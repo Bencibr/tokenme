@@ -23,9 +23,8 @@ pub const REPORT_EVENT: &str = "report-updated";
 /// Emitted when a tray menu entry asks the panel to focus a period.
 pub const PERIOD_EVENT: &str = "tray-period";
 
-/// Fallback cadence when the file watcher misses something, and the debounce
-/// window that absorbs a burst of write events as one re-index.
-const FALLBACK: Duration = Duration::from_secs(30);
+/// The debounce window that absorbs a burst of write events as one re-index.
+/// The idle cadence itself is the persisted `refresh_secs` setting.
 const DEBOUNCE: Duration = Duration::from_millis(800);
 
 pub enum Msg {
@@ -106,7 +105,13 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
     ingest(&app, &mut index, &adapters, &detected, &pricing);
 
     loop {
-        match wait_for_work(&rx, &mut pricing) {
+        // Read per pass, so a cadence change from the panel applies on the next
+        // wait without restarting the engine.
+        let fallback = {
+            let secs = app.state::<Shared>().settings().refresh_secs;
+            Duration::from_secs(secs.clamp(10, 3600))
+        };
+        match wait_for_work(&rx, &mut pricing, fallback) {
             Work::Ingest => ingest(&app, &mut index, &adapters, &detected, &pricing),
             Work::Resummarize => resummarize(&app, &index, &adapters, &detected, &pricing),
             Work::Quit => return,
@@ -121,9 +126,9 @@ enum Work {
 }
 
 /// Idle until something happens, then debounce a burst of wake-ups into one pass.
-fn wait_for_work(rx: &Receiver<Msg>, pricing: &mut PricingMap) -> Work {
+fn wait_for_work(rx: &Receiver<Msg>, pricing: &mut PricingMap, fallback: Duration) -> Work {
     loop {
-        match rx.recv_timeout(FALLBACK) {
+        match rx.recv_timeout(fallback) {
             Ok(Msg::Pricing(map)) => {
                 *pricing = map;
                 return Work::Resummarize;

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
-import type { Bridge, QuotaOrder, Report, TrayMode, TrayState } from "../types";
+import type { Bridge, PanelSettings, QuotaOrder, Report, TrayMode, TrayState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -91,4 +91,28 @@ export const bridge: Bridge = {
     if (!inTauri) return;
     await invoke<void>("set_quota_order", { order });
   },
+
+  async panelSettings(): Promise<PanelSettings> {
+    if (!inTauri) return { ...browserSettings };
+    return invoke<PanelSettings>("get_panel_settings");
+  },
+
+  async setAutostart(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.autostart = on;
+      return;
+    }
+    await invoke<void>("set_autostart", { on });
+  },
+
+  async setRefreshSecs(secs: number): Promise<void> {
+    if (!inTauri) {
+      browserSettings.refresh_secs = secs;
+      return;
+    }
+    await invoke<void>("set_refresh_secs", { secs });
+  },
 };
+
+/** The browser preview has nothing to persist; the sheet still works in memory. */
+const browserSettings: PanelSettings = { autostart: false, refresh_secs: 30, version: "dev" };

@@ -23,7 +23,7 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
       <ol className="src-list">
         {listed.map((s) => (
           <li className="src" key={s.id} data-off={!s.detected || undefined}>
-            {s.detected ? <ToolIcon tool={s.id} size={18} /> : <IconMissing size={12} className="src-icon" />}
+            {s.detected ? <ToolIcon tool={s.id} size={20} /> : <IconMissing size={12} className="src-icon" />}
             <span className="src-name">{s.display}</span>
             <span className="src-events num">{s.detected ? `${count(s.events_ingested)} 条` : "未检测到"}</span>
             <div className="src-meta">

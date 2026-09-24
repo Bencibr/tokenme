@@ -22,7 +22,7 @@ export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
             const billed = s.cost > 0 ? money(s.cost) : s.total_tokens === 0 ? null : "无价格";
             return (
               <li className="sess" key={`${s.tool}/${s.session}`}>
-                <ToolIcon tool={s.tool} size={16} />
+                <ToolIcon tool={s.tool} size={20} />
                 <div className="sess-main">
                   <div className="sess-line">
                     <span className="sess-name" title={s.project ?? s.session}>

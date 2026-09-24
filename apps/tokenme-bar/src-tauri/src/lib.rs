@@ -34,7 +34,10 @@ pub fn run() {
             commands::get_quota_order,
             commands::set_quota_order,
             commands::refresh_pricing,
-            commands::tool_icons
+            commands::tool_icons,
+            commands::get_panel_settings,
+            commands::set_autostart,
+            commands::set_refresh_secs
         ]);
 
     #[cfg(target_os = "macos")]

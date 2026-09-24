@@ -11,6 +11,7 @@ import { Heatmap } from "./components/Heatmap";
 import { QuotaStrip } from "./components/QuotaStrip";
 import { RankedList } from "./components/RankedList";
 import { Sessions } from "./components/Sessions";
+import { SettingsSheet } from "./components/SettingsSheet";
 import { Sources } from "./components/Sources";
 import { IconProvider } from "./components/ToolIcon";
 import { StatusBar } from "./components/StatusBar";
@@ -26,6 +27,7 @@ export default function App() {
   const [tray, setTray] = useState<TrayState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const tick = useTicker(30_000);
 
   useEffect(() => {
@@ -68,11 +70,15 @@ export default function App() {
     setTray(await bridge.setTrayMode(next));
   }, [tray?.mode]);
 
-  // Escape dismisses the panel; focus-loss dismissal is handled natively so it
-  // also works while another app holds keyboard focus.
+  // Escape dismisses the sheet first, then the panel; focus-loss dismissal is
+  // handled natively so it also works while another app holds keyboard focus.
   useEscape(useCallback(() => {
+    if (settingsOpen) {
+      setSettingsOpen(false);
+      return;
+    }
     if (inTauri) void getCurrentWindow().hide();
-  }, []));
+  }, [settingsOpen]));
 
   const now = useMemo(() => Date.now(), [tick]);
   const events = useMemo(() => (report ? report.sources.reduce((a, s) => a + s.events_ingested, 0) : 0), [report]);
@@ -142,8 +148,11 @@ export default function App() {
           events={events}
           loading={loading}
           onRefresh={() => void refresh()}
+          onOpenSettings={() => setSettingsOpen(true)}
           tray={inTauri ? { mode: tray?.mode ?? "cost", onCycle: () => void cycleTrayMode() } : null}
         />
+
+        {settingsOpen ? <SettingsSheet onClose={() => setSettingsOpen(false)} /> : null}
       </div>
     </IconProvider>
   );

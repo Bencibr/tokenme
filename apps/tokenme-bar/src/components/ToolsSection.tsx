@@ -17,8 +17,8 @@ import { ToolIcon } from "./ToolIcon";
  * in the same columns every time, so cross-tool comparison is a single glance.
  * The badge is the tool's own app icon where one is installed, which is what
  * lets twelve rows be scanned by shape instead of read one name at a time.
- * The badge is the tool's own app icon where one is installed, which is what
- * lets twelve rows be scanned by shape instead of read one name at a time.
+ * The cost share is a wash of the tool's own colour behind the row — the same
+ * language as the ranks page, so the eye learns it once.
  */
 export function ToolsSection({ tools }: { tools: Item[] }) {
   const costMax = tools.reduce((acc, t) => Math.max(acc, t.cost), 0);
@@ -39,9 +39,19 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
           const credit = t.counts.credits > 0 && t.total_tokens === 0;
           const share = costMax > 0 ? (t.cost / costMax) * 100 : 0;
           return (
-            <li className="tool" key={t.key} style={{ "--c": toolColor(t.key) } as React.CSSProperties}>
+            <li
+              className="tool"
+              key={t.key}
+              style={
+                {
+                  "--c": toolColor(t.key),
+                  backgroundImage: "linear-gradient(90deg, color-mix(in srgb, var(--c) 9%, transparent) 0 0)",
+                  backgroundSize: `${Math.max(share, t.cost > 0 ? 2 : 0)}% 100%`,
+                } as React.CSSProperties
+              }
+            >
               <div className="tool-top">
-                <ToolIcon tool={t.key} size={22} />
+                <ToolIcon tool={t.key} size={24} />
                 <span className="tool-name">{toolDisplay(t.key)}</span>
                 <span className="tool-tokens num">{credit ? "—" : compactTokens(t.total_tokens)}</span>
                 <span className="tool-cost num" data-credit={credit || undefined} data-unpriced={!t.priced || undefined}>
@@ -64,22 +74,17 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                   </span>
                 </div>
               ) : (
-                <>
-                  <div className="track tool-track" aria-hidden="true">
-                    <i style={{ width: `${Math.max(share, t.cost > 0 ? 2 : 0)}%` }} />
-                  </div>
-                  <div className="tool-foot">
-                    <span className="num">{count(t.requests)}</span>
-                    <span>次</span>
-                    <span className="dot-sep" aria-hidden="true" />
-                    <span className="num">{count(t.sessions)}</span>
-                    <span>会话</span>
-                    <span className="grow" />
-                    <span>
-                      缓存 {percent(cachedOf(t.counts), 0)} · 占 {percent(totalCost > 0 ? (t.cost / totalCost) * 100 : 0, 0)}
-                    </span>
-                  </div>
-                </>
+                <div className="tool-foot">
+                  <span className="num">{count(t.requests)}</span>
+                  <span>次</span>
+                  <span className="dot-sep" aria-hidden="true" />
+                  <span className="num">{count(t.sessions)}</span>
+                  <span>会话</span>
+                  <span className="grow" />
+                  <span>
+                    缓存 {percent(cachedOf(t.counts), 0)} · 占 {percent(totalCost > 0 ? (t.cost / totalCost) * 100 : 0, 0)}
+                  </span>
+                </div>
               )}
             </li>
           );

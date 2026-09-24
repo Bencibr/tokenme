@@ -21,6 +21,11 @@ impl TrayMode {
     pub const ALL: [TrayMode; 3] = [TrayMode::Cost, TrayMode::Tokens, TrayMode::Quiet];
 }
 
+/// The engine's fallback poll cadence when the file watcher is quiet.
+fn default_refresh_secs() -> u64 {
+    30
+}
+
 /// The whole persisted surface: a tiny JSON file under the platform config dir.
 ///
 /// `budgets` is shared with the CLI: `tokenme budget set …` writes that one key of
@@ -36,6 +41,9 @@ impl TrayMode {
 pub struct Settings {
     pub tray_mode: TrayMode,
     pub autostart: bool,
+    /// Fallback poll cadence; watcher wake-ups still re-index immediately.
+    #[serde(default = "default_refresh_secs")]
+    pub refresh_secs: u64,
     pub budgets: BTreeMap<String, usage_core::Budget>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub quota_tools: Vec<String>,

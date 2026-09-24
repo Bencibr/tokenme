@@ -1,6 +1,6 @@
 import type { PricingMeta, TrayMode } from "../types";
 import { TRAY_MODE_LABEL, count } from "../lib/format";
-import { IconRefresh, IconWarn } from "./Icons";
+import { IconRefresh, IconSettings, IconWarn } from "./Icons";
 
 const SOURCE_LABEL: Record<PricingMeta["source"], string> = {
   models_dev: "models.dev",
@@ -15,12 +15,14 @@ export function StatusBar({
   events,
   loading,
   onRefresh,
+  onOpenSettings,
   tray,
 }: {
   pricing: PricingMeta;
   events: number;
   loading: boolean;
   onRefresh: () => void;
+  onOpenSettings: () => void;
   /** Present only inside Tauri: a browser has no menu-bar title to configure. */
   tray?: { mode: TrayMode; onCycle: () => void } | null;
 }) {
@@ -48,6 +50,9 @@ export function StatusBar({
             托盘 · {TRAY_MODE_LABEL[tray.mode]}
           </button>
         ) : null}
+        <button type="button" className="settings-btn" onClick={onOpenSettings} title="设置" aria-label="设置">
+          <IconSettings size={13} />
+        </button>
         <button type="button" className="refresh" onClick={onRefresh} disabled={loading}>
           <IconRefresh size={12} />
           {loading ? "刷新中" : "刷新"}

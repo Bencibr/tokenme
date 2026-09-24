@@ -120,3 +120,45 @@ pub async fn refresh_pricing(app: AppHandle) -> Result<PricingMeta, String> {
 pub async fn tool_icons() -> Result<BTreeMap<String, String>, String> {
     Ok(usage_core::icons::icon_data_urls())
 }
+
+/// What the settings sheet shows: the two switches plus the build version.
+#[derive(Debug, Clone, Serialize)]
+pub struct PanelSettings {
+    pub autostart: bool,
+    pub refresh_secs: u64,
+    pub version: String,
+}
+
+#[tauri::command]
+pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String> {
+    let settings = app.state::<Shared>().settings();
+    Ok(PanelSettings {
+        autostart: settings.autostart,
+        refresh_secs: settings.refresh_secs,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
+    tray::set_autostart(&app, on);
+    Ok(())
+}
+
+/// Persist the new fallback cadence, then wake the engine so the next wait
+/// uses it instead of the old value's remaining timeout.
+#[tauri::command]
+pub async fn set_refresh_secs(app: AppHandle, secs: u64) -> Result<(), String> {
+    {
+        let shared = app.state::<Shared>();
+        let Ok(mut settings) = shared.settings.lock() else {
+            return Err("settings busy".into());
+        };
+        settings.refresh_secs = secs.clamp(10, 3600);
+        settings.clone().save().map_err(|e| e.to_string())?;
+    }
+    if let Some(channel) = app.try_state::<EngineChannel>() {
+        let _ = channel.0.send(Msg::Refresh);
+    }
+    Ok(())
+}

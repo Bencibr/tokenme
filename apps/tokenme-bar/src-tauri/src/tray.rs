@@ -208,17 +208,23 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
 }
 
 fn toggle_autostart(app: &AppHandle) {
+    let next = !app.autolaunch().is_enabled().unwrap_or(false);
+    set_autostart(app, next);
+}
+
+/// The one writer for the login-item switch: tray menu and panel command both
+/// land here, so the plugin, the menu checkmark and the file can never drift.
+pub fn set_autostart(app: &AppHandle, on: bool) {
     let plugin = app.autolaunch();
-    let next = !plugin.is_enabled().unwrap_or(false);
-    if next {
+    if on {
         plugin.enable().ok();
     } else {
         plugin.disable().ok();
     }
     if let Some(items) = app.try_state::<MenuItems>() {
-        items.autostart.set_checked(next).ok();
+        items.autostart.set_checked(on).ok();
     }
-    persist(app, |s| s.autostart = next);
+    persist(app, |s| s.autostart = on);
 }
 
 /// Applies the persisted switch, and repairs drift if login items changed.

@@ -4,6 +4,7 @@
    ========================================================================== */
 
 .panel {
+  position: relative; /* the settings sheet anchors to the panel, not the window */
   display: flex;
   flex-direction: column;
   width: 400px;
@@ -618,17 +619,20 @@
   padding: 0;
 }
 
+/* Same row language as the ranks page: the cost share is a wash of the tool's
+   own colour painted behind the row (inline background-size), so a hairline
+   separator between rows would only fight it. */
 .tool {
-  padding: 7px 0;
-}
-
-.tool + .tool {
-  border-top: 1px solid var(--hair);
+  padding: 7px 6px;
+  margin: 0 -6px;
+  border-radius: var(--r-sm);
+  background-repeat: no-repeat;
+  transition: background-size var(--dur-slow) var(--ease);
 }
 
 .tool-top {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) 52px 74px;
+  grid-template-columns: 24px minmax(0, 1fr) 52px 74px;
   align-items: center;
   gap: var(--s2);
 }
@@ -666,16 +670,13 @@
   color: var(--ink-3);
 }
 
-.tool-track {
-  margin: 6px 0 0 15px;
-}
-
+/* The meta line hangs under the tool's name, not under its icon. */
 .tool-foot {
   display: flex;
   align-items: center;
   gap: var(--s1);
-  margin-top: var(--s1);
-  padding-left: 15px;
+  margin-top: 3px;
+  padding-left: 32px;
   font-size: var(--t-meta);
   color: var(--ink-3);
 }
@@ -857,7 +858,7 @@
 
 .sess {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: start;
   gap: var(--s2);
   padding: 6px 0;
@@ -926,7 +927,7 @@
  * two lines each pushed this section past 800 px — more than a full panel. */
 .src {
   display: grid;
-  grid-template-columns: 18px auto auto minmax(0, 1fr);
+  grid-template-columns: 20px auto auto minmax(0, 1fr);
   align-items: baseline;
   column-gap: var(--s2);
   padding: 4px 0;
@@ -1134,6 +1135,140 @@
   background: var(--fill-hover);
 }
 
+.settings-btn {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: var(--ink-3);
+  border-radius: var(--r-sm);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.settings-btn:hover {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+/* --------------------------------------------------------- settings sheet */
+
+/* A bottom sheet, not a fifth page: settings are a detour, not a destination,
+   and the panel behind stays visible so the context is never lost. */
+.sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(20, 20, 24, 0.18);
+  animation: sheet-fade var(--dur-fast) var(--ease);
+}
+
+.sheet {
+  width: 100%;
+  padding: var(--s2) var(--s4) var(--s3);
+  background: var(--surface);
+  border-top: 1px solid var(--hair-2);
+  border-radius: 10px 10px 0 0;
+  box-shadow: 0 -8px 24px rgba(20, 20, 24, 0.12);
+  animation: sheet-up var(--dur-fast) var(--ease);
+}
+
+@keyframes sheet-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+}
+
+.sheet-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s1) 0;
+}
+
+.sheet-close {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--ink-3);
+  border-radius: var(--r-sm);
+}
+
+.sheet-close:hover {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+.sheet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: 10px 0;
+  border-top: 1px solid var(--hair);
+}
+
+.sheet-label {
+  font-size: var(--t-body);
+  color: var(--ink);
+}
+
+.sheet-hint {
+  margin-top: 1px;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.sheet-foot {
+  margin: var(--s2) 0 0;
+  padding-top: var(--s2);
+  border-top: 1px solid var(--hair);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+/* iOS-shaped switch: the panel's only boolean, so it gets the control people
+   already know rather than a checkbox that reads as a form. */
+.switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--hair-2);
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(20, 20, 24, 0.25);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.switch[aria-checked="true"] {
+  background: var(--accent);
+}
+
+.switch[aria-checked="true"]::after {
+  transform: translateX(14px);
+}
+
 /* ----------------------------------------------------------------- motion */
 
 /* Page entry: a 4 px lift, so a switch reads as the same panel showing another
@@ -1158,6 +1293,10 @@
     animation: none;
   }
   .page {
+    animation: none;
+  }
+  .sheet-backdrop,
+  .sheet {
     animation: none;
   }
   .track i,
