@@ -182,15 +182,15 @@ mod tests {
 
     #[test]
     fn file_name_and_directory_carry_the_labels() {
-        let p = Path::new("/h/.pi/agent/sessions/--Users-sp-work-x--/2026-09-22T14-16-39-708Z_01a0c979-d41a.jsonl");
+        let p = Path::new("/h/.pi/agent/sessions/--Users-dev-work-x--/2026-09-22T14-16-39-708Z_01a0c979-d41a.jsonl");
         assert_eq!(session_from_path(p), "01a0c979-d41a");
-        assert_eq!(project_from_path(p).as_deref(), Some("/Users/me/work/x"));
+        assert_eq!(project_from_path(p).as_deref(), Some("/Users/dev/work/x"));
         // Lossy by construction: a dashed segment cannot be told apart from a
         // separator, which is why the record's `cwd` always wins.
-        let d = Path::new("/s/--Users-sp-orca-neuro-tdd-backfill--/2026_a.jsonl");
+        let d = Path::new("/s/--Users-dev-orca-neuro-tdd-backfill--/2026_a.jsonl");
         assert_eq!(
             project_from_path(d).as_deref(),
-            Some("/Users/me/orca/neuro/tdd/backfill")
+            Some("/Users/dev/orca/neuro/tdd/backfill")
         );
     }
 

@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(project_label(&msgs), None, "no sibling meta yet");
         std::fs::write(sess.join("1_ts.json"), br#"{"workspace_root":"/a/b/apppty"}"#).unwrap();
         assert_eq!(project_label(&msgs).as_deref(), Some("apppty"));
-        std::fs::write(sess.join("1_ts.json"), br#"{"cwd":"/Users/me/workspace/apppty","workspace_root":"/other"}"#).unwrap();
+        std::fs::write(sess.join("1_ts.json"), br#"{"cwd":"/Users/dev/workspace/apppty","workspace_root":"/other"}"#).unwrap();
         assert_eq!(project_label(&msgs).as_deref(), Some("apppty"), "cwd takes priority");
         std::fs::write(sess.join("1_ts.json"), br#"{"cwd":"","metadata":{"usage":{"inputTokens":1}}}"#).unwrap();
         assert_eq!(project_label(&msgs), None, "empty cwd is no label; usage stays unread");

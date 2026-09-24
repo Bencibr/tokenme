@@ -2,6 +2,9 @@
 /dist
 node_modules
 *.log
+__pycache__/
+*.pyc
+
 .DS_Store
 apps/tokenme-bar/src-tauri/target
 apps/tokenme-bar/src-tauri/gen/schemas

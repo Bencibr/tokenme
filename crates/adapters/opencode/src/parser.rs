@@ -103,7 +103,7 @@ pub(crate) fn parse_message(raw: &str) -> Option<Parsed> {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"{"parentID":"msg_0ce07f070001nCMOF4ihn9bPVs","role":"assistant","mode":"build","agent":"build","variant":"xhigh","path":{"cwd":"/Users/me/workspace/test","root":"/"},"cost":1.234,"tokens":{"total":55598,"input":55073,"output":70,"reasoning":214,"cache":{"write":0,"read":241}},"modelID":"muse-spark-1.2-contributor-free","providerID":"opencode","time":{"created":1787799862846,"completed":1787799869012},"finish":"stop"}"#;
+    const SAMPLE: &str = r#"{"parentID":"msg_0ce07f070001nCMOF4ihn9bPVs","role":"assistant","mode":"build","agent":"build","variant":"xhigh","path":{"cwd":"/Users/dev/workspace/test","root":"/"},"cost":1.234,"tokens":{"total":55598,"input":55073,"output":70,"reasoning":214,"cache":{"write":0,"read":241}},"modelID":"muse-spark-1.2-contributor-free","providerID":"opencode","time":{"created":1787799862846,"completed":1787799869012},"finish":"stop"}"#;
 
     #[test]
     fn reasoning_folds_into_output_so_total_matches_the_source() {
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(p.counts.total(), 55598.0);
         assert_eq!(p.counts.total(), p.reported_total);
         assert_eq!(p.model.as_deref(), Some("muse-spark-1.2-contributor-free"));
-        assert_eq!(p.cwd.as_deref(), Some("/Users/me/workspace/test"));
+        assert_eq!(p.cwd.as_deref(), Some("/Users/dev/workspace/test"));
     }
 
     #[test]

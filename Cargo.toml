@@ -24,7 +24,7 @@ exclude = ["apps/tokenme-bar"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/HduSy/tokenscope"
+repository = "https://github.com/Bencibr/tokenme.git"
 
 [workspace.dependencies]
 usage-core = { path = "crates/usage-core" }

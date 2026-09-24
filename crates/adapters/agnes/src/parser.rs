@@ -358,7 +358,7 @@ mod tests {
             cost: None,
             cost_source: None,
             is_compaction: Some(0),
-            working_dir: Some("/Users/me/workspace/fucai".to_string()),
+            working_dir: Some("/Users/dev/workspace/fucai".to_string()),
         }
     }
 
@@ -434,7 +434,7 @@ mod tests {
             cost: None,
             cost_source: None,
             is_compaction: Some(1),
-            working_dir: Some("/Users/me/workspace/fucai".to_string()),
+            working_dir: Some("/Users/dev/workspace/fucai".to_string()),
         };
         let e = event_from_row(&r, "db").unwrap();
         assert_eq!(e.tool, "agnes");

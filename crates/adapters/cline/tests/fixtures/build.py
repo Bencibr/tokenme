@@ -2,15 +2,34 @@
 """Rebuild the cline fixtures from the real transcript on disk."""
 import json, os, pathlib
 
-FIX = pathlib.Path("/Users/me/workspace/tokenme/crates/adapters/cline/tests/fixtures")
+FIX = pathlib.Path(__file__).resolve().parent
 SRC = pathlib.Path.home() / ".cline/data/sessions/1787490736874_djat1"
 doc = json.load(open(SRC / "1787490736874_djat1.messages.json"))
 meta = json.load(open(SRC / "1787490736874_djat1.json"))
 asst = [m for m in doc["messages"] if m.get("role") == "assistant" and m.get("metrics")]
 
-# whole real transcript (236 messages, 96 of them assistant) + its meta sibling
-(FIX / "cline-djat1.messages.json").write_text(json.dumps(doc, indent=2) + "\n")
-(FIX / "cline-djat1.json").write_text(json.dumps(meta, indent=2) + "\n")
+# The same transcript, with the bodies and every local coordinate stripped:
+# token counts, ids and timestamps are what the parser reads, the prose is
+# another project's session and has no business in this repository.
+def redact_text(value):
+    return str(value).replace(str(pathlib.Path.home()), "/Users/dev")
+
+def redact(node):
+    if isinstance(node, dict):
+        return {k: ("…" if k in ("prompt", "title", "text", "system_prompt") and not isinstance(v, (int, float))
+                    else "0" * 40 if k == "ref" and isinstance(v, str)
+                    else "https://git.example/apppty.git" if k == "url"
+                    else redact(v)) for k, v in node.items()}
+    if isinstance(node, list):
+        return [redact(v) for v in node]
+    if isinstance(node, str):
+        return redact_text(node)
+    return node
+
+whole = redact(doc)
+whole["messages"] = [trim(m) for m in whole["messages"]]
+(FIX / "cline-djat1.messages.json").write_text(json.dumps(whole, indent=2, ensure_ascii=False) + "\n")
+(FIX / "cline-djat1.json").write_text(json.dumps(redact(meta), indent=2, ensure_ascii=False) + "\n")
 
 # the same file as Cline rewrites it: snapshot before the last message lands.
 # Assistant-bearing rows only, content arrays trimmed, one whole-file snapshot

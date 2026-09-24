@@ -43,7 +43,7 @@ fn fixture_maps_the_verified_sample_exactly() {
     let e = &events[0];
     assert_eq!(e.tool, "codex");
     assert_eq!(e.session, "01a0ce03-33ce-7172-848c-7199f1589e2e");
-    assert_eq!(e.project.as_deref(), Some("/Users/me/workspace/bug-hunter"));
+    assert_eq!(e.project.as_deref(), Some("/Users/dev/workspace/bug-hunter"));
     assert_eq!(e.model.as_deref(), Some("gpt-5.6-luna"), "from the turn_context before it");
     assert_eq!(e.counts.input, 15632.0 - 3072.0, "cached split out of input");
     assert_eq!(e.counts.cache_read, 3072.0);

@@ -372,8 +372,8 @@ mod tests {
 
     #[test]
     fn mangled_project_dir_decodes_to_a_readable_label() {
-        let file = source_file("/h/.claude/projects/-Users-sp--codex-worktrees-x/sess/a.jsonl");
-        assert_eq!(project_fallback(&file).as_deref(), Some("/Users/me/.codex/worktrees/x"));
+        let file = source_file("/h/.claude/projects/-Users-dev--codex-worktrees-x/sess/a.jsonl");
+        assert_eq!(project_fallback(&file).as_deref(), Some("/Users/dev/.codex/worktrees/x"));
         assert_eq!(session_fallback(&file), "a");
     }
 

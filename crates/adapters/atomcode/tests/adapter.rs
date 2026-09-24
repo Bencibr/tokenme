@@ -62,7 +62,7 @@ impl Drop for EnvGuard {
 const PROJECT: &str = "45d727130d2f41d9";
 const OTHER_PROJECT: &str = "af6efc199a23a581";
 const SESSION: &str = "242f9f29-b726-4555-bf38-604c610149b3";
-const WORKSPACE: &str = "/Users/me/workspace/deveco";
+const WORKSPACE: &str = "/Users/dev/workspace/deveco";
 
 /// `<tmp>/.atomcode/sessions/<project_hash>`, the real layout.
 struct Install {

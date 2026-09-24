@@ -8,7 +8,7 @@ them is the real one.
 """
 import json, os, pathlib, sqlite3
 
-FIX = pathlib.Path("/Users/me/workspace/tokenme/crates/adapters/zcode/tests/fixtures")
+FIX = pathlib.Path(__file__).resolve().parent
 CLI = pathlib.Path.home() / ".zcode/cli"
 ROLL = CLI / "rollout"
 DB = CLI / "db/db.sqlite"
@@ -16,6 +16,18 @@ FIX.mkdir(parents=True, exist_ok=True)
 (FIX / "model_usage.sqlite").unlink(missing_ok=True)
 for stale in FIX.glob("rollout-*.jsonl"):
     stale.unlink()
+
+HOME = pathlib.Path.home()
+
+
+def redact(value):
+    """The reader only needs ids, timestamps, model names and token counts --
+    the local coordinates and the session titles are this machine's business."""
+    if isinstance(value, str):
+        value = value.replace(str(HOME), "/Users/dev")
+        value = value.replace(f"users-{HOME.name}-", "users-dev-")
+    return value
+
 
 DROP = ("text", "headers", "toolCalls", "choices", "rawResponse")
 
@@ -106,7 +118,7 @@ def shrink(r):
         v = r[c]
         if c in BIG and isinstance(v, str) and len(v) > 120:
             v = v[:117] + "..."""
-        out[c] = v
+        out[c] = redact(v)
     return out
 
 sess_cols = [r[1] for r in con.execute("pragma table_info(session)")]
@@ -114,12 +126,12 @@ for sid in {r["session_id"] for r in picked_pre}:
     row = con.execute("select * from session where id=?", (sid,)).fetchone()
     if row is None:
         continue
-    small.execute(f"insert or replace into session ({','.join(sess_cols)}) values ({','.join('?' * len(sess_cols))})", [None if isinstance(v, (bytes, bytearray)) else v for v in tuple(row)])
+    small.execute(f"insert or replace into session ({','.join(sess_cols)}) values ({','.join('?' * len(sess_cols))})", [None if isinstance(v, (bytes, bytearray)) else redact(v) for v in tuple(row)])
 picked = picked_pre
 for n, r in enumerate(picked):
     d = shrink(r)
     names = [c for c in cols]
-    small.execute(f"insert into model_usage ({','.join(names)}) values ({','.join('?' * len(names))})", [d[c] for c in names])
+    small.execute(f"insert into model_usage ({','.join(names)}) values ({','.join('?' * len(names))})", [redact(d[c]) for c in names])
 # a second attempt of the first row: same logical request, billed again (the real
 # table has no such pair today -- attempt_index is 0 in all 18,112 rows)
 d = shrink(rows[0])

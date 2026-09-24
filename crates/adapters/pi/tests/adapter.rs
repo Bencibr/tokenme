@@ -556,7 +556,7 @@ impl ColaInstall {
 /// Header plus three billed turns and two unbilled records, in Cola's own shapes
 /// (`provider:"cola"`, `cost` riding along, `reasoning` on some records only).
 const COLA_PARENT: &str = concat!(
-    "{\"type\":\"session\",\"version\":3,\"id\":\"01a0252a-fc23-7844-a17b-94d62a069429\",\"timestamp\":\"2026-08-21T16:32:49.187Z\",\"cwd\":\"/Users/me/workspace/memory-bank\"}\n",
+    "{\"type\":\"session\",\"version\":3,\"id\":\"01a0252a-fc23-7844-a17b-94d62a069429\",\"timestamp\":\"2026-08-21T16:32:49.187Z\",\"cwd\":\"/Users/dev/workspace/memory-bank\"}\n",
     "{\"type\":\"message\",\"id\":\"0fe20590\",\"parentId\":\"137f0735\",\"timestamp\":\"2026-08-21T16:32:53.277Z\",\"message\":{\"role\":\"assistant\",\"api\":\"openai-completions\",\"provider\":\"cola\",\"model\":\"deepseek-v4-pro\",\"content\":[],\"usage\":{\"input\":7987,\"output\":165,\"cacheRead\":12288,\"cacheWrite\":0,\"reasoning\":42,\"totalTokens\":20440,\"cost\":{\"input\":0.0001,\"output\":0.0002,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0.0003}},\"stopReason\":\"tool-calls\"}}\n",
     "{\"type\":\"message\",\"id\":\"a1b2c3d4\",\"parentId\":\"0fe20590\",\"timestamp\":\"2026-08-21T16:32:54.000Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"bookmark these\"}]}}\n",
     "{\"type\":\"message\",\"id\":\"ee00ffff\",\"parentId\":\"a1b2c3d4\",\"timestamp\":\"2026-08-21T16:32:55.000Z\",\"message\":{\"role\":\"assistant\",\"model\":\"deepseek-v4-pro\",\"content\":[],\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0,\"cost\":{}},\"stopReason\":\"aborted\"}}\n",
@@ -566,7 +566,7 @@ const COLA_PARENT: &str = concat!(
 /// A sub-agent session: Cola files these as their own directory and their own
 /// transcript, unlike Pi's `subagent-artifacts/` copies, so they are billed.
 const COLA_SUBAGENT: &str = concat!(
-    "{\"type\":\"session\",\"version\":3,\"id\":\"01a0252a-fc23-7844-a17b-94d62a069428\",\"timestamp\":\"2026-08-21T16:33:49.187Z\",\"cwd\":\"/Users/me/workspace/neuro\"}\n",
+    "{\"type\":\"session\",\"version\":3,\"id\":\"01a0252a-fc23-7844-a17b-94d62a069428\",\"timestamp\":\"2026-08-21T16:33:49.187Z\",\"cwd\":\"/Users/dev/workspace/neuro\"}\n",
     "{\"type\":\"message\",\"id\":\"99aa0011\",\"timestamp\":\"2026-08-21T16:34:01.000Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"cola\",\"model\":\"luna-02\",\"content\":[],\"usage\":{\"input\":9686,\"output\":178,\"cacheRead\":0,\"cacheWrite\":512,\"reasoning\":38,\"totalTokens\":10376,\"cost\":{}},\"stopReason\":\"stop\"}}\n",
 );
 
@@ -666,7 +666,7 @@ fn cola_transcripts_are_stamped_cola_and_map_the_same_stages() {
     assert_eq!(first.session, "01a0252a-fc23-7844-a17b-94d62a069429");
     assert_eq!(
         first.project.as_deref(),
-        Some("/Users/me/workspace/memory-bank"),
+        Some("/Users/dev/workspace/memory-bank"),
         "the header's cwd, since Cola's session key is not a mangled path"
     );
     assert_eq!(first.model.as_deref(), Some("deepseek-v4-pro"));

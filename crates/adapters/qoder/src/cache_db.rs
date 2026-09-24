@@ -464,7 +464,7 @@ fn row_ts_ms(raw: SqlValue) -> Option<i64> {
 /// `chat_session` table at all (`vibe-cafe/vibe-usage:src/parsers/qoder.js:225-227`
 /// degrades the same way), and a `JOIN` would then cost the usage rows with it.
 /// `project_uri` is the same string the transcript records as `cwd` — measured:
-/// `/Users/me/Documents/Qoder/2026-07-28/chat-1` appears as both — so the two
+/// `/Users/dev/Documents/Qoder/2026-07-28/chat-1` appears as both — so the two
 /// sources label one workspace identically.
 fn session_projects(conn: &Connection) -> HashMap<String, String> {
     let mut out = HashMap::new();

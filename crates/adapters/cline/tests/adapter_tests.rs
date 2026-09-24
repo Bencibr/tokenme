@@ -96,7 +96,7 @@ fn probe_and_discover_respect_the_env_override_and_find_the_label() {
     std::fs::create_dir_all(&sess).unwrap();
     let messages = sess.join("1788497024441_2hl7c.messages.json");
     std::fs::write(&messages, std::fs::read(fixture("mixed-rows.messages.json")).unwrap()).unwrap();
-    std::fs::write(sess.join("1788497024441_2hl7c.json"), br#"{"cwd":"/Users/me/workspace/tunnel","metadata":{"usage":{"inputTokens":1,"aggregateUsage":{}}}}"#).unwrap();
+    std::fs::write(sess.join("1788497024441_2hl7c.json"), br#"{"cwd":"/Users/dev/workspace/tunnel","metadata":{"usage":{"inputTokens":1,"aggregateUsage":{}}}}"#).unwrap();
     std::env::set_var("CLINE_DATA_DIR_SESSIONS", dir.path());
 
     let adapter = ClineAdapter;

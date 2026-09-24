@@ -32,7 +32,7 @@ fn assistant_row_becomes_one_priced_event() {
     let d = db(true);
     let conn = d.conn();
     project(&conn, "prj_1", Some("mycloud"));
-    session(&conn, "ses_1", "prj_1", "/Users/me/workspace/test");
+    session(&conn, "ses_1", "prj_1", "/Users/dev/workspace/test");
     let rowid = message(&conn, "msg_0ce080864001v7gm5KqU8bkCHX", "ses_1", 1787799862846, ASSISTANT_SAMPLE);
     drop(conn);
 
@@ -42,7 +42,7 @@ fn assistant_row_becomes_one_priced_event() {
     assert_eq!(e.tool, "opencode");
     assert_eq!(e.ts_ms, 1787799862846, "time_created is already milliseconds");
     assert_eq!(e.session, "ses_1");
-    assert_eq!(e.project.as_deref(), Some("/Users/me/workspace/test"), "session.directory wins");
+    assert_eq!(e.project.as_deref(), Some("/Users/dev/workspace/test"), "session.directory wins");
     assert_eq!(e.model.as_deref(), Some("muse-spark-1.2-contributor-free"), "bare modelID, no provider prefix");
     assert_eq!(e.counts.input, 55073.0);
     assert_eq!(e.counts.cache_read, 241.0);
@@ -224,10 +224,10 @@ fn model_ids_are_passed_through_untouched() {
 /// `cache.read` is 36x `input` here, which is the dialect working as designed: the
 /// stages are mutually exclusive and `total` is their sum, so nothing is subtracted
 /// from `input` and there is nothing to "fix".
-const CROW5_ROW: &str = r#"{"parentID":"msg_fd58ef17d001A5UlAsi56aQmnL","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/Users/me/Library/Application Support/Open Design/namespaces/release-stable/data/projects/af392a8c","root":"/"},"cost":0,"tokens":{"total":111783,"input":3006,"output":206,"reasoning":27,"cache":{"write":0,"read":108544}},"modelID":"deepseek-v4-flash-ga-260731","providerID":"open-design-byok","time":{"created":1785994802824,"completed":1785994816263},"finish":"tool-calls"}"#;
+const CROW5_ROW: &str = r#"{"parentID":"msg_fd58ef17d001A5UlAsi56aQmnL","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/Users/dev/Library/Application Support/Open Design/namespaces/release-stable/data/projects/af392a8c","root":"/"},"cost":0,"tokens":{"total":111783,"input":3006,"output":206,"reasoning":27,"cache":{"write":0,"read":108544}},"modelID":"deepseek-v4-flash-ga-260731","providerID":"open-design-byok","time":{"created":1785994802824,"completed":1785994816263},"finish":"tool-calls"}"#;
 
 /// Verbatim from this machine's `~/.local/share/mimocode/mimocode.db`.
-const MIMOCODE_ROW: &str = r#"{"parentID":"msg_f65239a24001Ahn2rXO0PvmsWb","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/Users/me/workspace/macmini","root":"/"},"cost":0,"tokens":{"total":33785,"input":2429,"output":92,"reasoning":160,"cache":{"write":0,"read":31104}},"modelID":"mimo-auto","providerID":"mimo","time":{"created":1784108268372,"completed":1784108273415},"finish":"tool-calls"}"#;
+const MIMOCODE_ROW: &str = r#"{"parentID":"msg_f65239a24001Ahn2rXO0PvmsWb","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/Users/dev/workspace/macmini","root":"/"},"cost":0,"tokens":{"total":33785,"input":2429,"output":92,"reasoning":160,"cache":{"write":0,"read":31104}},"modelID":"mimo-auto","providerID":"mimo","time":{"created":1784108268372,"completed":1784108273415},"finish":"tool-calls"}"#;
 
 /// The siblings share this parser, so the one thing that must differ per product
 /// is the id stamped on the events — otherwise Crow5's spend lands on OpenCode.

@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn truncation_keeps_display_width() {
-        assert_eq!(truncate("/Users/me/.claude/projects", 12), "/Users/me/.…");
+        assert_eq!(truncate("/Users/dev/.claude/projects", 12), "/Users/dev/…");
         assert_eq!(width(&truncate("模型模型模型", 5)), 4 + 1);
     }
 

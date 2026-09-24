@@ -404,7 +404,7 @@ mod tests {
                 .unwrap();
         }
         // A project label lives on the session, exactly like the vendor's schema.
-        conn.execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY, working_dir TEXT NOT NULL); INSERT INTO sessions VALUES ('20260806_1', '/Users/me/workspace/fucai'), ('20260902_1', '/Users/me/.agnes/temporary/2026-09-02/20260902_1/work');")
+        conn.execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY, working_dir TEXT NOT NULL); INSERT INTO sessions VALUES ('20260806_1', '/Users/dev/workspace/fucai'), ('20260902_1', '/Users/dev/.agnes/temporary/2026-09-02/20260902_1/work');")
             .unwrap();
         drop(conn);
         path

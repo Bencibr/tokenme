@@ -252,7 +252,7 @@ mod tests {
         std::fs::create_dir_all(&sess).unwrap();
         let msgs = sess.join("1788497024441_2hl7c.messages.json");
         std::fs::write(&msgs, std::fs::read(fixture_path("mixed-rows.messages.json")).unwrap()).unwrap();
-        std::fs::write(sess.join("1788497024441_2hl7c.json"), br#"{"cwd":"/Users/me/workspace/tunnel","metadata":{"usage":{"inputTokens":999999}}}"#).unwrap();
+        std::fs::write(sess.join("1788497024441_2hl7c.json"), br#"{"cwd":"/Users/dev/workspace/tunnel","metadata":{"usage":{"inputTokens":999999}}}"#).unwrap();
         let meta = std::fs::metadata(&msgs).unwrap();
         let file = SourceFile { path: msgs, kind: FileKind::Tree, size: meta.len(), mtime_ms: mtime_ms(&meta) };
         let out = read(&file, ReadCursor(0)).unwrap();
