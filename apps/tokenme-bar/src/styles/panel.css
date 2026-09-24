@@ -682,12 +682,16 @@
 
 /* ------------------------------------------------------- ranked / call rows */
 
+/* One line per row; the ranking is the accent wash painted behind the row
+   (inline background-size), so there are no separator hairlines to fight it.
+   The wash bleeds 6px past the section's text edge, which reads as the bar
+   rather than as a highlight on the text. */
 .rank-row {
-  padding: 5px 0;
-}
-
-.rank-row + .rank-row {
-  border-top: 1px solid var(--hair);
+  padding: 5px 6px;
+  margin: 0 -6px;
+  border-radius: var(--r-sm);
+  background-repeat: no-repeat;
+  transition: background-size var(--dur-slow) var(--ease);
 }
 
 /* The numerals size themselves: a fixed 56 px cost column wrapped
@@ -734,11 +738,6 @@
 .rank-cost[data-credit] {
   font-size: var(--t-meta);
   font-weight: 550;
-}
-
-.rank-track {
-  height: 2px;
-  margin-top: 5px;
 }
 
 .tabs {

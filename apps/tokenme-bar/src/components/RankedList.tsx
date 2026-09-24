@@ -4,9 +4,10 @@ import { compactTokens, credits as creditText, money } from "../lib/format";
 import { MoreRow, Section } from "./Section";
 
 /**
- * One row = name, tokens, cost, and a hairline bar whose weight is either cost
- * (models / projects) or tokens (MCP / Skill). No sub-lines: a third line per
- * row is three times the height for information the numerals already carry.
+ * One row = name, tokens, cost, with the ranking carried by a proportional
+ * wash behind the row instead of a separate hairline bar: the two-line rows
+ * read as a ladder of stripes, and the 2 px tracks were too thin to compare.
+ * The fill is accent at 10%, so the text keeps full ink over it.
  */
 export function RankRows({
   items,
@@ -25,9 +26,17 @@ export function RankRows({
       {shown.map((i) => {
         const credit = i.counts.credits > 0 && i.total_tokens === 0;
         const measure = weight === "cost" ? i.cost : i.total_tokens;
+        const share = max > 0 ? Math.max((measure / max) * 100, measure > 0 ? 2 : 0) : 0;
         const [head, tail] = splitPath(i.label);
         return (
-          <li className="rank-row" key={i.key}>
+          <li
+            className="rank-row"
+            key={i.key}
+            style={{
+              backgroundImage: "linear-gradient(90deg, var(--accent-soft) 0 0)",
+              backgroundSize: `${share}% 100%`,
+            }}
+          >
             <div className="rank-line">
               <span className="rank-name" title={i.key}>
                 {head ? <span className="rank-dir">{head}</span> : null}
@@ -37,9 +46,6 @@ export function RankRows({
               <span className="rank-cost num" data-credit={credit || undefined} data-unpriced={!i.priced || undefined}>
                 {credit ? creditText(i.counts.credits) : i.priced ? money(i.cost) : "无价格"}
               </span>
-            </div>
-            <div className="track rank-track" aria-hidden="true">
-              <i style={{ width: `${max > 0 ? Math.max((measure / max) * 100, 2) : 0}%` }} />
             </div>
           </li>
         );
