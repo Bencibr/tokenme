@@ -510,6 +510,13 @@ fn discover_walks_nested_session_dirs_and_filters_by_mtime() {
     );
     // Side files sit next to the logs and are not logs.
     fs::write(nested.path.with_extension("meta.json"), "{}").unwrap();
+    // `fs::copy` carries the fixture's mtime on macOS, and a checkout can be
+    // days old — stamp placement time explicitly or the since-filter below
+    // reads a fresh placement as ancient.
+    for file in [&top, &nested, &transcript] {
+        let handle = OpenOptions::new().write(true).open(&file.path).unwrap();
+        handle.set_modified(SystemTime::now()).unwrap();
+    }
     let memory = Install::workspace(install.dir.path())
         .join(SESSION)
         .join("memory")
