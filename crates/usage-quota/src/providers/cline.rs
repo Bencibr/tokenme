@@ -1,16 +1,32 @@
 //! Cline: the windowed limits its own account API reports.
 //!
+//! ## What Cline's own source says (clined/cline, read 2026-09-24)
+//!
 //! Cline writes no quota to disk — `~/.cline/data` holds sessions, provider
 //! config and feature flags, and there is no keychain item or `state.vscdb` entry
 //! for it. What it *does* keep locally is the credential its gateway login
 //! produced: `providers.json` → `providers.cline.settings.auth.accessToken`, a
 //! string that already carries the literal `workos:` prefix.
 //!
-//! `Javis603/token-monitor:docs/providers/cline.md:81-84` measured that the bare
-//! JWT is rejected and the stored string must be sent **verbatim** as the bearer
-//! value, which is what `~/.cline/data/settings/providers.json` shows here too.
-//! The same doc (`:75-79`) and that project's
-//! `src/shared/providers/cline/limits.js:68-79` give the endpoint:
+//! The credential rules below are lifted from Cline's source, not guessed:
+//!
+//! * The account API's bearer keeps the `workos:` prefix. `apps/vscode/src/sdk/
+//!   account-service.ts` says it outright — "IMPORTANT: Prefixed with 'workos:'
+//!   so backend can route verification to WorkOS provider" — and `formatClineApiKey`
+//!   (`auth/provider-auth-registry.ts`) re-adds the prefix if a stored value lost
+//!   it. `auth/provider-auth-registry.ts:81-100` derives the expiry: the explicit
+//!   `expiresAt` (milliseconds; `providers.json` never stores seconds) wins, then
+//!   the token's own JWT `exp`, and with neither the credential counts as stale.
+//! * `resolveLocalClineAuthToken` (`services/providers/local-provider-service.ts`)
+//!   accepts the static `apiKey` where no OAuth token is stored, and
+//!   `shared/src/storage/paths.ts` resolves the file through
+//!   `CLINE_PROVIDER_SETTINGS_PATH` (a whole-path override) or `CLINE_DATA_DIR`
+//!   before falling back to `~/.cline/data/settings/providers.json`. Both are
+//!   mirrored here.
+//! * Refreshing is deliberately not done: the client's refresh grant rotates the
+//!   token and writes the new value back (`runtime-oauth-token-manager.ts`), so a
+//!   probe that refreshed without persisting would log the user out of Cline.
+//!   Same rule as [`super::antigravity`] and [`super::gemini`].
 //!
 //! ```text
 //! GET https://api.cline.bot/api/v1/users/me/plan/usage-limits
@@ -21,6 +37,18 @@
 //! `percentUsed` is already the *used* share (unlike Antigravity's
 //! `remaining_fraction`), so it maps straight onto [`QuotaSample::used_percent`].
 //!
+//! ## The one thing the source cannot confirm
+//!
+//! No current Cline client calls `usage-limits` — the endpoint and its field
+//! names come from a third-party measurement (`Javis603/token-monitor
+//! :docs/providers/cline.md:75-84`), and Cline's clients surface ClinePass
+//! limits only as error messages at request time (`ClinePassLimitError`), never
+//! by polling. What the source does document is `users/me/plan` (subscription,
+//! no windows) and `users/{id}/usages` (transaction lines). So this endpoint is
+//! kept because it is the only windowed source there is, and the parser stays
+//! tolerant of both envelope shapes (`data.limits` and bare `limits`); a shape
+//! drift answers empty rather than inventing a bar.
+//!
 //! Only a ClinePass subscriber has windows: for everyone else the endpoint answers
 //! 404 or an empty list, and this probe then answers nothing. A tool with no
 //! vendor limit is exactly what [`crate::Budget`] exists for — the panel shows the
@@ -28,18 +56,12 @@
 //!
 //! ## The credential has a lifetime, and this probe does not extend it
 //!
-//! `auth.expiresAt` is an hour-scale deadline. Measured on this machine
-//! (2026-09-24): the stored token expired **19.5 days** ago (the Cline CLI has not
-//! been run since), and all three endpoints — `users/me/plan/usage-limits`,
-//! `users/me`, `v1/credits` — answer `401 {"error":"Unauthorized: …"}`. So an
-//! empty answer here is the login being stale, not a broken request; a machine
-//! where Cline was used in the last hour answers normally.
-//!
-//! Refreshing is deliberately not done: it is Cline's credential, Google/WorkOS
-//! rotate it on refresh and every client persists the new value, so a probe that
-//! refreshed without writing back would log the user out of Cline. Same rule as
-//! [`super::antigravity`] and [`super::gemini`]. [`access_token`] therefore returns
-//! `None` once `expiresAt` has passed, which costs zero requests.
+//! Measured on this machine (2026-09-24): the stored token had expired **19.5
+//! days** earlier (the Cline CLI has not been run since), and the endpoints
+//! answer `401 {"error":"Unauthorized: …"}`. So an empty answer here is the
+//! login being stale, not a broken request; a machine where Cline was used in
+//! the last hour answers normally — and a stale credential is refused here
+//! without costing the 401.
 
 use std::path::PathBuf;
 
@@ -80,27 +102,68 @@ impl QuotaProbe for ClineQuota {
 
 /// The stored gateway token, verbatim — the `workos:` prefix is part of it.
 ///
-/// Honours `CLINE_DATA_DIR` the way the Cline adapter does, so a test or a
-/// relocated profile resolves the same file.
+/// Expiry is judged the way Cline's own registry derives it: the explicit
+/// `expiresAt` (milliseconds; a legacy seconds-shaped value is promoted) wins,
+/// else the access token's own JWT `exp`, and with neither the credential
+/// counts as stale — the client treats "unknown expiry" as "refresh now", and
+/// a probe that cannot refresh has no business sending a likely-dead token.
+/// A stale OAuth token falls through to the static `apiKey`, the same fallback
+/// `resolveLocalClineAuthToken` applies.
 pub(crate) fn access_token() -> Option<String> {
     let raw = std::fs::read_to_string(settings_file()?).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
     let auth = value.get("providers")?.get("cline")?.get("settings")?.get("auth")?;
-    let token = auth.get("accessToken")?.as_str()?.trim();
-    if token.is_empty() {
-        return None;
-    }
-    // `expiresAt` is unix milliseconds. Missing means the profile predates the
-    // field, so there is nothing to judge by and the request is worth trying.
-    if let Some(expires_ms) = auth.get("expiresAt").and_then(Value::as_i64) {
-        if expires_ms < usage_core::report::now_ms() {
-            return None;
+    let token = auth.get("accessToken").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
+    if let Some(token) = token {
+        let expiry = auth
+            .get("expiresAt")
+            .and_then(Value::as_i64)
+            .map(|ms| if ms < 10_000_000_000 { ms * 1_000 } else { ms })
+            .or_else(|| jwt_exp_ms(token));
+        if expiry.is_none_or(|expires_ms| expires_ms >= usage_core::report::now_ms()) {
+            return Some(token.to_string());
         }
     }
-    Some(token.to_string())
+    let key = auth.get("apiKey").and_then(Value::as_str)?.trim();
+    (!key.is_empty()).then(|| key.to_string())
 }
 
+/// The `exp` claim of an access-token JWT, in milliseconds — the SDK derives
+/// the credential's expiry from it when `providers.json` has no `expiresAt`.
+fn jwt_exp_ms(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = b64url_decode(payload)?;
+    let claim = serde_json::from_slice::<Value>(&decoded).ok()?.get("exp")?.as_f64()?;
+    (claim > 0.0).then(|| (claim * 1_000.0) as i64)
+}
+
+/// Base64url without padding, which is what a JWT segment is.
+fn b64url_decode(segment: &str) -> Option<Vec<u8>> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut bits = 0u32;
+    let mut acc = 0u16;
+    let mut out = Vec::with_capacity(segment.len() * 3 / 4);
+    for c in segment.bytes() {
+        let v = T.iter().position(|&x| x == c)? as u16;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The SDK's own resolution order (`shared/src/storage/paths.ts`): a whole-path
+/// override, then a relocated data dir, then `~/.cline/data`.
 fn settings_file() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CLINE_PROVIDER_SETTINGS_PATH") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
     let root = match std::env::var("CLINE_DATA_DIR") {
         Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
         _ => dirs::home_dir()?.join(".cline").join("data"),
