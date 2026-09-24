@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PageKey, PeriodKey, Report, TrayMode, TrayState } from "./types";
-import { bridge, inTauri } from "./lib/bridge";
+import { bridge, inTauri, applyTheme } from "./lib/bridge";
 import { localDate } from "./lib/format";
 import { useEscape, useTicker } from "./lib/hooks";
 import { CallTabs } from "./components/CallTabs";
@@ -37,6 +37,9 @@ export default function App() {
       .then((r) => alive && setReport(r))
       .catch((e: unknown) => alive && setError(String(e)));
     void bridge.trayState().then((s) => alive && setTray(s));
+    // The theme pin lives in settings.json; apply it before the first paint
+    // matters more than the rest of the sheet's state, so it loads at boot.
+    void bridge.panelSettings().then((s) => applyTheme(s.theme));
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);

@@ -1,10 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
-import type { Bridge, PanelSettings, QuotaOrder, Report, TrayMode, TrayState } from "../types";
+import type { Bridge, PanelSettings, QuotaOrder, Report, ThemeKey, TrayMode, TrayState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** `system` hands the media query back to the OS; a pin sets `data-theme`. */
+export function applyTheme(theme: ThemeKey): void {
+  if (theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+}
 
 /**
  * A real `Report` as produced by `tokenme report --json`, for reviewing the panel
@@ -112,7 +118,16 @@ export const bridge: Bridge = {
     }
     await invoke<void>("set_refresh_secs", { secs });
   },
+
+  async setTheme(theme: ThemeKey): Promise<void> {
+    applyTheme(theme);
+    if (!inTauri) {
+      browserSettings.theme = theme;
+      return;
+    }
+    await invoke<void>("set_theme", { theme });
+  },
 };
 
 /** The browser preview has nothing to persist; the sheet still works in memory. */
-const browserSettings: PanelSettings = { autostart: false, refresh_secs: 30, version: "dev" };
+const browserSettings: PanelSettings = { autostart: false, refresh_secs: 30, theme: "system", version: "dev" };

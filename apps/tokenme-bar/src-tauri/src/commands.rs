@@ -8,7 +8,7 @@ use usage_core::pricing::PricingOptions;
 use usage_core::{PricingMap, PricingMeta, Report};
 
 use crate::engine::{EngineChannel, Msg, Shared};
-use crate::settings::TrayMode;
+use crate::settings::{Theme, TrayMode};
 use crate::tray;
 
 /// Mirrors the tray's live state so the panel can show what the bar shows.
@@ -121,11 +121,12 @@ pub async fn tool_icons() -> Result<BTreeMap<String, String>, String> {
     Ok(usage_core::icons::icon_data_urls())
 }
 
-/// What the settings sheet shows: the two switches plus the build version.
+/// What the settings sheet shows: the switches plus the build version.
 #[derive(Debug, Clone, Serialize)]
 pub struct PanelSettings {
     pub autostart: bool,
     pub refresh_secs: u64,
+    pub theme: Theme,
     pub version: String,
 }
 
@@ -135,6 +136,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
     Ok(PanelSettings {
         autostart: settings.autostart,
         refresh_secs: settings.refresh_secs,
+        theme: settings.theme,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -143,6 +145,18 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
 pub async fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
     tray::set_autostart(&app, on);
     Ok(())
+}
+
+/// Purely a webview concern — the panel applies it as `data-theme` itself;
+/// persisting it here is what makes the choice survive a relaunch.
+#[tauri::command]
+pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.theme = theme;
+    settings.clone().save().map_err(|e| e.to_string())
 }
 
 /// Persist the new fallback cadence, then wake the engine so the next wait

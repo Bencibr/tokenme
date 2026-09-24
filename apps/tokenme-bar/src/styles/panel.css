@@ -144,7 +144,7 @@
 
 .seg-btn {
   min-width: 30px;
-  padding: 2px 0;
+  padding: 2px var(--s2); /* the theme seg has word labels, not 日/周/月 */
   font-size: var(--t-meta);
   color: var(--ink-3);
   border-radius: var(--r-sm);

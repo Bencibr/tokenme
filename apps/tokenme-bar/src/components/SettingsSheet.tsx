@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { PanelSettings } from "../types";
+import type { PanelSettings, ThemeKey } from "../types";
 import { bridge } from "../lib/bridge";
 import { IconClose } from "./Icons";
 
@@ -8,6 +8,12 @@ const INTERVALS: { secs: number; label: string }[] = [
   { secs: 30, label: "30 秒" },
   { secs: 60, label: "1 分钟" },
   { secs: 300, label: "5 分钟" },
+];
+
+const THEMES: { key: ThemeKey; label: string }[] = [
+  { key: "system", label: "跟随系统" },
+  { key: "light", label: "浅色" },
+  { key: "dark", label: "深色" },
 ];
 
 /**
@@ -34,6 +40,13 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const setRefresh = (secs: number) => {
     setSettings((s) => (s ? { ...s, refresh_secs: secs } : s));
     void bridge.setRefreshSecs(secs);
+  };
+
+  // The bridge applies `data-theme` synchronously, so the pick is visible
+  // before the persist round-trip answers.
+  const setTheme = (theme: ThemeKey) => {
+    setSettings((s) => (s ? { ...s, theme } : s));
+    void bridge.setTheme(theme);
   };
 
   return (
@@ -68,6 +81,24 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
                 onClick={() => setRefresh(i.secs)}
               >
                 {i.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="sheet-row">
+          <div className="sheet-label">外观</div>
+          <div className="seg" role="radiogroup" aria-label="外观主题">
+            {THEMES.map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                role="radio"
+                className="seg-btn"
+                aria-checked={settings?.theme === t.key}
+                onClick={() => setTheme(t.key)}
+              >
+                {t.label}
               </button>
             ))}
           </div>

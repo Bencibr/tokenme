@@ -179,10 +179,15 @@ export interface Bridge {
   panelSettings: () => Promise<PanelSettings>;
   setAutostart: (on: boolean) => Promise<void>;
   setRefreshSecs: (secs: number) => Promise<void>;
+  setTheme: (theme: ThemeKey) => Promise<void>;
 }
+
+/** `system` defers to the OS media query; `light`/`dark` pin the panel. */
+export type ThemeKey = "system" | "light" | "dark";
 
 export interface PanelSettings {
   autostart: boolean;
   refresh_secs: number;
+  theme: ThemeKey;
   version: string;
 }

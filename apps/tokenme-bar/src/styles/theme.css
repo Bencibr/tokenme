@@ -85,8 +85,11 @@
   --ease: cubic-bezier(0.22, 0.8, 0.32, 1);
 }
 
+/* Dark tokens apply two ways: the OS media query (unless the user pinned
+   浅色), or an explicit 深色 pin. Plain CSS has no "reuse that block", so the
+   token list appears twice, mechanically identical — keep them in sync. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --ground: #111112;
     --surface: #1b1b1d;
@@ -134,6 +137,58 @@
     --bad: #e07a6a;
     --bad-soft: rgba(224, 122, 106, 0.16);
   }
+}
+
+/* The explicit 深色 pin: same tokens, media query or not. CSS has no
+   "use that block" — duplication here is the price of one source of truth
+   per theme being readable side by side. Kept mechanically identical. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #111112;
+  --surface: #1b1b1d;
+  --surface-2: #212124;
+
+  --ink: #ececee;
+  --ink-2: #b3b3bd;
+  --ink-3: #8e8e99;
+
+  --hair: rgba(236, 236, 238, 0.09);
+  --hair-2: rgba(236, 236, 238, 0.16);
+  --track: rgba(236, 236, 238, 0.09);
+  --fill-hover: rgba(236, 236, 238, 0.06);
+  --fill-active: rgba(236, 236, 238, 0.11);
+
+  --accent: #58c0b4;
+  --accent-ink: #7ad3c8;
+  --accent-soft: rgba(88, 192, 180, 0.14);
+  --bar-fill: rgba(88, 192, 180, 0.44);
+  --bar-fill-hot: rgba(217, 169, 76, 0.5);
+
+  --cat-1: #58c0b4;
+  --cat-2: #8faee8;
+  --cat-3: #d9b24c;
+  --cat-4: #de9ac9;
+  --cat-5: #97cc7c;
+  --cat-6: #a2aab8;
+  --cat-7: #d98a5c;
+  --cat-8: #b5c25e;
+  --cat-9: #6fb0dd;
+  --cat-10: #e08fb5;
+  --cat-11: #a893e0;
+  --cat-12: #d97f7f;
+  --cat-13: #7fc79e;
+  --cat-14: #bfae7f;
+
+  --heat-1: #232f2e;
+  --heat-2: #2d4a47;
+  --heat-3: #3a6f69;
+  --heat-4: #4aa99e;
+
+  --warn: #d9a94c;
+  --warn-soft: rgba(217, 169, 76, 0.16);
+  --ok: #6fbf73;
+  --bad: #e07a6a;
+  --bad-soft: rgba(224, 122, 106, 0.16);
 }
 
 /* ------------------------------------------------------------------- base */

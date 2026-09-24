@@ -37,7 +37,8 @@ pub fn run() {
             commands::tool_icons,
             commands::get_panel_settings,
             commands::set_autostart,
-            commands::set_refresh_secs
+            commands::set_refresh_secs,
+            commands::set_theme
         ]);
 
     #[cfg(target_os = "macos")]

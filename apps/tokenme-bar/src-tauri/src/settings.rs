@@ -21,6 +21,16 @@ impl TrayMode {
     pub const ALL: [TrayMode; 3] = [TrayMode::Cost, TrayMode::Tokens, TrayMode::Quiet];
 }
 
+/// Panel appearance. `System` leaves the OS media query in charge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 /// The engine's fallback poll cadence when the file watcher is quiet.
 fn default_refresh_secs() -> u64 {
     30
@@ -41,6 +51,7 @@ fn default_refresh_secs() -> u64 {
 pub struct Settings {
     pub tray_mode: TrayMode,
     pub autostart: bool,
+    pub theme: Theme,
     /// Fallback poll cadence; watcher wake-ups still re-index immediately.
     #[serde(default = "default_refresh_secs")]
     pub refresh_secs: u64,
