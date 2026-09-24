@@ -1,0 +1,17 @@
+[package]
+name = "usage-adapter-ccswitch"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "tokenme source adapter: ccswitch"
+
+[dependencies]
+usage-core = { path = "../../usage-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"

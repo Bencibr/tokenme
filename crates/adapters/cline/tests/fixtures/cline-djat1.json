@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "session_id": "1787490736874_djat1",
+  "source": "cli",
+  "pid": 1754,
+  "started_at": "2026-08-23T13:12:16.875Z",
+  "ended_at": "2026-08-23T21:26:43.607Z",
+  "exit_code": 0,
+  "status": "completed",
+  "interactive": true,
+  "provider": "cline",
+  "model": "deepseek/deepseek-v4-flash",
+  "cwd": "/Users/me/workspace/apppty",
+  "workspace_root": "/Users/me/workspace/apppty",
+  "team_name": "team-CdaDH",
+  "enable_tools": true,
+  "enable_spawn": true,
+  "enable_teams": true,
+  "prompt": "<user_input mode=\"act\">\u542f\u52a8\u670d\u52a1\u7aef</user_input>",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "3.0.56"
+    },
+    "git": {
+      "url": "https://github.com/Bencibr/tokenme",
+      "branch": "feat/v0.1-foundation"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "c88c656ffa3be07d9cc389e13d5f4f0082241ef3",
+        "createdAt": 1787517747192,
+        "runCount": 13,
+        "kind": "stash"
+      },
+      "history": [
+        {
+          "ref": "208ca0ffc91c714b05bd4feacbbdc33d2af737be",
+          "createdAt": 1787490783219,
+          "runCount": 1,
+          "kind": "stash"
+        },
+        {
+          "ref": "17b533aa6e780608dd5cb5760d4db0612d244560",
+          "createdAt": 1787491280892,
+          "runCount": 2,
+          "kind": "stash"
+        },
+        {
+          "ref": "86002fa97743d4cceb586a489e7c6b0d232ed55d",
+          "createdAt": 1787492242592,
+          "runCount": 3,
+          "kind": "stash"
+        },
+        {
+          "ref": "d7427dcce12ea55734c8435c584a673afd7d6ef5",
+          "createdAt": 1787492492897,
+          "runCount": 4,
+          "kind": "stash"
+        },
+        {
+          "ref": "c9a5ab2c3a29b61463966981e29ab6017f8ed826",
+          "createdAt": 1787492554134,
+          "runCount": 5,
+          "kind": "stash"
+        },
+        {
+          "ref": "cf135d5f43436f6fc0f8a676b4eacdb2020e6cb9",
+          "createdAt": 1787493602866,
+          "runCount": 6,
+          "kind": "stash"
+        },
+        {
+          "ref": "b6f15bd5432dd3242fc3e9d9d707441020518f3a",
+          "createdAt": 1787493983808,
+          "runCount": 7,
+          "kind": "stash"
+        },
+        {
+          "ref": "ecb43b395ab9cd64d7b8978408ec4b056b587b5f",
+          "createdAt": 1787516258586,
+          "runCount": 8,
+          "kind": "stash"
+        },
+        {
+          "ref": "1ee4d0ccacda27c59339c12392d493f225e91155",
+          "createdAt": 1787516447809,
+          "runCount": 9,
+          "kind": "stash"
+        },
+        {
+          "ref": "62bd5467662909c6b82e7e666a88fe564ae80a4f",
+          "createdAt": 1787517018197,
+          "runCount": 10,
+          "kind": "stash"
+        },
+        {
+          "ref": "b03e5dd9f772f7329d1ab0df04024c900520b096",
+          "createdAt": 1787517251616,
+          "runCount": 11,
+          "kind": "stash"
+        },
+        {
+          "ref": "45a4d30716f3b4d2dd8e44d12f4a1de47000233d",
+          "createdAt": 1787517386492,
+          "runCount": 12,
+          "kind": "stash"
+        },
+        {
+          "ref": "c88c656ffa3be07d9cc389e13d5f4f0082241ef3",
+          "createdAt": 1787517747192,
+          "runCount": 13,
+          "kind": "stash"
+        }
+      ]
+    },
+    "title": "\u542f\u52a8\u670d\u52a1\u7aef",
+    "totalCost": 0,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 11816157,
+      "outputTokens": 56286,
+      "cacheReadTokens": 11093248,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 11816157,
+      "outputTokens": 56286,
+      "cacheReadTokens": 11093248,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    }
+  },
+  "messages_path": "/Users/me/.cline/data/sessions/1787490736874_djat1/1787490736874_djat1.messages.json"
+}

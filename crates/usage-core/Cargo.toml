@@ -1,0 +1,17 @@
+[package]
+name = "usage-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-tool AI token usage model: adapter contract, pricing, aggregation"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+ureq.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

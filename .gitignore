@@ -1,0 +1,11 @@
+/target
+/dist
+node_modules
+*.log
+.DS_Store
+apps/tokenme-bar/src-tauri/target
+apps/tokenme-bar/src-tauri/gen/schemas
+
+# dev-only: `tokenme report --json` / `tokenme icons --json` output that ?real=1 renders
+apps/tokenme-bar/report.json
+apps/tokenme-bar/icons.json

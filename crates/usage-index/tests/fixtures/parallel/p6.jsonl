@@ -1,0 +1,3 @@
+{"ts": 1789800600000, "session": "p6", "model": "glm-5.3-flash", "project": "/work/p6", "id": "p6-0", "in": 1000, "out": 1}
+{"ts": 1789800601000, "session": "p6", "model": "glm-5.3-flash", "project": "/work/p6", "id": "p6-1", "in": 2000, "out": 2}
+{"ts": 1789800602000, "session": "p6", "model": "glm-5.3-flash", "project": "/work/p6", "id": "p6-2", "in": 3000, "out": 3}
