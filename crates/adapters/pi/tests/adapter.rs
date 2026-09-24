@@ -469,6 +469,14 @@ fn discover_lists_logs_and_skips_derived_transcripts() {
     let derived = install.place("streamed.jsonl", "agent.jsonl", Some("subagent-artifacts"));
     fs::write(install.log_path("notes.md", None), "not a log").unwrap();
 
+    // `fs::copy` carries the fixture's mtime on macOS, and a checkout can be
+    // days old — stamp placement time explicitly or the since-filter below
+    // reads a fresh placement as ancient.
+    for file in [&top, &other, &derived] {
+        let handle = OpenOptions::new().write(true).open(&file.path).unwrap();
+        handle.set_modified(SystemTime::now()).unwrap();
+    }
+
     let all = PiAdapter.discover(&DateFilter::default());
     assert_eq!(
         paths(&all),
