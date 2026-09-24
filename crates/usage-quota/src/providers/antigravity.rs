@@ -129,29 +129,38 @@ pub(crate) fn samples_from(value: &Value) -> Vec<QuotaSample> {
         // `groups[].buckets` — the array shape above is the CLI's, keep tolerant.
         let name = group.get("name").and_then(Value::as_str).unwrap_or("Antigravity");
         let Some(buckets) = group.get("buckets").and_then(Value::as_array) else { continue };
-        for bucket in buckets.iter().filter_map(Value::as_object) {
-            if bucket.get("disabled").and_then(Value::as_bool).unwrap_or(false) {
-                continue;
-            }
-            let Some(remaining) = bucket.get("remaining_fraction").and_then(Value::as_f64) else { continue };
-            if !(0.0..=1.0).contains(&remaining) {
-                continue;
-            }
-            let window = bucket.get("window").and_then(Value::as_str).unwrap_or_default();
-            let minutes = WINDOW_MINUTES.iter().find(|(k, _)| *k == window).map(|(_, m)| *m).unwrap_or(0);
-            out.push(QuotaSample {
-                used_percent: (1.0 - remaining) * 100.0,
-                window_minutes: minutes,
-                resets_at_ms: bucket.get("reset_time").and_then(Value::as_str).and_then(parse_ts_ms).unwrap_or(0),
-                label: Some(match bucket.get("name").and_then(Value::as_str) {
-                    Some(n) if !n.is_empty() => format!("{} · {}", group_label(name), short(n, window)),
-                    _ => format!("{} · {window}", group_label(name)),
-                }),
-                id: None,
-            });
-        }
+        let mut rows: Vec<QuotaSample> = buckets
+            .iter()
+            .filter_map(Value::as_object)
+            .filter(|bucket| !bucket.get("disabled").and_then(Value::as_bool).unwrap_or(false))
+            .filter_map(|bucket| {
+                let Some(remaining) = bucket.get("remaining_fraction").and_then(Value::as_f64) else {
+                    return None;
+                };
+                if !(0.0..=1.0).contains(&remaining) {
+                    return None;
+                }
+                let window = bucket.get("window").and_then(Value::as_str).unwrap_or_default();
+                let minutes = WINDOW_MINUTES.iter().find(|(k, _)| *k == window).map(|(_, m)| *m).unwrap_or(0);
+                Some(QuotaSample {
+                    used_percent: (1.0 - remaining) * 100.0,
+                    window_minutes: minutes,
+                    resets_at_ms: bucket.get("reset_time").and_then(Value::as_str).and_then(parse_ts_ms).unwrap_or(0),
+                    label: Some(match bucket.get("name").and_then(Value::as_str) {
+                        Some(n) if !n.is_empty() => format!("{} · {}", group_label(name), short(n, window)),
+                        _ => format!("{} · {window}", group_label(name)),
+                    }),
+                    id: None,
+                })
+            })
+            .collect();
+        // The vendor groups by model and answers with a 5-hour and a weekly
+        // window per group; keep the groups in the vendor's own order and the
+        // windows shortest-first inside a group, so the panel can show one
+        // model's two windows together instead of interleaving the models.
+        rows.sort_by_key(|s| s.window_minutes);
+        out.extend(rows);
     }
-    out.sort_by(|a, b| a.window_minutes.cmp(&b.window_minutes).then_with(|| b.used_percent.total_cmp(&a.used_percent)));
     out
 }
 
@@ -210,8 +219,12 @@ mod tests {
         assert_eq!(s[0].window_minutes, 300, "5-hour windows sort first");
         assert!((s[0].used_percent - 24.12).abs() < 0.01, "1 - 0.7588: {:?}", s[0]);
         assert_eq!(s[0].label.as_deref(), Some("Gemini · 5 小时"));
-        assert_eq!(s[2].window_minutes, 10_080);
-        assert!((s[2].used_percent - 5.005).abs() < 0.01, "{:?}", s[2]);
+        // The vendor's own group order — Gemini first — and each model's two
+        // windows adjacent, because the panel groups on this arrangement.
+        assert_eq!(s[1].label.as_deref(), Some("Gemini · 周"));
+        assert_eq!(s[1].window_minutes, 10_080);
+        assert!((s[1].used_percent - 5.005).abs() < 0.01, "{:?}", s[1]);
+        assert_eq!(s[2].label.as_deref(), Some("Claude/GPT · 5 小时"));
         assert!(s.iter().all(|x| x.resets_at_ms > 1_790_000_000_000), "{s:?}");
         assert!(s.iter().all(|x| x.used_percent >= 0.0 && x.used_percent <= 100.0));
     }

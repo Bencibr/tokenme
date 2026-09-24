@@ -609,8 +609,33 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         next_local_midnight(opts.now_ms, 1),
         next_local_midnight(opts.now_ms, first_of_next_month_days(opts.now_ms)),
     ));
+    // Rows whose label names a subject before the window — Antigravity's
+    // "Gemini · 5 小时" — are grouped by that subject, and the subjects keep the
+    // order the probes emitted them in, which is the vendor's own grouping. A
+    // bare window label ("5 小时") names no subject: those rows sort first, then
+    // by window length, exactly as they always did. Either way nothing here
+    // moves with the numbers: a percentage or a shrinking reset gap would make
+    // the bars jump around while being read.
+    let mut family_rank: Vec<(&str, &str)> = Vec::new();
+    for q in &opts.polled_quota {
+        let Some((fam, _)) = q.label.as_deref().and_then(|l| l.split_once(" · ")) else { continue };
+        if fam.is_empty() || family_rank.iter().any(|(t, f)| *t == q.tool && *f == fam) {
+            continue;
+        }
+        family_rank.push((q.tool.as_str(), fam));
+    }
+    let family_rank = |q: &QuotaView| -> usize {
+        match q.label.as_deref().and_then(|l| l.split_once(" · ")) {
+            Some((fam, _)) if !fam.is_empty() => family_rank
+                .iter()
+                .position(|(t, f)| *t == q.tool && *f == fam)
+                .map_or(0, |i| i + 1),
+            _ => 0,
+        }
+    };
     quotas.sort_by(|a, b| {
         a.tool.cmp(&b.tool)
+            .then_with(|| family_rank(a).cmp(&family_rank(b)))
             .then_with(|| window_rank(a.window_minutes).cmp(&window_rank(b.window_minutes)))
             .then_with(|| a.label.cmp(&b.label))
     });
@@ -890,6 +915,63 @@ mod tests {
         assert_eq!(r.quotas.len(), 1, "one window, not a named twin: {:?}", r.quotas);
         assert_eq!(r.quotas[0].used_percent, 61.0);
         assert_eq!(r.quotas[0].origin, QuotaOrigin::Probe);
+    }
+
+    /// Antigravity answers with a 5-hour and a weekly window per model group.
+    /// The old length-then-label sort interleaved the two models; the groups
+    /// now keep the probe's own order (the vendor's — Gemini first) with each
+    /// model's two windows adjacent, whatever the percentages say.
+    #[test]
+    fn a_model_group_keeps_its_windows_together() {
+        let p = pricing();
+        let now = ms_of(2026, 9, 23, 10);
+        let view = |label: &str, minutes: i64, used: f64| QuotaView {
+            tool: "antigravity".into(),
+            used_percent: used,
+            window_minutes: minutes,
+            resets_at_ms: now + 86_400_000,
+            sampled_at_ms: now,
+            label: Some(label.into()),
+            id: None,
+            origin: QuotaOrigin::Probe,
+        };
+        let opts = ReportOptions::new(&p).with_now(now).with_quota(vec![
+            view("Gemini · 5 小时", 300, 41.0),
+            view("Gemini · 周", 10_080, 34.0),
+            view("Claude/GPT · 5 小时", 300, 0.0),
+            view("Claude/GPT · 周", 10_080, 0.0),
+        ]);
+        let r = summarize(&[], &opts);
+        let labels: Vec<String> = r.quotas.iter().map(|q| q.label.clone().unwrap_or_default()).collect();
+        assert_eq!(
+            labels,
+            vec!["Gemini · 5 小时", "Gemini · 周", "Claude/GPT · 5 小时", "Claude/GPT · 周"],
+            "{labels:?}"
+        );
+    }
+
+    /// A bare window label names no subject, so it keeps the old order: window
+    /// length first, the probe's rows untouched by any family grouping.
+    #[test]
+    fn unlabeled_windows_still_sort_by_length() {
+        let p = pricing();
+        let now = ms_of(2026, 9, 23, 10);
+        let view = |label: &str, minutes: i64| QuotaView {
+            tool: "codex".into(),
+            used_percent: 50.0,
+            window_minutes: minutes,
+            resets_at_ms: now + 86_400_000,
+            sampled_at_ms: now,
+            label: Some(label.into()),
+            id: None,
+            origin: QuotaOrigin::Probe,
+        };
+        let opts = ReportOptions::new(&p)
+            .with_now(now)
+            .with_quota(vec![view("周", 10_080), view("5 小时", 300)]);
+        let r = summarize(&[], &opts);
+        let labels: Vec<String> = r.quotas.iter().map(|q| q.label.clone().unwrap_or_default()).collect();
+        assert_eq!(labels, vec!["5 小时", "周"], "{labels:?}");
     }
 
     #[test]

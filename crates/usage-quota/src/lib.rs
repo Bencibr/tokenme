@@ -95,7 +95,12 @@ pub fn collect_within(budget: Duration) -> Vec<QuotaView> {
     }
 
     let mut out = shared.lock().map(|g| g.clone()).unwrap_or_default();
-    out.sort_by(|a, b| a.tool.cmp(&b.tool).then_with(|| b.used_percent.total_cmp(&a.used_percent)));
+    // Tool grouping only; inside a tool each probe's own row order stands. The
+    // report that consumes this re-sorts deterministically, and what it groups
+    // by is exactly the probe's arrangement — the vendor's own, as in
+    // Antigravity's per-model groups — which a `used_percent` sort here would
+    // reshuffle every time two models' percentages crossed.
+    out.sort_by(|a, b| a.tool.cmp(&b.tool));
     out
 }
 
