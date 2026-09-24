@@ -51,7 +51,7 @@ apps/tokenme-bar/      Tauri v2 菜单栏程序（React + TS）
 - `antigravity`：跑它自己的 CLI `agy -p /usage --output-format json` 读 `command.data.groups[].buckets[]`（周/5 小时两组，Gemini 与 Claude/GPT 各一组）。**故意不自己刷 refresh_token**——Google 会轮换它，探针不写回就会把用户登录作废。
 - `ccswitch`：网关自己的预算表 `providers.limit_daily_usd` / `limit_monthly_usd`，用量按 `proxy_request_logs` 的本地零点/月首求和。没设限额就没有条。
 - `claude`：官方 OAuth 接口。**若 Claude 走 CC Switch 之类的本地网关托管认证，`accessToken` 在本机就是空的**，此时查不到属正常。
-- `cline`：对照 cline/cline 源码校准过。套餐名来自 SDK 自己调的 `GET /api/v1/users/me/plan`（`fetchCurrentUserPlan`）：有套餐用套餐名（如 ClinePass Pro），`404 {"error":"no plan history found for user"}`（本机实测，非订阅账号两个 plan 端点都这么答）或 `plan:null` 就显示为 **Free**；窗口来自 `GET /api/v1/users/me/plan/usage-limits`——**注意这个端点不在任何现行 Cline 客户端源码里**（Cline 客户端根本不轮询限额，ClinePass 限额只在撞限时以 `ClinePassLimitError` 之类的错误消息出现），它是第三方（Javis603/token-monitor）实测的口径，解析保持宽容（`data.limits`/`limits` 两种封装都收）。没有窗口数据时出一条 `{套餐名} · 无可查限额` 的状态条（free 档有限额但只在请求时上报，无处可查），而不是让 cline 从面板上消失。鉴权头必须带 `workos:` 前缀——其 vscode account-service 源码注释原话（后端靠它路由 WorkOS 验证）。token 有效性判定同 SDK 的 `deriveCredentialExpiry`：显式 `expiresAt`（毫秒）→ JWT `exp` → 都没有视为失效；`accessToken` 缺失/失效回退 `apiKey`（同 `resolveLocalClineAuthToken`）；路径解析同 `shared/src/storage/paths.ts`（`CLINE_PROVIDER_SETTINGS_PATH` > `CLINE_DATA_DIR` > `~/.cline/data`）。**绝不刷新**：Cline 的 access token 只有 1 小时寿命，Cline 自己运行时会刷新并写回 providers.json，tokenme 读到的总是它最近刷新后的凭据；Cline 长期不开就过期，探针返回空、只剩预算条（本机实测：过期 19.5 天全端点 401；重新登录后 1 小时内全链路 200）。
+- `cline`：对照 cline/cline 源码校准过。套餐名来自 SDK 自己调的 `GET /api/v1/users/me/plan`（`fetchCurrentUserPlan`）：有套餐用套餐名（如 ClinePass Pro），`404 {"error":"no plan history found for user"}`（本机实测，非订阅账号两个 plan 端点都这么答）或 `plan:null` 就显示为 **Free**；窗口来自 `GET /api/v1/users/me/plan/usage-limits`——**注意这个端点不在任何现行 Cline 客户端源码里**（Cline 客户端根本不轮询限额，ClinePass 限额只在撞限时以 `ClinePassLimitError` 之类的错误消息出现），它是第三方（Javis603/token-monitor）实测的口径，解析保持宽容（`data.limits`/`limits` 两种封装都收）。没有窗口数据时出一条 `{套餐名} · 无可查限额` 的状态条（free 档有限额但只在请求时上报，无处可查），而不是让 cline 从面板上消失。鉴权头必须带 `workos:` 前缀——其 vscode account-service 源码注释原话（后端靠它路由 WorkOS 验证）。token 有效性判定同 SDK 的 `deriveCredentialExpiry`：显式 `expiresAt`（毫秒）→ JWT `exp` → 都没有视为失效；`accessToken` 缺失/失效回退 `apiKey`（同 `resolveLocalClineAuthToken`）；路径解析同 `shared/src/storage/paths.ts`（`CLINE_PROVIDER_SETTINGS_PATH` > `CLINE_DATA_DIR` > `~/.cline/data`）。**过期就用它自己的 refresh token 走 Cline 网关轮换**（`POST /api/v1/auth/refresh`，载荷/响应/写回字段与其 SDK 的 `refreshClineToken`+`saveOAuthCredentials` 逐字段一致）：access token 只有 1 小时寿命且 refresh token 轮换式更新，所以**写回 providers.json 是安全的前提**——只写 `accessToken/refreshToken/expiresAt` 三个字段、原子 tmp+rename、保留 0600 权限与其余内容；轮换失败（refresh token 被吊销）不写任何东西，去 Cline 重新登录即可。tokenme 是唯一会写别的工具凭据文件的例外，规则从"绝不写回"改为"**写回才许刷新**"。本机实测：过期 19.5 天全端点 401（旧版只读不刷的现状）；2026-09-24 晚真实过期后自动轮换成功，providers.json 写回新过期时间（+1h），Free 条不再随过期消失。
 - `zcode`：**全部走 ZCode app 自己在用的那组活接口，不再读任何缓存**。拆它的 `app.asar` 可见 usage-stats 服务就是三个 GET（它自己的 locale 把这个面板标注为"来自当前供应商额度接口"）：
   ① `GET https://bigmodel.cn/api/monitor/usage/quota/limit`（Z.ai 家族账号是 `https://api.z.ai` 同路径；`ZCODE_BIGMODEL_USAGE_QUOTA_URL`/`BIGMODEL_USAGE_QUOTA_URL` 覆盖，与 app 同名同优先级）→ `{code,data:{level,limits[]}}`，5 小时 prompt 池、每周额度、工具调用月额度全在这里。实测 200 / 亚秒，且 5 小时窗口带真实 `percentage` 与 `nextResetTime`（毫秒）。鉴权用 `~/.zcode/v2/credentials.json` 里 `account-provider:coding-plan:account:<plan>:account:<id>:api-key` 的 coding-plan API key（同 `enc:v1:` 信封），账号的 `oauth:<family>:access_token` 实测同样可用作回退。
   ② `GET {base}/api/biz/subscription/list` → 套餐显示名（`GLM Coding Lite`，取 `status=="VALID"` 的那条）。
@@ -81,15 +81,17 @@ tokenme budget rm cline
 - 窗口 `resets_at_ms` 已过的样本直接丢弃：一条旧日志记录曾让 Codex 的"月 0%"条永远挂在面板上。**不宣传重置时间的日志行**（`resets_at_ms==0`）无法用这个规则判死，改按年龄判：最后一次被提到超过 24 小时就退场——否则探针改了标签（Qoder 的"已用完"退役时）会留一条永远擦不掉的鬼条。
 - **同一长度的不同窗口是两个窗口**：窗口身份是 `(工具, 长度, 名字)`。只按长度去重时，ZCode 的"1 月工具调用"被"月 MCP"覆盖，Antigravity 的 Gemini 两组被 Claude/GPT 两组覆盖——四个窗口只剩两条。没有名字的日志行（Codex 就是这么写的）仍与同名的探针行合并，所以不会出现双胞胎条。
 - 厂商语义不同：Cline 给 `percentUsed`（已用），Antigravity 给 `remaining_fraction`（剩余，取反），Qoder 给 0..1 的 `percentage` 分数或 `used/total`。标签只写窗口名（Qoder 的资源包带 `剩 N/总N`，因为 credits 的绝对量比百分比有用），不写"剩余"，因为条上显示的是已用。
-- `agy /usage` 一次要 10–17 s，所以探针内部预算 25 s、CLI 等 30 s；菜单栏只等 5 s，慢探针落缓存后下一轮出现。
+- `agy /usage` 一次要 10–17 s，所以探针内部预算 25 s、CLI 等 30 s；菜单栏只等 5 s——**超预算的探针不会让它的条从面板上消失一个周期**：预算到点时该工具若还没答，就用磁盘上 6 小时宽限期内上一次的答案补位（cline 一次探测最多三个串行 HTTPS 请求，正是它先撞上的这个问题——条目反复消失又出现，看起来就是"位置在跳动"），迟到的那轮自己落缓存、下一轮起就是新值。
 
 ## 面板结构
 
-菜单栏下拉出来的是**三个页面**，不是一条长滚动：`概览`（配额条 + 工具分布 + 活动热力）、`排行`（模型 / 项目 / MCP / Skill）、`明细`（最近会话 + 数据来源）。顶部左侧的返回按钮按访问顺序回退（不是回到第一个 tab）。每页里被截断的列表都有"查看全部 N 项"，折叠时就把隐藏数量写在按钮上。
+菜单栏下拉出来的是**四个页面**，不是一条长滚动：`概览`（活动热力 + 配额条）、`工具`（每工具的用量与花费）、`排行`（模型 / 项目 / MCP / Skill）、`明细`（最近会话 + 数据来源）。每页里被截断的列表都有"查看全部 N 项"，折叠时就把隐藏数量写在按钮上。
 
 这么分是因为全塞一页时面板实测 2,102 px 高、视口只有 593 px，每个 section 都要滚过六个体温才能看到。
 
 配额区的顺序是**固定的，不是排行**：报表侧按名义窗口长度定档（5 小时 → 日 → 周 → 月，隐含长度与无窗口长度的条排其后），面板不再按"已用百分比"重排——百分比每次刷新都变，zcode MCP 条的窗口长度是不断缩小的重置间隔，按它们排序条目就会在眼前跳动。顺序归用户管：**长按**任意一条或某个工具的标题行即可拖动（移动超过 8px 视为滚动，不触发拖拽），排列写进 `settings.json` 的 `quota_tools`/`quota_rows`，键是探针给的稳定窗口 id（label 里带实时金额、长度会漂移的条都带 id）；没拖过的条按报表默认序，新出现的窗口排在已保存顺序之后。
+
+条的配色表达**"距离不可用还有多远"**（红绿灯语义）：填充是一条锚定整条轨道的渐变（`--ok` 绿 → 62% 起 `--warn` 橙 → 100% `--bad` 红），填充只负责露出渐变的前段——条的前缘颜色就是剩余量，**满条必然以红色收尾，"满"只会被读成"用完"，不会被读成"还没用"**；超 100%（预算超支）整条红色斜纹、数字显示真实百分比。数字本身在 ≥80% 变橙，色弱用户不依赖颜色也能读。
 
 工具行的徽标用**该工具自己 app 的图标**：`usage-core/src/icons.rs` 直接解析 `/Applications`（和 `~/Applications`）里 bundle 的 `Contents/Resources/*.icns`，按 `IHDR` 宽度挑"不小于显示尺寸 2× 的最小那张"（不放大，宁可缩小），原样取内嵌 PNG 编成 data URL。只有确实有 bundle 的才用图标——Codex、OpenCode、Pi、Cline、AtomCode、Mimocode 是命令行工具，**没有 app**，就退回彩色首字母；借一个邻近产品的图标会把 token 到底出自哪个账号标错。图标是装饰：行上的名字照旧，读不出 PNG 也只是掉成字母，任何数字都不经过它。`tokenme icons` 看这台机器上哪些源能拿到图标（`--json` 是面板与 `?real=1` 预览读的数据）。
 

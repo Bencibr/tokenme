@@ -59,14 +59,25 @@ pub fn collect() -> Vec<QuotaView> {
 /// responsive and can afford to wait out a slow probe (the Antigravity CLI takes
 /// ~10 s), while the menu-bar app must not block its refresh on one.
 pub fn collect_within(budget: Duration) -> Vec<QuotaView> {
+    collect_probes_within(budget, built_in(), cache::Cache::open("tokenme/quota", TTL))
+}
+
+/// The same, over an injected probe set and cache — the seam the blink test
+/// uses.
+fn collect_probes_within(
+    budget: Duration,
+    probes: Vec<Box<dyn QuotaProbe>>,
+    cache: Option<cache::Cache>,
+) -> Vec<QuotaView> {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    let cache = Arc::new(cache::Cache::open("tokenme/quota", TTL));
+    let cache = Arc::new(cache);
     let done = Arc::new(AtomicUsize::new(0));
     let shared: Arc<Mutex<Vec<QuotaView>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let probes = built_in();
+    let names: Vec<String> = probes.iter().map(|p| p.tool().to_string()).collect();
     let total = probes.len();
     for probe in probes {
         let cache = Arc::clone(&cache);
@@ -95,6 +106,21 @@ pub fn collect_within(budget: Duration) -> Vec<QuotaView> {
     }
 
     let mut out = shared.lock().map(|g| g.clone()).unwrap_or_default();
+    // A probe still running at the budget — three sequential vendor calls can
+    // outrun five seconds — must not make its bars blink out of the panel for
+    // a cycle. Its last answer is on disk inside the grace window, and that is
+    // exactly what grace is for; the late thread overwrites it when it lands.
+    let answered: HashSet<String> = out.iter().map(|v| v.tool.clone()).collect();
+    for name in &names {
+        if answered.contains(name) {
+            continue;
+        }
+        if let Some(cache) = cache.as_ref() {
+            if let Some(views) = cache.within(name, cache::GRACE) {
+                out.extend(views);
+            }
+        }
+    }
     // Tool grouping only; inside a tool each probe's own row order stands. The
     // report that consumes this re-sorts deterministically, and what it groups
     // by is exactly the probe's arrangement — the vendor's own, as in
@@ -123,6 +149,53 @@ mod tests {
                 || PROBE_ONLY_TOOLS.contains(&probe.tool());
             assert!(known, "probe tool {:?} matches no adapter TOOL_ID or probe-only id", probe.tool());
         }
+    }
+
+    /// A probe whose vendor needs longer than the caller's budget: without the
+    /// grace supplement its bars vanish for a cycle and the panel reflows —
+    /// the "cline jumps around" blink.
+    #[test]
+    fn a_probe_that_outruns_the_budget_is_carried_by_its_cached_answer() {
+        struct Slow {
+            tool: &'static str,
+            millis: u64,
+        }
+        impl QuotaProbe for Slow {
+            fn tool(&self) -> &'static str {
+                self.tool
+            }
+            fn fetch(&self) -> Vec<QuotaSample> {
+                std::thread::sleep(Duration::from_millis(self.millis));
+                vec![QuotaSample {
+                    used_percent: 42.0,
+                    window_minutes: 300,
+                    resets_at_ms: 0,
+                    label: Some("fresh answer".into()),
+                    id: None,
+                }]
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        // Seed an answer older than the probe TTL but inside the grace window,
+        // exactly what a previous good cycle leaves behind.
+        let stale = format!(
+            r#"{{"captured_at_ms":{},"entries":[{{"used_percent":7.0,"window_minutes":300,"resets_at_ms":0,"label":"cached answer"}}]}}"#,
+            cache::now_ms() - TTL.as_millis() as i64 - 60_000
+        );
+        std::fs::write(dir.path().join("slow.json"), stale).unwrap();
+        let cache = cache::Cache::in_dir(dir.path().to_path_buf(), TTL);
+
+        let probes: Vec<Box<dyn QuotaProbe>> =
+            vec![Box::new(Slow { tool: "slow", millis: 400 })];
+        let out = collect_probes_within(Duration::from_millis(40), probes, Some(cache));
+        assert!(
+            out.iter().any(|v| v.tool == "slow"),
+            "a probe over budget must not drop its tool from the report: {out:?}"
+        );
+        // Either the late thread landed (fresh answer) or grace did (cached
+        // answer); what must never happen is an empty report for that tool.
+        assert!(out.iter().all(|v| v.tool != "slow" || v.used_percent > 0.0));
     }
 
     #[test]

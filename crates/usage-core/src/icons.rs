@@ -40,7 +40,12 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
 /// PNGs shipped with the panel for tools that usually have no installed bundle,
 /// consulted only when the bundle lookup above produced no pixels. Still pure
 /// decoration: a corrupt file costs the row its icon, never a figure.
-pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[("cline", include_bytes!("../assets/cline.png"))];
+pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
+    ("cline", include_bytes!("../assets/cline.png")),
+    // OpenCode is a CLI, but the vendor ships an official mark (their own
+    // apple-touch icon) — shipped, not scraped from an unrelated bundle.
+    ("opencode", include_bytes!("../assets/opencode.png")),
+];
 
 /// Where a user-installed app lives. `~/Applications` first: a per-user install
 /// of the same name is the one this person chose.
@@ -306,6 +311,6 @@ mod tests {
         }
         assert!(map.contains_key("codex"), "ChatGPT.app is installed here");
         assert!(map.contains_key("cline"), "cline ships a bundled icon");
-        assert!(!map.contains_key("opencode"), "nothing shipped or named for it");
+        assert!(map.contains_key("opencode"), "opencode ships a bundled icon");
     }
 }

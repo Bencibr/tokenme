@@ -23,10 +23,13 @@
 //!   `CLINE_PROVIDER_SETTINGS_PATH` (a whole-path override) or `CLINE_DATA_DIR`
 //!   before falling back to `~/.cline/data/settings/providers.json`. Both are
 //!   mirrored here.
-//! * Refreshing is deliberately not done: the client's refresh grant rotates the
-//!   token and writes the new value back (`runtime-oauth-token-manager.ts`), so a
-//!   probe that refreshed without persisting would log the user out of Cline.
-//!   Same rule as [`super::antigravity`] and [`super::gemini`].
+//! * Refreshing is done through the gateway the SDK itself uses
+//!   (`refreshClineToken`: `POST /api/v1/auth/refresh` with the stored refresh
+//!   token), and the rotated pair is persisted back into `providers.json` —
+//!   the persistence is what makes this safe, because a refresh whose result
+//!   is not written back consumes the rotation and logs the user out. This is
+//!   the one place tokenme writes to another tool's file, and it writes only
+//!   the three rotated fields, atomically, permissions preserved.
 //!
 //! ```text
 //! GET https://api.cline.bot/api/v1/users/me/plan/usage-limits
@@ -60,22 +63,24 @@
 //! quota for it, and [`crate::Budget`] is the honest bar. Only a ClinePass
 //! subscriber's `usage-limits` returns windows.
 //!
-//! ## The credential has a lifetime, and this probe does not extend it
+//! ## The credential has a one-hour lifetime, and the gateway extends it
 //!
 //! Measured on this machine (2026-09-24): a stored token expired **19.5 days**
 //! earlier (the Cline CLI had not been run since) and every endpoint answered
-//! `401 {"error":"Unauthorized: …"}`; after a fresh login the same field reads
-//! one hour out. So an hour-scale `expiresAt` is the normal state and a stale
-//! credential is the common case: this probe refuses a stale token without
-//! costing the 401, and an empty answer means the login is stale — not that
-//! the request broke.
+//! `401 {"error":"Unauthorized: …"}`; a fresh login reads one hour out. An
+//! hour-scale `expiresAt` is therefore the normal state: when the stored
+//! token is stale or inside the SDK's five-minute refresh buffer, this probe
+//! rotates it through the gateway (above) so the tier bar survives the
+//! expiry; when the refresh token itself has been revoked, the answer is
+//! empty and a re-login in Cline is the fix.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use usage_core::{parse_ts_ms, QuotaSample};
 
-use crate::http::{get_json, get_json_any_status};
+use crate::http::{get_json, get_json_any_status, post_json};
 use crate::QuotaProbe;
 
 pub struct ClineQuota;
@@ -167,12 +172,13 @@ fn tier_sample(tier: &str) -> QuotaSample {
 /// Expiry is judged the way Cline's own registry derives it: the explicit
 /// `expiresAt` (milliseconds; a legacy seconds-shaped value is promoted) wins,
 /// else the access token's own JWT `exp`, and with neither the credential
-/// counts as stale — the client treats "unknown expiry" as "refresh now", and
-/// a probe that cannot refresh has no business sending a likely-dead token.
-/// A stale OAuth token falls through to the static `apiKey`, the same fallback
-/// `resolveLocalClineAuthToken` applies.
+/// counts as stale. A token that is stale — or inside the SDK's five-minute
+/// refresh buffer — is refreshed through Cline's own gateway, and the rotated
+/// pair is persisted back to `providers.json` the same way the app persists
+/// it; a static `apiKey` remains the fallback for profiles without OAuth.
 pub(crate) fn access_token() -> Option<String> {
-    let raw = std::fs::read_to_string(settings_file()?).ok()?;
+    let path = settings_file()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
     let auth = value.get("providers")?.get("cline")?.get("settings")?.get("auth")?;
     let token = auth.get("accessToken").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
@@ -184,12 +190,124 @@ pub(crate) fn access_token() -> Option<String> {
             .or_else(|| jwt_exp_ms(token));
         // No expiry to judge by counts as stale: the client derives one or
         // refreshes, and this probe refuses to spend a likely-dead 401.
-        if expiry.is_some_and(|expires_ms| expires_ms >= usage_core::report::now_ms()) {
+        if expiry.is_some_and(|expires_ms| expires_ms >= usage_core::report::now_ms() + REFRESH_BUFFER_MS) {
             return Some(token.to_string());
+        }
+        // Stale or about to expire: refresh through the gateway, the same call
+        // the app itself makes every hour, persisting the rotated tokens.
+        if let Some(refresh) =
+            auth.get("refreshToken").and_then(Value::as_str).map(str::trim).filter(|r| !r.is_empty())
+        {
+            if let Some(fresh) = refresh_stored_tokens(&path, refresh) {
+                return Some(fresh);
+            }
         }
     }
     let key = auth.get("apiKey").and_then(Value::as_str)?.trim();
     (!key.is_empty()).then(|| key.to_string())
+}
+
+/// Refresh before expiry by this much — the same buffer the SDK refreshes in.
+/// Refreshing only after expiry would blank the bar for one round-trip.
+const REFRESH_BUFFER_MS: i64 = 5 * 60 * 1000;
+
+const REFRESH_ENDPOINT: &str = "https://api.cline.bot/api/v1/auth/refresh";
+
+/// The gateway URL the rotation POSTs to. Overridable for a self-hosted or
+/// proxied gateway (the SDK overrides the same base), and for tests.
+fn refresh_endpoint() -> String {
+    std::env::var("CLINE_AUTH_REFRESH_URL")
+        .ok()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| REFRESH_ENDPOINT.to_string())
+}
+
+/// One OAuth rotation: exchange the stored refresh token at Cline's own
+/// gateway (`refreshClineToken` in its SDK), then write the rotated pair back
+/// into `providers.json`.
+///
+/// The write-back is the safety, not a courtesy: refresh tokens rotate, so a
+/// refresh whose result is not persisted consumes the stored token and logs
+/// the user out of Cline on its next refresh. What is written mirrors the
+/// app's own `saveOAuthCredentials` — new access token (with the `workos:`
+/// prefix the account APIs require), the rotated refresh token when the
+/// answer carries one, the parsed `expiresAt` — and nothing else. A transient
+/// failure leaves the stored credentials untouched; a rejected refresh token
+/// also writes nothing and simply ends the probe (re-auth is the user's next
+/// step, in Cline).
+fn refresh_stored_tokens(path: &Path, refresh_token: &str) -> Option<String> {
+    let body = post_json(
+        &refresh_endpoint(),
+        &[("content-type", "application/json"), ("accept", "application/json")],
+        serde_json::json!({"refreshToken": refresh_token, "grantType": "refresh_token"}),
+    )?;
+    let (access, rotated, expires_ms) = parse_refresh_response(&body)?;
+    let mut root: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let formatted = apply_refreshed_credentials(&mut root, &access, rotated.as_deref(), expires_ms)?;
+    // Atomic tmp+rename, and the credential file keeps its 0600 permissions —
+    // a renamed-in temp file would otherwise land world-readable.
+    let mut text = serde_json::to_vec(&root).ok()?;
+    text.push(b'\n');
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &text).ok()?;
+    #[cfg(unix)]
+    if let Ok(original) = fs::metadata(path) {
+        let _ = fs::set_permissions(&tmp, original.permissions());
+    }
+    fs::rename(&tmp, path).ok()?;
+    Some(formatted)
+}
+
+/// `{"success":true,"data":{"accessToken":…,"refreshToken"?…,"expiresAt":…}}`
+/// — the shape `requireClineTokenResponse` accepts.
+fn parse_refresh_response(body: &Value) -> Option<(String, Option<String>, i64)> {
+    if body.get("success").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let data = body.get("data")?;
+    let access = data.get("accessToken").and_then(Value::as_str)?.trim().to_string();
+    if access.is_empty() {
+        return None;
+    }
+    let rotated = data
+        .get("refreshToken")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string);
+    // `expiresAt` arrives as an RFC 3339 string and is stored as milliseconds.
+    let expires_ms = data.get("expiresAt").and_then(Value::as_str).and_then(parse_ts_ms)?;
+    Some((access, rotated, expires_ms))
+}
+
+/// Merge one rotation into a parsed providers.json: the access token with its
+/// `workos:` prefix restored (`formatClineApiKey`), the rotated refresh token
+/// when present, the new expiry. Everything else — other providers, account
+/// id, metadata — is left exactly as it was.
+fn apply_refreshed_credentials(
+    root: &mut Value,
+    access: &str,
+    rotated: Option<&str>,
+    expires_ms: i64,
+) -> Option<String> {
+    let auth = root
+        .get_mut("providers")?
+        .get_mut("cline")?
+        .get_mut("settings")?
+        .get_mut("auth")?
+        .as_object_mut()?;
+    let formatted = if access.to_lowercase().starts_with("workos:") {
+        access.to_string()
+    } else {
+        format!("workos:{access}")
+    };
+    auth.insert("accessToken".into(), Value::String(formatted.clone()));
+    if let Some(r) = rotated {
+        auth.insert("refreshToken".into(), Value::String(r.to_string()));
+    }
+    auth.insert("expiresAt".into(), Value::from(expires_ms));
+    Some(formatted)
 }
 
 /// The `exp` claim of an access-token JWT, in milliseconds — the SDK derives
@@ -388,6 +506,7 @@ mod tests {
 
     #[test]
     fn the_credential_is_read_verbatim_from_the_gateway_profile() {
+        let _guard = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings/providers.json");
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
@@ -477,6 +596,161 @@ mod tests {
         };
         let payload = encode(format!(r#"{{"exp":{exp_seconds}}}"#).as_bytes());
         format!("{prefix}h.{payload}.s")
+    }
+
+    // --------------------------------------------------------- the rotation
+
+    #[test]
+    fn a_refresh_answer_yields_the_rotated_pair() {
+        let ok = body(
+            r#"{"success":true,"data":{"accessToken":"plain-jwt","refreshToken":"rotated","tokenType":"Bearer",
+                 "expiresAt":"2026-09-24T12:00:00Z","userInfo":{"clineUserId":"usr-1"}}}"#,
+        );
+        let (access, rotated, expires) = parse_refresh_response(&ok).expect("valid answer parses");
+        assert_eq!(access, "plain-jwt");
+        assert_eq!(rotated.as_deref(), Some("rotated"), "the rotation must be persisted, or the next refresh dies");
+        assert_eq!(expires, parse_ts_ms("2026-09-24T12:00:00Z").unwrap());
+
+        // A rejected refresh token is not a credential.
+        assert!(parse_refresh_response(&body(r#"{"success":false,"error":"invalid_grant"}"#)).is_none());
+        // Nor a success shape without a token in it.
+        assert!(parse_refresh_response(&body(r#"{"success":true,"data":{}}"#)).is_none());
+        assert!(parse_refresh_response(&body("not json")).is_none());
+    }
+
+    #[test]
+    fn writing_a_rotation_touches_only_the_rotated_fields() {
+        let mut root = serde_json::from_str::<Value>(
+            r#"{"version":"1","tray":"tokens","providers":{"cline":{"settings":{"auth":{
+                 "accessToken":"workos:old","refreshToken":"old-refresh","expiresAt":1,
+                 "accountId":"acc","metadata":{"provider":"cline"}},
+                 "other":"kept"}},"otherProvider":{"settings":{}}}}"#,
+        )
+        .unwrap();
+        let formatted = apply_refreshed_credentials(&mut root, "plain-jwt", Some("rotated"), 1234567890123)
+            .expect("a cline auth block");
+        assert_eq!(formatted, "workos:plain-jwt", "the prefix the account APIs require is restored");
+        let auth = &root["providers"]["cline"]["settings"]["auth"];
+        assert_eq!(auth["accessToken"], "workos:plain-jwt");
+        assert_eq!(auth["refreshToken"], "rotated");
+        assert_eq!(auth["expiresAt"], 1234567890123i64);
+        // Everything else survives untouched.
+        assert_eq!(auth["accountId"], "acc");
+        assert_eq!(auth["metadata"]["provider"], "cline");
+        assert_eq!(root["providers"]["cline"]["settings"]["other"], "kept");
+        assert_eq!(root["providers"]["otherProvider"], serde_json::json!({"settings":{}}));
+        assert_eq!(root["version"], "1");
+        assert_eq!(root["tray"], "tokens");
+
+        // An answer without a rotation keeps the stored refresh token.
+        apply_refreshed_credentials(&mut root, "next", None, 1).unwrap();
+        assert_eq!(root["providers"]["cline"]["settings"]["auth"]["refreshToken"], "rotated");
+    }
+
+    /// The credential file is process-global through its env overrides, so the
+    /// tests that relocate it take this lock; parallel tests would otherwise
+    /// read each other's fixtures.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn a_stale_credential_is_refreshed_and_the_rotation_lands_on_disk() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings/providers.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::env::set_var("CLINE_DATA_DIR", dir.path());
+        std::fs::write(
+            &settings,
+            serde_json::json!({"version":"1","providers":{"cline":{"settings":{"auth":{
+                "accessToken":"workos:stale","expiresAt":1_700_000_000_000i64,"refreshToken":"stored-refresh"
+            }}}}})
+            .to_string(),
+        )
+        .unwrap();
+
+        // A local gateway speaking the measured answer shape, byte for byte.
+        let answer = serde_json::json!({
+            "success": true,
+            "data": {"accessToken": "plain-new", "refreshToken": "rotated-refresh",
+                     "tokenType": "Bearer", "expiresAt": "2026-12-24T00:00:00Z",
+                     "userInfo": {"clineUserId": "usr-1"}}
+        })
+        .to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::env::set_var("CLINE_AUTH_REFRESH_URL", format!("http://{addr}/api/v1/auth/refresh"));
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut stream = stream;
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            use std::io::Write as _;
+            let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", answer.len(), answer);
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let token = access_token().expect("the rotation refreshes a stale credential");
+        assert_eq!(token, "workos:plain-new", "the prefix is restored before use");
+        server.join().unwrap();
+
+        // The rotation landed on disk: new tokens, new expiry, nothing else moved.
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let auth = &after["providers"]["cline"]["settings"]["auth"];
+        assert_eq!(auth["accessToken"], "workos:plain-new");
+        assert_eq!(auth["refreshToken"], "rotated-refresh");
+        assert_eq!(auth["expiresAt"], parse_ts_ms("2026-12-24T00:00:00Z").unwrap());
+        assert_eq!(after["version"], "1");
+        // And the next read serves the fresh token without another rotation.
+        assert_eq!(access_token().as_deref(), Some("workos:plain-new"));
+
+        std::env::remove_var("CLINE_AUTH_REFRESH_URL");
+        std::env::remove_var("CLINE_DATA_DIR");
+    }
+
+    #[test]
+    fn a_failed_refresh_leaves_the_stored_credentials_untouched() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings/providers.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::env::set_var("CLINE_DATA_DIR", dir.path());
+        std::fs::write(
+            &settings,
+            serde_json::json!({"version":"1","providers":{"cline":{"settings":{"auth":{
+                "accessToken":"workos:stale","expiresAt":1_700_000_000_000i64,"refreshToken":"stored-refresh"
+            }}}}})
+            .to_string(),
+        )
+        .unwrap();
+
+        // A gateway that answers like the vendor does for a rejected refresh.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::env::set_var("CLINE_AUTH_REFRESH_URL", format!("http://{addr}/api/v1/auth/refresh"));
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut stream = stream;
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            use std::io::Write as _;
+            let body = r#"{"error":"invalid_grant","message":"refresh token invalid"}"#;
+            let response = format!("HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        assert_eq!(access_token(), None, "a rejected refresh token means re-auth");
+        server.join().unwrap();
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let auth = &after["providers"]["cline"]["settings"]["auth"];
+        assert_eq!(auth["refreshToken"], "stored-refresh", "a failed refresh must not touch the file");
+        assert_eq!(auth["accessToken"], "workos:stale");
+        assert_eq!(after["version"], "1");
+
+        std::env::remove_var("CLINE_AUTH_REFRESH_URL");
+        std::env::remove_var("CLINE_DATA_DIR");
     }
 
     #[test]

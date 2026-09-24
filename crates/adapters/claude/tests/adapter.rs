@@ -279,6 +279,13 @@ fn discover_walks_nested_session_dirs_and_filters_by_mtime() {
     let _env = install.env();
     let top = install.place("main.jsonl", "sess-1.jsonl", None);
     let nested = install.place("resume.jsonl", "agent-a.jsonl", Some("sess-1/subagents"));
+    // `fs::copy` carries the fixture's mtime on macOS, and a checkout can be
+    // days old — stamp placement time explicitly or the since-filter below
+    // reads a fresh placement as ancient.
+    for file in [&top, &nested] {
+        let handle = OpenOptions::new().write(true).open(&file.path).unwrap();
+        handle.set_modified(SystemTime::now()).unwrap();
+    }
     // Subagent metadata sits next to the logs and is not a log.
     fs::write(nested.path.with_extension("meta.json"), "{}").unwrap();
 

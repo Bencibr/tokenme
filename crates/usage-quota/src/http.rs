@@ -21,9 +21,8 @@ pub fn get_json_any_status(url: &str, headers: &[(&str, &str)]) -> Option<(u16, 
     Some((status, resp.into_json().ok()?))
 }
 
-/// Used by the probes that must POST (Antigravity's local Connect RPC); the
-/// read-only ones stick to `get_json`.
-#[allow(dead_code)]
+/// Used by the probes that must POST (Cline's token refresh, Antigravity's
+/// local Connect RPC).
 pub fn post_json(url: &str, headers: &[(&str, &str)], body: Value) -> Option<Value> {
     request(url, headers, Some(body)).and_then(|r| r.into_json().ok())
 }
@@ -53,6 +52,13 @@ fn send(url: &str, headers: &[(&str, &str)], body: Option<Value>) -> Option<ureq
     }
     match body {
         Some(body) => req.send_json(body).ok(),
-        None => req.call().ok(),
+        // ureq surfaces non-2xx as `Err`, but a status error still carries the
+        // response — and a 404 body is exactly what `get_json_any_status` is
+        // here to read.
+        None => match req.call() {
+            Ok(resp) => Some(resp),
+            Err(ureq::Error::Status(_, resp)) => Some(resp),
+            Err(_) => None,
+        },
     }
 }
