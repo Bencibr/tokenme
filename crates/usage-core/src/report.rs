@@ -612,26 +612,40 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
     // Rows whose label names a subject before the window — Antigravity's
     // "Gemini · 5 小时" — are grouped by that subject, and the subjects keep the
     // order the probes emitted them in, which is the vendor's own grouping. A
-    // bare window label ("5 小时") names no subject: those rows sort first, then
-    // by window length, exactly as they always did. Either way nothing here
-    // moves with the numbers: a percentage or a shrinking reset gap would make
-    // the bars jump around while being read.
-    let mut family_rank: Vec<(&str, &str)> = Vec::new();
+    // subject with a single window has nothing to group: those rows keep the
+    // window-length order (ZCode's meters must not start following the vendor's
+    // limits array). Bare window labels ("5 小时") name no subject either.
+    // Nothing here moves with the numbers: a percentage or a shrinking reset
+    // gap would make the bars jump around while being read.
+    fn family_label(q: &QuotaView) -> Option<&str> {
+        q.label.as_deref().and_then(|l| l.split_once(" · ")).map(|(fam, _)| fam).filter(|fam| !fam.is_empty())
+    }
+    let mut family_rank: Vec<(String, String)> = Vec::new();
     for q in &opts.polled_quota {
-        let Some((fam, _)) = q.label.as_deref().and_then(|l| l.split_once(" · ")) else { continue };
-        if fam.is_empty() || family_rank.iter().any(|(t, f)| *t == q.tool && *f == fam) {
+        let Some(fam) = family_label(q) else { continue };
+        if family_rank.iter().any(|(t, f)| t == &q.tool && f == fam) {
             continue;
         }
-        family_rank.push((q.tool.as_str(), fam));
+        family_rank.push((q.tool.clone(), fam.to_string()));
+    }
+    // Owned, not borrowed: the vec feeds a closure that runs inside
+    // `quotas.sort_by`, and a borrow of `quotas` rows would fight the sort's
+    // mutable borrow.
+    let mut family_windows: Vec<(String, String, usize)> = Vec::new();
+    for q in &quotas {
+        let Some(fam) = family_label(q) else { continue };
+        match family_windows.iter_mut().find(|(t, f, _)| t == &q.tool && f == fam) {
+            Some((_, _, n)) => *n += 1,
+            None => family_windows.push((q.tool.clone(), fam.to_string(), 1)),
+        }
     }
     let family_rank = |q: &QuotaView| -> usize {
-        match q.label.as_deref().and_then(|l| l.split_once(" · ")) {
-            Some((fam, _)) if !fam.is_empty() => family_rank
-                .iter()
-                .position(|(t, f)| *t == q.tool && *f == fam)
-                .map_or(0, |i| i + 1),
-            _ => 0,
+        let Some(fam) = family_label(q) else { return 0 };
+        let grouped = family_windows.iter().any(|(t, f, n)| t == &q.tool && f == fam && *n > 1);
+        if !grouped {
+            return 0;
         }
+        family_rank.iter().position(|(t, f)| t == &q.tool && f == fam).map_or(0, |i| i + 1)
     };
     quotas.sort_by(|a, b| {
         a.tool.cmp(&b.tool)
@@ -972,6 +986,33 @@ mod tests {
         let r = summarize(&[], &opts);
         let labels: Vec<String> = r.quotas.iter().map(|q| q.label.clone().unwrap_or_default()).collect();
         assert_eq!(labels, vec!["5 小时", "周"], "{labels:?}");
+    }
+
+    /// ZCode's meters are one window per subject: no grouping applies, and the
+    /// rows keep the window-length order instead of following the vendor's
+    /// limits array (which puts the idle tool-call meter first).
+    #[test]
+    fn single_window_subjects_keep_the_length_order() {
+        let p = pricing();
+        let now = ms_of(2026, 9, 23, 10);
+        let view = |label: &str, minutes: i64, used: f64| QuotaView {
+            tool: "zcode".into(),
+            used_percent: used,
+            window_minutes: minutes,
+            resets_at_ms: now + 86_400_000,
+            sampled_at_ms: now,
+            label: Some(label.into()),
+            id: None,
+            origin: QuotaOrigin::Probe,
+        };
+        let opts = ReportOptions::new(&p).with_now(now).with_quota(vec![
+            view("工具调用 · GLM Coding Lite", 43_200, 0.0),
+            view("5 小时 · GLM Coding Lite", 300, 11.0),
+            view("ZCode MCP · GLM Coding Lite", 216_000, 0.0),
+        ]);
+        let r = summarize(&[], &opts);
+        let labels: Vec<String> = r.quotas.iter().map(|q| q.label.clone().unwrap_or_default()).collect();
+        assert_eq!(labels, vec!["5 小时 · GLM Coding Lite", "工具调用 · GLM Coding Lite", "ZCode MCP · GLM Coding Lite"], "{labels:?}");
     }
 
     #[test]
