@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=400, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>tokenme</title>
+    <style>
+      /* Critical, before the stylesheet loads, so a dark panel never flashes white. */
+      html {
+        background: #fafaf9;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: #111112;
+          color-scheme: dark;
+        }
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,39 @@
+[package]
+name = "tokenme-bar"
+version = "0.1.0"
+description = "tokenme menu-bar token & cost monitor"
+edition = "2021"
+rust-version = "1.97"
+
+# Deliberately its own cargo project: the root workspace `exclude`s this path so
+# that the app's heavy Tauri dependency graph never blocks the core crates.
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+thiserror = "2"
+
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+
+usage-core = { path = "../../../crates/usage-core" }
+usage-index = { path = "../../../crates/usage-index" }
+usage-adapter-all = { path = "../../../crates/adapters/all" }
+usage-quota = { path = "../../../crates/usage-quota" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

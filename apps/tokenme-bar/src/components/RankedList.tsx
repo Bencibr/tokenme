@@ -1,0 +1,94 @@
+import { useState } from "react";
+import type { Item, UnpricedModel } from "../types";
+import { compactTokens, credits as creditText, money } from "../lib/format";
+import { MoreRow, Section } from "./Section";
+
+/**
+ * One row = name, tokens, cost, and a hairline bar whose weight is either cost
+ * (models / projects) or tokens (MCP / Skill). No sub-lines: a third line per
+ * row is three times the height for information the numerals already carry.
+ */
+export function RankRows({
+  items,
+  limit = 5,
+  weight = "cost",
+}: {
+  items: Item[];
+  limit?: number;
+  weight?: "cost" | "tokens";
+}) {
+  const shown = items.slice(0, limit);
+  const max = shown.reduce((acc, i) => Math.max(acc, weight === "cost" ? i.cost : i.total_tokens), 0);
+
+  return (
+    <ol className="rank">
+      {shown.map((i) => {
+        const credit = i.counts.credits > 0 && i.total_tokens === 0;
+        const measure = weight === "cost" ? i.cost : i.total_tokens;
+        const [head, tail] = splitPath(i.label);
+        return (
+          <li className="rank-row" key={i.key}>
+            <div className="rank-line">
+              <span className="rank-name" title={i.key}>
+                {head ? <span className="rank-dir">{head}</span> : null}
+                {tail}
+              </span>
+              <span className="rank-tokens num">{credit ? "—" : compactTokens(i.total_tokens)}</span>
+              <span className="rank-cost num" data-credit={credit || undefined} data-unpriced={!i.priced || undefined}>
+                {credit ? creditText(i.counts.credits) : i.priced ? money(i.cost) : "无价格"}
+              </span>
+            </div>
+            <div className="track rank-track" aria-hidden="true">
+              <i style={{ width: `${max > 0 ? Math.max((measure / max) * 100, 2) : 0}%` }} />
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/** `/Users/me/work/tokenme` → dim the directory, keep the basename at full ink. */
+function splitPath(label: string): [string, string] {
+  const i = label.lastIndexOf("/");
+  return i > 0 ? [label.slice(0, i + 1), label.slice(i + 1)] : ["", label];
+}
+
+interface RankedProps {
+  label: string;
+  items: Item[];
+  limit?: number;
+  weight?: "cost" | "tokens";
+  unpriced?: UnpricedModel[];
+  emptyText?: string;
+}
+
+export function RankedList({ label, items, limit = 5, weight = "cost", unpriced, emptyText }: RankedProps) {
+  const [all, setAll] = useState(false);
+  const hidden = items.length - Math.min(items.length, limit);
+  const shown = all ? items.length : Math.min(items.length, limit);
+  const listed = (unpriced ?? []).filter((u) => items.some((i) => i.key === u.model && !i.priced));
+
+  return (
+    <Section
+      label={all ? `${label} · 全部` : `${label} Top ${Math.max(shown, 1)}`}
+      meta={all ? `${items.length} 项` : hidden > 0 ? `另 ${hidden} 项` : undefined}
+    >
+      {items.length === 0 ? (
+        <p className="empty-row">{emptyText ?? "本期无数据"}</p>
+      ) : (
+        <RankRows items={items} limit={shown} weight={weight} />
+      )}
+      <MoreRow open={all} total={items.length} preview={limit} onToggle={() => setAll((v) => !v)} />
+      {listed.length > 0 ? (
+        <p className="foot-note">
+          {unpriced?.length ?? 0} 个模型暂无价格：
+          {listed
+            .slice(0, 2)
+            .map((u) => `${u.model} ${compactTokens(u.total_tokens)}`)
+            .join(" · ")}
+        </p>
+      ) : null}
+    </Section>
+  );
+}

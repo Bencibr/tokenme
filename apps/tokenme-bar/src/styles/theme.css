@@ -1,0 +1,218 @@
+/* ==========================================================================
+   tokenme · design tokens
+   Editorial, dense, quiet. One accent, a fixed 6-slot categorical ramp,
+   hairlines instead of cards, and tabular numerals everywhere a number appears.
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* ground */
+  --ground: #fafaf9;
+  --surface: #ffffff;
+  --surface-2: #f4f4f2;
+
+  /* text hierarchy carries meaning, colour does not */
+  --ink: #17171a;
+  --ink-2: #45454c;
+  --ink-3: #6b6b73; /* 5.1:1 on --ground — safe at 11px */
+
+  /* lines & tracks (8% contrast hairlines, no cards) */
+  --hair: rgba(20, 20, 24, 0.08);
+  --hair-2: rgba(20, 20, 24, 0.14);
+  --track: rgba(20, 20, 24, 0.07);
+  --fill-hover: rgba(20, 20, 24, 0.04);
+  --fill-active: rgba(20, 20, 24, 0.09);
+
+  /* single restrained graphite-teal accent */
+  --accent: #0f6e68;
+  --accent-ink: #0b5a55;
+  --accent-soft: rgba(15, 110, 104, 0.1);
+  /* bars are quiet: the categorical dots carry the colour, the fills do not */
+  --bar-fill: rgba(15, 110, 104, 0.5);
+  --bar-fill-hot: rgba(138, 90, 18, 0.55);
+
+  /* fixed categorical ramp: a tool keeps its slot regardless of ranking */
+  --cat-1: #0f6e68;
+  --cat-2: #3d5a9e;
+  --cat-3: #8a6a15;
+  --cat-4: #8a4a78;
+  --cat-5: #4c7a3a;
+  --cat-6: #5a5f6b;
+  --cat-7: #a2542f;
+  --cat-8: #6d7a2f;
+  --cat-9: #2f6f9e;
+  --cat-10: #9e3f6f;
+  --cat-11: #6a4a9e;
+  --cat-12: #7a2f2f;
+  --cat-13: #2f7a4f;
+  --cat-14: #6f5f3f;
+
+  /* activity scale, quiet → saturated */
+  --heat-1: #d7e5e2;
+  --heat-2: #a5cbc6;
+  --heat-3: #4f9c94;
+  --heat-4: #0f6e68;
+
+  --warn: #8a5a12;
+  --warn-soft: rgba(138, 90, 18, 0.14);
+  /* quota gauge scale: green = usable, red = exhausted at 100% */
+  --ok: #3e7c38;
+  --bad: #a12d2d;
+  --bad-soft: rgba(161, 45, 45, 0.14);
+
+  /* 8px rhythm */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 28px;
+
+  --r-sm: 3px;
+  --r-md: 5px;
+
+  --stack: -apple-system, "SF Pro Text", "Inter", system-ui, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+
+  --t-hero: 34px;
+  --t-title: 13px;
+  --t-body: 13px;
+  --t-meta: 11px;
+
+  --dur-fast: 160ms;
+  --dur-slow: 240ms;
+  --ease: cubic-bezier(0.22, 0.8, 0.32, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --ground: #111112;
+    --surface: #1b1b1d;
+    --surface-2: #212124;
+
+    --ink: #ececee;
+    --ink-2: #b3b3bd;
+    --ink-3: #8e8e99; /* 5.3:1 on --surface */
+
+    --hair: rgba(236, 236, 238, 0.09);
+    --hair-2: rgba(236, 236, 238, 0.16);
+    --track: rgba(236, 236, 238, 0.09);
+    --fill-hover: rgba(236, 236, 238, 0.06);
+    --fill-active: rgba(236, 236, 238, 0.11);
+
+    --accent: #58c0b4;
+    --accent-ink: #7ad3c8;
+    --accent-soft: rgba(88, 192, 180, 0.14);
+    --bar-fill: rgba(88, 192, 180, 0.44);
+    --bar-fill-hot: rgba(217, 169, 76, 0.5);
+
+    --cat-1: #58c0b4;
+    --cat-2: #8faee8;
+    --cat-3: #d9b24c;
+    --cat-4: #de9ac9;
+    --cat-5: #97cc7c;
+    --cat-6: #a2aab8;
+    --cat-7: #d98a5c;
+    --cat-8: #b5c25e;
+    --cat-9: #6fb0dd;
+    --cat-10: #e08fb5;
+    --cat-11: #a893e0;
+    --cat-12: #d97f7f;
+    --cat-13: #7fc79e;
+    --cat-14: #bfae7f;
+
+    --heat-1: #232f2e;
+    --heat-2: #2d4a47;
+    --heat-3: #3a6f69;
+    --heat-4: #4aa99e;
+
+    --warn: #d9a94c;
+    --warn-soft: rgba(217, 169, 76, 0.16);
+    --ok: #6fbf73;
+    --bad: #e07a6a;
+    --bad-soft: rgba(224, 122, 106, 0.16);
+  }
+}
+
+/* ------------------------------------------------------------------- base */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--stack);
+  font-size: var(--t-body);
+  line-height: 1.45;
+  color: var(--ink);
+  background: transparent;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+/* In a browser there is no transparent tray window, so the panel sits on a
+   neutral ground instead of floating over nothing. */
+body[data-env="web"] {
+  background: var(--ground);
+}
+
+/* Every numeral is tabular: columns must not shimper when a report arrives. */
+.num,
+.hero-value,
+.hero-cost,
+.row-val,
+.row-cost,
+.mini-val,
+.mini-cost,
+.quota-pct,
+.stat-v,
+.heat-figure,
+.badge {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
