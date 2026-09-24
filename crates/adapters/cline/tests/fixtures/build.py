@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Rebuild the cline fixtures from the real transcript on disk."""
+"""Rebuild the cline fixtures from the real transcript on disk.
+
+The parser reads ids, timestamps, model names and token counts, so that is all
+the fixtures carry: the bodies are another project's session log and the local
+coordinates are this machine's. Every write goes through `redact`, and the two
+transcript shapes through `trim` as well, so regeneration cannot re-leak.
+"""
 import json, os, pathlib
 
 FIX = pathlib.Path(__file__).resolve().parent
@@ -8,23 +14,30 @@ doc = json.load(open(SRC / "1787490736874_djat1.messages.json"))
 meta = json.load(open(SRC / "1787490736874_djat1.json"))
 asst = [m for m in doc["messages"] if m.get("role") == "assistant" and m.get("metrics")]
 
-# The same transcript, with the bodies and every local coordinate stripped:
-# token counts, ids and timestamps are what the parser reads, the prose is
-# another project's session and has no business in this repository.
-def redact_text(value):
-    return str(value).replace(str(pathlib.Path.home()), "/Users/dev")
+# keys whose value is prose this repository has no business carrying
+BODY_KEYS = ("prompt", "title", "text", "system_prompt", "reasoning")
+
+
+def trim(m):
+    m = dict(m)
+    if isinstance(m.get("content"), list):
+        m["content"] = [{"type": c.get("type", "text"), "text": "…"} if isinstance(c, dict) else c for c in m["content"]]
+    return m
+
 
 def redact(node):
     if isinstance(node, dict):
-        return {k: ("…" if k in ("prompt", "title", "text", "system_prompt") and not isinstance(v, (int, float))
+        return {k: ("…" if k in BODY_KEYS and not isinstance(v, (int, float, bool))
                     else "0" * 40 if k == "ref" and isinstance(v, str)
-                    else "https://git.example/apppty.git" if k == "url"
+                    else "https://git.example/apppty.git" if k == "url" and isinstance(v, str)
+                    else "feat/x" if k == "branch" and isinstance(v, str)
                     else redact(v)) for k, v in node.items()}
     if isinstance(node, list):
         return [redact(v) for v in node]
     if isinstance(node, str):
-        return redact_text(node)
+        return node.replace(str(pathlib.Path.home()), "/Users/dev")
     return node
+
 
 whole = redact(doc)
 whole["messages"] = [trim(m) for m in whole["messages"]]
@@ -34,14 +47,8 @@ whole["messages"] = [trim(m) for m in whole["messages"]]
 # the same file as Cline rewrites it: snapshot before the last message lands.
 # Assistant-bearing rows only, content arrays trimmed, one whole-file snapshot
 # per line so a test can feed the two generations separately.
-def trim(m):
-    m = dict(m)
-    if isinstance(m.get("content"), list):
-        m["content"] = [{"type": c.get("type", "text"), "text": "…"} if isinstance(c, dict) else c for c in m["content"]]
-    return m
-
-msgs = [trim(m) for m in doc["messages"]]
-head = {"version": doc["version"], "updated_at": doc["updated_at"], "agent": "lead",
+msgs = [trim(m) for m in whole["messages"]]
+head = {"version": whole["version"], "updated_at": whole["updated_at"], "agent": "lead",
         "sessionId": "1787490736874_djat1", "messages": msgs[:-1]}
 tail = dict(head, messages=msgs)
 (FIX / "rewritten-twice.jsonl").write_text(
