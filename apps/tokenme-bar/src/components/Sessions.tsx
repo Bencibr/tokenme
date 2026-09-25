@@ -3,6 +3,7 @@ import type { SessionRow } from "../types";
 import { compactTokens, count, money, relativeTime } from "../lib/format";
 import { MoreRow, Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
+import { useMoney } from "../lib/display";
 
 const BASENAME = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 
@@ -10,6 +11,7 @@ const BASENAME = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
  *  the tail reachable rather than silently cut off. */
 export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
   const [all, setAll] = useState(false);
+  const showMoney = useMoney();
   const shown = all ? rows : rows.slice(0, 6);
   return (
     <Section label="最近会话" meta={rows.length > shown.length ? `显示 ${shown.length} / ${rows.length}` : undefined}>
@@ -19,7 +21,8 @@ export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
         <ol className="sess-list">
           {shown.map((s) => {
             const project = s.project ? BASENAME(s.project) : s.session.slice(0, 8);
-            const billed = s.cost > 0 ? money(s.cost) : s.total_tokens === 0 ? null : "无价格";
+            const billed =
+              s.cost > 0 ? (showMoney ? money(s.cost) : "") : s.total_tokens === 0 ? null : "无价格";
             return (
               <li className="sess" key={`${s.tool}/${s.session}`}>
                 <ToolIcon tool={s.tool} size={20} />

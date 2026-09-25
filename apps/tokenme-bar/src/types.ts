@@ -180,6 +180,7 @@ export interface Bridge {
   setAutostart: (on: boolean) => Promise<void>;
   setRefreshSecs: (secs: number) => Promise<void>;
   setTheme: (theme: ThemeKey) => Promise<void>;
+  setShowMoney: (on: boolean) => Promise<void>;
 }
 
 /** `system` defers to the OS media query; `light`/`dark` pin the panel. */
@@ -189,5 +190,6 @@ export interface PanelSettings {
   autostart: boolean;
   refresh_secs: number;
   theme: ThemeKey;
+  show_money: boolean;
   version: string;
 }

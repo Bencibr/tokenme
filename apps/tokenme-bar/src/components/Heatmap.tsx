@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { HeatCell } from "../types";
 import { compactTokens, count, formatDateLabel, money } from "../lib/format";
+import { useMoney } from "../lib/display";
 import { Section } from "./Section";
 
 const CELL = 5;
@@ -46,6 +47,7 @@ function monthMarkers(weeks: HeatCell[][]) {
 
 export function Heatmap({ cells, today }: { cells: HeatCell[]; today: string }) {
   const [hover, setHover] = useState<HeatCell | null>(null);
+  const showMoney = useMoney();
 
   const { weeks, thresholds, totals } = useMemo(() => {
     const grid = toWeeks(cells);
@@ -85,7 +87,11 @@ export function Heatmap({ cells, today }: { cells: HeatCell[]; today: string }) 
           height={height}
           viewBox={`0 0 ${width} ${height}`}
           role="img"
-          aria-label={`近 ${weeks.length} 周活动，共 ${compactTokens(totals.tokens)} tokens，花费 ${money(totals.cost)}`}
+          aria-label={
+            showMoney
+              ? `近 ${weeks.length} 周活动，共 ${compactTokens(totals.tokens)} tokens，花费 ${money(totals.cost)}`
+              : `近 ${weeks.length} 周活动，共 ${compactTokens(totals.tokens)} tokens`
+          }
           onMouseLeave={() => setHover(null)}
         >
           {weeks.map((week, col) =>
@@ -111,12 +117,13 @@ export function Heatmap({ cells, today }: { cells: HeatCell[]; today: string }) 
           <span className="heat-read num" role="status" aria-live="off">
             {hover ? (
               <>
-                {formatDateLabel(hover.date)} · {compactTokens(hover.total_tokens)} tokens · {money(hover.cost)} ·{" "}
-                {count(hover.requests)} 次
+                {formatDateLabel(hover.date)} · {compactTokens(hover.total_tokens)} tokens
+                {showMoney ? <> · {money(hover.cost)}</> : null} · {count(hover.requests)} 次
               </>
             ) : (
               <>
-                共 {compactTokens(totals.tokens)} tokens · {money(totals.cost)}
+                共 {compactTokens(totals.tokens)} tokens
+                {showMoney ? <> · {money(totals.cost)}</> : null}
               </>
             )}
           </span>

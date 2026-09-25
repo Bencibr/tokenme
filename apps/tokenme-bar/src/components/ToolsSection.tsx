@@ -11,6 +11,7 @@ import {
 } from "../lib/format";
 import { Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
+import { useMoney } from "../lib/display";
 
 /**
  * The product's core differentiator: one row per tool, the same three numerals
@@ -21,7 +22,11 @@ import { ToolIcon } from "./ToolIcon";
  * language as the ranks page, so the eye learns it once.
  */
 export function ToolsSection({ tools }: { tools: Item[] }) {
-  const costMax = tools.reduce((acc, t) => Math.max(acc, t.cost), 0);
+  const showMoney = useMoney();
+  // With dollars off, the wash ranks by tokens instead of cost — the row has
+  // to keep saying something about relative size.
+  const keyOf = (t: Item) => (showMoney ? t.cost : t.total_tokens);
+  const costMax = tools.reduce((acc, t) => Math.max(acc, keyOf(t)), 0);
   const totalCost = tools.reduce((acc, t) => acc + t.cost, 0);
 
   if (tools.length === 0) {
@@ -37,7 +42,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
       <ol className="tool-list">
         {tools.map((t) => {
           const credit = t.counts.credits > 0 && t.total_tokens === 0;
-          const share = costMax > 0 ? (t.cost / costMax) * 100 : 0;
+          const share = costMax > 0 ? (keyOf(t) / costMax) * 100 : 0;
           return (
             <li
               className="tool"
@@ -46,7 +51,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                 {
                   "--c": toolColor(t.key),
                   backgroundImage: "linear-gradient(90deg, color-mix(in srgb, var(--c) 9%, transparent) 0 0)",
-                  backgroundSize: `${Math.max(share, t.cost > 0 ? 2 : 0)}% 100%`,
+                  backgroundSize: `${Math.max(share, keyOf(t) > 0 ? 2 : 0)}% 100%`,
                 } as React.CSSProperties
               }
             >
@@ -56,12 +61,14 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                 <span className="tool-tokens num">{credit ? "—" : compactTokens(t.total_tokens)}</span>
                 <span className="tool-cost num" data-credit={credit || undefined} data-unpriced={!t.priced || undefined}>
                   {credit
-                  ? t.cost > 0
+                  ? showMoney && t.cost > 0
                     ? `≈${money(t.cost)}`
                     : creditText(t.counts.credits)
-                  : t.priced
-                    ? money(t.cost)
-                    : "无价格"}
+                  : showMoney
+                    ? t.priced
+                      ? money(t.cost)
+                      : "无价格"
+                    : ""}
                 </span>
               </div>
               {credit ? (
@@ -82,7 +89,8 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                   <span>会话</span>
                   <span className="grow" />
                   <span>
-                    缓存 {percent(cachedOf(t.counts), 0)} · 占 {percent(totalCost > 0 ? (t.cost / totalCost) * 100 : 0, 0)}
+                    缓存 {percent(cachedOf(t.counts), 0)}
+                    {showMoney ? <> · 占 {percent(totalCost > 0 ? (t.cost / totalCost) * 100 : 0, 0)}</> : null}
                   </span>
                 </div>
               )}

@@ -12,6 +12,13 @@ export function applyTheme(theme: ThemeKey): void {
   else document.documentElement.dataset.theme = theme;
 }
 
+/** Dollar figures off => the components read the flag from context; the
+ *  attribute exists for anything style-level that ever needs it. */
+export function applyMoney(on: boolean): void {
+  if (on) delete document.documentElement.dataset.money;
+  else document.documentElement.dataset.money = "off";
+}
+
 /**
  * A real `Report` as produced by `tokenme report --json`, for reviewing the panel
  * in a browser with this machine's actual numbers instead of the fixture. Set it
@@ -127,7 +134,22 @@ export const bridge: Bridge = {
     }
     await invoke<void>("set_theme", { theme });
   },
+
+  async setShowMoney(on: boolean): Promise<void> {
+    applyMoney(on);
+    if (!inTauri) {
+      browserSettings.show_money = on;
+      return;
+    }
+    await invoke<void>("set_show_money", { on });
+  },
 };
 
 /** The browser preview has nothing to persist; the sheet still works in memory. */
-const browserSettings: PanelSettings = { autostart: false, refresh_secs: 30, theme: "system", version: "dev" };
+const browserSettings: PanelSettings = {
+  autostart: false,
+  refresh_secs: 30,
+  theme: "system",
+  show_money: true,
+  version: "dev",
+};

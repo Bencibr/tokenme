@@ -36,6 +36,12 @@ fn default_refresh_secs() -> u64 {
     30
 }
 
+/// Dollar figures default on: they are the one scale that compares models
+/// across tools. Off leaves pure tokens/credits.
+fn default_show_money() -> bool {
+    true
+}
+
 /// The whole persisted surface: a tiny JSON file under the platform config dir.
 ///
 /// `budgets` is shared with the CLI: `tokenme budget set …` writes that one key of
@@ -55,6 +61,11 @@ pub struct Settings {
     /// Fallback poll cadence; watcher wake-ups still re-index immediately.
     #[serde(default = "default_refresh_secs")]
     pub refresh_secs: u64,
+    /// Whether converted-API-dollar figures render at all. Subscribers pay a
+    /// fixed plan, so the number is an equal-value yardstick, not a bill — and
+    /// some users would rather not see it.
+    #[serde(default = "default_show_money")]
+    pub show_money: bool,
     pub budgets: BTreeMap<String, usage_core::Budget>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub quota_tools: Vec<String>,

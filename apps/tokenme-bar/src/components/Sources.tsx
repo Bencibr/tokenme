@@ -4,6 +4,7 @@ import { compactTokens, count, money } from "../lib/format";
 import { IconMissing } from "./Icons";
 import { MoreRow, Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
+import { useMoney } from "../lib/display";
 
 /**
  * Which logs were actually read. Undetected sources stay reachable rather than
@@ -13,6 +14,7 @@ import { ToolIcon } from "./ToolIcon";
  */
 export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime: Summary }) {
   const [showMissing, setShowMissing] = useState(false);
+  const showMoney = useMoney();
   const detected = sources.filter((s) => s.detected);
   const missing = sources.filter((s) => !s.detected);
   const events = sources.reduce((acc, s) => acc + s.events_ingested, 0);
@@ -52,8 +54,13 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
       <p className="src-total">
         全部历史
         <span className="num"> {compactTokens(allTime.total_tokens)}</span>
-        <span> tokens ·</span>
-        <span className="num"> {money(allTime.cost)}</span>
+        <span> tokens</span>
+        {showMoney ? (
+          <>
+            <span> ·</span>
+            <span className="num"> {money(allTime.cost)}</span>
+          </>
+        ) : null}
         {allTime.credits > 0 ? (
           <>
             <span> · </span>

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Item, UnpricedModel } from "../types";
 import { compactTokens, credits as creditText, money } from "../lib/format";
+import { useMoney } from "../lib/display";
 import { MoreRow, Section } from "./Section";
 
 /**
@@ -19,13 +20,16 @@ export function RankRows({
   weight?: "cost" | "tokens";
 }) {
   const shown = items.slice(0, limit);
-  const max = shown.reduce((acc, i) => Math.max(acc, weight === "cost" ? i.cost : i.total_tokens), 0);
+  // Dollars off: rank and wash by tokens — the list keeps its shape without
+  // pretending to know what a model costs.
+  const rankingByCost = weight === "cost" && useMoney();
+  const max = shown.reduce((acc, i) => Math.max(acc, rankingByCost ? i.cost : i.total_tokens), 0);
 
   return (
     <ol className="rank">
       {shown.map((i) => {
         const credit = i.counts.credits > 0 && i.total_tokens === 0;
-        const measure = weight === "cost" ? i.cost : i.total_tokens;
+        const measure = rankingByCost ? i.cost : i.total_tokens;
         const share = max > 0 ? Math.max((measure / max) * 100, measure > 0 ? 2 : 0) : 0;
         const [head, tail] = splitPath(i.label);
         return (
@@ -44,7 +48,13 @@ export function RankRows({
               </span>
               <span className="rank-tokens num">{credit ? "—" : compactTokens(i.total_tokens)}</span>
               <span className="rank-cost num" data-credit={credit || undefined} data-unpriced={!i.priced || undefined}>
-                {credit ? creditText(i.counts.credits) : i.priced ? money(i.cost) : "无价格"}
+                {credit
+                  ? creditText(i.counts.credits)
+                  : !rankingByCost
+                    ? ""
+                    : i.priced
+                      ? money(i.cost)
+                      : "无价格"}
               </span>
             </div>
           </li>

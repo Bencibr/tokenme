@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PageKey, PeriodKey, Report, TrayMode, TrayState } from "./types";
-import { bridge, inTauri, applyTheme } from "./lib/bridge";
+import { bridge, inTauri, applyTheme, applyMoney } from "./lib/bridge";
+import { DisplayCtx } from "./lib/display";
 import { localDate } from "./lib/format";
 import { useEscape, useTicker } from "./lib/hooks";
 import { CallTabs } from "./components/CallTabs";
@@ -28,6 +29,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showMoney, setShowMoney] = useState(true);
   const tick = useTicker(30_000);
 
   useEffect(() => {
@@ -37,9 +39,14 @@ export default function App() {
       .then((r) => alive && setReport(r))
       .catch((e: unknown) => alive && setError(String(e)));
     void bridge.trayState().then((s) => alive && setTray(s));
-    // The theme pin lives in settings.json; apply it before the first paint
-    // matters more than the rest of the sheet's state, so it loads at boot.
-    void bridge.panelSettings().then((s) => applyTheme(s.theme));
+    // The theme pin and the money flag live in settings.json; applying them
+    // before the first paint matters more than the rest of the sheet's state,
+    // so they load at boot.
+    void bridge.panelSettings().then((s) => {
+      applyTheme(s.theme);
+      applyMoney(s.show_money);
+      setShowMoney(s.show_money);
+    });
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
@@ -106,6 +113,7 @@ export default function App() {
   const win = report[period];
 
   return (
+    <DisplayCtx.Provider value={{ money: showMoney }}>
     <IconProvider>
       <div className="panel" data-open data-page={page}>
         <Header
@@ -155,8 +163,14 @@ export default function App() {
           tray={inTauri ? { mode: tray?.mode ?? "cost", onCycle: () => void cycleTrayMode() } : null}
         />
 
-        {settingsOpen ? <SettingsSheet onClose={() => setSettingsOpen(false)} /> : null}
+        {settingsOpen ? (
+          <SettingsSheet
+            onClose={() => setSettingsOpen(false)}
+            onMoney={setShowMoney}
+          />
+        ) : null}
       </div>
     </IconProvider>
+    </DisplayCtx.Provider>
   );
 }

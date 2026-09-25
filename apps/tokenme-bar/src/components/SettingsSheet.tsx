@@ -21,7 +21,7 @@ const THEMES: { key: ThemeKey; label: string }[] = [
  * login-item switch, and the build version. Both switches apply on click —
  * there is no dirty state to save, so there is no save button.
  */
-export function SettingsSheet({ onClose }: { onClose: () => void }) {
+export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMoney: (on: boolean) => void }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
 
   useEffect(() => {
@@ -47,6 +47,12 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const setTheme = (theme: ThemeKey) => {
     setSettings((s) => (s ? { ...s, theme } : s));
     void bridge.setTheme(theme);
+  };
+
+  const setShowMoney = (on: boolean) => {
+    setSettings((s) => (s ? { ...s, show_money: on } : s));
+    onMoney(on);
+    void bridge.setShowMoney(on);
   };
 
   return (
@@ -102,6 +108,21 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="sheet-row">
+          <div>
+            <div className="sheet-label">金额折算</div>
+            <div className="sheet-hint">关闭后只显示 tokens 与 credits</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            className="switch"
+            aria-checked={settings?.show_money ?? true}
+            aria-label="金额折算"
+            onClick={() => setShowMoney(!(settings?.show_money ?? true))}
+          />
         </div>
 
         <div className="sheet-row">

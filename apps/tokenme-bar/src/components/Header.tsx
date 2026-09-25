@@ -13,6 +13,7 @@ import {
   splitTokens,
 } from "../lib/format";
 import { useTweenNumber } from "../lib/hooks";
+import { useMoney } from "../lib/display";
 import { IconArrowDown, IconArrowUp, IconFlat } from "./Icons";
 
 const ORDER: PeriodKey[] = ["day", "week", "month"];
@@ -45,6 +46,7 @@ function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
 }
 
 export function Header({ report, period, onPeriod, page, onPage }: Props) {
+  const showMoney = useMoney();
   const win = report[period];
   const { summary } = win;
   const hero = splitTokens(useTweenNumber(summary.total_tokens));
@@ -93,17 +95,21 @@ export function Header({ report, period, onPeriod, page, onPage }: Props) {
           <span className="hero-unit-word">tokens</span>
         </div>
         <span className="sr">
-          {`${win.label} ${compactTokens(summary.total_tokens)} tokens，花费 ${money(summary.cost)}，较${prevLabel} ${signedPercent(win.delta_cost_pct)}`}
+          {showMoney
+            ? `${win.label} ${compactTokens(summary.total_tokens)} tokens，花费 ${money(summary.cost)}，较${prevLabel} ${signedPercent(win.delta_cost_pct)}`
+            : `${win.label} ${compactTokens(summary.total_tokens)} tokens，较${prevLabel} ${signedPercent(win.delta_tokens_pct)}`}
         </span>
         <div className="hero-sub">
-          <span
-            className="hero-cost"
-            title={summary.credit_cost > 0 ? `含 ${money(summary.credit_cost)} 由 credits 按官方方案价折算` : undefined}
-          >
-            {summary.credit_cost > 0 ? "≈" : ""}
-            {money(summary.cost)}
-          </span>
-          <DeltaChip pct={win.delta_cost_pct} caption={prevLabel} />
+          {showMoney ? (
+            <span
+              className="hero-cost"
+              title={summary.credit_cost > 0 ? `含 ${money(summary.credit_cost)} 由 credits 按官方方案价折算` : undefined}
+            >
+              {summary.credit_cost > 0 ? "≈" : ""}
+              {money(summary.cost)}
+            </span>
+          ) : null}
+          <DeltaChip pct={showMoney ? win.delta_cost_pct : win.delta_tokens_pct} caption={prevLabel} />
         </div>
       </div>
 
@@ -121,7 +127,7 @@ export function Header({ report, period, onPeriod, page, onPage }: Props) {
           <>
             <span className="dot-sep" aria-hidden="true" />
             <span>{creditText(summary.credits)}</span>
-            {summary.credit_cost > 0 ? (
+            {showMoney && summary.credit_cost > 0 ? (
               <span className="hint" title="credits 按厂商公布的方案价折算，非账单">
                 ≈{money(summary.credit_cost)} 已计入
               </span>
