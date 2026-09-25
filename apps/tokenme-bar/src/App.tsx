@@ -95,12 +95,15 @@ export default function App() {
   const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
 
   if (!report) {
+    // "indexing" is the backend sentinel for "first scan still running"; the
+    // report-updated event swaps this screen out once the data lands.
+    const indexing = !error || error === "indexing";
     return (
       <div className="panel" data-boot>
         <div className="boot">
           <span className="boot-mark" aria-hidden="true" />
-          <span>{error ? `读取失败：${error}` : "正在索引本机用量…"}</span>
-          {error ? (
+          <span>{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
+          {!indexing ? (
             <button type="button" className="boot-retry" onClick={() => void refresh()}>
               重试
             </button>

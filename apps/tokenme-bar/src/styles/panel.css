@@ -55,6 +55,19 @@
   height: 7px;
   border-radius: 50%;
   background: var(--accent);
+  animation: boot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes boot-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-mark {
+    animation: none;
+  }
 }
 
 .boot-retry {
