@@ -158,9 +158,12 @@ export function cachedOf(c: TokenCounts): number {
 }
 
 export const TRAY_MODE_LABEL: Record<TrayMode, string> = {
-  cost: "花费",
-  tokens: "Token",
-  quiet: "仅图标",
+  tray_only: "仅托盘",
+  tokens_only: "仅Token",
+  cost_only: "仅花费",
+  tray_tokens: "托盘·Token",
+  tray_cost: "托盘·花费",
+  tray_tokens_cost: "托盘·Token·花费",
 };
 
 /** Local `YYYY-MM-DD` for an epoch-ms value, matching how report.rs buckets days. */

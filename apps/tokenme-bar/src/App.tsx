@@ -18,7 +18,8 @@ import { IconProvider } from "./components/ToolIcon";
 import { StatusBar } from "./components/StatusBar";
 import { ToolsSection } from "./components/ToolsSection";
 
-const MODES: TrayMode[] = ["cost", "tokens", "quiet"];
+/** 托盘显示模式循环顺序:仅托盘 → 仅Token → 仅花费 → 三个托盘组合。 */
+const MODES: TrayMode[] = ["tray_only", "tokens_only", "cost_only", "tray_tokens", "tray_cost", "tray_tokens_cost"];
 
 export default function App() {
   const [report, setReport] = useState<Report | null>(null);
@@ -82,7 +83,7 @@ export default function App() {
   }, [page]);
 
   const cycleTrayMode = useCallback(async () => {
-    const next = MODES[(MODES.indexOf(tray?.mode ?? "cost") + 1) % MODES.length];
+    const next = MODES[(MODES.indexOf(tray?.mode ?? "tray_tokens") + 1) % MODES.length];
     setTray(await bridge.setTrayMode(next));
   }, [tray?.mode]);
 
@@ -192,7 +193,7 @@ export default function App() {
           loading={loading}
           onRefresh={() => void refresh()}
           onOpenSettings={() => setSettingsOpen(true)}
-          tray={inTauri ? { mode: tray?.mode ?? "cost", onCycle: () => void cycleTrayMode() } : null}
+          tray={inTauri ? { mode: tray?.mode ?? "tray_tokens", onCycle: () => void cycleTrayMode() } : null}
         />
 
         {settingsOpen ? (

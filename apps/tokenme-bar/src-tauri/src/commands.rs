@@ -43,17 +43,18 @@ pub async fn get_tray_state(app: AppHandle) -> Result<TrayState, String> {
 #[tauri::command]
 pub async fn set_tray_mode(app: AppHandle, mode: TrayMode) -> Result<(), String> {
     let report = app.state::<Shared>().report();
-    {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".into());
-        };
-        settings.tray_mode = mode;
-        settings.clone().save().map_err(|e| e.to_string())?;
+    if let Err(e) = app.state::<Shared>().set_tray_mode(mode) {
+        return Err(e);
     }
+    // The menubar repaints before anything touches disk: the switch must feel
+    // instant, and a slow save must never sit between the click and the pixel.
     if let Some(report) = report {
         tray::refresh(&app, &report, mode);
     }
+    // Persist after the repaint: disk IO never sits between the click and the
+    // menubar, and a failed write still leaves this session working.
+    let settings = app.state::<Shared>().settings();
+    settings.save().map_err(|e| e.to_string())?;
     Ok(())
 }
 

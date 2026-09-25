@@ -5,20 +5,45 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// What the menu-bar title shows. `Cost` is the default; `Tokens` and `Quiet`
-/// exist because a fixed-width money figure is not always what a user wants
-/// glued to their status bar.
+/// What the menu-bar status item shows: the six combinations of
+/// {icon?} × {tokens?} × {cost?} — exactly these, nothing between them.
+/// The `alias`es keep settings.json written by the old three-mode era loading
+/// (cost/tokens/quiet map onto their closest new mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TrayMode {
+    /// 仅托盘 — icon only, no text.
+    #[serde(alias = "quiet")]
+    TrayOnly,
+    /// 仅Token — text only, icon hidden.
+    TokensOnly,
+    /// 仅花费 — text only, icon hidden.
+    CostOnly,
+    /// 托盘·Token — the branded default.
     #[default]
-    Cost,
-    Tokens,
-    Quiet,
+    TrayTokens,
+    /// 托盘·花费
+    #[serde(alias = "cost")]
+    TrayCost,
+    /// 托盘·Token·花费
+    TrayTokensCost,
 }
 
 impl TrayMode {
-    pub const ALL: [TrayMode; 3] = [TrayMode::Cost, TrayMode::Tokens, TrayMode::Quiet];
+    /// Cycle order as the user listed it: 仅托盘 → 仅Token → 仅花费 → the three 托盘 combos.
+    pub const ALL: [TrayMode; 6] = [
+        TrayMode::TrayOnly,
+        TrayMode::TokensOnly,
+        TrayMode::CostOnly,
+        TrayMode::TrayTokens,
+        TrayMode::TrayCost,
+        TrayMode::TrayTokensCost,
+    ];
+
+    /// Whether the dual-ring icon is part of the display.
+    pub fn shows_icon(self) -> bool {
+        !matches!(self, TrayMode::TokensOnly | TrayMode::CostOnly)
+    }
 }
 
 /// Panel appearance. `System` leaves the OS media query in charge.

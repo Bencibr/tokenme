@@ -55,6 +55,14 @@ impl Shared {
         }
     }
 
+    /// Updates the tray mode in memory only; the caller decides when the
+    /// settings file is written, so a slow save never delays the switch.
+    pub fn set_tray_mode(&self, mode: crate::settings::TrayMode) -> Result<(), String> {
+        let mut settings = self.settings.lock().map_err(|_| "settings busy".to_string())?;
+        settings.tray_mode = mode;
+        Ok(())
+    }
+
     pub fn settings(&self) -> Settings {
         self.settings.lock().map(|s| s.clone()).unwrap_or_default()
     }
