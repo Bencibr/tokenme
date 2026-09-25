@@ -14,6 +14,7 @@ members = [
     "crates/adapters/agnes",
     "crates/adapters/atomcode",
     "crates/adapters/workbuddy",
+    "crates/adapters/catpaw",
     "crates/adapters/all",
     "crates/usage-index",
     "crates/usage-quota",

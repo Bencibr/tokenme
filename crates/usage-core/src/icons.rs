@@ -31,6 +31,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("cline", &["Cline"]),
     ("zcode", &["ZCode"]),
     ("qoder", &["Qoder"]),
+    ("catpaw", &["CatPawAI"]),
     ("antigravity", &["Antigravity"]),
     ("ccswitch", &["CC Switch"]),
     ("agnes", &["AgnesCode"]),
@@ -52,6 +53,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("codex", include_bytes!("../assets/codex.png")),
     ("zcode", include_bytes!("../assets/zcode.png")),
     ("qoder", include_bytes!("../assets/qoder.png")),
+    ("catpaw", include_bytes!("../assets/catpaw.png")),
     ("antigravity", include_bytes!("../assets/antigravity.png")),
     ("ccswitch", include_bytes!("../assets/ccswitch.png")),
     ("agnes", include_bytes!("../assets/agnes.png")),
@@ -122,7 +124,7 @@ fn icons_from(dirs: &[PathBuf], wanted: &[(&str, &[&str])]) -> BTreeMap<String, 
 /// `.icns`, so the answer never depends on directory iteration order.
 fn icns_bytes(bundle: &Path) -> Option<Vec<u8>> {
     let res = bundle.join("Contents/Resources");
-    for name in ["AppIcon.icns", "icon.icns", "electron.icns"] {
+    for name in ["AppIcon.icns", "icon.icns", "electron.icns", "CatPawAI.icns"] {
         let p = res.join(name);
         if p.is_file() {
             return std::fs::read(p).ok();
