@@ -38,10 +38,23 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("cola", &["Cola"]),
 ];
 
-/// PNGs shipped with the panel for tools that usually have no installed bundle,
-/// consulted only when the bundle lookup above produced no pixels. Still pure
-/// decoration: a corrupt file costs the row its icon, never a figure.
+/// PNGs shipped with the panel, consulted only when the bundle lookup above
+/// produced no pixels — which is always the case on Windows and Linux, where
+/// there are no `.app` bundles to read. Extracted from each vendor's own
+/// installed bundle (smallest tile ≥ 48 px, same rule as the live lookup), so
+/// a Windows panel shows the same marks a Mac one does. Still pure decoration:
+/// a corrupt file costs the row its icon, never a figure.
 pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
+    ("claude", include_bytes!("../assets/claude.png")),
+    ("codex", include_bytes!("../assets/codex.png")),
+    ("zcode", include_bytes!("../assets/zcode.png")),
+    ("qoder", include_bytes!("../assets/qoder.png")),
+    ("antigravity", include_bytes!("../assets/antigravity.png")),
+    ("ccswitch", include_bytes!("../assets/ccswitch.png")),
+    ("agnes", include_bytes!("../assets/agnes.png")),
+    ("crow5", include_bytes!("../assets/crow5.png")),
+    ("cola", include_bytes!("../assets/cola.png")),
+    ("workbuddy", include_bytes!("../assets/workbuddy.png")),
     ("cline", include_bytes!("../assets/cline.png")),
     // OpenCode is a CLI, but the vendor ships an official mark (their own
     // apple-touch icon) — shipped, not scraped from an unrelated bundle.
