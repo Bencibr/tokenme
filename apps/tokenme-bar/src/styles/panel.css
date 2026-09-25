@@ -331,22 +331,6 @@
   margin-bottom: var(--s2);
 }
 
-.sec-right {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  align-self: center;
-}
-
-.quota-rings {
-  flex: none;
-  transform: translateY(1px); /* optical centering against the meta baseline */
-}
-
-.quota-rings .ring-arc {
-  transition: stroke-dasharray var(--dur-slow) var(--ease);
-}
-
 .sec-label {
   margin: 0;
   font-size: var(--t-meta);
