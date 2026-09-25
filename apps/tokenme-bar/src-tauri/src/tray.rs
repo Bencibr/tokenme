@@ -129,6 +129,9 @@ pub fn refresh(app: &AppHandle, report: &Report, mode: TrayMode) {
         None
     };
     let _ = tray.set_icon(icon);
+    // set_icon resets the template flag; without it macOS stops recoloring the
+    // glyph and the black PNG ships as-is — invisible on a dark menu bar.
+    let _ = tray.set_icon_as_template(true);
     let _ = tray.set_title(title.as_deref());
     let _ = tray.set_tooltip(Some(tooltip));
 }
