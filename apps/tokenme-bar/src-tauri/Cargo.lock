@@ -4674,6 +4674,7 @@ dependencies = [
  "usage-adapter-agnes",
  "usage-adapter-antigravity",
  "usage-adapter-atomcode",
+ "usage-adapter-catpaw",
  "usage-adapter-ccswitch",
  "usage-adapter-claude",
  "usage-adapter-cline",
@@ -4710,6 +4711,18 @@ dependencies = [
  "thiserror 2.0.20",
  "usage-core",
  "walkdir",
+]
+
+[[package]]
+name = "usage-adapter-catpaw"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs 6.0.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "usage-core",
 ]
 
 [[package]]

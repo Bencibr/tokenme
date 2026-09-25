@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
-import type { Bridge, PanelSettings, QuotaOrder, Report, ThemeKey, TrayMode, TrayState } from "../types";
+import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -71,6 +71,20 @@ export const bridge: Bridge = {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     void listen<Report>("report-updated", (event) => handler(event.payload)).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  },
+
+  onTrayPeriod(handler: (period: PeriodKey) => void): () => void {
+    if (!inTauri) return () => {};
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void listen<PeriodKey>("tray-period", (event) => handler(event.payload)).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
     });
