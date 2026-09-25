@@ -11,7 +11,7 @@ import {
   toolDisplay,
 } from "../lib/format";
 import { Section } from "./Section";
-import { SortToggle } from "./SortToggle";
+import { nextSortState, SortToggle, type SortState } from "./SortToggle";
 import { ToolIcon } from "./ToolIcon";
 import { useMoney } from "../lib/display";
 
@@ -25,11 +25,12 @@ import { useMoney } from "../lib/display";
  */
 export function ToolsSection({ tools }: { tools: Item[] }) {
   const showMoney = useMoney();
-  const [asc, setAsc] = useState(false);
-  const ordered = useMemo(
-    () => [...tools].sort((a, b) => (asc ? a.total_tokens - b.total_tokens : b.total_tokens - a.total_tokens)),
-    [tools, asc],
-  );
+  const [sort, setSort] = useState<SortState>("default");
+  const ordered = useMemo(() => {
+    if (sort === "default") return tools;
+    const dir = sort === "asc" ? 1 : -1;
+    return [...tools].sort((a, b) => (a.total_tokens - b.total_tokens) * dir);
+  }, [tools, sort]);
   // With dollars off, the wash ranks by tokens instead of cost — the row has
   // to keep saying something about relative size.
   const keyOf = (t: Item) => (showMoney ? t.cost : t.total_tokens);
@@ -48,7 +49,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
     <Section
       label="工具"
       meta={`${tools.length} 个工具`}
-      trail={<SortToggle asc={asc} onToggle={() => setAsc((v) => !v)} />}
+      trail={<SortToggle state={sort} onCycle={() => setSort((s) => nextSortState(s))} />}
     >
       <ol className="tool-list">
         {ordered.map((t) => {

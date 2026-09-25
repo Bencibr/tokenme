@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import type { SessionRow } from "../types";
 import { compactTokens, count, money, relativeTime } from "../lib/format";
 import { MoreRow, Section } from "./Section";
-import { SortToggle } from "./SortToggle";
+import { nextSortState, SortToggle, type SortState } from "./SortToggle";
 import { ToolIcon } from "./ToolIcon";
 import { useMoney } from "../lib/display";
 
@@ -13,18 +13,19 @@ const BASENAME = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
  *  by tokens; time stays visible on every row either way. */
 export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
   const [all, setAll] = useState(false);
-  const [asc, setAsc] = useState(false);
+  const [sort, setSort] = useState<SortState>("default");
   const showMoney = useMoney();
-  const ordered = useMemo(
-    () => [...rows].sort((a, b) => (asc ? a.total_tokens - b.total_tokens : b.total_tokens - a.total_tokens)),
-    [rows, asc],
-  );
+  const ordered = useMemo(() => {
+    if (sort === "default") return rows;
+    const dir = sort === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => (a.total_tokens - b.total_tokens) * dir);
+  }, [rows, sort]);
   const shown = ordered.slice(0, all ? ordered.length : 6);
   return (
     <Section
       label="最近会话"
       meta={rows.length > shown.length ? `显示 ${shown.length} / ${rows.length}` : undefined}
-      trail={rows.length > 1 ? <SortToggle asc={asc} onToggle={() => setAsc((v) => !v)} /> : undefined}
+      trail={rows.length > 1 ? <SortToggle state={sort} onCycle={() => setSort((v) => nextSortState(v))} /> : undefined}
     >
       {shown.length === 0 ? (
         <p className="empty-row">还没有会话记录</p>

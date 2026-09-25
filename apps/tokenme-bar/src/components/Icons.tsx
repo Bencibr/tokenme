@@ -125,3 +125,41 @@ export function IconClose(p: IconProps) {
     </Svg>
   );
 }
+
+/** 排序三态:未排序(上下双箭头)。 */
+export function IconSortDefault(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="m21 16-4 4-4-4" />
+      <path d="M17 20V4" />
+      <path d="m3 8 4-4 4 4" />
+      <path d="M7 2v16" />
+    </Svg>
+  );
+}
+
+/** 升序(向上箭头 + 递减横线)。 */
+export function IconSortAsc(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="m3 8 4-4 4 4" />
+      <path d="M7 4v16" />
+      <path d="M13 6h8" />
+      <path d="M13 12h6" />
+      <path d="M13 18h4" />
+    </Svg>
+  );
+}
+
+/** 降序(向下箭头 + 递减横线)。 */
+export function IconSortDesc(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="m3 16 4 4 4-4" />
+      <path d="M7 4v16" />
+      <path d="M13 6h8" />
+      <path d="M13 12h6" />
+      <path d="M13 18h4" />
+    </Svg>
+  );
+}

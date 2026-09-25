@@ -1,17 +1,25 @@
-import { IconArrowDown, IconArrowUp } from "./Icons";
+import { IconSortAsc, IconSortDefault, IconSortDesc } from "./Icons";
 
-/** 用量排序开关:降序(默认)⇄ 升序。区头右侧的小图标按钮。 */
-export function SortToggle({ asc, onToggle }: { asc: boolean; onToggle: () => void }) {
-  const Icon = asc ? IconArrowUp : IconArrowDown;
+export type SortState = "default" | "asc" | "desc";
+
+const META: Record<SortState, { title: string; label: string }> = {
+  default: { title: "默认排序", label: "默认" },
+  asc: { title: "按用量升序", label: "升序" },
+  desc: { title: "按用量降序", label: "降序" },
+};
+
+/** 用量排序三态开关:默认 ⇄ 升序 ⇄ 降序,点击循环。 */
+export function SortToggle({ state, onCycle }: { state: SortState; onCycle: () => void }) {
+  const Icon = state === "asc" ? IconSortAsc : state === "desc" ? IconSortDesc : IconSortDefault;
+  const { title, label } = META[state];
   return (
-    <button
-      type="button"
-      className="sort-toggle"
-      title={asc ? "按用量升序" : "按用量降序"}
-      aria-label={`按用量${asc ? "升" : "降"}序`}
-      onClick={onToggle}
-    >
+    <button type="button" className="sort-toggle" title={title} aria-label={`排序：${label}`} onClick={onCycle}>
       <Icon size={12} />
     </button>
   );
+}
+
+/** 点击推进三态循环:默认 → 升序 → 降序 → 默认。 */
+export function nextSortState(state: SortState): SortState {
+  return state === "default" ? "asc" : state === "asc" ? "desc" : "default";
 }
