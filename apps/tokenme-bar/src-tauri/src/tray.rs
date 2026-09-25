@@ -163,7 +163,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("tokenme")
+        .tooltip("TokenMe")
         .icon(tauri::include_image!("icons/tray-icon.png"))
         .icon_as_template(true)
         .on_menu_event(on_menu_event)

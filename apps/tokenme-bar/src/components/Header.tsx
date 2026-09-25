@@ -66,7 +66,7 @@ export function Header({ report, period, onPeriod, page, onPage }: Props) {
   return (
     <header className="hdr">
       <div className="hdr-bar">
-        <span className="brand">tokenme</span>
+        <span className="brand">TokenMe</span>
         <div className="seg" role="radiogroup" aria-label="统计周期" onKeyDown={onKey}>
           {ORDER.map((key) => (
             <button

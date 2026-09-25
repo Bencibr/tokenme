@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import type { Item } from "../types";
 import {
   cachedOf,
@@ -10,6 +11,7 @@ import {
   toolDisplay,
 } from "../lib/format";
 import { Section } from "./Section";
+import { SortToggle } from "./SortToggle";
 import { ToolIcon } from "./ToolIcon";
 import { useMoney } from "../lib/display";
 
@@ -23,11 +25,16 @@ import { useMoney } from "../lib/display";
  */
 export function ToolsSection({ tools }: { tools: Item[] }) {
   const showMoney = useMoney();
+  const [asc, setAsc] = useState(false);
+  const ordered = useMemo(
+    () => [...tools].sort((a, b) => (asc ? a.total_tokens - b.total_tokens : b.total_tokens - a.total_tokens)),
+    [tools, asc],
+  );
   // With dollars off, the wash ranks by tokens instead of cost — the row has
   // to keep saying something about relative size.
   const keyOf = (t: Item) => (showMoney ? t.cost : t.total_tokens);
-  const costMax = tools.reduce((acc, t) => Math.max(acc, keyOf(t)), 0);
-  const totalCost = tools.reduce((acc, t) => acc + t.cost, 0);
+  const costMax = ordered.reduce((acc, t) => Math.max(acc, keyOf(t)), 0);
+  const totalCost = ordered.reduce((acc, t) => acc + t.cost, 0);
 
   if (tools.length === 0) {
     return (
@@ -38,9 +45,13 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
   }
 
   return (
-    <Section label="工具" meta={`${tools.length} 个工具`}>
+    <Section
+      label="工具"
+      meta={`${tools.length} 个工具`}
+      trail={<SortToggle asc={asc} onToggle={() => setAsc((v) => !v)} />}
+    >
       <ol className="tool-list">
-        {tools.map((t) => {
+        {ordered.map((t) => {
           const credit = t.counts.credits > 0 && t.total_tokens === 0;
           const share = costMax > 0 ? (keyOf(t) / costMax) * 100 : 0;
           return (
