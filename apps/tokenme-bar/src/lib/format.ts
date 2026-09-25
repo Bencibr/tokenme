@@ -18,6 +18,7 @@ const TOOL_ORDER = [
   "mimocode",
   "cola",
   "catpaw",
+  "dsh",
 ];
 
 const DISPLAY: Record<string, string> = {

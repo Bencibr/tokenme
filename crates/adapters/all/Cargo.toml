@@ -20,4 +20,5 @@ usage-adapter-agnes.workspace = true
 usage-adapter-atomcode.workspace = true
 usage-adapter-workbuddy.workspace = true
 usage-adapter-catpaw = { path = "../catpaw" }
+usage-adapter-dsh = { path = "../dsh" }
 serde.workspace = true
