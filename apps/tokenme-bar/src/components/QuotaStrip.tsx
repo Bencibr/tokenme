@@ -16,6 +16,51 @@ function windowName(q: QuotaView): string {
 
 const ORIGIN: Record<string, string> = { probe: "实测", log: "日志", budget: "预算" };
 
+/** The app icon's dual rings, live: the outer arc is the worst live long
+ *  window (7 天级), the inner the worst short one (5 小时级); arc length is the
+ *  used percent and the colour steps green → amber → red as the window fills.
+ *  A glanceable echo of the rows underneath — exact numbers stay in the rows. */
+function QuotaRings({ short, long }: { short: number; long: number }) {
+  const tier = (pct: number) => (pct >= 85 ? "var(--bad)" : pct >= 60 ? "var(--warn)" : "var(--ok)");
+  const arc = (pct: number) => Math.max(0, Math.min(100, pct));
+  const ring = (r: number, pct: number, key: string) => (
+    <>
+      <circle cx="22" cy="22" r={r} fill="none" stroke="var(--track)" strokeWidth="5" pathLength={100} />
+      {pct > 0 ? (
+        <circle
+          cx="22"
+          cy="22"
+          r={r}
+          fill="none"
+          stroke={tier(pct)}
+          strokeWidth="5"
+          strokeLinecap="round"
+          pathLength={100}
+          strokeDasharray={`${arc(pct)} ${100 - arc(pct)}`}
+          className="ring-arc"
+          data-ring={key}
+        />
+      ) : null}
+    </>
+  );
+  return (
+    <svg
+      className="quota-rings"
+      width={30}
+      height={30}
+      viewBox="0 0 44 44"
+      role="img"
+      aria-label={`配额环：外环 7 天窗口已用 ${Math.round(long)}%，内环 5 小时窗口已用 ${Math.round(short)}%`}
+    >
+      <title>外环 7 天窗口 · 内环 5 小时窗口</title>
+      <g transform="rotate(-90 22 22)">
+        {ring(18.5, long, "long")}
+        {ring(10.5, short, "short")}
+      </g>
+    </svg>
+  );
+}
+
 /** Row identity, and the one thing a saved drag order may key on. A probe with
  *  a natural window name carries an id (`zcode/mcp`); the rest derive one from
  *  nominal length + label, neither of which changes between refreshes. Rows
@@ -198,7 +243,17 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
   };
 
   return (
-    <Section label="配额" meta={`${live.length} 个窗口 · ${groups.length} 个工具`}>
+    <Section
+      label="配额"
+      meta={`${live.length} 个窗口 · ${groups.length} 个工具`}
+      trail={
+        // window_minutes 0 = unknown window; it belongs to neither ring.
+        <QuotaRings
+          short={Math.max(0, ...live.filter((q) => q.window_minutes > 0 && q.window_minutes < 1440).map((q) => q.used_percent))}
+          long={Math.max(0, ...live.filter((q) => q.window_minutes >= 1440).map((q) => q.used_percent))}
+        />
+      }
+    >
       <div
         className="quota-list"
         ref={listRef}

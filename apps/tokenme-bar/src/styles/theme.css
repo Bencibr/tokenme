@@ -121,19 +121,19 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --ground: #111112;
-    --surface: #1b1b1d;
-    --surface-2: #212124;
+    --ground: #17181b;
+    --surface: #212327;
+    --surface-2: #2a2c31;
 
     --ink: #ececee;
     --ink-2: #b3b3bd;
-    --ink-3: #8e8e99; /* 5.3:1 on --surface */
+    --ink-3: #9797a2; /* 5.4:1 on --surface */
 
-    --hair: rgba(236, 236, 238, 0.09);
-    --hair-2: rgba(236, 236, 238, 0.16);
-    --track: rgba(236, 236, 238, 0.09);
-    --fill-hover: rgba(236, 236, 238, 0.06);
-    --fill-active: rgba(236, 236, 238, 0.11);
+    --hair: rgba(236, 236, 238, 0.11);
+    --hair-2: rgba(236, 236, 238, 0.2);
+    --track: rgba(236, 236, 238, 0.13);
+    --fill-hover: rgba(236, 236, 238, 0.07);
+    --fill-active: rgba(236, 236, 238, 0.14);
 
     --accent: #2fc6a4;
     --accent-ink: #63d8bc;
@@ -156,9 +156,9 @@
     --cat-13: #7fc79e;
     --cat-14: #bfae7f;
 
-    --heat-1: #232f2e;
-    --heat-2: #2d4a47;
-    --heat-3: #3a6f69;
+    --heat-1: #263434;
+    --heat-2: #315450;
+    --heat-3: #417c74;
     --heat-4: #4aa99e;
 
     --warn: #d9a94c;
@@ -179,6 +179,11 @@
   :root:not([data-theme="light"]) .panel[data-page="detail"] {
     --page-accent: #a893e0;
   }
+
+  /* dark needs a stronger wash than light for the same read */
+  :root:not([data-theme="light"]) .panel {
+    --page-accent-soft: color-mix(in srgb, var(--page-accent) 15%, transparent);
+  }
 }
 
 /* The explicit 深色 pin: same tokens, media query or not. CSS has no
@@ -186,19 +191,19 @@
    per theme being readable side by side. Kept mechanically identical. */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --ground: #111112;
-  --surface: #1b1b1d;
-  --surface-2: #212124;
+  --ground: #17181b;
+  --surface: #212327;
+  --surface-2: #2a2c31;
 
   --ink: #ececee;
   --ink-2: #b3b3bd;
-  --ink-3: #8e8e99;
+  --ink-3: #9797a2;
 
-  --hair: rgba(236, 236, 238, 0.09);
-  --hair-2: rgba(236, 236, 238, 0.16);
-  --track: rgba(236, 236, 238, 0.09);
-  --fill-hover: rgba(236, 236, 238, 0.06);
-  --fill-active: rgba(236, 236, 238, 0.11);
+  --hair: rgba(236, 236, 238, 0.11);
+  --hair-2: rgba(236, 236, 238, 0.2);
+  --track: rgba(236, 236, 238, 0.13);
+  --fill-hover: rgba(236, 236, 238, 0.07);
+  --fill-active: rgba(236, 236, 238, 0.14);
 
   --accent: #2fc6a4;
   --accent-ink: #63d8bc;
@@ -221,9 +226,9 @@
   --cat-13: #7fc79e;
   --cat-14: #bfae7f;
 
-  --heat-1: #232f2e;
-  --heat-2: #2d4a47;
-  --heat-3: #3a6f69;
+  --heat-1: #263434;
+  --heat-2: #315450;
+  --heat-3: #417c74;
   --heat-4: #4aa99e;
 
   --warn: #d9a94c;
@@ -243,6 +248,11 @@
 
 :root[data-theme="dark"] .panel[data-page="detail"] {
   --page-accent: #a893e0;
+}
+
+/* dark needs a stronger wash than light for the same read */
+:root[data-theme="dark"] .panel {
+  --page-accent-soft: color-mix(in srgb, var(--page-accent) 15%, transparent);
 }
 
 /* ------------------------------------------------------------------- base */

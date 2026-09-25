@@ -3,16 +3,23 @@ import { IconChevron } from "./Icons";
 interface SectionProps {
   label: string;
   meta?: string;
+  /** A compact widget (e.g. the quota rings) sitting beside the meta text. */
+  trail?: React.ReactNode;
   children: React.ReactNode;
 }
 
 /** A hairline-separated block. Deliberately not a card: no radius, no shadow. */
-export function Section({ label, meta, children }: SectionProps) {
+export function Section({ label, meta, trail, children }: SectionProps) {
   return (
     <section className="sec">
       <div className="sec-hd">
         <h2 className="sec-label">{label}</h2>
-        {meta ? <span className="sec-meta num">{meta}</span> : null}
+        {meta || trail ? (
+          <span className="sec-right">
+            {trail}
+            {meta ? <span className="sec-meta num">{meta}</span> : null}
+          </span>
+        ) : null}
       </div>
       {children}
     </section>
