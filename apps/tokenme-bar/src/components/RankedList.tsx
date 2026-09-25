@@ -37,7 +37,9 @@ export function RankRows({
             className="rank-row"
             key={i.key}
             style={{
-              backgroundImage: "linear-gradient(90deg, var(--page-accent-soft) 0 0)",
+              // a fading tail: the wash reads as a bar, not a stained block
+              backgroundImage:
+                "linear-gradient(90deg, var(--page-accent-soft), transparent 92%)",
               backgroundSize: `${share}% 100%`,
             }}
           >

@@ -7,32 +7,46 @@
 :root {
   color-scheme: light;
 
-  /* ground */
-  --ground: #fafaf9;
-  --surface: #ffffff;
-  --surface-2: #f4f4f2;
+  /* ground (the web preview's fake desktop) */
+  --ground: #eef1f6;
+  /* Glass surfaces: translucent so the native NSVisualEffectView (or the
+     preview's backdrop-filter) shows the blurred desktop through. */
+  --surface: rgba(255, 255, 255, 0.8);
+  /* opaque twin for overlays (the settings sheet, the switch knob) that sit
+     above content and would turn to mush over glass */
+  --surface-solid: #f9fafc;
+  --surface-2: rgba(30, 52, 84, 0.06);
+  /* the web preview's fake desktop */
+  --wallpaper:
+    radial-gradient(120% 90% at 18% 0%, #7fa4d4 0%, transparent 58%),
+    radial-gradient(130% 100% at 88% 100%, #a488cc 0%, transparent 55%),
+    linear-gradient(160deg, #b9c8dc, #98a8c0 55%, #b0a2c8);
 
-  /* text hierarchy carries meaning, colour does not */
-  --ink: #17171a;
-  --ink-2: #45454c;
-  --ink-3: #6b6b73; /* 5.1:1 on --ground — safe at 11px */
+  /* text hierarchy carries meaning, colour does not — cool slate, not gray */
+  --ink: #182234;
+  --ink-2: #455468;
+  --ink-3: #66748a; /* 5:1 on the glass — safe at 11px */
 
-  /* lines & tracks (8% contrast hairlines, no cards) */
-  --hair: rgba(20, 20, 24, 0.08);
-  --hair-2: rgba(20, 20, 24, 0.14);
-  --track: rgba(20, 20, 24, 0.07);
-  --fill-hover: rgba(20, 20, 24, 0.04);
-  --fill-active: rgba(20, 20, 24, 0.09);
+  /* lines & tracks (hairlines, no cards) */
+  --hair: rgba(24, 44, 72, 0.1);
+  --hair-2: rgba(24, 44, 72, 0.17);
+  --track: rgba(24, 44, 72, 0.09);
+  --fill-hover: rgba(24, 44, 72, 0.05);
+  --fill-active: rgba(24, 44, 72, 0.1);
 
-  /* single restrained graphite-teal accent */
-  /* Brand teal follows the app icon's gradient ends: light mode sits on the
-     deep end (#0c7f6c), dark mode on the bright end (#2fc6a4). */
-  --accent: #0c7f6c;
-  --accent-ink: #0a6558;
-  --accent-soft: rgba(12, 127, 108, 0.1);
+  /* single restrained graphite-teal accent, plus the cyan end of the
+     energy gradient (tabs, the refresh button): teal = calm efficiency,
+     cyan = clarity — the two hues a programmer's eye trusts. */
+  --accent: #0d8f74;
+  --accent-2: #0c82bd;
+  --accent-ink: #0a725e;
+  --accent-soft: rgba(13, 143, 116, 0.11);
+  --on-accent: #ffffff;
   /* bars are quiet: the categorical dots carry the colour, the fills do not */
-  --bar-fill: rgba(12, 127, 108, 0.5);
+  --bar-fill: rgba(13, 143, 116, 0.5);
   --bar-fill-hot: rgba(138, 90, 18, 0.55);
+  /* the light-catching top edge of the glass */
+  --edge-hi: rgba(255, 255, 255, 0.85);
 
   /* fixed categorical ramp: a tool keeps its slot regardless of ranking */
   --cat-1: #0c7f6c;
@@ -51,10 +65,10 @@
   --cat-14: #6f5f3f;
 
   /* activity scale, quiet → saturated */
-  --heat-1: #d7e5e2;
-  --heat-2: #a5cbc6;
+  --heat-1: #d8e7e4;
+  --heat-2: #a7cdc9;
   --heat-3: #4f9c94;
-  --heat-4: #0c7f6c;
+  --heat-4: #0d8f74;
 
   --warn: #8a5a12;
   --warn-soft: rgba(138, 90, 18, 0.14);
@@ -121,25 +135,33 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --ground: #17181b;
-    --surface: #212327;
-    --surface-2: #2a2c31;
+    --ground: #0c0f15;
+    --surface: rgba(19, 26, 38, 0.66);
+    --surface-solid: #19212d;
+    --surface-2: rgba(148, 180, 220, 0.08);
+    --wallpaper:
+      radial-gradient(120% 90% at 18% 0%, #3a5a8c 0%, transparent 58%),
+      radial-gradient(130% 100% at 88% 100%, #6a3f96 0%, transparent 55%),
+      linear-gradient(160deg, #232e40, #151d2a 55%, #1e1730);
 
-    --ink: #ececee;
-    --ink-2: #b3b3bd;
-    --ink-3: #9797a2; /* 5.4:1 on --surface */
+    --ink: #e8edf5;
+    --ink-2: #b7c3d4;
+    --ink-3: #8a99ad; /* 5.2:1 on the glass */
 
-    --hair: rgba(236, 236, 238, 0.11);
-    --hair-2: rgba(236, 236, 238, 0.2);
-    --track: rgba(236, 236, 238, 0.13);
-    --fill-hover: rgba(236, 236, 238, 0.07);
-    --fill-active: rgba(236, 236, 238, 0.14);
+    --hair: rgba(205, 225, 250, 0.11);
+    --hair-2: rgba(205, 225, 250, 0.2);
+    --track: rgba(205, 225, 250, 0.13);
+    --fill-hover: rgba(205, 225, 250, 0.07);
+    --fill-active: rgba(205, 225, 250, 0.13);
 
-    --accent: #2fc6a4;
-    --accent-ink: #63d8bc;
-    --accent-soft: rgba(47, 198, 164, 0.14);
-    --bar-fill: rgba(47, 198, 164, 0.44);
+    --accent: #30d9aa;
+    --accent-2: #3fc8ec;
+    --accent-ink: #71e6c6;
+    --accent-soft: rgba(48, 217, 170, 0.15);
+    --on-accent: #072019;
+    --bar-fill: rgba(48, 217, 170, 0.5);
     --bar-fill-hot: rgba(217, 169, 76, 0.5);
+    --edge-hi: rgba(255, 255, 255, 0.09);
 
     --cat-1: #2fc6a4;
     --cat-2: #8faee8;
@@ -156,16 +178,16 @@
     --cat-13: #7fc79e;
     --cat-14: #bfae7f;
 
-    --heat-1: #263434;
-    --heat-2: #315450;
-    --heat-3: #417c74;
-    --heat-4: #4aa99e;
+    --heat-1: #23333f;
+    --heat-2: #2a4f60;
+    --heat-3: #327787;
+    --heat-4: #43b2c0;
 
-    --warn: #d9a94c;
-    --warn-soft: rgba(217, 169, 76, 0.16);
-    --ok: #6fbf73;
-    --bad: #e07a6a;
-    --bad-soft: rgba(224, 122, 106, 0.16);
+    --warn: #e6b35a;
+    --warn-soft: rgba(230, 179, 90, 0.16);
+    --ok: #74d88a;
+    --bad: #f2806f;
+    --bad-soft: rgba(242, 128, 111, 0.16);
   }
 
   :root:not([data-theme="light"]) .panel[data-page="tools"] {
@@ -191,25 +213,33 @@
    per theme being readable side by side. Kept mechanically identical. */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --ground: #17181b;
-  --surface: #212327;
-  --surface-2: #2a2c31;
+  --ground: #0c0f15;
+  --surface: rgba(19, 26, 38, 0.66);
+  --surface-solid: #19212d;
+  --surface-2: rgba(148, 180, 220, 0.08);
+  --wallpaper:
+    radial-gradient(120% 90% at 18% 0%, #3a5a8c 0%, transparent 58%),
+    radial-gradient(130% 100% at 88% 100%, #6a3f96 0%, transparent 55%),
+    linear-gradient(160deg, #232e40, #151d2a 55%, #1e1730);
 
-  --ink: #ececee;
-  --ink-2: #b3b3bd;
-  --ink-3: #9797a2;
+  --ink: #e8edf5;
+  --ink-2: #b7c3d4;
+  --ink-3: #8a99ad;
 
-  --hair: rgba(236, 236, 238, 0.11);
-  --hair-2: rgba(236, 236, 238, 0.2);
-  --track: rgba(236, 236, 238, 0.13);
-  --fill-hover: rgba(236, 236, 238, 0.07);
-  --fill-active: rgba(236, 236, 238, 0.14);
+  --hair: rgba(205, 225, 250, 0.11);
+  --hair-2: rgba(205, 225, 250, 0.2);
+  --track: rgba(205, 225, 250, 0.13);
+  --fill-hover: rgba(205, 225, 250, 0.07);
+  --fill-active: rgba(205, 225, 250, 0.13);
 
-  --accent: #2fc6a4;
-  --accent-ink: #63d8bc;
-  --accent-soft: rgba(47, 198, 164, 0.14);
-  --bar-fill: rgba(47, 198, 164, 0.44);
+  --accent: #30d9aa;
+  --accent-2: #3fc8ec;
+  --accent-ink: #71e6c6;
+  --accent-soft: rgba(48, 217, 170, 0.15);
+  --on-accent: #072019;
+  --bar-fill: rgba(48, 217, 170, 0.5);
   --bar-fill-hot: rgba(217, 169, 76, 0.5);
+  --edge-hi: rgba(255, 255, 255, 0.09);
 
   --cat-1: #2fc6a4;
   --cat-2: #8faee8;
@@ -226,16 +256,16 @@
   --cat-13: #7fc79e;
   --cat-14: #bfae7f;
 
-  --heat-1: #263434;
-  --heat-2: #315450;
-  --heat-3: #417c74;
-  --heat-4: #4aa99e;
+  --heat-1: #23333f;
+  --heat-2: #2a4f60;
+  --heat-3: #327787;
+  --heat-4: #43b2c0;
 
-  --warn: #d9a94c;
-  --warn-soft: rgba(217, 169, 76, 0.16);
-  --ok: #6fbf73;
-  --bad: #e07a6a;
-  --bad-soft: rgba(224, 122, 106, 0.16);
+  --warn: #e6b35a;
+  --warn-soft: rgba(230, 179, 90, 0.16);
+  --ok: #74d88a;
+  --bad: #f2806f;
+  --bad-soft: rgba(242, 128, 111, 0.16);
 }
 
 :root[data-theme="dark"] .panel[data-page="tools"] {
@@ -281,10 +311,21 @@ body {
   overflow: hidden;
 }
 
-/* In a browser there is no transparent tray window, so the panel sits on a
-   neutral ground instead of floating over nothing. */
+/* In a browser there is no vibrancy behind the panel, so the preview sits on
+   a fake per-theme desktop and the panel frosts it with backdrop-filter,
+   which is what the native NSVisualEffectView does in the real tray window. */
 body[data-env="web"] {
-  background: var(--ground);
+  background: var(--wallpaper);
+}
+
+body[data-env="web"] .panel {
+  backdrop-filter: blur(30px) saturate(1.6);
+  -webkit-backdrop-filter: blur(30px) saturate(1.6);
+  border: 1px solid var(--hair-2);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--edge-hi);
+  height: calc(100vh - 48px);
+  margin: 24px;
 }
 
 /* Every numeral is tabular: columns must not shimper when a report arrives. */
