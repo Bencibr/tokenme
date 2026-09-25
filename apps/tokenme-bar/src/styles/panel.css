@@ -123,7 +123,7 @@
 .page-tab[aria-selected="true"] {
   color: var(--ink);
   font-weight: 600;
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--page-accent);
 }
 
 .brand {
@@ -223,6 +223,19 @@
   color: var(--ink-2);
   border: 1px solid var(--hair-2);
   border-radius: var(--r-sm);
+}
+
+/* cost delta: down is money saved (green), up is more spent (red) */
+.chip[data-dir="down"] {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+  background: color-mix(in srgb, var(--ok) 9%, transparent);
+}
+
+.chip[data-dir="up"] {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 35%, transparent);
+  background: var(--bad-soft);
 }
 
 .chip-v {
@@ -759,7 +772,7 @@
 .tab[aria-selected="true"] {
   color: var(--ink);
   font-weight: 600;
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--page-accent);
 }
 
 .tab-n {

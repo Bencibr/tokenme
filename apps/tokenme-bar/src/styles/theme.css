@@ -60,6 +60,34 @@
   --ok: #3e7c38;
   --bad: #a12d2d;
   --bad-soft: rgba(161, 45, 45, 0.14);
+}
+
+/* Per-page accent: each tab gets its own quiet hue so the four pages read
+   as distinct rooms of the same house. The soft wash must be *declared* on
+   .panel, not :root — var() in a custom property is substituted where the
+   property is declared, so a :root declaration would bake in the default
+   accent before the per-page override ever applies. */
+:root {
+  --page-accent: var(--accent);
+}
+
+.panel {
+  --page-accent-soft: color-mix(in srgb, var(--page-accent) 10%, transparent);
+}
+
+.panel[data-page="tools"] {
+  --page-accent: #3d5a9e;
+}
+
+.panel[data-page="ranks"] {
+  --page-accent: #8a6a15;
+}
+
+.panel[data-page="detail"] {
+  --page-accent: #6a4a9e;
+}
+
+:root {
 
   /* 8px rhythm */
   --s1: 4px;
@@ -137,6 +165,18 @@
     --bad: #e07a6a;
     --bad-soft: rgba(224, 122, 106, 0.16);
   }
+
+  :root:not([data-theme="light"]) .panel[data-page="tools"] {
+    --page-accent: #8faee8;
+  }
+
+  :root:not([data-theme="light"]) .panel[data-page="ranks"] {
+    --page-accent: #d9b24c;
+  }
+
+  :root:not([data-theme="light"]) .panel[data-page="detail"] {
+    --page-accent: #a893e0;
+  }
 }
 
 /* The explicit 深色 pin: same tokens, media query or not. CSS has no
@@ -189,6 +229,18 @@
   --ok: #6fbf73;
   --bad: #e07a6a;
   --bad-soft: rgba(224, 122, 106, 0.16);
+}
+
+:root[data-theme="dark"] .panel[data-page="tools"] {
+  --page-accent: #8faee8;
+}
+
+:root[data-theme="dark"] .panel[data-page="ranks"] {
+  --page-accent: #d9b24c;
+}
+
+:root[data-theme="dark"] .panel[data-page="detail"] {
+  --page-accent: #a893e0;
 }
 
 /* ------------------------------------------------------------------- base */

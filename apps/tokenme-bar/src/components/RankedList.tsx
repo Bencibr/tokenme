@@ -33,7 +33,7 @@ export function RankRows({
             className="rank-row"
             key={i.key}
             style={{
-              backgroundImage: "linear-gradient(90deg, var(--accent-soft) 0 0)",
+              backgroundImage: "linear-gradient(90deg, var(--page-accent-soft) 0 0)",
               backgroundSize: `${share}% 100%`,
             }}
           >

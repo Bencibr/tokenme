@@ -107,7 +107,7 @@ export default function App() {
 
   return (
     <IconProvider>
-      <div className="panel" data-open>
+      <div className="panel" data-open data-page={page}>
         <Header
           report={report}
           period={period}
