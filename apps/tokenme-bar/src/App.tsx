@@ -51,9 +51,15 @@ export default function App() {
       setReport(r);
       setError(null);
     });
+    // The tray menu's "本周"/"今日" entries open the panel already focused on
+    // that period, so the numbers match the menu item that was clicked.
+    const unPeriod = bridge.onTrayPeriod((p) => {
+      if (p === "day" || p === "week" || p === "month") setPeriod(p);
+    });
     return () => {
       alive = false;
       un();
+      unPeriod();
     };
   }, []);
 
@@ -97,13 +103,39 @@ export default function App() {
   const events = useMemo(() => (report ? report.sources.reduce((a, s) => a + s.events_ingested, 0) : 0), [report]);
   const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
 
+  // The tools page lists every *detected* source, not just the ones that
+  // billed this window: WorkBuddy (credits at session close) or a source
+  // whose store is unreadable would otherwise vanish for weeks at a time.
+  // Hooks rule: this must sit above the boot screen's early return.
+  const tools = useMemo(() => {
+    if (!report) return [];
+    const w = report[period];
+    const inWindow = new Set(w.breakdown.tools.map((t) => t.key));
+    const silent = report.sources
+      .filter((s) => s.detected && !inWindow.has(s.id))
+      .map((s) => ({
+        key: s.id,
+        label: s.display,
+        counts: { input: 0, cache_creation: 0, cache_read: 0, output: 0, reasoning: 0, credits: 0 },
+        total_tokens: 0,
+        cost: 0,
+        requests: 0,
+        sessions: 0,
+        priced: true,
+      }));
+    return [...w.breakdown.tools, ...silent];
+  }, [report, period]);
+
   if (!report) {
+    // "indexing" is the backend sentinel for "first scan still running"; the
+    // report-updated event swaps this screen out once the data lands.
+    const indexing = !error || error === "indexing";
     return (
       <div className="panel" data-boot>
         <div className="boot">
           <span className="boot-mark" aria-hidden="true" />
-          <span>{error ? `读取失败：${error}` : "正在索引本机用量…"}</span>
-          {error ? (
+          <span>{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
+          {!indexing ? (
             <button type="button" className="boot-retry" onClick={() => void refresh()}>
               重试
             </button>
@@ -140,7 +172,7 @@ export default function App() {
                   <QuotaStrip quotas={report.quotas} now={now} />
                 </>
               ) : null}
-              {page === "tools" ? <ToolsSection tools={win.breakdown.tools} /> : null}
+              {page === "tools" ? <ToolsSection tools={tools} /> : null}
               {page === "ranks" ? (
                 <>
                   <RankedList label="模型" items={win.breakdown.models} limit={8} unpriced={win.summary.unpriced} />

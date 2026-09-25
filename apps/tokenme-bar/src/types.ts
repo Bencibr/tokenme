@@ -170,6 +170,8 @@ export interface Bridge {
   trayState: () => Promise<TrayState | null>;
   setTrayMode: (mode: TrayMode) => Promise<TrayState | null>;
   onReport: (handler: (report: Report) => void) => () => void;
+  /** A tray menu entry ("本周"/"今日") asks the panel to focus a period. */
+  onTrayPeriod: (handler: (period: PeriodKey) => void) => () => void;
   /** `tool id → data:image/png;base64,…` for the tools that ship a macOS app. */
   toolIcons: () => Promise<Record<string, string>>;
   /** The saved drag order of the quota section (empty lists ⇒ report order). */

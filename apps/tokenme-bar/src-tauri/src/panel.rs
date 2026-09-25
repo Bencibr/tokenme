@@ -403,6 +403,17 @@ pub fn configure(app: &AppHandle) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
+    // Frosted glass: the native under-window material blurs the desktop
+    // behind the panel wherever the page paints translucent surface. Set
+    // through tauri's supported API before the NSPanel conversion (raw
+    // addSubview calls here raise during app setup); the corner clip below
+    // rounds the material.
+    let _ = window.set_effects(Some(tauri::utils::config::WindowEffectsConfig {
+        effects: vec![tauri::window::Effect::UnderWindowBackground],
+        state: Some(tauri::window::EffectState::Active),
+        radius: None,
+        color: None,
+    }));
     if let Ok(panel) = window.to_panel() {
         panel.set_style_mask(STYLE);
         panel.set_collection_behaviour(

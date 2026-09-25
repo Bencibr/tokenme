@@ -12,6 +12,8 @@
   max-height: 100vh;
   background: var(--surface);
   color: var(--ink);
+  /* the light-catching top edge of the glass */
+  box-shadow: inset 0 1px 0 var(--edge-hi);
   overflow: hidden;
 }
 
@@ -58,6 +60,19 @@
   height: 7px;
   border-radius: 50%;
   background: var(--accent);
+  animation: boot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes boot-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-mark {
+    animation: none;
+  }
 }
 
 .boot-retry {
@@ -149,7 +164,10 @@
 .page-tab[aria-selected="true"] {
   color: var(--ink);
   font-weight: 600;
-  border-bottom-color: var(--page-accent);
+  /* gradient underline: page accent melting into the brand cyan */
+  border-bottom-color: transparent;
+  border-image: linear-gradient(90deg, var(--page-accent), var(--accent-2)) 1;
+  border-image-slice: 0 0 1 0;
 }
 
 .brand {
@@ -1144,21 +1162,25 @@
   gap: 5px;
   padding: 3px var(--s2);
   font-size: var(--t-meta);
-  color: var(--ink);
-  border: 1px solid var(--hair-2);
+  font-weight: 600;
+  color: var(--on-accent);
+  /* the one saturated button on the panel: teal → cyan energy gradient */
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border: 0;
   border-radius: var(--r-sm);
-  transition: background var(--dur-fast) var(--ease);
+  transition: filter var(--dur-fast) var(--ease);
 }
 
 .refresh:hover:not(:disabled) {
-  background: var(--fill-hover);
+  filter: brightness(1.08);
 }
 
 .refresh:active:not(:disabled) {
-  background: var(--fill-active);
+  filter: brightness(0.94);
 }
 
 .refresh:disabled {
+  background: var(--fill-active);
   color: var(--ink-3);
 }
 
@@ -1206,7 +1228,7 @@
 .sheet {
   width: 100%;
   padding: var(--s2) var(--s4) var(--s3);
-  background: var(--surface);
+  background: var(--surface-solid);
   border-top: 1px solid var(--hair-2);
   border-radius: 10px 10px 0 0;
   box-shadow: 0 -8px 24px rgba(20, 20, 24, 0.12);
@@ -1314,7 +1336,7 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--surface);
+  background: var(--surface-solid);
   box-shadow: 0 1px 3px rgba(20, 20, 24, 0.25);
   transition: transform var(--dur-fast) var(--ease);
 }

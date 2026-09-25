@@ -7,9 +7,12 @@
 //!
 //! A bundle's `Contents/Resources/*.icns` is parsed just enough to lift out an
 //! embedded PNG. Apple's own icon containers store those entries as ordinary PNG
-//! files, so no image codec is needed: find the entry whose `IHDR` width is
-//! closest to the 24 px slot and hand the bytes over untouched. Tools with no
-//! bundle to read keep a PNG shipped next to this file instead.
+//! files, so no image codec is needed: the smallest entry of at least 128 px is
+//! chosen — vendors draw those big marketing tiles with the standard badge
+//! margins, while the small tiles are drawn full-bleed, so picking small tiles
+//! makes a tool's glyph read visibly larger than its neighbours'. The bytes are
+//! handed over untouched. Tools with no bundle to read keep a PNG shipped next
+//! to this file instead.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -28,6 +31,8 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("cline", &["Cline"]),
     ("zcode", &["ZCode"]),
     ("qoder", &["Qoder"]),
+    ("catpaw", &["CatPawAI"]),
+    ("dsh", &["DSH Desktop"]),
     ("antigravity", &["Antigravity"]),
     ("ccswitch", &["CC Switch"]),
     ("agnes", &["AgnesCode"]),
@@ -49,6 +54,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("codex", include_bytes!("../assets/codex.png")),
     ("zcode", include_bytes!("../assets/zcode.png")),
     ("qoder", include_bytes!("../assets/qoder.png")),
+    ("catpaw", include_bytes!("../assets/catpaw.png")),
+    ("dsh", include_bytes!("../assets/dsh.png")),
     ("antigravity", include_bytes!("../assets/antigravity.png")),
     ("ccswitch", include_bytes!("../assets/ccswitch.png")),
     ("agnes", include_bytes!("../assets/agnes.png")),
@@ -102,7 +109,7 @@ fn icons_from(dirs: &[PathBuf], wanted: &[(&str, &[&str])]) -> BTreeMap<String, 
                 .iter()
                 .map(|d| d.join(format!("{name}.app")))
                 .find(|p| p.is_dir())
-                .and_then(|bundle| icns_bytes(&bundle).and_then(|b| png_from_icns(&b, 24)))
+                .and_then(|bundle| icns_bytes(&bundle).and_then(|b| png_from_icns(&b, 64)))
             else {
                 continue;
             };
@@ -117,7 +124,7 @@ fn icons_from(dirs: &[PathBuf], wanted: &[(&str, &[&str])]) -> BTreeMap<String, 
 /// `.icns`, so the answer never depends on directory iteration order.
 fn icns_bytes(bundle: &Path) -> Option<Vec<u8>> {
     let res = bundle.join("Contents").join("Resources");
-    for name in ["AppIcon.icns", "icon.icns", "electron.icns"] {
+    for name in ["AppIcon.icns", "icon.icns", "electron.icns", "CatPawAI.icns"] {
         let p = res.join(name);
         if p.is_file() {
             return std::fs::read(p).ok();
@@ -133,7 +140,8 @@ fn icns_bytes(bundle: &Path) -> Option<Vec<u8>> {
 
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
-/// The embedded PNG whose width best fits `slot_px` at 2x, i.e. ~48 px.
+/// The embedded PNG whose width is the smallest at least `slot_px`, preferring
+/// a real 128 px tile: see the module notes on badge margins.
 ///
 /// An `.icns` is a `icns` magic, a big-endian total length, then entries of
 /// four-byte type + big-endian length (header included) + payload. The modern

@@ -14,6 +14,8 @@ members = [
     "crates/adapters/agnes",
     "crates/adapters/atomcode",
     "crates/adapters/workbuddy",
+    "crates/adapters/catpaw",
+    "crates/adapters/dsh",
     "crates/adapters/all",
     "crates/usage-index",
     "crates/usage-quota",
@@ -53,6 +55,7 @@ ureq = { version = "2", features = ["json"] }
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 walkdir = "2"
+zstd = "0.13"
 notify = "6"
 aes = "0.8"
 cbc = { version = "0.1", features = ["std"] }

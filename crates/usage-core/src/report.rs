@@ -379,6 +379,34 @@ fn summarize_events(rows: &[Row<'_>]) -> Summary {
     s
 }
 
+/// Qoder's gateway names models with opaque keys (`qfmodel`), but the key
+/// itself decodes — `<vendor><version/tier>model`, one first letter per
+/// vendor: q = Qwen, g = GLM, k = Kimi, d = DeepSeek, m = MiniMax. The
+/// vendor-letter readings below are corroborated by the Qoder CN proxies'
+/// official model lists (qwen3.8-max/flash, glm-5.3/flash, kimi-k3,
+/// deepseek-v4-pro/flash, minimax-m3) and by the IDE's own
+/// `chat_model_preferences` table, where `qmodel_38max` carries the 1M
+/// context window the proxies advertise for qwen3.8-max.
+///
+/// Display only. The grouping key stays the raw key everywhere, so pricing,
+/// dedupe and identity never see the rename — a credits-metered call must
+/// not grow a dollar price just because its label got readable. Keys that
+/// don't decode with confidence (`qmodel_latest`, `smodel`, `cmodel`) stay
+/// verbatim rather than risk naming the wrong model.
+fn model_display(id: &str) -> &str {
+    match id {
+        "qmodel_38max" => "qwen3.8-max",
+        "qfmodel" => "qwen3.8-flash",
+        "gmodel" => "glm-5.3",
+        "gfmodel" => "glm-5.3-flash",
+        "kmodel_latest" => "kimi-k3",
+        "dmodel" => "deepseek-v4-pro",
+        "dfmodel" => "deepseek-v4-flash",
+        "mmodel" => "minimax-m3",
+        other => other,
+    }
+}
+
 fn group<F>(rows: &[Row<'_>], mut key_of: F) -> Vec<Item>
 where
     F: FnMut(&UsageEvent) -> Option<(&str, &str)>,
@@ -424,7 +452,10 @@ fn build_window(span: Span, rows: &[Row<'_>]) -> Window {
     let prev_summary = summarize_events(&prev);
     let breakdown = Breakdown {
         tools: group(&cur, |e| Some((e.tool.as_str(), e.tool.as_str()))),
-        models: group(&cur, |e| Some((e.model.as_deref().unwrap_or("unknown"), e.model.as_deref().unwrap_or("unknown")))),
+        models: group(&cur, |e| {
+            let id = e.model.as_deref().unwrap_or("unknown");
+            Some((id, model_display(id)))
+        }),
         projects: group(&cur, |e| e.project.as_deref().map(|p| (p, p))),
         mcps: group(&cur, |e| e.calls.iter().find(|c| c.kind == CallKind::Mcp).map(|c| (c.name.as_str(), c.name.as_str()))),
         skills: group(&cur, |e| e.calls.iter().find(|c| c.kind == CallKind::Skill).map(|c| (c.name.as_str(), c.name.as_str()))),
@@ -676,7 +707,7 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
             tool: r.ev.tool.clone(),
             session: r.ev.session.clone(),
             project: r.ev.project.clone(),
-            model: r.ev.model.clone().unwrap_or_else(|| "unknown".into()),
+            model: r.ev.model.as_deref().map(model_display).unwrap_or("unknown").to_string(),
             first_ms: r.ev.ts_ms,
             last_ms: r.ev.ts_ms,
             total_tokens: 0.0,
@@ -689,7 +720,7 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         e.cost += r.cost;
         e.requests += 1;
         if r.ev.model.is_some() {
-            e.model = r.ev.model.clone().unwrap_or_else(|| "unknown".into());
+            e.model = r.ev.model.as_deref().map(model_display).unwrap_or("unknown").to_string();
         }
         if e.project.is_none() {
             e.project = r.ev.project.clone();
