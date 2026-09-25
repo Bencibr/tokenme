@@ -29,6 +29,9 @@ usage-quota = { path = "../../../crates/usage-quota" }
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi"] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -1,4 +1,4 @@
-//! The complete JS-facing surface: five commands, none of which computes a number.
+//! The complete JS-facing surface; none of these commands computes a number.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +10,12 @@ use usage_core::{PricingMap, PricingMeta, Report};
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::settings::{Theme, TrayMode};
 use crate::tray;
+
+/// Terminates the tray application, rather than merely hiding its panel.
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
 
 /// Mirrors the tray's live state so the panel can show what the bar shows.
 #[derive(Debug, Clone, Serialize)]

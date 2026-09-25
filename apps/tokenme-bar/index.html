@@ -6,14 +6,16 @@
     <meta name="color-scheme" content="light dark" />
     <title>tokenme</title>
     <style>
-      /* Critical, before the stylesheet loads, so a dark panel never flashes white. */
+      /* Keep the transparent window transparent before the stylesheet loads. */
       html {
-        background: #fafaf9;
+        /* The Tauri window is transparent. An opaque html background would
+           paint a square behind the rounded panel before CSS can clip it. */
+        background: transparent;
         color-scheme: light;
       }
       @media (prefers-color-scheme: dark) {
         html {
-          background: #111112;
+          background: transparent;
           color-scheme: dark;
         }
       }

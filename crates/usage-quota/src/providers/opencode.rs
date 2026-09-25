@@ -98,7 +98,7 @@ fn api_key() -> Option<String> {
     }
     let root = std::env::var_os("OPENCODE_DATA_DIR")
         .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".local/share/opencode")))?;
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode")))?;
     auth_key(&root.join("auth.json"))
 }
 

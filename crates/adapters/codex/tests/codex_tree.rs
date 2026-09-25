@@ -43,7 +43,7 @@ fn home_with_tree(base: &Path) -> PathBuf {
 
 #[test]
 fn discover_prunes_whole_date_directories() {
-    let _g = HOME_LOCK.lock().unwrap();
+    let _g = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
     let home = home_with_tree(tmp.path());
     std::env::set_var("CODEX_HOME", &home);
@@ -65,14 +65,15 @@ fn discover_prunes_whole_date_directories() {
     let narrow = DateFilter::new(Some(ms(2026, 8, 1) + 3_600_000), Some(ms(2026, 8, 30)));
     let one: Vec<PathBuf> = a.discover(&narrow).into_iter().map(|f| f.path).collect();
     assert_eq!(one.len(), 1, "August alone, and the year/month chains prune around it");
-    assert!(one[0].to_string_lossy().contains("2026/08/01"));
+    let august_day = Path::new("2026").join("08").join("01");
+    assert!(one[0].parent().is_some_and(|parent| parent.ends_with(&august_day)));
 
     std::env::remove_var("CODEX_HOME");
 }
 
 #[test]
 fn probe_short_circuits_and_reports_the_root() {
-    let _g = HOME_LOCK.lock().unwrap();
+    let _g = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
     let home = home_with_tree(tmp.path());
     std::env::set_var("CODEX_HOME", &home);

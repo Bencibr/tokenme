@@ -323,7 +323,7 @@ fn mcp_of(body: &Value) -> Option<QuotaSample> {
 // ------------------------------------------------------------- the credential
 
 fn credential_store() -> Option<Value> {
-    let raw = std::fs::read(dirs::home_dir()?.join(".zcode/v2/credentials.json")).ok()?;
+    let raw = std::fs::read(dirs::home_dir()?.join(".zcode").join("v2").join("credentials.json")).ok()?;
     serde_json::from_slice(&raw).ok()
 }
 

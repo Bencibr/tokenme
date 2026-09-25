@@ -14,7 +14,7 @@ import {
 } from "../lib/format";
 import { useTweenNumber } from "../lib/hooks";
 import { useMoney } from "../lib/display";
-import { IconArrowDown, IconArrowUp, IconFlat } from "./Icons";
+import { IconArrowDown, IconArrowUp, IconClose, IconFlat } from "./Icons";
 
 const ORDER: PeriodKey[] = ["day", "week", "month"];
 
@@ -31,6 +31,7 @@ interface Props {
   onPeriod: (period: PeriodKey) => void;
   page: PageKey;
   onPage: (page: PageKey) => void;
+  onClose?: () => void;
 }
 
 function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
@@ -45,7 +46,7 @@ function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
   );
 }
 
-export function Header({ report, period, onPeriod, page, onPage }: Props) {
+export function Header({ report, period, onPeriod, page, onPage, onClose }: Props) {
   const showMoney = useMoney();
   const win = report[period];
   const { summary } = win;
@@ -67,20 +68,27 @@ export function Header({ report, period, onPeriod, page, onPage }: Props) {
     <header className="hdr">
       <div className="hdr-bar">
         <span className="brand">tokenme</span>
-        <div className="seg" role="radiogroup" aria-label="统计周期" onKeyDown={onKey}>
-          {ORDER.map((key) => (
-            <button
-              key={key}
-              type="button"
-              role="radio"
-              className="seg-btn"
-              aria-checked={key === period}
-              tabIndex={key === period ? 0 : -1}
-              onClick={() => onPeriod(key)}
-            >
-              {PERIOD_SHORT[key]}
+        <div className="hdr-actions">
+          <div className="seg" role="radiogroup" aria-label="统计周期" onKeyDown={onKey}>
+            {ORDER.map((key) => (
+              <button
+                key={key}
+                type="button"
+                role="radio"
+                className="seg-btn"
+                aria-checked={key === period}
+                tabIndex={key === period ? 0 : -1}
+                onClick={() => onPeriod(key)}
+              >
+                {PERIOD_SHORT[key]}
+              </button>
+            ))}
+          </div>
+          {onClose ? (
+            <button type="button" className="panel-close" onClick={onClose} title="关闭面板" aria-label="关闭面板">
+              <IconClose size={13} />
             </button>
-          ))}
+          ) : null}
         </div>
       </div>
 

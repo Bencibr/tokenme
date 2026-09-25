@@ -255,6 +255,15 @@ body,
   height: 100%;
 }
 
+/* The real Tauri window supplies the surface through `.panel`. Keeping every
+   document layer transparent is required for the native rounded window region
+   to show the desktop at the four corners. The web preview restores its own
+   ground on `body[data-env="web"]` below. */
+html,
+#root {
+  background: transparent;
+}
+
 body {
   margin: 0;
   font-family: var(--stack);

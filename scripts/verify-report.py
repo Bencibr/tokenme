@@ -16,14 +16,36 @@ import argparse
 import datetime as dt
 import json
 import os
+from pathlib import Path
 import sqlite3
 import sys
+import tempfile
 from collections import defaultdict
 
 HOME = os.path.expanduser("~")
-DB = os.path.join(HOME, "Library/Application Support/tokenme/index.db")
-PRICES = os.path.join(HOME, "Library/Caches/tokenme/models.dev.json")
-SETTINGS = os.path.join(HOME, "Library/Application Support/tokenme/settings.json")
+
+
+def platform_dirs():
+    """Mirror the `dirs` crate locations used by the Rust application."""
+    if os.name == "nt":
+        data = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+        cache = data
+        config = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
+    elif sys.platform == "darwin":
+        data = os.path.join(HOME, "Library", "Application Support")
+        cache = os.path.join(HOME, "Library", "Caches")
+        config = data
+    else:
+        data = os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share")
+        cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache")
+        config = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+    return data, cache, config
+
+
+DATA_DIR, CACHE_DIR, CONFIG_DIR = platform_dirs()
+DB = os.path.join(DATA_DIR, "tokenme", "index.db")
+PRICES = os.path.join(CACHE_DIR, "tokenme", "models.dev.json")
+SETTINGS = os.path.join(CONFIG_DIR, "tokenme", "settings.json")
 # docs.qoder.com/zh/account/pricing: Pro $20/2000, Pro+ $60/6000, Ultra $200/20000.
 CREDIT_USD = {"qoder": 0.01}
 FIELDS = ["input", "cache_creation", "cache_read", "output", "reasoning", "credits"]
@@ -31,6 +53,11 @@ FIELDS = ["input", "cache_creation", "cache_read", "output", "reasoning", "credi
 # sub-breakdown of `output` and `credits` is a different meter entirely, so adding
 # either would double-bill — which is exactly the mistake this script made first.
 STAGES = ["input", "cache_creation", "cache_read", "output"]
+
+
+def sqlite_readonly_uri(path: str) -> str:
+    """Build a SQLite URI that also accepts Windows drive letters."""
+    return f"{Path(path).resolve().as_uri()}?mode=ro"
 
 
 def norm(s: str) -> str:
@@ -121,7 +148,8 @@ def main():
     db = DB
     frozen = None
     if args.freeze:
-        frozen = f"/tmp/tokenme-frozen-{os.getpid()}.db"
+        with tempfile.NamedTemporaryFile(prefix="tokenme-frozen-", suffix=".db", delete=False) as handle:
+            frozen = handle.name
         src = sqlite3.connect(DB)
         dst = sqlite3.connect(frozen)
         src.backup(dst)  # `.backup` folds the WAL in, which a plain copy would not
@@ -129,7 +157,7 @@ def main():
         src.close()
         db = frozen
 
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn = sqlite3.connect(sqlite_readonly_uri(db), uri=True)
     events = [
         {
             "tool": r[0],
@@ -152,7 +180,10 @@ def main():
         import subprocess
 
         binary = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target/release/tokenme"
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "target",
+            "release",
+            "tokenme.exe" if os.name == "nt" else "tokenme",
         )
         # `--no-ingest` so the report reads the very snapshot we just took instead of
         # advancing the index underneath us.

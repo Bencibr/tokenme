@@ -57,7 +57,7 @@ pub fn cli_dir() -> Option<PathBuf> {
 
 /// `~/.zcode/cli/db/db.sqlite` — the complete per-call record.
 pub fn db_path() -> Option<PathBuf> {
-    let p = cli_dir()?.join("db/db.sqlite");
+    let p = cli_dir()?.join("db").join("db.sqlite");
     p.is_file().then_some(p)
 }
 
@@ -136,9 +136,9 @@ mod tests {
         assert_eq!(cli_dir().as_deref(), Some(dir.path().join("cli").as_path()));
         assert!(db_path().is_none(), "no db under the temp home");
         assert!(rollout_dir().is_none());
-        std::fs::create_dir_all(dir.path().join("cli/db")).unwrap();
-        std::fs::write(dir.path().join("cli/db/db.sqlite"), b"SQLite format 3").unwrap();
-        assert_eq!(db_path().as_deref(), Some(dir.path().join("cli/db/db.sqlite").as_path()));
+        std::fs::create_dir_all(dir.path().join("cli").join("db")).unwrap();
+        std::fs::write(dir.path().join("cli").join("db").join("db.sqlite"), b"SQLite format 3").unwrap();
+        assert_eq!(db_path().as_deref(), Some(dir.path().join("cli").join("db").join("db.sqlite").as_path()));
         std::env::remove_var(ENV_ZCODE_HOME);
         assert_eq!(zcode_home().as_deref(), dirs::home_dir().map(|h| h.join(".zcode")).as_deref());
     }

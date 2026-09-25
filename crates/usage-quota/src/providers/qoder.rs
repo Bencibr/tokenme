@@ -20,13 +20,15 @@
 //! account with a resource pack reads as "no quota at all" from the snapshot:
 //! this is why the live call comes first.
 //!
-//! The bearer is `secret://aicoding.auth.userInfo`'s `token`, through the same
-//! Electron `safeStorage` envelope as the snapshot (`v10` + AES-128-CBC, PBKDF2
-//! over the `Qoder Safe Storage` / `Qoder Key` login item). `expireTime` (epoch
-//! milliseconds, stored as a JSON string) gates it, and **nothing here ever
-//! refreshes**: a refresh grant may rotate `refreshToken`, and a tool that
-//! consumes the rotation without writing it back logs the user out of their own
-//! IDE. An expired token is simply "no live sample".
+//! The bearer is `secret://aicoding.auth.userInfo`'s `token`. macOS keeps that
+//! record in Electron's `safeStorage` envelope (`v10` + AES-128-CBC, PBKDF2
+//! over the `Qoder Safe Storage` / `Qoder Key` login item). Windows keeps the
+//! equivalent record in `auth.v1.dat`, with an AES-256-GCM key protected by the
+//! user's DPAPI key in `Local State`. `expireTime` (epoch milliseconds, stored
+//! as a JSON string) gates it, and **nothing here ever refreshes**: a refresh
+//! grant may rotate `refreshToken`, and a tool that consumes the rotation
+//! without writing it back logs the user out of their own IDE. An expired token
+//! is simply "no live sample".
 //!
 //! Reading the envelope costs one `security` subprocess per cache miss (TTL in
 //! [`crate::TTL`]); the keychain may ask the user for permission the first time
@@ -65,6 +67,16 @@ impl QuotaProbe for QoderQuota {
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
+        #[cfg(windows)]
+        for dir in windows_app_dirs() {
+            let Some(info) = read_windows_user_info(&dir) else {
+                continue;
+            };
+            if let Some(samples) = live_usage(&info).filter(|s| !s.is_empty()) {
+                return samples;
+            }
+        }
+
         for db in state_dbs() {
             let conn = match open(&db) {
                 Some(c) => c,
@@ -94,11 +106,142 @@ impl QuotaProbe for QoderQuota {
     }
 }
 
+/// Qoder's Windows build uses Electron's Chromium profile layout rather than
+/// the VS Code `state.vscdb` layout. Keep the directory discovery tolerant of
+/// beta/dev channels and of an explicit `APPDATA` fallback, because `dirs` can
+/// be unavailable in a restricted service environment.
+#[cfg(windows)]
+fn windows_app_dirs() -> Vec<std::path::PathBuf> {
+    let mut bases = Vec::new();
+    if let Some(base) = dirs::data_dir() {
+        bases.push(base);
+    }
+    if let Some(base) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) {
+        if !bases.iter().any(|p| p == &base) {
+            bases.push(base);
+        }
+    }
+
+    let mut out = Vec::new();
+    for base in bases {
+        for name in [
+            "com.qoder.app.stable",
+            "com.qoder.app.beta",
+            "com.qoder.app.dev",
+        ] {
+            let candidate = base.join(name);
+            if !out.iter().any(|p| p == &candidate) {
+                out.push(candidate);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_channel = entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("com.qoder.app.");
+                if is_channel && !out.iter().any(|p| p == &path) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Read a Windows Qoder login record without spawning PowerShell or a helper
+/// process. DPAPI is deliberately called in-process so the result is tied to
+/// the same Windows user that owns Qoder's profile.
+#[cfg(windows)]
+fn read_windows_user_info(dir: &Path) -> Option<Value> {
+    use base64::Engine;
+
+    let local_state: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("Local State")).ok()?).ok()?;
+    let encrypted_key = local_state.pointer("/os_crypt/encrypted_key")?.as_str()?;
+    let wrapped = base64::engine::general_purpose::STANDARD
+        .decode(encrypted_key)
+        .ok()?;
+    let wrapped = wrapped.strip_prefix(b"DPAPI")?;
+    let key = dpapi_unprotect(wrapped)?;
+    if key.len() != 32 {
+        return None;
+    }
+
+    let encrypted_auth = std::fs::read(dir.join("auth.v1.dat")).ok()?;
+    let plaintext = decrypt_windows_v10(&key, &encrypted_auth)?;
+    let info: Value = serde_json::from_slice(&plaintext).ok()?;
+    info.get("token")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())?;
+    Some(info)
+}
+
+/// Chromium's Windows `safeStorage` key is a DPAPI blob prefixed by ASCII
+/// `DPAPI`. `CryptUnprotectData` allocates the output with LocalAlloc; copy it
+/// before freeing it so no Windows-owned pointer escapes this function.
+#[cfg(windows)]
+fn dpapi_unprotect(data: &[u8]) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+
+    let cb_data = u32::try_from(data.len()).ok()?;
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: cb_data,
+        pbData: data.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    let ok = unsafe {
+        CryptUnprotectData(
+            &input,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            &mut output,
+        )
+    };
+    if ok == 0 || output.pbData.is_null() {
+        return None;
+    }
+
+    let plaintext =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData.cast());
+    }
+    Some(plaintext)
+}
+
+/// Current Chromium/Electron Windows envelopes are `v10 || nonce(12) ||
+/// AES-256-GCM(ciphertext || tag)`, with empty additional authenticated data.
+#[cfg(windows)]
+fn decrypt_windows_v10(key: &[u8], blob: &[u8]) -> Option<Vec<u8>> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
+
+    let payload = blob.strip_prefix(b"v10")?;
+    if payload.len() <= 12 {
+        return None;
+    }
+    let (nonce, ciphertext) = payload.split_at(12);
+    if ciphertext.len() < 16 {
+        return None;
+    }
+    let cipher = Aes256Gcm::new_from_slice(key).ok()?;
+    cipher.decrypt(Nonce::from_slice(nonce), ciphertext).ok()
+}
+
 fn state_dbs() -> Vec<std::path::PathBuf> {
     let Some(base) = dirs::data_dir() else { return Vec::new() };
     SUPPORT_DIRS
         .iter()
-        .map(|d| base.join(d).join("User/globalStorage/state.vscdb"))
+        .map(|d| base.join(d).join("User").join("globalStorage").join("state.vscdb"))
         .filter(|p| p.is_file())
         .collect()
 }
@@ -122,6 +265,7 @@ fn read_secret(conn: &rusqlite::Connection, key: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+#[cfg(target_os = "macos")]
 fn keychain_pass(service: &str, account: &str) -> Option<String> {
     let out = std::process::Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
@@ -132,6 +276,15 @@ fn keychain_pass(service: &str, account: &str) -> Option<String> {
     }
     let pass = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
     (!pass.is_empty()).then_some(pass)
+}
+
+// Qoder stores this Electron safeStorage key in the platform credential
+// manager.  Windows uses DPAPI rather than the macOS Keychain command above;
+// until a Windows DPAPI reader is available, make the limitation explicit and
+// keep the probe a quiet, read-only miss instead of spawning a Unix command.
+#[cfg(not(target_os = "macos"))]
+fn keychain_pass(_service: &str, _account: &str) -> Option<String> {
+    None
 }
 
 /// Chromium's macOS `safeStorage` envelope. No per-record nonce: the IV is fixed,
@@ -442,6 +595,103 @@ mod tests {
         assert_eq!(decrypt(pass, &blob).as_deref(), Some(body));
         assert!(decrypt("wrong", &blob).is_none_or(|p| !p.starts_with('{')));
         assert!(decrypt(pass, b"short").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_dpapi_and_v10_profile_fixture_round_trip() {
+        use aes_gcm::{
+            aead::{Aead, KeyInit},
+            Aes256Gcm, Nonce,
+        };
+        use base64::Engine;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let key = [0x42u8; 32];
+        let nonce = [0x24u8; 12];
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let mut auth = b"v10".to_vec();
+        auth.extend_from_slice(&nonce);
+        auth.extend_from_slice(
+            &cipher
+                .encrypt(
+                    Nonce::from_slice(&nonce),
+                    br#"{"token":"fixture-token"}"# as &[u8],
+                )
+                .unwrap(),
+        );
+
+        let mut wrapped_key = b"DPAPI".to_vec();
+        wrapped_key.extend_from_slice(&dpapi_protect_for_test(&key));
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Local State"),
+            serde_json::to_vec(&serde_json::json!({
+                "os_crypt": {"encrypted_key": base64::engine::general_purpose::STANDARD.encode(wrapped_key)}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.path().join("auth.v1.dat"), auth).unwrap();
+
+        let info =
+            read_windows_user_info(dir.path()).expect("the Windows profile fixture decrypts");
+        assert_eq!(
+            info.get("token").and_then(Value::as_str),
+            Some("fixture-token")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "reads the installed Qoder profile but never prints its token"]
+    fn the_installed_windows_qoder_profile_is_readable() {
+        let Some(dir) = windows_app_dirs()
+            .into_iter()
+            .find(|dir| dir.join("auth.v1.dat").is_file())
+        else {
+            println!("[qoder] no Windows auth.v1.dat found");
+            return;
+        };
+        let info =
+            read_windows_user_info(&dir).expect("the installed Qoder profile decrypts");
+        assert!(info
+            .get("token")
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.is_empty()));
+        println!("[qoder] Windows encrypted login record decoded successfully");
+    }
+
+    #[cfg(windows)]
+    fn dpapi_protect_for_test(data: &[u8]) -> Vec<u8> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: data.len().try_into().unwrap(),
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB::default();
+        let ok = unsafe {
+            CryptProtectData(
+                &input,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                &mut output,
+            )
+        };
+        assert_ne!(ok, 0, "CryptProtectData failed");
+        assert!(!output.pbData.is_null());
+        let protected =
+            unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+        unsafe {
+            LocalFree(output.pbData.cast());
+        }
+        protected
     }
 
     #[test]

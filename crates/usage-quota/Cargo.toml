@@ -19,6 +19,10 @@ pbkdf2.workspace = true
 sha1.workspace = true
 aes-gcm.workspace = true
 sha2.workspace = true
+base64.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

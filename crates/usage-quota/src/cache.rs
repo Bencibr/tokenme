@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use usage_core::{QuotaSample, QuotaView};
+use usage_core::{replace_file, QuotaSample, QuotaView};
 
 use crate::QuotaProbe;
 
@@ -65,7 +65,7 @@ impl Cache {
         let path = self.path(tool);
         let tmp = path.with_extension("json.tmp");
         if fs::write(&tmp, text.as_bytes()).is_ok() {
-            let _ = fs::rename(&tmp, &path);
+            let _ = replace_file(&tmp, &path);
         }
     }
 

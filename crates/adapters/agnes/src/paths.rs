@@ -73,10 +73,10 @@ pub const USAGE_TABLE: &str = "usage_ledger";
 pub const SESSIONS_TABLE: &str = "sessions";
 
 /// Relative to [`root`].
-const DB_RELATIVE: &str = "data/sessions/sessions.db";
+const DB_RELATIVE: &[&str] = &["data", "sessions", "sessions.db"];
 
 /// Relative to [`root`]: the fallback request/response buffer.
-const LLM_LOGS_RELATIVE: &str = "state/logs/llm";
+const LLM_LOGS_RELATIVE: &[&str] = &["state", "logs", "llm"];
 
 /// SQLite's WAL sidecars, spelled with a dash because that is what the vendor's
 /// file names actually use (`sessions.db-wal`, not `sessions.wal`).
@@ -98,15 +98,19 @@ pub fn root() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".agnes"))
 }
 
+fn join_relative(root: &Path, components: &[&str]) -> PathBuf {
+    components.iter().fold(root.to_path_buf(), |path, component| path.join(component))
+}
+
 /// `~/.agnes/data/sessions/sessions.db`, when it is there.
 pub fn db_path() -> Option<PathBuf> {
-    let p = root()?.join(DB_RELATIVE);
+    let p = join_relative(&root()?, DB_RELATIVE);
     p.is_file().then_some(p)
 }
 
 /// `~/.agnes/state/logs/llm`, when it is there.
 pub fn llm_log_dir() -> Option<PathBuf> {
-    let p = root()?.join(LLM_LOGS_RELATIVE);
+    let p = join_relative(&root()?, LLM_LOGS_RELATIVE);
     p.is_dir().then_some(p)
 }
 
@@ -287,17 +291,19 @@ mod tests {
         assert_eq!(root().as_deref(), Some(dir.path()));
         assert!(db_path().is_none(), "nothing installed under the temp root");
         assert!(llm_log_dir().is_none());
-        std::fs::create_dir_all(dir.path().join("data/sessions")).unwrap();
-        std::fs::create_dir_all(dir.path().join("state/logs/llm")).unwrap();
-        std::fs::write(dir.path().join(DB_RELATIVE), b"SQLite format 3\0").unwrap();
-        assert_eq!(db_path().as_deref(), Some(dir.path().join(DB_RELATIVE).as_path()));
-        assert_eq!(llm_log_dir().as_deref(), Some(dir.path().join(LLM_LOGS_RELATIVE).as_path()));
+        std::fs::create_dir_all(dir.path().join("data").join("sessions")).unwrap();
+        std::fs::create_dir_all(dir.path().join("state").join("logs").join("llm")).unwrap();
+        std::fs::write(join_relative(dir.path(), DB_RELATIVE), b"SQLite format 3\0").unwrap();
+        assert_eq!(db_path().as_deref(), Some(join_relative(dir.path(), DB_RELATIVE).as_path()));
+        assert_eq!(llm_log_dir().as_deref(), Some(join_relative(dir.path(), LLM_LOGS_RELATIVE).as_path()));
         // An empty value is ignored, exactly like `agnesd`'s own check.
         std::env::set_var(ENV_PATH_ROOT, "");
-        assert_eq!(root().as_deref(), dirs::home_dir().map(|h| h.join(".agnes")).as_deref());
+        let home_root = dirs::home_dir().map(|h| h.join(".agnes"));
+        assert_eq!(root().as_deref(), home_root.as_deref());
+        let expected_db = home_root.as_ref().map(|h| join_relative(h, DB_RELATIVE)).filter(|p| p.is_file());
+        assert_eq!(db_path(), expected_db);
         std::env::remove_var(ENV_PATH_ROOT);
-        assert_eq!(root().as_deref(), dirs::home_dir().map(|h| h.join(".agnes")).as_deref());
-        assert!(db_path().is_some(), "the real ~/.agnes has a ledger on this machine");
+        assert_eq!(root().as_deref(), home_root.as_deref());
     }
 
     #[test]

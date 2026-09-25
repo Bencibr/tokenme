@@ -65,18 +65,16 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
 /// of the same name is the one this person chose.
 pub fn bundle_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        out.push(Path::new(&home).join("Applications"));
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = dirs::home_dir() {
+            out.push(home.join("Applications"));
+        }
+        out.push(PathBuf::from("/Applications"));
     }
-    out.push(PathBuf::from("/Applications"));
     if let Some(s) = std::env::var_os("TOKENME_APP_DIRS") {
         // A test or a review run can point the lookup at a fixture tree instead.
-        out.extend(
-            s.to_string_lossy()
-                .split(':')
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from),
-        );
+        out.extend(std::env::split_paths(&s));
     }
     out
 }
@@ -118,7 +116,7 @@ fn icons_from(dirs: &[PathBuf], wanted: &[(&str, &[&str])]) -> BTreeMap<String, 
 /// The bundle's icon container. Preference order, then the alphabetically first
 /// `.icns`, so the answer never depends on directory iteration order.
 fn icns_bytes(bundle: &Path) -> Option<Vec<u8>> {
-    let res = bundle.join("Contents/Resources");
+    let res = bundle.join("Contents").join("Resources");
     for name in ["AppIcon.icns", "icon.icns", "electron.icns"] {
         let p = res.join(name);
         if p.is_file() {
@@ -269,7 +267,7 @@ mod tests {
     /// A fixture bundle tree, so the whole lookup is testable without depending on
     /// what happens to be installed.
     fn fixture_bundle(root: &Path, name: &str, icon: &str) {
-        let res = root.join(format!("{name}.app")).join("Contents/Resources");
+        let res = root.join(format!("{name}.app")).join("Contents").join("Resources");
         std::fs::create_dir_all(&res).unwrap();
         std::fs::write(res.join(icon), icns(&[("ic12", png(64)), ("ic07", png(128))])).unwrap();
     }

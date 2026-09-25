@@ -77,11 +77,18 @@ pub(crate) fn samples_from(body: &Value) -> Vec<QuotaSample> {
         if seconds <= 0 {
             continue;
         }
+        // Codex currently exposes the five-hour and weekly token windows. A
+        // stale/extra 30-day bucket is not a Codex window and must not be
+        // presented as one just because the wire payload contains a duration.
+        let minutes = seconds / 60;
+        if minutes >= 43_200 {
+            continue;
+        }
         out.push(QuotaSample {
             used_percent: used_percent.clamp(0.0, 100.0),
-            window_minutes: seconds / 60,
+            window_minutes: minutes,
             resets_at_ms: unix_ms(window.get("reset_at").unwrap_or(&Value::Null)),
-            label: Some(label_for(key, seconds / 60)),
+            label: Some(label_for(key, minutes)),
             id: None,
         });
     }
@@ -211,6 +218,18 @@ mod tests {
         assert!(samples_from(&Value::Null).is_empty());
         assert!(samples_from(&serde_json::from_str(r#"{"rate_limit":null}"#).unwrap()).is_empty());
         assert!(samples_from(&serde_json::from_str(r#"{"rate_limit":{}}"#).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn a_monthly_bucket_is_not_a_codex_window() {
+        let body: Value = serde_json::from_str(
+            r#"{"rate_limit":{"primary_window":{"used_percent":12,"limit_window_seconds":18000,"reset_at":1790188292},"secondary_window":{"used_percent":99,"limit_window_seconds":2592000,"reset_at":1790739004}}}"#,
+        )
+        .unwrap();
+        let samples = samples_from(&body);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].window_minutes, 300);
+        assert!(!samples.iter().any(|s| s.window_minutes >= 43_200));
     }
 
     #[test]

@@ -211,10 +211,7 @@ pub fn until(in_ms: i64) -> String {
 
 /// Home-directory shorthand keeps the roots column readable.
 pub fn shorten_path(p: &str) -> String {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|h| h.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
     if !home.is_empty() && p.starts_with(&home) {
         format!("~{}", &p[home.len()..])
     } else {

@@ -39,7 +39,8 @@ pub fn run() {
             commands::set_autostart,
             commands::set_refresh_secs,
             commands::set_theme,
-            commands::set_show_money
+            commands::set_show_money,
+            commands::quit_app
         ]);
 
     #[cfg(target_os = "macos")]

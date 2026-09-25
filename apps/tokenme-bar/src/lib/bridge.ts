@@ -143,6 +143,11 @@ export const bridge: Bridge = {
     }
     await invoke<void>("set_show_money", { on });
   },
+
+  async quit(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("quit_app");
+  },
 };
 
 /** The browser preview has nothing to persist; the sheet still works in memory. */

@@ -22,6 +22,9 @@
   border-radius: 12px;
   border: 1px solid var(--hair-2);
   height: calc(100vh - 2px);
+  /* Keep overlays, scroll content, and the WebView's own composited layers
+     inside the same rounded shape as the native window region. */
+  clip-path: inset(0 round 12px);
 }
 
 @keyframes panel-in {
@@ -78,6 +81,29 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.hdr-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+}
+
+/* Windows tray panels still need an obvious way to dismiss the open surface;
+   this hides the panel and leaves the background process in the tray. */
+.panel-close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: var(--ink-3);
+  border-radius: var(--r-sm);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.panel-close:hover {
+  color: var(--ink);
+  background: var(--fill-hover);
 }
 
 .back {
@@ -1228,6 +1254,25 @@
   gap: var(--s2);
   padding: 10px 0;
   border-top: 1px solid var(--hair);
+}
+
+.sheet-row-danger .sheet-label {
+  color: var(--bad);
+}
+
+.quit-btn {
+  flex: none;
+  padding: 3px var(--s2);
+  font-size: var(--t-meta);
+  color: var(--bad);
+  border: 1px solid color-mix(in srgb, var(--bad) 38%, transparent);
+  border-radius: var(--r-sm);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.quit-btn:hover {
+  color: var(--surface);
+  background: var(--bad);
 }
 
 .sheet-label {

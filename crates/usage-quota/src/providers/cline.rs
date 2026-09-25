@@ -78,7 +78,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use usage_core::{parse_ts_ms, QuotaSample};
+use usage_core::{parse_ts_ms, replace_file, QuotaSample};
 
 use crate::http::{get_json, get_json_any_status, post_json};
 use crate::QuotaProbe;
@@ -255,7 +255,7 @@ fn refresh_stored_tokens(path: &Path, refresh_token: &str) -> Option<String> {
     if let Ok(original) = fs::metadata(path) {
         let _ = fs::set_permissions(&tmp, original.permissions());
     }
-    fs::rename(&tmp, path).ok()?;
+    replace_file(&tmp, path).ok()?;
     Some(formatted)
 }
 
@@ -350,7 +350,7 @@ fn settings_file() -> Option<PathBuf> {
         Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
         _ => dirs::home_dir()?.join(".cline").join("data"),
     };
-    Some(root.join("settings/providers.json"))
+    Some(root.join("settings").join("providers.json"))
 }
 
 /// Both dialects the endpoint has been seen to use: an RFC 3339 string, or a
@@ -508,7 +508,7 @@ mod tests {
     fn the_credential_is_read_verbatim_from_the_gateway_profile() {
         let _guard = env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let settings = dir.path().join("settings/providers.json");
+        let settings = dir.path().join("settings").join("providers.json");
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::env::set_var("CLINE_DATA_DIR", dir.path());
         let write = |auth: serde_json::Value| {
@@ -572,7 +572,7 @@ mod tests {
         std::env::remove_var("CLINE_PROVIDER_SETTINGS_PATH");
         assert_eq!(
             settings_file().as_deref(),
-            Some(dir.path().join("elsewhere").join("settings/providers.json").as_path()),
+            Some(dir.path().join("elsewhere").join("settings").join("providers.json").as_path()),
             "then the data-dir override applies"
         );
 
@@ -655,6 +655,40 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Read the complete request before answering. Unix often delivers this
+    /// tiny request in one read, but Windows may split the headers and body;
+    /// replying after the first chunk resets the connection while the client
+    /// is still writing it.
+    fn read_http_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read as _;
+
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let count = stream.read(&mut chunk).unwrap();
+            if count == 0 {
+                return;
+            }
+            request.extend_from_slice(&chunk[..count]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find_map(|(key, value)| {
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                return;
+            }
+        }
+    }
+
     #[test]
     fn a_stale_credential_is_refreshed_and_the_rotation_lands_on_disk() {
         let _guard = env_lock();
@@ -685,8 +719,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut stream = stream;
-            let mut buf = [0u8; 1024];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            read_http_request(&mut stream);
             use std::io::Write as _;
             let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", answer.len(), answer);
             stream.write_all(response.as_bytes()).unwrap();
@@ -733,8 +766,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut stream = stream;
-            let mut buf = [0u8; 1024];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            read_http_request(&mut stream);
             use std::io::Write as _;
             let body = r#"{"error":"invalid_grant","message":"refresh token invalid"}"#;
             let response = format!("HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);

@@ -1,6 +1,6 @@
 # tokenme
 
-跨工具的 AI 编码 token / 成本 / 配额监视器：**macOS + Windows 菜单栏程序**（Tauri v2），**Linux 命令行**（`usage-cli`，类 ccusage）。所有数据都从本机工具自己的日志/数据库读取，不上传、不代理、不写回。
+跨工具的 AI 编码 token / 成本 / 配额监视器：当前 checkout 可运行的交付物是跨平台 Rust CLI（`usage-cli`，类 ccusage）。所有数据都从本机工具自己的日志/数据库读取，不上传、不代理、不写回。仓库文档曾包含 Tauri 菜单栏程序规划，但本 checkout 不含 `apps/tokenme-bar` 源码，因此不会凭空生成 Windows/macOS 菜单栏包。
 
 ```
 crates/
@@ -9,7 +9,7 @@ crates/
   usage-quota/         配额探针（厂商接口 + 本机凭据 + 本地预算表）
   usage-cli/           detect / daily / report / quota / index 子命令
   adapters/            一源一 crate，静态注册在 adapters/all
-apps/tokenme-bar/      Tauri v2 菜单栏程序（React + TS）
+apps/tokenme-bar/      （当前 checkout 缺失；不参与本次构建）
 ```
 
 ## 支持的数据源
@@ -73,7 +73,7 @@ tokenme budget list
 tokenme budget rm cline
 ```
 
-写进 `~/Library/Application Support/tokenme/settings.json` 的 `budgets` 键（菜单栏程序读同一个文件的同一个键，下一轮刷新就生效）。这类条目标 `origin = budget`、**每一行**自带 **预算** 角标（组头的角标只说这个工具有哪些来源，行上的角标才回答"这一条是谁"），和 **实测**（厂商接口）、**日志**（记录里自带）三种来源区分开；超过上限就显示真实百分比（如 `540%`），不夹到 100%。
+写进平台配置目录下的 `tokenme/settings.json` 的 `budgets` 键（macOS 为 `~/Library/Application Support/tokenme/`，Windows 为 `%APPDATA%\tokenme\`，Linux 由 `$XDG_CONFIG_HOME` 决定）。这类条目标 `origin = budget`、**每一行**自带 **预算** 角标（组头的角标只说这个工具有哪些来源，行上的角标才回答"这一条是谁"），和 **实测**（厂商接口）、**日志**（记录里自带）三种来源区分开；超过上限就显示真实百分比（如 `540%`），不夹到 100%。
 
 ### 配额口径
 
@@ -125,7 +125,7 @@ tokenme pricing contested --limit 15       # 索引里每一个多方报价的�
 
 ## 构建
 
-前置：Rust 1.97+、pnpm 9、Xcode（macOS 打包）。
+前置：Rust 1.97+。Windows 使用 MSVC 工具链和 Visual Studio Build Tools 的 Desktop development with C++ workload；本 checkout 的 CLI 不需要 Node/pnpm。macOS 菜单栏打包另需 Xcode，但对应 `apps/tokenme-bar` 源码当前缺失。
 
 ```bash
 cargo build --release -p usage-cli        # CLI：target/release/tokenme
@@ -134,7 +134,14 @@ cargo test --workspace --all-targets      # 全量门禁
 ./scripts/build-macos.sh --dev            # 开发模式（含前端热更新）
 ```
 
-面板可以脱离菜单栏程序看：`pnpm dev` 后打开 `http://127.0.0.1:1420/?real=1`，它会读 `apps/tokenme-bar/report.json`（用 `tokenme report --json > apps/tokenme-bar/report.json` 生成，已 gitignore）——这样能拿这台机器的真实数字审布局；不带 `?real=1` 走 fixture。要看真实 app 图标再补一份 `tokenme icons --json > apps/tokenme-bar/icons.json`（同样 gitignore；没有它就全部退成首字母）。
+Windows PowerShell 可直接使用仓库脚本；默认使用 `TOKENME_TOOLS_ROOT` 下的 Rust 和 Visual Studio Build Tools，也可通过 `-ToolsRoot` 或 `TOKENME_TOOLS_ROOT` 改位置：
+
+```powershell
+.\scripts\build-windows.ps1
+.\scripts\build-windows.ps1 -ReleaseOnly
+```
+
+如果后续补回 `apps/tokenme-bar`，再使用 `pnpm dev` 和下面的 macOS 打包命令；当前 checkout 没有该前端目录，所以这些面板命令不可执行。
 
 未做代码签名（自用/内部分发）：首次打开需右键 → 打开以越过 Gatekeeper；`xattr -dr com.apple.quarantine /Applications/tokenme.app` 亦可。菜单栏程序要求 macOS 12+。
 
@@ -142,4 +149,4 @@ DMG 由脚本用 `hdiutil` 生成，而不是 Tauri 的 `bundle_dmg.sh`：后者
 
 ## 数据位置
 
-索引库 `~/Library/Application Support/tokenme/index.db`（Linux: `$XDG_DATA_HOME/tokenme/`），配额缓存 `~/Library/Application Support/tokenme/quota/`，设置 `settings.json` 同目录。索引只增不删，源文件被截断时按 `source` 键清除该文件的事件。
+索引库 macOS 为 `~/Library/Application Support/tokenme/index.db`、Windows 为 `%LOCALAPPDATA%\tokenme\index.db`、Linux 为 `$XDG_DATA_HOME/tokenme/index.db`；配额缓存跟随平台 cache 目录，设置文件位于平台 config 目录的 `tokenme/settings.json`。索引只增不删，源文件被截断时按 `source` 键清除该文件的事件。

@@ -454,6 +454,14 @@ fn label_key(label: Option<&str>) -> String {
         .collect()
 }
 
+/// Codex currently publishes a five-hour and a weekly window. Older log
+/// records (and some backend responses) can contain a 30-day bucket, but that
+/// is not a Codex quota and must not survive into the panel report. This check
+/// also removes stale bad rows already present in the local index.
+fn keep_vendor_quota(tool: &str, window_minutes: i64) -> bool {
+    !(tool == "codex" && window_minutes >= 43_200)
+}
+
 /// Nominal window lengths order short-to-long; a length the source only implies —
 /// a reset gap that shrinks on every poll — would make its row climb over its
 /// neighbours as it decays, so implied lengths sort after every nominal one and
@@ -553,6 +561,9 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
     let mut quotas: BTreeMap<(String, i64, String), QuotaView> = BTreeMap::new();
     for r in &rows {
         let Some(q) = r.ev.quota.as_ref() else { continue };
+        if !keep_vendor_quota(&r.ev.tool, q.window_minutes) {
+            continue;
+        }
         let key = (r.ev.tool.clone(), q.window_minutes, label_key(q.label.as_deref()));
         let better = quotas.get(&key).is_none_or(|cur| r.ev.ts_ms >= cur.sampled_at_ms);
         if better {
@@ -573,6 +584,9 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
     }
     // A live probe is fresher than whatever the last log record happened to carry.
     for polled in &opts.polled_quota {
+        if !keep_vendor_quota(&polled.tool, polled.window_minutes) {
+            continue;
+        }
         let named = label_key(polled.label.as_deref());
         let same = quotas
             .iter()
@@ -784,6 +798,7 @@ mod tests {
             .with_now(now)
             .with_quota(vec![
                 quota("codex", 43_200, now - 60_000, 0.0, QuotaOrigin::Log),
+                quota("codex", 43_200, now + 3_600_000, 88.0, QuotaOrigin::Probe),
                 quota("codex", 300, now + 3_600_000, 42.0, QuotaOrigin::Probe),
                 quota("qoder", 0, 0, 100.0, QuotaOrigin::Probe),
             ]);

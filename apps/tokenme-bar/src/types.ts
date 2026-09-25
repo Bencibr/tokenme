@@ -181,6 +181,7 @@ export interface Bridge {
   setRefreshSecs: (secs: number) => Promise<void>;
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
+  quit: () => Promise<void>;
 }
 
 /** `system` defers to the OS media query; `light`/`dark` pin the panel. */

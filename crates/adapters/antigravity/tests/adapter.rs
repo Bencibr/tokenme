@@ -559,6 +559,7 @@ fn a_live_wal_database_shows_rows_that_never_reached_the_main_file() {
 /// wal-index at all, the private copy must serve the same rows — while leaving
 /// the user's directory byte-for-byte untouched.
 #[test]
+#[cfg(unix)]
 fn a_wal_index_a_read_only_handle_cannot_rebuild_falls_back_to_a_private_copy() {
     let fix = Fixture::new();
     let gens = gen_blobs();
@@ -595,9 +596,7 @@ fn readonly(dir: PathBuf, set: bool) {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(if set { 0o555 } else { 0o755 })).unwrap();
 }
 
-#[cfg(not(unix))]
-fn readonly(_dir: PathBuf, _set: bool) {}
-
+#[cfg(unix)]
 fn listing(dir: PathBuf) -> BTreeSet<String> {
     std::fs::read_dir(dir)
         .expect("read dir")
@@ -609,6 +608,7 @@ fn listing(dir: PathBuf) -> BTreeSet<String> {
 /// Copies this process made and did not remove. Filtered to our own pid, because
 /// a run the harness killed earlier leaves directories no `Drop` ever got to
 /// clean, and those are not this test's leak.
+#[cfg(unix)]
 fn temp_leftovers() -> Vec<PathBuf> {
     let root = std::env::temp_dir();
     let mine = format!("tokenme-antigravity-{}-", std::process::id());

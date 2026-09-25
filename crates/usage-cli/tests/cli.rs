@@ -73,7 +73,18 @@ fn no_arguments_prints_help() {
 
 #[test]
 fn an_unopenable_index_is_exit_1() {
-    let out = run(&["--db", "/proc/tokenme-definitely-not-a-db", "index", "--status"]);
+    // `/proc` is a useful Unix fixture, but Windows treats that spelling as a
+    // relative filename and SQLite can create it.  A directory is not a valid
+    // SQLite database on either platform and gives the same open failure.
+    let blocked = std::env::temp_dir().join(format!(
+        "tokenme-cli-unopenable-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir(&blocked);
+    std::fs::create_dir(&blocked).expect("create an unopenable database directory");
+    let blocked = blocked.to_string_lossy().into_owned();
+    let out = run(&["--db", &blocked, "index", "--status"]);
+    let _ = std::fs::remove_dir(&blocked);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("cannot open index"), "{}", stderr(&out));
     assert!(stdout(&out).is_empty(), "nothing may reach stdout on failure");

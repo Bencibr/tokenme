@@ -71,6 +71,11 @@ pub fn parse_budgets(raw: &str) -> BTreeMap<String, Budget> {
 /// Insert or clear one tool's budget, leaving every other key in the file alone.
 pub fn store_budget(tool: &str, budget: Budget) -> std::io::Result<PathBuf> {
     let path = settings_path().ok_or_else(|| std::io::Error::other("no platform config dir"))?;
+    store_budget_at(&path, tool, budget)?;
+    Ok(path)
+}
+
+fn store_budget_at(path: &std::path::Path, tool: &str, budget: Budget) -> std::io::Result<()> {
     let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})),
         Err(_) => serde_json::json!({}),
@@ -100,8 +105,7 @@ pub fn store_budget(tool: &str, budget: Budget) -> std::io::Result<PathBuf> {
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(path)
+    crate::replace_file(&tmp, path)
 }
 
 /// One bar per open window, from what tokenme already charged.
@@ -192,12 +196,19 @@ mod tests {
     /// on the JSON tree is what must keep the app's own settings alive.
     #[test]
     fn writing_a_budget_leaves_the_app_settings_intact() {
-        let mut root: serde_json::Value =
-            serde_json::from_str(r#"{"tray_mode":"tokens","autostart":true,"budgets":{}}"#).unwrap();
-        root["budgets"] = serde_json::json!({ "zcode": { "daily_usd": 5.0, "monthly_usd": 0.0 } });
-        let saved = serde_json::to_string(&root).unwrap();
-        assert_eq!(parse_budgets(&saved)["zcode"].daily_usd, 5.0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"tray_mode":"tokens","autostart":true,"budgets":{}}"#).unwrap();
+
+        store_budget_at(&path, "zcode", Budget { daily_usd: 5.0, monthly_usd: 0.0 }).unwrap();
+        // Updating an existing settings file is the Windows-specific case:
+        // plain std::fs::rename reports ERROR_ALREADY_EXISTS there.
+        store_budget_at(&path, "zcode", Budget { daily_usd: 7.0, monthly_usd: 20.0 }).unwrap();
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(parse_budgets(&saved)["zcode"].daily_usd, 7.0);
         let back: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back["budgets"]["zcode"]["monthly_usd"], 20.0);
         assert_eq!(back["tray_mode"], "tokens");
         assert_eq!(back["autostart"], true);
     }

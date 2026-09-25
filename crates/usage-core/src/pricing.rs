@@ -278,7 +278,7 @@ fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     }
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)
+    crate::replace_file(&tmp, path)
 }
 
 struct Payload {

@@ -55,6 +55,10 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
     void bridge.setShowMoney(on);
   };
 
+  const quit = () => {
+    void bridge.quit();
+  };
+
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div
@@ -136,6 +140,18 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             onClick={() => setAutostart(!(settings?.autostart ?? false))}
           />
         </div>
+
+        {bridge.live ? (
+          <div className="sheet-row sheet-row-danger">
+            <div>
+              <div className="sheet-label">退出程序</div>
+              <div className="sheet-hint">关闭面板并退出托盘进程</div>
+            </div>
+            <button type="button" className="quit-btn" onClick={quit}>
+              退出
+            </button>
+          </div>
+        ) : null}
 
         <p className="sheet-foot num">tokenme v{settings?.version ?? "…"} · 数据只存在本机</p>
       </div>

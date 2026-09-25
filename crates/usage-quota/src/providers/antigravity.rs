@@ -76,12 +76,25 @@ fn binary() -> Option<PathBuf> {
 }
 
 fn which(name: &str) -> Option<PathBuf> {
-    let out = Command::new("/usr/bin/env").args(["sh", "-c", &format!("command -v {name}")]).output().ok()?;
-    if !out.status.success() {
-        return None;
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let direct = dir.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        #[cfg(windows)]
+        for extension in std::env::var_os("PATHEXT")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![PathBuf::from(".EXE")])
+        {
+            let extension = extension.to_string_lossy();
+            let candidate = dir.join(format!("{name}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
     }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!path.is_empty()).then_some(PathBuf::from(path))
+    None
 }
 
 /// `{}` on every failure path: no CLI, no network, an old CLI, a timeout.

@@ -70,6 +70,9 @@ export default function App() {
   }, []);
 
   const goPage = useCallback((next: PageKey) => setPage(next), []);
+  const closePanel = useCallback(() => {
+    if (inTauri) void getCurrentWindow().hide();
+  }, []);
   // A new page that keeps the old scroll offset lands mid-list.
   useEffect(() => {
     scroll.current?.scrollTo(0, 0);
@@ -122,6 +125,7 @@ export default function App() {
           onPeriod={setPeriod}
           page={page}
           onPage={goPage}
+          onClose={inTauri ? closePanel : undefined}
         />
 
         <main className="scroll" tabIndex={-1} ref={scroll}>

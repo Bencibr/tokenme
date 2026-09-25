@@ -16,6 +16,8 @@ import datetime as dt
 import glob
 import json
 import os
+from pathlib import Path
+import shutil
 import sqlite3
 import struct
 import sys
@@ -25,6 +27,15 @@ START = time.time()
 from collections import defaultdict
 
 HOME = os.path.expanduser("~")
+
+
+def data_dir():
+    """Mirror `dirs::data_dir()` for the CLI's default index location."""
+    if os.name == "nt":
+        return os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+    if sys.platform == "darwin":
+        return os.path.join(HOME, "Library", "Application Support")
+    return os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share")
 
 
 def rows(path: str):
@@ -55,6 +66,11 @@ def millis(v) -> float:
 
 def files(pattern, recursive=True):
     return sorted(glob.glob(os.path.expanduser(pattern), recursive=recursive))
+
+
+def sqlite_readonly_uri(path: str) -> str:
+    """Build a SQLite URI that also accepts Windows drive letters."""
+    return f"{Path(path).resolve().as_uri()}?mode=ro"
 
 
 # ------------------------------------------------------------------ sources
@@ -127,7 +143,7 @@ def codex():
     skipped_identical = 0
     deltas = delta_agree = delta_disagree = zero_echo = 0
     delta_tokens = first_tokens = first_calls = 0
-    paths = [p for p in files("~/.codex/sessions/**/rollout-*.jsonl") if "/archived_sessions/" not in p]
+    paths = [p for p in files("~/.codex/sessions/**/rollout-*.jsonl") if "archived_sessions" not in Path(p).parts]
     for path in paths:
         prev_total = None
         tot_prev = None
@@ -220,7 +236,7 @@ def opencode_family():
         for pattern in patterns:
             for path in files(pattern):
                 try:
-                    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
                 except sqlite3.Error:
                     continue
                 try:
@@ -375,7 +391,9 @@ def zcode():
     vendor's deletions, quantified in `_deleted` and reported, not counted
     against the survivors."""
     path = os.path.expanduser("~/.zcode/cli/db/db.sqlite")
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    if not os.path.exists(path):
+        return {"n": 0, "notes": "no zcode model_usage database here"}
+    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
     got = conn.execute(
         "select input_tokens, cache_read_input_tokens, cache_creation_input_tokens,"
         " output_tokens, reasoning_tokens, computed_total_tokens, session_id,"
@@ -432,7 +450,9 @@ def agnes():
     """`usage_ledger.input_tokens` contains the cache: the file's own identity is
     `input + output == total_tokens`, so the net prompt is `input - read - write`."""
     path = os.path.expanduser("~/.agnes/data/sessions/sessions.db")
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    if not os.path.exists(path):
+        return {"n": 0, "notes": "no agnes sessions database here"}
+    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
     got = conn.execute(
         "select input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens"
         " from usage_ledger"
@@ -508,7 +528,7 @@ def ccswitch():
     path = os.path.expanduser("~/.cc-switch/cc-switch.db")
     if not os.path.exists(path):
         return {"n": 0, "notes": "no cc-switch.db here"}
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
     got = conn.execute(
         "select coalesce(nullif(data_source, ''), 'proxy'), app_type, input_token_semantics,"
         " input_tokens, cache_read_tokens, cache_creation_tokens, output_tokens, created_at"
@@ -656,7 +676,7 @@ def antigravity():
     paths = [p for r in roots for p in files(f"~/.gemini/{r}/conversations/*.db")]
     for path in paths:
         try:
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
             got = conn.execute("select data from gen_metadata").fetchall()
             conn.close()
         except sqlite3.Error:
@@ -722,7 +742,7 @@ def antigravity():
 
 
 def index_totals(db):
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn = sqlite3.connect(sqlite_readonly_uri(db), uri=True)
     try:
         got = conn.execute(
             "select tool, count(*), coalesce(sum(in_tok),0), coalesce(sum(cc_tok),0),"
@@ -766,7 +786,7 @@ def zcode_row_identity(index_db, keyed, tolerance):
     only the index has are the vendor's deletions: quantified and handed back
     so the aggregate comparison can subtract them, never trusted as numbers.
     Returns `(failures, deleted_field_sums, note)`."""
-    conn = sqlite3.connect(f"file:{index_db}?mode=ro", uri=True)
+    conn = sqlite3.connect(sqlite_readonly_uri(index_db), uri=True)
     try:
         ev = conn.execute(
             "select dedupe_key, ts_ms, in_tok, cc_tok, cr_tok, out_tok, reason_tok"
@@ -800,7 +820,7 @@ def zcode_row_identity(index_db, keyed, tolerance):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bracket", action="store_true", help="re-read everything after rebuilding the index")
-    ap.add_argument("--db", default=os.path.expanduser("~/Library/Application Support/tokenme/index.db"))
+    ap.add_argument("--db", default=os.path.join(data_dir(), "tokenme", "index.db"))
     ap.add_argument("--tolerance", type=float, default=0.005, help="relative tolerance for live-growing sources")
     args = ap.parse_args()
 
@@ -815,11 +835,34 @@ def main():
         import subprocess
 
         print(f"[bracket] pass 1 done in {time.time() - START:.0f}s; rebuilding the index…", flush=True)
-        subprocess.run(
-            ["cargo", "run", "--quiet", "--release", "-p", "usage-cli", "--", "index", "--rebuild", "--offline"],
-            check=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        binary = os.path.join(
+            repo,
+            "target",
+            "release",
+            "tokenme.exe" if os.name == "nt" else "tokenme",
         )
+        if os.path.isfile(binary):
+            command = [binary, "--db", args.db, "--offline", "index", "--rebuild"]
+        else:
+            cargo = shutil.which("cargo")
+            if not cargo:
+                raise SystemExit("tokenme release binary and cargo are both unavailable; build the CLI first")
+            command = [
+                cargo,
+                "run",
+                "--quiet",
+                "--release",
+                "-p",
+                "usage-cli",
+                "--",
+                "--db",
+                args.db,
+                "--offline",
+                "index",
+                "--rebuild",
+            ]
+        subprocess.run(command, check=True, cwd=repo)
         stored = index_totals(args.db)
         high = compute_all()
         print(f"[bracket] pass 2 done in {time.time() - START:.0f}s", flush=True)

@@ -73,6 +73,11 @@ fn quota_from(rate_limits: &Value) -> Option<QuotaSample> {
     let primary = rate_limits.get("primary")?.as_object()?;
     let used_percent = primary.get("used_percent").and_then(Value::as_f64)?;
     let window_minutes = primary.get("window_minutes").and_then(Value::as_i64).unwrap_or(0);
+    // Codex's supported rate limits are the five-hour and weekly windows. Do
+    // not persist a stale/extra 30-day bucket into the index as a real quota.
+    if window_minutes >= 43_200 {
+        return None;
+    }
     let resets_at = primary.get("resets_at").and_then(Value::as_i64).unwrap_or(0);
     Some(QuotaSample {
         used_percent,

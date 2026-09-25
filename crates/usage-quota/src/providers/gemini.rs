@@ -98,7 +98,7 @@ pub(crate) fn samples_from(body: &Value) -> Vec<QuotaSample> {
 /// The on-disk credential as `(expiry_ms, scope)` — never its token.
 #[cfg(test)]
 fn creds_state() -> Option<(i64, String)> {
-    let path = dirs::home_dir()?.join(".gemini/oauth_creds.json");
+    let path = dirs::home_dir()?.join(".gemini").join("oauth_creds.json");
     let body: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     Some((body.get("expiry_date")?.as_i64()?, body.get("scope")?.as_str()?.to_string()))
 }

@@ -611,11 +611,11 @@ mod tests {
         let _env = paths::lock_env();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join("state/logs/llm/20260902_1")).unwrap();
-        std::fs::create_dir_all(root.join("data/sessions")).unwrap();
+        std::fs::create_dir_all(root.join("state").join("logs").join("llm").join("20260902_1")).unwrap();
+        std::fs::create_dir_all(root.join("data").join("sessions")).unwrap();
         std::env::set_var(paths::ENV_PATH_ROOT, root);
 
-        let log = root.join("state/logs/llm/20260902_1/1788348486108-07179738-main.jsonl");
+        let log = root.join("state").join("logs").join("llm").join("20260902_1").join("1788348486108-07179738-main.jsonl");
         let body = [
             "{\"meta\": {\"session_id\": \"20260902_1\", \"purpose\": \"main\", \"request_id\": \"07179738700a42b59c3bf3fcb46628df\", \"timestamp_ms\": 1788348486108}}",
             "{\"input\": {}, \"model_config\": {\"model_name\": \"agnes-2.5-flash\"}}",
@@ -624,8 +624,8 @@ mod tests {
         ]
         .join("\n");
         std::fs::write(&log, format!("{body}\n")).unwrap();
-        std::fs::write(root.join("state/logs/llm/20260902_1/notes.txt"), b"x\n").unwrap();
-        std::fs::write(root.join("state/logs/llm/loose-1-2-main.jsonl"), b"{}\n").unwrap();
+        std::fs::write(root.join("state").join("logs").join("llm").join("20260902_1").join("notes.txt"), b"x\n").unwrap();
+        std::fs::write(root.join("state").join("logs").join("llm").join("loose-1-2-main.jsonl"), b"{}\n").unwrap();
 
         let found = discover(&DateFilter::default());
         assert_eq!(found.len(), 2, "the two jsonl files, nothing else: {found:?}");
@@ -654,7 +654,7 @@ mod tests {
 
         // Installing the ledger makes it the only source handed out: the overlap is
         // the same calls in another id space, so both would double-bill.
-        let db = fixture_db(&root.join("data/sessions"));
+        let db = fixture_db(&root.join("data").join("sessions"));
         let found = discover(&DateFilter::default());
         assert_eq!(found.len(), 1, "the logs are dropped: {found:?}");
         assert_eq!(found[0].kind, FileKind::Sqlite);
