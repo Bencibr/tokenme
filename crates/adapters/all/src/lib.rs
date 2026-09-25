@@ -22,6 +22,7 @@ pub const TOOL_IDS: &[&str] = &[
     "ccswitch",
     "agnes",
     "atomcode",
+    "workbuddy",
     // Siblings of the adapters above: same storage dialect, different product.
     "crow5",
     "mimocode",
@@ -41,6 +42,7 @@ pub fn builtin_adapters() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(usage_adapter_ccswitch::CcSwitchAdapter),
         Box::new(usage_adapter_agnes::AgnesAdapter),
         Box::new(usage_adapter_atomcode::AtomCodeAdapter),
+        Box::new(usage_adapter_workbuddy::WorkBuddyAdapter),
         Box::new(usage_adapter_opencode::Crow5Adapter),
         Box::new(usage_adapter_opencode::MimocodeAdapter),
         Box::new(usage_adapter_pi::ColaAdapter),

@@ -18,4 +18,5 @@ usage-adapter-antigravity.workspace = true
 usage-adapter-ccswitch.workspace = true
 usage-adapter-agnes.workspace = true
 usage-adapter-atomcode.workspace = true
+usage-adapter-workbuddy.workspace = true
 serde.workspace = true

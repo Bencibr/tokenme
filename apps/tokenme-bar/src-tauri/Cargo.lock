@@ -4681,6 +4681,7 @@ dependencies = [
  "usage-adapter-opencode",
  "usage-adapter-pi",
  "usage-adapter-qoder",
+ "usage-adapter-workbuddy",
  "usage-adapter-zcode",
  "usage-core",
 ]
@@ -4799,6 +4800,18 @@ dependencies = [
  "serde_json",
  "usage-core",
  "walkdir",
+]
+
+[[package]]
+name = "usage-adapter-workbuddy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs 6.0.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "usage-core",
 ]
 
 [[package]]

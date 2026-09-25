@@ -1,0 +1,276 @@
+//! WorkBuddy AI: the account's remaining credits, through the same billing
+//! interface the desktop app and the open-source `workbuddy2api` gateway use.
+//!
+//! ## Credential
+//!
+//! The desktop app keeps its OAuth record at
+//! `~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info`:
+//! `auth.accessToken`, `auth.expiresAt` (epoch ms), `auth.domain`
+//! (`www.workbuddy.ai` global / `www.codebuddy.cn` CN), `account.uid`. The
+//! record is read, never written: **nothing here ever refreshes** — consuming
+//! a refresh grant without writing the rotation back would log the user out
+//! of their own app, the same rule the Qoder probe follows.
+//!
+//! ## The call
+//!
+//! `POST https://<domain>/billing/meter/get-user-resource` (global; the CN
+//! realm keeps the older `/v2/billing/meter/get-user-resource`, which is also
+//! the global 404 fallback), body
+//! `{PageNumber, PageSize, ProductCode: "p_tcaca", Status: [0,3],
+//! PackageEndTimeRangeBegin, PackageEndTimeRangeEnd}` — measured live against
+//! this machine's account, matching `workbuddy2api`'s `ResourceSummary`.
+//!
+//! The answer lists one row per credit package (this account: seven
+//! "Bonus Pack" rows expiring on successive days), so packages are grouped by
+//! name into one bar each — a pack-per-bar rendering would flood the strip.
+//! A group's reset is the nearest expiry among its packs that still hold
+//! credits; `CycleEndTime` is a UTC+8 wall clock ("2006-01-02 15:04:05").
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use serde_json::{json, Value};
+use usage_core::QuotaSample;
+
+use crate::http::post_json;
+use crate::QuotaProbe;
+
+pub struct WorkBuddyQuota;
+
+const METER_PATH: &str = "/billing/meter/get-user-resource";
+const METER_PATH_V2: &str = "/v2/billing/meter/get-user-resource";
+
+impl QuotaProbe for WorkBuddyQuota {
+    fn tool(&self) -> &'static str {
+        "workbuddy"
+    }
+
+    fn fetch(&self) -> Vec<QuotaSample> {
+        let Some(info) = read_auth() else { return Vec::new() };
+        if !token_is_fresh(&info, chrono::Utc::now().timestamp_millis()) {
+            return Vec::new();
+        }
+        let body = request_body(chrono::Local::now());
+        let Some(data) = call(&info, &body) else { return Vec::new() };
+        samples_from_resource(&data)
+    }
+}
+
+// ---------------------------------------------------------------- credential
+
+/// The auth record's location; `WORKBUDDY_AUTH_FILE` overrides it for tests
+/// and side-by-side installs.
+fn auth_file() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("WORKBUDDY_AUTH_FILE") {
+        return Some(PathBuf::from(path));
+    }
+    dirs::data_dir()
+        .map(|d| d.join("CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info"))
+        .filter(|p| p.is_file())
+}
+
+fn read_auth() -> Option<Value> {
+    let raw = std::fs::read_to_string(auth_file()?).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// An expired token is "no sample", never a refresh grant.
+fn token_is_fresh(info: &Value, now_ms: i64) -> bool {
+    info.pointer("/auth/expiresAt").and_then(Value::as_i64).is_none_or(|ms| ms > now_ms)
+}
+
+// ------------------------------------------------------------------ the call
+
+/// `Status: [0,3]` = active and exhausted-but-unexpired packages, the window
+/// the app's own usage page asks for.
+fn request_body(now: chrono::DateTime<chrono::Local>) -> Value {
+    let fmt = "%Y-%m-%d %H:%M:%S";
+    json!({
+        "PageNumber": 1,
+        "PageSize": 100,
+        "ProductCode": "p_tcaca",
+        "Status": [0, 3],
+        "PackageEndTimeRangeBegin": now.format(fmt).to_string(),
+        "PackageEndTimeRangeEnd": (now + chrono::Duration::days(365)).format(fmt).to_string(),
+    })
+}
+
+fn call(info: &Value, body: &Value) -> Option<Value> {
+    let auth = info.get("auth")?;
+    let token = auth.get("accessToken").and_then(Value::as_str).filter(|t| !t.is_empty())?;
+    let uid = info.pointer("/account/uid").and_then(Value::as_str).unwrap_or_default();
+    let domain = auth.get("domain").and_then(Value::as_str).unwrap_or("www.workbuddy.ai");
+    let cn = domain.contains("codebuddy.cn");
+    let base = format!("https://{domain}");
+    let bearer = format!("Bearer {token}");
+    let headers: Vec<(&str, &str)> = vec![
+        ("authorization", &bearer),
+        ("content-type", "application/json"),
+        ("accept", "application/json"),
+        ("x-user-id", uid),
+        ("user-agent", "WorkBuddy/2.48.0"),
+    ];
+    // CN answers only under /v2; global prefers the bare path and falls back
+    // on it. post_json drops non-2xx, so a 404 on the first candidate simply
+    // moves to the next — a network blip costs one extra POST, nothing else.
+    let paths: &[&str] = if cn { &[METER_PATH_V2] } else { &[METER_PATH, METER_PATH_V2] };
+    for path in paths {
+        if let Some(body) = post_json(&format!("{base}{path}"), &headers, body.clone()) {
+            return Some(body);
+        }
+    }
+    None
+}
+
+// ------------------------------------------------------------------- parsing
+
+/// The wire answer, grouped into one bar per package name. `data.Response.Data`
+/// nests twice (Tencent API envelope inside the app's own envelope).
+pub(crate) fn samples_from_resource(body: &Value) -> Vec<QuotaSample> {
+    let accounts = body
+        .pointer("/data/Response/Data/Accounts")
+        .or_else(|| body.pointer("/Response/Data/Accounts"))
+        .and_then(Value::as_array);
+    let Some(accounts) = accounts else { return Vec::new() };
+
+    struct Group {
+        size: f64,
+        remain: f64,
+        resets_at_ms: i64,
+    }
+    let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+    for acct in accounts {
+        let name = acct
+            .get("PackageName")
+            .and_then(Value::as_str)
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or("积分包")
+            .to_string();
+        // Cycle fields describe the current billing cycle and win when set;
+        // the Capacity triple is the package's lifetime fallback.
+        let (size, remain) = match (
+            acct.get("CycleCapacitySize").and_then(Value::as_f64).unwrap_or(0.0),
+            acct.get("CycleCapacityRemain").and_then(Value::as_f64).unwrap_or(0.0),
+        ) {
+            (size, remain) if size > 0.0 => (size, remain.clamp(0.0, size)),
+            _ => (
+                acct.get("CapacitySize").and_then(Value::as_f64).unwrap_or(0.0),
+                acct.get("CapacityRemain").and_then(Value::as_f64).unwrap_or(0.0),
+            ),
+        };
+        if size <= 0.0 {
+            continue;
+        }
+        let group = groups.entry(name).or_insert(Group { size: 0.0, remain: 0.0, resets_at_ms: 0 });
+        group.size += size;
+        group.remain += remain;
+        // The group's reset is the nearest expiry among packs that still hold
+        // credits — a pack at 0 has nothing left to lose.
+        if remain > 0.0 {
+            if let Some(ms) = acct.get("CycleEndTime").and_then(Value::as_str).and_then(parse_cycle_end) {
+                if group.resets_at_ms == 0 || ms < group.resets_at_ms {
+                    group.resets_at_ms = ms;
+                }
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(name, g)| QuotaSample {
+            used_percent: ((1.0 - g.remain / g.size) * 100.0).clamp(0.0, 100.0),
+            window_minutes: 0,
+            resets_at_ms: g.resets_at_ms,
+            label: Some(format!("{name} · 剩 {}/{}", trim(g.remain), trim(g.size))),
+            id: Some("credits".into()),
+        })
+        .collect()
+}
+
+/// `CycleEndTime` is a UTC+8 wall clock with no offset on the wire.
+fn parse_cycle_end(raw: &str) -> Option<i64> {
+    use chrono::TimeZone;
+    let naive = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S").ok()?;
+    let zone = chrono::FixedOffset::east_opt(8 * 3600)?;
+    Some(zone.from_local_datetime(&naive).single()?.timestamp_millis())
+}
+
+/// Whole when whole, one decimal when fractional (same rule as Qoder's).
+fn trim(n: f64) -> String {
+    if n.fract() == 0.0 { format!("{n:.0}") } else { format!("{n:.1}") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The answer this machine's account actually gave (2026-09-25), trimmed
+    /// to the fields the probe reads: one exhausted pack and two live ones.
+    const MEASURED: &str = r#"{"code":0,"msg":"OK","data":{"Response":{"Data":{
+        "TotalCount":3,"TotalDosage":60,"Accounts":[
+          {"PackageName":"Bonus Pack","Status":3,"CycleEndTime":"2026-09-25 19:35:00",
+           "CapacitySize":250,"CapacityRemain":0,"CapacityUsed":250,
+           "CycleCapacitySize":250,"CycleCapacityRemain":0,"CycleCapacityUsed":250},
+          {"PackageName":"Bonus Pack","Status":0,"CycleEndTime":"2026-10-13 01:18:53",
+           "CapacitySize":30,"CapacityRemain":30,"CapacityUsed":0,
+           "CycleCapacitySize":30,"CycleCapacityRemain":30,"CycleCapacityUsed":0},
+          {"PackageName":"Bonus Pack","Status":0,"CycleEndTime":"2026-10-19 02:27:49",
+           "CapacitySize":30,"CapacityRemain":30,"CapacityUsed":0,
+           "CycleCapacitySize":30,"CycleCapacityRemain":30,"CycleCapacityUsed":0}
+        ]}}}}"#;
+
+    #[test]
+    fn same_named_packs_fold_into_one_bar() {
+        let body: Value = serde_json::from_str(MEASURED).unwrap();
+        let s = samples_from_resource(&body);
+        assert_eq!(s.len(), 1, "{s:?}");
+        let bar = &s[0];
+        assert_eq!(bar.label.as_deref(), Some("Bonus Pack · 剩 60/310"));
+        assert!((bar.used_percent - (1.0 - 60.0 / 310.0) * 100.0).abs() < 1e-9);
+        // The reset is the nearest expiry among packs still holding credits,
+        // not the exhausted pack's earlier date.
+        assert_eq!(bar.resets_at_ms, parse_cycle_end("2026-10-13 01:18:53").unwrap());
+    }
+
+    #[test]
+    fn differently_named_packs_get_their_own_bars() {
+        let body = json!({"Response": {"Data": {"Accounts": [
+            {"PackageName": "套餐内", "CycleCapacitySize": 2000, "CycleCapacityRemain": 500,
+             "CycleEndTime": "2026-10-01 00:00:00"},
+            {"PackageName": "Bonus Pack", "CapacitySize": 30, "CapacityRemain": 30,
+             "CycleCapacitySize": 0, "CycleEndTime": ""}
+        ]}}});
+        let s = samples_from_resource(&body);
+        assert_eq!(s.len(), 2, "{s:?}");
+        assert_eq!(s[0].label.as_deref(), Some("Bonus Pack · 剩 30/30"));
+        assert_eq!(s[0].used_percent, 0.0);
+        assert_eq!(s[0].resets_at_ms, 0, "a capacity-only pack advertises no cycle reset");
+        assert_eq!(s[1].label.as_deref(), Some("套餐内 · 剩 500/2000"));
+        assert_eq!(s[1].used_percent, 75.0);
+    }
+
+    #[test]
+    fn empty_or_shapeless_answers_are_silence() {
+        assert!(samples_from_resource(&json!({"code": 0})).is_empty());
+        assert!(samples_from_resource(&json!({"Response": {"Data": {"Accounts": []}}})).is_empty());
+        // A zero-sized pack is not a 100% bar (same rule as Qoder's 0/0).
+        assert!(samples_from_resource(&json!({"Response": {"Data": {"Accounts": [
+            {"PackageName": "Free", "CapacitySize": 0, "CapacityRemain": 0}
+        ]}}})).is_empty());
+    }
+
+    #[test]
+    fn the_cycle_end_wall_clock_reads_as_beijing_time() {
+        // 2026-10-13 01:18:53 +0800 = 2026-10-12 17:18:53 UTC.
+        let ms = parse_cycle_end("2026-10-13 01:18:53").unwrap();
+        assert_eq!(ms, 1_791_825_533_000);
+        assert!(parse_cycle_end("not a date").is_none());
+    }
+
+    #[test]
+    fn an_expired_token_is_not_used() {
+        let info = json!({"auth": {"accessToken": "t", "expiresAt": 1_791_071_360_000i64}});
+        assert!(!token_is_fresh(&info, 1_791_071_360_000));
+        assert!(token_is_fresh(&info, 1_791_071_359_999));
+        assert!(token_is_fresh(&json!({"auth": {"accessToken": "t"}}), i64::MAX));
+    }
+}

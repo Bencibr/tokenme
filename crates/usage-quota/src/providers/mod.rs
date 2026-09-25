@@ -9,6 +9,7 @@ mod gemini;
 mod opencode;
 mod qoder;
 mod ccswitch;
+mod workbuddy;
 mod zcode;
 
 pub use antigravity::AntigravityQuota;
@@ -20,6 +21,7 @@ pub use gemini::GeminiQuota;
 pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
 pub use ccswitch::CcSwitchQuota;
+pub use workbuddy::WorkBuddyQuota;
 pub use zcode::ZcodeQuota;
 
 use crate::QuotaProbe;
@@ -36,6 +38,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(GeminiQuota),
         Box::new(QoderQuota),
         Box::new(CcSwitchQuota),
+        Box::new(WorkBuddyQuota),
         Box::new(ZcodeQuota),
     ]
 }

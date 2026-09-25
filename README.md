@@ -27,6 +27,7 @@ apps/tokenme-bar/      Tauri v2 菜单栏程序（React + TS）
 | `qoder` | Qoder | `~/.qoder/projects/**/*.jsonl` → `usage.credits` | **credits** |
 | `antigravity` | Antigravity CLI | `~/.gemini/antigravity-cli/conversations/*.db`（protobuf blob） | tokens |
 | `ccswitch` | CC Switch 网关 | `~/.cc-switch/cc-switch.db` → `proxy_request_logs` | tokens |
+| `workbuddy` | WorkBuddy AI | `~/.workbuddy-ai/workbuddy.db` → `session_usage.credit_json`（会话关闭时落账；`used`/`size` 是上下文窗口占用，不是消耗） | **credits** |
 同方言不同产品坐标的三个源：`crow5`（`~/.local/share/crow5/` 下**每个**可读的 `*.db` 都是源：`crow5.db` 是历史库、`opencode-powerformer-v<版本>.db` 是升级后的在用车，两边 message id 不相交，按 mtime 只挑一个会静默丢掉 99% 历史）、`mimocode`（`~/.local/share/mimocode/mimocode.db`）都走 OpenCode 的 `message.data` 方言；`cola`（`~/.cola/sessions/*/*.jsonl`）走 Pi 的 `message.usage` 方言。另有两个独立格式：`agnes`（`~/.agnes/data/sessions/sessions.db` → `usage_ledger`，成本列全空、时间戳是秒）、`atomcode`（`~/.atomcode/sessions/*/*.jsonl` → 顶层 `usage.{prompt,completion,cached}`，`prompt` 已含 `cached`）。
 
 ### 统计不了的（已实测，不是没做）
@@ -48,6 +49,7 @@ apps/tokenme-bar/      Tauri v2 菜单栏程序（React + TS）
 
 - `codex`：官方接口 + 日志窗口。
 - `qoder`：**活接口优先**。`GET https://openapi.qoder.sh/sash/api/v2/me/usage` 就是"我的用量"面板自己发的请求（拆 `app.asar` 可见 `account.getQuotaUsage`，实测 200 / 6 ms），头为 `Authorization: Bearer <token>` + `Cosy-ClientType: 10` + `User-Agent: Qoder`。回答按面板自己的 zh locale 命名四类表：`userQuota` **套餐内 Credits**、`addOnQuota` **资源包**、`dedicatedResourcePackages[]` **专属资源包**（`available:false` 的不画）、`orgResourcePackage` **共享资源包**；`percentage` 在线上是 0..1 的分数，≤1 就 ×100（与厂商自己的归一化一致），标签带 `剩 N/总N`。token 解自 `secret://aicoding.auth.userInfo`（与快照同一个 safeStorage 信封），`expireTime` 过期就放弃活读、**绝不刷新**；0/0 的表（免费档套餐内）不画。快照 `secret://aicoding.auth.creditUsage` 降为离线回退且只认 `total>0`——它**只装套餐内一项**，本机实测还是过期值（`total:0, isQuotaExceeded:true`），而活接口答 `isQuotaExceeded:false` + 资源包 600/已用 130：只读快照时这账号被画成"已用完"，就是改活读的原因。
+- `workbuddy`：桌面端 OAuth 记录 `CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info`（`auth.accessToken`/`expiresAt`/`domain` + `account.uid`），`POST https://<domain>/billing/meter/get-user-resource`（global 无 `/v2` 前缀、404 回落 `/v2`；CN 域直接 `/v2`），体为 `{ProductCode:"p_tcaca", Status:[0,3], 包有效期窗口}`——与开源网关 workbuddy2api 的 `ResourceSummary` 同口径，本机实测 200。回答按套餐逐行（本机 7 行全叫 "Bonus Pack"），**按包名聚合成一条**（剩 180/430），reset 取仍有余额的包里最近的 `CycleEndTime`（UTC+8 墙钟）。token 过期即放弃、**绝不刷新**（同 qoder 的轮换即登出规则）。
 - `antigravity`：跑它自己的 CLI `agy -p /usage --output-format json` 读 `command.data.groups[].buckets[]`（周/5 小时两组，Gemini 与 Claude/GPT 各一组）。**故意不自己刷 refresh_token**——Google 会轮换它，探针不写回就会把用户登录作废。
 - `ccswitch`：网关自己的预算表 `providers.limit_daily_usd` / `limit_monthly_usd`，用量按 `proxy_request_logs` 的本地零点/月首求和。没设限额就没有条。
 - `claude`：官方 OAuth 接口。**若 Claude 走 CC Switch 之类的本地网关托管认证，`accessToken` 在本机就是空的**，此时查不到属正常。

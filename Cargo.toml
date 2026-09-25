@@ -13,6 +13,7 @@ members = [
     "crates/adapters/ccswitch",
     "crates/adapters/agnes",
     "crates/adapters/atomcode",
+    "crates/adapters/workbuddy",
     "crates/adapters/all",
     "crates/usage-index",
     "crates/usage-quota",
@@ -41,6 +42,7 @@ usage-adapter-antigravity = { path = "crates/adapters/antigravity" }
 usage-adapter-ccswitch = { path = "crates/adapters/ccswitch" }
 usage-adapter-agnes = { path = "crates/adapters/agnes" }
 usage-adapter-atomcode = { path = "crates/adapters/atomcode" }
+usage-adapter-workbuddy = { path = "crates/adapters/workbuddy" }
 usage-adapter-all = { path = "crates/adapters/all" }
 
 serde = { version = "1", features = ["derive"] }

@@ -32,6 +32,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("ccswitch", &["CC Switch"]),
     ("agnes", &["AgnesCode"]),
     ("atomcode", &[]),
+    ("workbuddy", &["WorkBuddy AI", "WorkBuddy"]),
     ("crow5", &["Crow5"]),
     ("mimocode", &[]),
     ("cola", &["Cola"]),
