@@ -343,20 +343,20 @@
   align-self: center;
 }
 
+/* 裸图标,无框:平时半隐,悬停/激活时全亮 */
 .sort-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  padding: 2px;
   color: var(--ink-3);
-  border: 1px solid var(--hair-2);
+  opacity: 0.55;
   border-radius: var(--r-sm);
-  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 
 .sort-toggle:hover {
-  background: var(--fill-hover);
+  opacity: 1;
   color: var(--ink);
 }
 
