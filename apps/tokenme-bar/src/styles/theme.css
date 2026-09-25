@@ -25,15 +25,17 @@
   --fill-active: rgba(20, 20, 24, 0.09);
 
   /* single restrained graphite-teal accent */
-  --accent: #0f6e68;
-  --accent-ink: #0b5a55;
-  --accent-soft: rgba(15, 110, 104, 0.1);
+  /* Brand teal follows the app icon's gradient ends: light mode sits on the
+     deep end (#0c7f6c), dark mode on the bright end (#2fc6a4). */
+  --accent: #0c7f6c;
+  --accent-ink: #0a6558;
+  --accent-soft: rgba(12, 127, 108, 0.1);
   /* bars are quiet: the categorical dots carry the colour, the fills do not */
-  --bar-fill: rgba(15, 110, 104, 0.5);
+  --bar-fill: rgba(12, 127, 108, 0.5);
   --bar-fill-hot: rgba(138, 90, 18, 0.55);
 
   /* fixed categorical ramp: a tool keeps its slot regardless of ranking */
-  --cat-1: #0f6e68;
+  --cat-1: #0c7f6c;
   --cat-2: #3d5a9e;
   --cat-3: #8a6a15;
   --cat-4: #8a4a78;
@@ -52,7 +54,7 @@
   --heat-1: #d7e5e2;
   --heat-2: #a5cbc6;
   --heat-3: #4f9c94;
-  --heat-4: #0f6e68;
+  --heat-4: #0c7f6c;
 
   --warn: #8a5a12;
   --warn-soft: rgba(138, 90, 18, 0.14);
@@ -133,13 +135,13 @@
     --fill-hover: rgba(236, 236, 238, 0.06);
     --fill-active: rgba(236, 236, 238, 0.11);
 
-    --accent: #58c0b4;
-    --accent-ink: #7ad3c8;
-    --accent-soft: rgba(88, 192, 180, 0.14);
-    --bar-fill: rgba(88, 192, 180, 0.44);
+    --accent: #2fc6a4;
+    --accent-ink: #63d8bc;
+    --accent-soft: rgba(47, 198, 164, 0.14);
+    --bar-fill: rgba(47, 198, 164, 0.44);
     --bar-fill-hot: rgba(217, 169, 76, 0.5);
 
-    --cat-1: #58c0b4;
+    --cat-1: #2fc6a4;
     --cat-2: #8faee8;
     --cat-3: #d9b24c;
     --cat-4: #de9ac9;
@@ -198,13 +200,13 @@
   --fill-hover: rgba(236, 236, 238, 0.06);
   --fill-active: rgba(236, 236, 238, 0.11);
 
-  --accent: #58c0b4;
-  --accent-ink: #7ad3c8;
-  --accent-soft: rgba(88, 192, 180, 0.14);
-  --bar-fill: rgba(88, 192, 180, 0.44);
+  --accent: #2fc6a4;
+  --accent-ink: #63d8bc;
+  --accent-soft: rgba(47, 198, 164, 0.14);
+  --bar-fill: rgba(47, 198, 164, 0.44);
   --bar-fill-hot: rgba(217, 169, 76, 0.5);
 
-  --cat-1: #58c0b4;
+  --cat-1: #2fc6a4;
   --cat-2: #8faee8;
   --cat-3: #d9b24c;
   --cat-4: #de9ac9;
