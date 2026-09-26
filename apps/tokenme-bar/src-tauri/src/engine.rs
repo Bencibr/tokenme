@@ -15,7 +15,7 @@ use usage_core::report::{now_ms, ReportOptions};
 use usage_core::{DateFilter, DetectedSource, PricingMap, Report, SourceAdapter, SourceStatus, UsageEvent};
 use usage_index::{Index, Watcher, RETENTION_DAYS};
 
-use crate::settings::{Settings, TrayMode};
+use crate::settings::Settings;
 use crate::tray;
 
 /// Emitted on every recomputed report; the payload is a serialised `Report`.
@@ -192,8 +192,7 @@ fn ingest(
     let _ = index.prune(cutoff);
     let events = index.all_events().unwrap_or_default();
     let sources = index.source_statuses(detected).unwrap_or_else(|_| fallback_sources(detected));
-    let mode = shared.settings().tray_mode;
-    publish(app, &events, &sources, pricing, mode, adapters);
+    publish(app, &events, &sources, pricing, adapters);
 }
 
 /// Re-runs the aggregation over already-indexed events after a price refresh.
@@ -210,8 +209,7 @@ fn resummarize(
     let sources = index
         .source_statuses(detected)
         .unwrap_or_else(|_| fallback_sources(detected));
-    let mode = shared.settings().tray_mode;
-    publish(app, &events, &sources, pricing, mode, adapters);
+    publish(app, &events, &sources, pricing, adapters);
 }
 
 fn publish(
@@ -219,7 +217,6 @@ fn publish(
     events: &[UsageEvent],
     sources: &[SourceStatus],
     pricing: &PricingMap,
-    mode: TrayMode,
     adapters: &[Box<dyn SourceAdapter>],
 ) {
     // Live quota (a keychain read, a vendor CLI, or an HTTPS call) is merged in
@@ -246,6 +243,10 @@ fn publish(
         *slot = Some(report.clone());
     }
     let _ = app.emit(REPORT_EVENT, &report);
+    // Re-read the mode AFTER the slow quota probes: a switch made while
+    // polling ran must not be painted back to the old display (the stale-read
+    // race behind "切换有很大的延迟").
+    let mode = app.state::<Shared>().settings().tray_mode;
     tray::refresh(app, &report, mode);
 }
 
