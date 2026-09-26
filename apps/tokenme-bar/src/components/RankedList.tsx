@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { Item, UnpricedModel } from "../types";
 import { compactTokens, credits as creditText, money } from "../lib/format";
 import { useMoney } from "../lib/display";
 import { MoreRow, Section } from "./Section";
+import { nextSortState, SortToggle, type SortState } from "./SortToggle";
 
 /**
  * One row = name, tokens, cost, with the ranking carried by a proportional
@@ -83,19 +84,34 @@ interface RankedProps {
 
 export function RankedList({ label, items, limit = 5, weight = "cost", unpriced, emptyText }: RankedProps) {
   const [all, setAll] = useState(false);
+  const [sort, setSort] = useState<SortState>("default");
+  const showMoney = useMoney();
   const hidden = items.length - Math.min(items.length, limit);
   const shown = all ? items.length : Math.min(items.length, limit);
   const listed = (unpriced ?? []).filter((u) => items.some((i) => i.key === u.model && !i.priced));
+  // The toggle re-orders by the same measure the wash paints with, so the
+  // stripes stay aligned with the ranking in both directions.
+  const ordered = useMemo(() => {
+    if (sort === "default") return items;
+    const byCost = weight === "cost" && showMoney;
+    const dir = sort === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      const ma = byCost ? a.cost : a.total_tokens;
+      const mb = byCost ? b.cost : b.total_tokens;
+      return (ma - mb) * dir;
+    });
+  }, [items, sort, weight, showMoney]);
 
   return (
     <Section
       label={all ? `${label} · 全部` : `${label} Top ${Math.max(shown, 1)}`}
       meta={all ? `${items.length} 项` : hidden > 0 ? `另 ${hidden} 项` : undefined}
+      trail={items.length > 1 ? <SortToggle state={sort} onCycle={() => setSort((v) => nextSortState(v))} /> : undefined}
     >
       {items.length === 0 ? (
         <p className="empty-row">{emptyText ?? "本期无数据"}</p>
       ) : (
-        <RankRows items={items} limit={shown} weight={weight} />
+        <RankRows items={ordered} limit={shown} weight={weight} />
       )}
       <MoreRow open={all} total={items.length} preview={limit} onToggle={() => setAll((v) => !v)} />
       {listed.length > 0 ? (

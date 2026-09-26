@@ -28,7 +28,7 @@ pub struct Stream {
 
 pub enum Parsed {
     /// A usage event for the index.
-    Event(UsageEvent),
+    Event(Box<UsageEvent>),
     /// A line that carries no billable call (headers, chunks, snapshots…).
     Noise,
 }
@@ -102,6 +102,6 @@ impl Stream {
         event.project = self.project.clone();
         event.dedupe_key = Some(format!("{session}#{seq}"));
         event.source = format!("{source_key}#{seq}");
-        Parsed::Event(event)
+        Parsed::Event(Box::new(event))
     }
 }

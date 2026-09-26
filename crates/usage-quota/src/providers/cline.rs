@@ -316,7 +316,7 @@ fn jwt_exp_ms(token: &str) -> Option<i64> {
     let payload = token.split('.').nth(1)?;
     let decoded = b64url_decode(payload)?;
     let claim = serde_json::from_slice::<Value>(&decoded).ok()?.get("exp")?.as_f64()?;
-    (claim > 0.0).then(|| (claim * 1_000.0) as i64)
+    (claim > 0.0).then_some((claim * 1_000.0) as i64)
 }
 
 /// Base64url without padding, which is what a JWT segment is.

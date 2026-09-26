@@ -48,37 +48,42 @@
 
 /* ---------------------------------------------------------------- boot state */
 
+/* Boot screen: the whole block sits centered in the panel — a spinning ring
+   echoing the dual-ring brand mark, with the status line underneath. */
 .boot {
+  flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: var(--s2);
-  padding: var(--s5) var(--s4);
+  justify-content: center;
+  gap: var(--s3);
   font-size: var(--t-meta);
   color: var(--ink-3);
 }
 
-.boot-mark {
-  width: 7px;
-  height: 7px;
+.boot-ring {
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
-  background: var(--accent);
-  animation: boot-pulse 1.2s ease-in-out infinite;
+  border: 3px solid var(--track);
+  border-top-color: var(--accent);
+  animation: boot-spin 0.9s linear infinite;
 }
 
-@keyframes boot-pulse {
-  50% {
-    opacity: 0.25;
+@keyframes boot-spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .boot-mark {
+  .boot-ring {
     animation: none;
+    border-top-color: var(--accent);
   }
 }
 
 .boot-retry {
-  margin-left: auto;
   font-size: var(--t-meta);
   color: var(--accent-ink);
   padding: 2px 6px;
@@ -339,21 +344,12 @@
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
+  /* no scrollbar: the wheel/trackpad is the affordance, the panel is narrow */
+  scrollbar-width: none;
 }
 
 .scroll::-webkit-scrollbar {
-  width: 9px;
-}
-
-.scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.scroll::-webkit-scrollbar-thumb {
-  background: var(--hair-2);
-  border: 3px solid var(--surface);
-  border-radius: 6px;
+  display: none;
 }
 
 .scroll:focus-visible {
@@ -375,6 +371,30 @@
   justify-content: space-between;
   gap: var(--s2);
   margin-bottom: var(--s2);
+}
+
+.sec-right {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  align-self: center;
+}
+
+/* 裸图标,无框:平时半隐,悬停/激活时全亮 */
+.sort-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  color: var(--ink-3);
+  opacity: 0.55;
+  border-radius: var(--r-sm);
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.sort-toggle:hover {
+  opacity: 1;
+  color: var(--ink);
 }
 
 .sec-label {

@@ -175,7 +175,7 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
           </div>
         ) : null}
 
-        <p className="sheet-foot num">tokenme v{settings?.version ?? "…"} · 数据只存在本机</p>
+        <p className="sheet-foot num">TokenMe v{settings?.version ?? "…"} · 数据只存在本机</p>
       </div>
     </div>
   );

@@ -147,9 +147,7 @@ pub(crate) fn samples_from(value: &Value) -> Vec<QuotaSample> {
             .filter_map(Value::as_object)
             .filter(|bucket| !bucket.get("disabled").and_then(Value::as_bool).unwrap_or(false))
             .filter_map(|bucket| {
-                let Some(remaining) = bucket.get("remaining_fraction").and_then(Value::as_f64) else {
-                    return None;
-                };
+                let remaining = bucket.get("remaining_fraction").and_then(Value::as_f64)?;
                 if !(0.0..=1.0).contains(&remaining) {
                     return None;
                 }

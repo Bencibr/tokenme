@@ -39,7 +39,6 @@ const VISIBILITY_DEBOUNCE_MS: u64 = 160;
 const SHOW_FOCUS_GRACE_MS: u64 = 220;
 
 static LAST_VISIBILITY_REQUEST_MS: AtomicU64 = AtomicU64::new(0);
-static LAST_TOGGLE_REQUEST_MS: AtomicU64 = AtomicU64::new(0);
 static SHOW_FOCUS_GRACE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "windows")]
 static CLICK_AWAY_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
@@ -66,8 +65,29 @@ enum TrayEdge {
     Right,
 }
 
+/// Rapid tray clicks deliver Click + DoubleClick events that would toggle the
+/// panel two-plus times per gesture; toggles inside this window are swallowed.
+const TOGGLE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+
+fn last_toggle() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// True when this toggle was swallowed by the debounce.
+fn debounced() -> bool {
+    let mut slot = last_toggle().lock().unwrap();
+    let now = std::time::Instant::now();
+    let skip = slot.map(|t| now.duration_since(t) < TOGGLE_DEBOUNCE).unwrap_or(false);
+    if !skip {
+        *slot = Some(now);
+    }
+    skip
+}
+
 pub fn toggle(app: &AppHandle, rect: Option<Rect>) {
-    if !accept_toggle_request() {
+    if debounced() {
         return;
     }
     let Some(window) = app.get_webview_window(LABEL) else {
@@ -153,21 +173,6 @@ fn accept_visibility_request(visible: bool) -> bool {
     }
 }
 
-fn accept_toggle_request() -> bool {
-    let now = now_ms();
-    loop {
-        let previous = LAST_TOGGLE_REQUEST_MS.load(Ordering::Acquire);
-        if now.saturating_sub(previous) < VISIBILITY_DEBOUNCE_MS {
-            return false;
-        }
-        if LAST_TOGGLE_REQUEST_MS
-            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return true;
-        }
-    }
-}
 
 /// Opens the panel and tells the frontend which period to focus.
 pub fn open_at(app: &AppHandle, period: &str) {
@@ -744,7 +749,22 @@ fn observe_context_switches(app: &AppHandle) {
     use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
 
     let handle = app.clone();
-    let block = ConcreteBlock::new(move |_note: id| {
+    // Our own process id: clicking the tray icon activates this very app,
+    // which used to fire DidActivateApplication and hide the panel right
+    // after showing it — the "first click does nothing" bug.
+    let our_pid = std::process::id();
+    let block = ConcreteBlock::new(move |note: id| {
+        unsafe {
+            let user_info: id = msg_send![note, userInfo];
+            if !user_info.is_null() {
+                let key: id = msg_send![class!(NSString), stringWithUTF8String: "NSWorkspaceApplicationKey"];
+                let activated: id = msg_send![user_info, objectForKey: key];
+                let pid: i32 = if activated.is_null() { 0 } else { msg_send![activated, processIdentifier] };
+                if pid == our_pid as i32 || pid == 0 {
+                    return; // our own activation, or an event without an app
+                }
+            }
+        }
         if let Some(window) = handle.get_webview_window(LABEL) {
             if window.is_visible().unwrap_or(false) {
                 let _ = window.hide();

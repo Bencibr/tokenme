@@ -1,20 +1,32 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { SessionRow } from "../types";
 import { compactTokens, count, money, relativeTime } from "../lib/format";
 import { MoreRow, Section } from "./Section";
+import { nextSortState, SortToggle, type SortState } from "./SortToggle";
 import { ToolIcon } from "./ToolIcon";
 import { useMoney } from "../lib/display";
 
 const BASENAME = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 
 /** Six rows by default — "what did I just spend on", not a session browser — with
- *  the tail reachable rather than silently cut off. */
+ *  the tail reachable rather than silently cut off. The sort toggle re-orders
+ *  by tokens; time stays visible on every row either way. */
 export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
   const [all, setAll] = useState(false);
+  const [sort, setSort] = useState<SortState>("default");
   const showMoney = useMoney();
-  const shown = all ? rows : rows.slice(0, 6);
+  const ordered = useMemo(() => {
+    if (sort === "default") return rows;
+    const dir = sort === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => (a.total_tokens - b.total_tokens) * dir);
+  }, [rows, sort]);
+  const shown = ordered.slice(0, all ? ordered.length : 6);
   return (
-    <Section label="最近会话" meta={rows.length > shown.length ? `显示 ${shown.length} / ${rows.length}` : undefined}>
+    <Section
+      label="最近会话"
+      meta={rows.length > shown.length ? `显示 ${shown.length} / ${rows.length}` : undefined}
+      trail={rows.length > 1 ? <SortToggle state={sort} onCycle={() => setSort((v) => nextSortState(v))} /> : undefined}
+    >
       {shown.length === 0 ? (
         <p className="empty-row">还没有会话记录</p>
       ) : (

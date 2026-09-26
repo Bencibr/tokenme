@@ -43,14 +43,6 @@ export function IconArrowUp(p: IconProps) {
 }
 
 /** Header's "back to the previous page". */
-export function IconBack(p: IconProps) {
-  return (
-    <Svg {...p}>
-      <path d="M15 5l-7 7 7 7" />
-    </Svg>
-  );
-}
-
 /** Points down when a list is folded; `.more-row[aria-expanded="true"]` turns it. */
 export function IconChevron(p: IconProps) {
   return (
@@ -73,15 +65,6 @@ export function IconFlat(p: IconProps) {
   return (
     <Svg {...p}>
       <path d="M5 12h14" />
-    </Svg>
-  );
-}
-
-export function IconClock(p: IconProps) {
-  return (
-    <Svg {...p}>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M12 7.5V12l3 2" />
     </Svg>
   );
 }
@@ -122,6 +105,44 @@ export function IconClose(p: IconProps) {
     <Svg {...p}>
       <path d="M6 6l12 12" />
       <path d="M18 6L6 18" />
+    </Svg>
+  );
+}
+
+/** 排序三态:未排序(上下双箭头)。 */
+export function IconSortDefault(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="m21 16-4 4-4-4" />
+      <path d="M17 20V4" />
+      <path d="m3 8 4-4 4 4" />
+      <path d="M7 2v16" />
+    </Svg>
+  );
+}
+
+/** 升序(向上箭头 + 递减横线)。 */
+export function IconSortAsc(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="m3 8 4-4 4 4" />
+      <path d="M7 4v16" />
+      <path d="M13 6h8" />
+      <path d="M13 12h6" />
+      <path d="M13 18h4" />
+    </Svg>
+  );
+}
+
+/** 降序(向下箭头 + 递减横线)。 */
+export function IconSortDesc(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="m3 16 4 4 4-4" />
+      <path d="M7 4v16" />
+      <path d="M13 6h8" />
+      <path d="M13 12h6" />
+      <path d="M13 18h4" />
     </Svg>
   );
 }

@@ -46,8 +46,8 @@ export function StatusBar({
       </span>
       <span className="status-right">
         {tray ? (
-          <button type="button" className="tray-mode" onClick={tray.onCycle} title="菜单栏标题显示内容">
-            托盘 · {TRAY_MODE_LABEL[tray.mode]}
+          <button type="button" className="tray-mode" onClick={tray.onCycle} title="菜单栏显示内容">
+            {TRAY_MODE_LABEL[tray.mode]}
           </button>
         ) : null}
         <button type="button" className="settings-btn" onClick={onOpenSettings} title="设置" aria-label="设置">

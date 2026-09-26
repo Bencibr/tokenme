@@ -140,6 +140,7 @@ export interface Report {
   day: Window;
   week: Window;
   month: Window;
+  year: Window;
   heatmap: HeatCell[];
   quotas: QuotaView[];
   sources: SourceStatus[];
@@ -148,19 +149,24 @@ export interface Report {
   all_time: Summary;
 }
 
-export type PeriodKey = "day" | "week" | "month";
+export type PeriodKey = "day" | "week" | "month" | "year";
 
 /** The panel is four pages rather than one long scroll; see `App.tsx`. */
 export type PageKey = "overview" | "tools" | "ranks" | "detail";
 
-/** Tray label modes, mirrored from `tokenme_bar::TrayMode`. */
-export type TrayMode = "cost" | "tokens" | "quiet";
+/** Tray label modes, mirrored from `tokenme_bar::TrayMode` (snake_case). */
+export type TrayMode =
+  | "tray_only"
+  | "tokens_only"
+  | "cost_only"
+  | "tray_tokens"
+  | "tray_cost"
+  | "tray_tokens_cost";
 
 export interface TrayState {
   label: string;
   tooltip: string;
   mode: TrayMode;
-  modes: TrayMode[];
 }
 
 export interface Bridge {

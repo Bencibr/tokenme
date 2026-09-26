@@ -19,7 +19,8 @@ import { StatusBar } from "./components/StatusBar";
 import { ToolsSection } from "./components/ToolsSection";
 import { BubbleApp } from "./components/BubbleApp";
 
-const MODES: TrayMode[] = ["cost", "tokens", "quiet"];
+/** 托盘显示模式循环顺序:仅托盘 → 仅Token → 仅花费 → 三个托盘组合。 */
+const MODES: TrayMode[] = ["tray_only", "tokens_only", "cost_only", "tray_tokens", "tray_cost", "tray_tokens_cost"];
 
 export default function App() {
   // The bubble is a runtime-created Windows window that shares this frontend
@@ -94,7 +95,7 @@ function PanelApp() {
   }, [page]);
 
   const cycleTrayMode = useCallback(async () => {
-    const next = MODES[(MODES.indexOf(tray?.mode ?? "cost") + 1) % MODES.length];
+    const next = MODES[(MODES.indexOf(tray?.mode ?? "tray_tokens") + 1) % MODES.length];
     setTray(await bridge.setTrayMode(next));
   }, [tray?.mode]);
 
@@ -142,8 +143,8 @@ function PanelApp() {
     return (
       <div className="panel" data-boot>
         <div className="boot">
-          <span className="boot-mark" aria-hidden="true" />
-          <span>{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
+          <span className="boot-ring" aria-hidden="true" />
+          <span className="boot-text">{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
           {!indexing ? (
             <button type="button" className="boot-retry" onClick={() => void refresh()}>
               重试
@@ -205,7 +206,7 @@ function PanelApp() {
           loading={loading}
           onRefresh={() => void refresh()}
           onOpenSettings={() => setSettingsOpen(true)}
-          tray={inTauri ? { mode: tray?.mode ?? "cost", onCycle: () => void cycleTrayMode() } : null}
+          tray={inTauri ? { mode: tray?.mode ?? "tray_tokens", onCycle: () => void cycleTrayMode() } : null}
         />
 
         {settingsOpen ? (

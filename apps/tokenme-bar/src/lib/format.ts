@@ -161,18 +161,21 @@ export const PERIOD_LABEL: Record<PeriodKey, string> = {
   day: "今日",
   week: "本周",
   month: "本月",
+  year: "今年",
 };
 
 export const PERIOD_PREV: Record<PeriodKey, string> = {
   day: "昨日同期",
   week: "上周同期",
   month: "上月同期",
+  year: "去年同期",
 };
 
 export const PERIOD_SHORT: Record<PeriodKey, string> = {
   day: "日",
   week: "周",
   month: "月",
+  year: "年",
 };
 
 /** `TokenCounts::total` and `cached_pct` are Rust methods; mirror them here. */
@@ -186,9 +189,12 @@ export function cachedOf(c: TokenCounts): number {
 }
 
 export const TRAY_MODE_LABEL: Record<TrayMode, string> = {
-  cost: "花费",
-  tokens: "Token",
-  quiet: "仅图标",
+  tray_only: "仅托盘",
+  tokens_only: "仅Token",
+  cost_only: "仅花费",
+  tray_tokens: "托盘·Token",
+  tray_cost: "托盘·花费",
+  tray_tokens_cost: "托盘·Token·花费",
 };
 
 /** Local `YYYY-MM-DD` for an epoch-ms value, matching how report.rs buckets days. */

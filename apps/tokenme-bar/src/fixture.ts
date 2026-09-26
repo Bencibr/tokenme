@@ -189,7 +189,7 @@ interface PeriodSpec {
   prev: Summary;
 }
 
-function buildWindow(now: Date, kind: "day" | "week" | "month", spec: PeriodSpec): Window {
+function buildWindow(now: Date, kind: "day" | "week" | "month" | "year", spec: PeriodSpec): Window {
   const tools = spec.tools.map(([tool, tokens, cost, requests, sessions]) =>
     // For the credit-metered tool the `tokens` slot carries credits instead.
     tool === "qoder" ? creditItem(tokens, requests, sessions) : toolItem(tool, tokens, cost, requests, sessions),
@@ -215,6 +215,10 @@ function buildWindow(now: Date, kind: "day" | "week" | "month", spec: PeriodSpec
     start = monday;
     key = isoWeekKey(monday);
     label = `${pad(monday.getMonth() + 1)}-${pad(monday.getDate())} ~ ${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  } else if (kind === "year") {
+    start = new Date(today.getFullYear(), 0, 1);
+    key = `${today.getFullYear()}`;
+    label = key;
   } else {
     start = new Date(today.getFullYear(), today.getMonth(), 1);
     key = `${today.getFullYear()}-${pad(today.getMonth() + 1)}`;
@@ -523,12 +527,53 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     creditItem(24.6, 4_182, 268),
   ]);
 
+  const year = buildWindow(now, "year", {
+    tools: [
+      ["claude", 1_284_018_000, 442.86, 31_408, 812],
+      ["codex", 518_264_000, 141.22, 8_942, 468],
+      ["opencode", 148_062_000, 34.08, 3_412, 214],
+      ["qoder", 96.4, 0, 4_182, 268],
+    ],
+    models: [
+      ["glm-5.3-flash", 882_068_000, 288.22, 18_214],
+      ["claude-sonnet-4-6", 402_264_000, 188.04, 9_386],
+      ["gpt-5", 310_118_000, 96.88, 6_988],
+      ["deepseek-v4-flash", 148_486_000, 32.92, 4_648],
+      ["kimi-k3", 96_402_000, 18.44, 3_538],
+    ],
+    projects: [
+      ["/Users/me/work/tokenme", 1_042_286_000, 352.84, 21_728],
+      ["/Users/me/work/wallet-web", 478_142_000, 146.44, 8_842],
+      ["/Users/me/work/tokenscope-rs", 234_028_000, 68.88, 4_812],
+      ["/Users/me/work/infra", 118_402_000, 24.72, 2_486],
+      ["/Users/me/work/docs-site", 62_148_000, 12.08, 1_348],
+    ],
+    mcps: [
+      ["bugx", 168_142_000, 3_428],
+      ["codebase-index", 96_806_000, 1_288],
+      ["gh", 48_402_000, 848],
+      ["context7", 24_118_000, 614],
+    ],
+    skills: [
+      ["review", 84_146_000, 1_488],
+      ["investigate", 52_402_000, 966],
+      ["ship", 28_864_000, 544],
+    ],
+    unpriced: [{ tool: "codex", model: "kimi-k2-turbo", total_tokens: 9_864_000, requests: 674 }],
+    prev: summaryOf([
+      toolItem("claude", 942_408_000, 321.84, 28_942, 762),
+      toolItem("codex", 402_112_000, 108.62, 6_421, 415),
+      toolItem("opencode", 85_086_000, 18.48, 1_065, 205),
+    ]),
+  });
+
   return {
     generated_at_ms: nowMs2,
     utc_offset: fmtOffset(now),
     day,
     week,
     month,
+    year,
     heatmap: buildHeatmap(localMidnight(now)),
     quotas: quotasOf(nowMs2),
     sources: SOURCES,
