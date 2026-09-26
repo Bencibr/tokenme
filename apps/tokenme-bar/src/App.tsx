@@ -131,8 +131,8 @@ export default function App() {
     return (
       <div className="panel" data-boot>
         <div className="boot">
-          <span className="boot-mark" aria-hidden="true" />
-          <span>{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
+          <span className="boot-ring" aria-hidden="true" />
+          <span className="boot-text">{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
           {!indexing ? (
             <button type="button" className="boot-retry" onClick={() => void refresh()}>
               重试
