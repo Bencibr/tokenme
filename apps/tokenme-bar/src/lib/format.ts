@@ -133,18 +133,21 @@ export const PERIOD_LABEL: Record<PeriodKey, string> = {
   day: "今日",
   week: "本周",
   month: "本月",
+  year: "今年",
 };
 
 export const PERIOD_PREV: Record<PeriodKey, string> = {
   day: "昨日同期",
   week: "上周同期",
   month: "上月同期",
+  year: "去年同期",
 };
 
 export const PERIOD_SHORT: Record<PeriodKey, string> = {
   day: "日",
   week: "周",
   month: "月",
+  year: "年",
 };
 
 /** `TokenCounts::total` and `cached_pct` are Rust methods; mirror them here. */

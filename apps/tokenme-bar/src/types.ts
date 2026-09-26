@@ -140,6 +140,7 @@ export interface Report {
   day: Window;
   week: Window;
   month: Window;
+  year: Window;
   heatmap: HeatCell[];
   quotas: QuotaView[];
   sources: SourceStatus[];
@@ -148,7 +149,7 @@ export interface Report {
   all_time: Summary;
 }
 
-export type PeriodKey = "day" | "week" | "month";
+export type PeriodKey = "day" | "week" | "month" | "year";
 
 /** The panel is four pages rather than one long scroll; see `App.tsx`. */
 export type PageKey = "overview" | "tools" | "ranks" | "detail";

@@ -16,7 +16,7 @@ import { useTweenNumber } from "../lib/hooks";
 import { useMoney } from "../lib/display";
 import { IconArrowDown, IconArrowUp, IconFlat } from "./Icons";
 
-const ORDER: PeriodKey[] = ["day", "week", "month"];
+const ORDER: PeriodKey[] = ["day", "week", "month", "year"];
 
 const PAGES: { key: PageKey; label: string; hint: string }[] = [
   { key: "overview", label: "概览", hint: "活动热力与配额" },

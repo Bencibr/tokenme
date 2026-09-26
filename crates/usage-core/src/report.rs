@@ -152,6 +152,7 @@ pub struct Report {
     pub day: Window,
     pub week: Window,
     pub month: Window,
+    pub year: Window,
     pub heatmap: Vec<HeatCell>,
     pub quotas: Vec<QuotaView>,
     pub sources: Vec<SourceStatus>,
@@ -277,7 +278,7 @@ struct Span {
 }
 
 /// Calendar-aligned span plus an equally long slice immediately before it.
-fn spans(now_ms: i64) -> (Span, Span, Span) {
+fn spans(now_ms: i64) -> (Span, Span, Span, Span) {
     let now = to_local(now_ms).unwrap_or_else(Local::now);
     let today = now.date_naive();
 
@@ -312,7 +313,17 @@ fn spans(now_ms: i64) -> (Span, Span, Span) {
         key: month_first.format("%Y-%m").to_string(),
         label: month_first.format("%Y-%m").to_string(),
     };
-    (day, week, month)
+    let year_first = today.with_month(1).and_then(|d| d.with_day(1)).unwrap_or(today);
+    let year_start_ms = start_of_day_ms(year_first);
+    let year_elapsed = (now_ms - year_start_ms).max(1);
+    let year = Span {
+        start_ms: year_start_ms,
+        end_ms: now_ms,
+        prev_start_ms: year_start_ms - year_elapsed,
+        key: year_first.format("%Y").to_string(),
+        label: year_first.format("%Y").to_string(),
+    };
+    (day, week, month, year)
 }
 
 fn pct_delta(cur: f64, prev: f64) -> f64 {
@@ -551,10 +562,11 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         })
         .collect();
 
-    let (day_span, week_span, month_span) = spans(opts.now_ms);
+    let (day_span, week_span, month_span, year_span) = spans(opts.now_ms);
     let day = build_window(day_span, &rows);
     let week = build_window(week_span, &rows);
     let month = build_window(month_span, &rows);
+    let year = build_window(year_span, &rows);
 
     let mut heat: BTreeMap<NaiveDate, (f64, f64, u64)> = BTreeMap::new();
     for r in &rows {
@@ -722,6 +734,7 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         day,
         week,
         month,
+        year,
         heatmap,
         quotas,
         sources: opts.sources.clone(),
