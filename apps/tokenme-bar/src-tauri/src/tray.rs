@@ -121,16 +121,31 @@ pub fn tray_state(app: &AppHandle) -> Option<TrayState> {
 pub fn refresh(app: &AppHandle, report: &Report, mode: TrayMode) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
     let (title, tooltip) = label_for(report, mode);
-    // 仅Token/仅花费 hide the icon entirely: a text-only status item.
-    let icon = if mode.shows_icon() {
-        app.try_state::<TrayAssets>().map(|a| a.0.clone())
-    } else {
-        None
+    // Re-setting the image repaints the status item — visible as a flicker on
+    // every engine cycle. The image only depends on the mode, so touch it
+    // when the mode actually changes and leave it alone otherwise.
+    let changed = match app.state::<LastMode>().0.lock() {
+        Ok(mut last) => {
+            let changed = *last != Some(mode);
+            if changed {
+                *last = Some(mode);
+            }
+            changed
+        }
+        Err(_) => true, // poisoned: repaint rather than risk a stale image
     };
-    let _ = tray.set_icon(icon);
-    // set_icon resets the template flag; without it macOS stops recoloring the
-    // glyph and the black PNG ships as-is — invisible on a dark menu bar.
-    let _ = tray.set_icon_as_template(true);
+    if changed {
+        // 仅Token/仅花费 hide the icon entirely: a text-only status item.
+        let icon = if mode.shows_icon() {
+            app.try_state::<TrayAssets>().map(|a| a.0.clone())
+        } else {
+            None
+        };
+        let _ = tray.set_icon(icon);
+        // set_icon resets the template flag; without it macOS stops recoloring
+        // the glyph and the black PNG ships as-is — invisible on a dark bar.
+        let _ = tray.set_icon_as_template(true);
+    }
     // tray-icon's set_title(None) is a no-op, so clearing means an empty
     // string — otherwise 仅托盘 keeps the previous mode's text forever.
     let _ = tray.set_title(Some(title.as_deref().unwrap_or("")));
@@ -145,6 +160,10 @@ struct MenuItems {
 /// The dual-ring icon, kept so 仅Token/仅花费 can hide it and the 托盘 modes
 /// can put it back without re-reading the file.
 struct TrayAssets(tauri::image::Image<'static>);
+
+/// The last mode the status item was painted with — the guard that keeps
+/// periodic refreshes from re-setting the image (and flickering) on no-op.
+struct LastMode(std::sync::Mutex<Option<TrayMode>>);
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -175,6 +194,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     });
     let icon = tauri::include_image!("icons/tray-icon.png");
     app.manage(TrayAssets(icon.clone()));
+    // The builder already painted the icon for the startup mode's default;
+    // seeding None makes the first publish apply the real mode's imagery.
+    app.manage(LastMode(std::sync::Mutex::new(None)));
 
     TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)

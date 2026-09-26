@@ -204,7 +204,6 @@ fn resummarize(
     pricing: &PricingMap,
 ) {
     let Some(index) = index else { return };
-    let shared = app.state::<Shared>();
     let events = index.all_events().unwrap_or_default();
     let sources = index
         .source_statuses(detected)
