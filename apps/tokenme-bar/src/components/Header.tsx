@@ -37,11 +37,13 @@ interface Props {
 function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
   const dir = deltaDirection(pct);
   const Glyph = dir === "up" ? IconArrowUp : dir === "down" ? IconArrowDown : IconFlat;
+  // Naked text on the hero's baseline, glued to the figure it qualifies — a
+  // boxed chip floating beside the cost read as an unrelated second row.
   return (
     <span className="chip" data-dir={dir} title={caption}>
       <Glyph size={11} />
-      <span className="chip-v">{signedPercent(pct)}</span>
-      <span className="chip-cap">{caption}</span>
+      <span className="chip-v num">{signedPercent(pct)}</span>
+      <span className="chip-cap">较{caption}</span>
     </span>
   );
 }

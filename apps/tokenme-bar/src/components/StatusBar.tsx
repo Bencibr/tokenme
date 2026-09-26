@@ -51,7 +51,7 @@ export function StatusBar({
           </button>
         ) : null}
         <button type="button" className="settings-btn" onClick={onOpenSettings} title="设置" aria-label="设置">
-          <IconSettings size={13} />
+          <IconSettings size={15} />
         </button>
         <button type="button" className="refresh" onClick={onRefresh} disabled={loading}>
           <IconRefresh size={12} />

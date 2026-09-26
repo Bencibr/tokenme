@@ -176,12 +176,11 @@
 }
 
 .page-tab[aria-selected="true"] {
-  color: var(--ink);
+  color: var(--accent-ink);
   font-weight: 600;
-  /* gradient underline: page accent melting into the brand cyan */
-  border-bottom-color: transparent;
-  border-image: linear-gradient(90deg, var(--page-accent), var(--accent-2)) 1;
-  border-image-slice: 0 0 1 0;
+  /* one interaction colour: the underline is the same mint as the seg and the
+     refresh button, not a per-page hue */
+  border-bottom-color: var(--accent);
 }
 
 .brand {
@@ -214,10 +213,10 @@
 }
 
 .seg-btn[aria-checked="true"] {
-  background: var(--surface);
-  color: var(--ink);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
   font-weight: 600;
-  box-shadow: inset 0 0 0 1px var(--hair-2);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent);
 }
 
 .hero {
@@ -274,26 +273,20 @@
 
 .chip {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 3px;
-  padding: 1px 6px 1px 4px;
   font-size: var(--t-meta);
   color: var(--ink-2);
-  border: 1px solid var(--hair-2);
-  border-radius: var(--r-sm);
 }
 
-/* cost delta: down is money saved (green), up is more spent (red) */
+/* cost delta: down is money saved (green), up is more spent (red);
+   naked text glued to the figure it qualifies — no box of its own */
 .chip[data-dir="down"] {
   color: var(--ok);
-  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
-  background: color-mix(in srgb, var(--ok) 9%, transparent);
 }
 
 .chip[data-dir="up"] {
   color: var(--bad);
-  border-color: color-mix(in srgb, var(--bad) 35%, transparent);
-  background: var(--bad-soft);
 }
 
 .chip-v {
@@ -302,9 +295,7 @@
 
 .chip-cap {
   color: var(--ink-3);
-  padding-left: 3px;
-  border-left: 1px solid var(--hair);
-  margin-left: 2px;
+  font-size: 10.5px;
 }
 
 .hdr-stats {
@@ -625,7 +616,9 @@
   grid-template-columns: minmax(0, 1fr) 84px 42px 50px;
   align-items: center;
   gap: var(--s2);
-  padding: 2px 0 2px 15px;
+  /* child rows indent to the tool name's text origin (icon 18 + gap), so the
+     window ladder reads as one level under the header */
+  padding: 2px 0 2px 26px;
   min-width: 0;
   max-width: 100%;
 }
@@ -667,8 +660,46 @@
   opacity: 0.6;
 }
 
-.quota-pct[data-hot] {
+.quota-pct[data-stage="mid"] {
   color: var(--warn);
+}
+
+.quota-pct[data-stage="high"],
+.quota-pct[data-stage="over"] {
+  color: var(--bad);
+}
+
+/* the window name leads, the plan suffix follows dimmed */
+.quota-name .quota-sub {
+  color: var(--ink-3);
+  font-size: 10.5px;
+}
+
+/* stage legend in the section head */
+.quota-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.quota-legend i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 3px;
+  vertical-align: -1px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.quota-legend i[data-stage="mid"] {
+  background: color-mix(in srgb, var(--warn) 70%, transparent);
+}
+
+.quota-legend i[data-stage="high"] {
+  background: color-mix(in srgb, var(--bad) 75%, transparent);
 }
 
 .quota-reset {
@@ -683,28 +714,74 @@
   height: 3px;
 }
 
-/* Color answers "how far from unusable": the traffic-light gradient spans the
-   whole window (the fill reveals it, via the inline background-size), so the
-   bar's leading edge is the remaining share — green when fresh, amber as it
-   runs down, and at 100% the visible bar ends in red: full means used up,
-   never full means untouched. Tool identity stays in the header. */
+/* One hue per stage, the whole bar: <50% mint, 50-79% amber, ≥80% red. A
+   gradient left two colour semantics on one bar and let a 58% window glow
+   amber at its tip while the figure stayed quiet; a stage dyes bar and figure
+   together, and the legend in the section head names the stages. */
 .quota-row .track i {
-  background-color: var(--ok);
-  background-image: linear-gradient(90deg, var(--ok) 0%, var(--warn) 62%, var(--bad) 100%);
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
-  opacity: 0.9;
+  background-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
-.quota-row .track i[data-hot] {
-  opacity: 1;
+.quota-row .track i[data-stage="mid"] {
+  background-color: color-mix(in srgb, var(--warn) 70%, transparent);
 }
 
-/* Past the cap the gauge is already full; say so with the track itself. */
-.quota-row .track i[data-over] {
-  background-image: none;
+.quota-row .track i[data-stage="high"] {
+  background-color: color-mix(in srgb, var(--bad) 75%, transparent);
+}
+
+/* Past the cap the gauge is already full; say so at full strength. */
+.quota-row .track i[data-stage="over"] {
   background-color: var(--bad);
-  background-image: repeating-linear-gradient(90deg, var(--bad) 0 4px, transparent 4px 6px), var(--bad);
+}
+
+/* A source with no metered limit hatches its track: nothing is measured here. */
+.track-inf {
+  background: repeating-linear-gradient(115deg, var(--track) 0 4px, transparent 4px 8px);
+}
+
+.quota-pct--na {
+  color: var(--ink-3);
+  font-weight: 400;
+  font-size: 10.5px;
+}
+
+/* cost share: one stacked strip in the tools' own slot colours, with a legend
+   that repeats the numbers the bars encode */
+.share {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hair);
+}
+
+.share-bar {
+  display: flex;
+  gap: 2px;
+  height: 8px;
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.share-bar span {
+  background: color-mix(in srgb, var(--c) 70%, transparent);
+}
+
+.share-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+
+.share-legend i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: -1px;
 }
 
 /* ---------------------------------------------------------------- tools */
@@ -802,17 +879,43 @@
    "0.42 credits" onto two lines and broke the row grid. */
 .rank-line {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: baseline;
+  grid-template-columns: 16px minmax(0, 1fr) 60px auto auto;
+  align-items: center;
   gap: var(--s2);
+}
+
+.rank-no {
+  font-size: 9.5px;
+  color: var(--ink-3);
+}
+
+/* the ranking is a bar in its own column, one shared origin: cross-row
+   comparison is a single vertical line, not background staining */
+.rank-bar {
+  height: 3px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.rank-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .rank-name {
   font-size: 12px;
-  color: var(--ink);
+  color: var(--ink-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rank-row:first-child .rank-name {
+  color: var(--ink);
+  font-weight: 550;
 }
 
 /* Only the basename of a project path is worth full ink. */
@@ -1187,9 +1290,10 @@
 .badge {
   padding: 1px 5px;
   font-size: var(--t-meta);
-  color: var(--ink-2);
-  background: var(--surface-2);
-  border: 1px solid var(--hair);
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   border-radius: var(--r-sm);
   flex: none;
 }
@@ -1216,8 +1320,8 @@
   font-size: var(--t-meta);
   font-weight: 600;
   color: var(--on-accent);
-  /* the one saturated button on the panel: teal → cyan energy gradient */
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  /* the one saturated button on the panel: single accent, no second hue */
+  background: var(--accent);
   border: 0;
   border-radius: var(--r-sm);
   transition: filter var(--dur-fast) var(--ease);
@@ -1236,7 +1340,11 @@
   color: var(--ink-3);
 }
 
+/* the dot says "tray is live" before the label is read */
 .tray-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 3px var(--s1);
   font-size: var(--t-meta);
   color: var(--ink-3);
@@ -1248,13 +1356,15 @@
   background: var(--fill-hover);
 }
 
+/* a 15 px glyph inside a 24 px target: an icon this load-bearing cannot be a
+   bare 13 px glyph squeezed between the tray label and the refresh button */
 .settings-btn {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
-  color: var(--ink-3);
-  border-radius: var(--r-sm);
+  width: 24px;
+  height: 24px;
+  color: var(--ink-2);
+  border-radius: var(--r-md);
   transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
 

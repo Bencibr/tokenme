@@ -198,7 +198,17 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
   };
 
   return (
-    <Section label="配额" meta={`${live.length} 个窗口 · ${groups.length} 个工具`}>
+    <Section
+      label="配额"
+      meta={`${live.length} 个窗口 · ${groups.length} 个工具`}
+      trail={
+        <span className="quota-legend" aria-hidden="true">
+          <span><i data-stage="low" />安稳</span>
+          <span><i data-stage="mid" />注意</span>
+          <span><i data-stage="high" />告急</span>
+        </span>
+      }
+    >
       <div
         className="quota-list"
         ref={listRef}
@@ -235,8 +245,22 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
               {g.rows.map((q) => {
                 const pct = q.used_percent;
                 const width = Math.max(0, Math.min(100, pct));
-                const hot = pct >= 80;
+                // One colour per stage, the whole bar: <50% mint, 50-79% amber,
+                // ≥80% red — a gauge whose hue answers "how urgent", never a
+                // gradient that leaves two colour semantics on one bar.
+                const stage = pct > 100 ? "over" : pct >= 80 ? "high" : pct >= 50 ? "mid" : "low";
+                // A source with no metered limit at all keeps its row (so the
+                // tool block never loses a line) but its track hatches: nothing
+                // here is being measured, and a 0% bar would claim otherwise.
+                const unlimited = (q.label ?? "").includes("无可查限额");
                 const mine = (q.origin ?? "probe") === "budget";
+                // The window name leads at full ink; a plan suffix the source
+                // appended ("5 小时 · GLM Coding Lite") follows dimmed, so ten
+                // rows of the same plan stop shouting it.
+                const label = windowName(q);
+                const cut = label.indexOf(" · ");
+                const head = cut === -1 ? label : label.slice(0, cut);
+                const tail = cut === -1 ? "" : label.slice(cut);
                 return (
                   <div
                     className="quota-row"
@@ -245,42 +269,47 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     data-dragging={drag?.kind === "row" && drag.key === rowKey(q) ? "" : undefined}
                     onPointerDown={(e) => beginPress(e, { kind: "row", key: rowKey(q) })}
                   >
-                    <span className="quota-name" title={windowName(q)}>
-                      <span className="quota-text">{windowName(q)}</span>
+                    <span className="quota-name" title={label}>
+                      <span className="quota-text">
+                        <span className="quota-win">{head}</span>
+                        {tail ? <span className="quota-sub">{tail}</span> : null}
+                      </span>
                       {mine && (
                         <span className="quota-badge" data-origin="budget">
                           {ORIGIN.budget}
                         </span>
                       )}
                     </span>
-                    <span
-                      className="track"
-                      role="progressbar"
-                      aria-valuenow={Math.round(pct)}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-label={`${toolDisplay(q.tool)} ${windowName(q)} 已用 ${pct.toFixed(1)}%`}
-                    >
-                      <i
-                        style={{
-                          width: `${width}%`,
-                          // A used window at 3% must still read as *started*;
-                          // below ~4 px the fill is invisible on a 84 px track.
-                          minWidth: pct > 0 ? 4 : undefined,
-                          // The gradient paints the whole window, the fill only
-                          // reveals it: the bar's leading edge is the color of
-                          // "how far from unusable" — red by 100%, never a full
-                          // bar that could be read as untouched allowance.
-                          backgroundSize: width > 0 ? `${10000 / width}% 100%` : "0% 100%",
-                        }}
-                        data-hot={hot || undefined}
-                        data-over={pct > 100 || undefined}
-                      />
-                    </span>
-                    <span className="quota-pct num" data-hot={hot || undefined}>
-                      {pct > 100 ? Math.round(pct) : pct < 10 ? pct.toFixed(1) : Math.round(pct)}
-                      <em>%</em>
-                    </span>
+                    {unlimited ? (
+                      <span className="track track-inf" aria-hidden="true" />
+                    ) : (
+                      <span
+                        className="track"
+                        role="progressbar"
+                        aria-valuenow={Math.round(pct)}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={`${toolDisplay(q.tool)} ${label} 已用 ${pct.toFixed(1)}%`}
+                      >
+                        <i
+                          style={{
+                            width: `${width}%`,
+                            // A used window at 3% must still read as *started*;
+                            // below ~4 px the fill is invisible on a 84 px track.
+                            minWidth: pct > 0 ? 4 : undefined,
+                          }}
+                          data-stage={stage}
+                        />
+                      </span>
+                    )}
+                    {unlimited ? (
+                      <span className="quota-pct quota-pct--na">不限</span>
+                    ) : (
+                      <span className="quota-pct num" data-stage={stage}>
+                        {pct > 100 ? Math.round(pct) : pct < 10 ? pct.toFixed(1) : Math.round(pct)}
+                        <em>%</em>
+                      </span>
+                    )}
                     <span className="quota-reset num">
                       {q.resets_at_ms > 0 ? until(q.resets_at_ms, now) : "—"}
                     </span>

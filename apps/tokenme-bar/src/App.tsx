@@ -33,7 +33,11 @@ export default function App() {
 function PanelApp() {
   const [report, setReport] = useState<Report | null>(null);
   const [period, setPeriod] = useState<PeriodKey>("day");
-  const [page, setPage] = useState<PageKey>("overview");
+  // Dev/QA affordance: ?page=ranks deep-links a page; anything unknown is overview.
+const [page, setPage] = useState<PageKey>(() => {
+  const p = new URLSearchParams(location.search).get("page");
+  return p === "tools" || p === "ranks" || p === "detail" ? p : "overview";
+});
   const scroll = useRef<HTMLElement | null>(null);
   const [tray, setTray] = useState<TrayState | null>(null);
   const [loading, setLoading] = useState(false);

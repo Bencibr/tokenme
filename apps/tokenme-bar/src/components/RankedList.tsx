@@ -6,10 +6,10 @@ import { MoreRow, Section } from "./Section";
 import { nextSortState, SortToggle, type SortState } from "./SortToggle";
 
 /**
- * One row = name, tokens, cost, with the ranking carried by a proportional
- * wash behind the row instead of a separate hairline bar: the two-line rows
- * read as a ladder of stripes, and the 2 px tracks were too thin to compare.
- * The fill is accent at 10%, so the text keeps full ink over it.
+ * One row = position, name, proportional bar, tokens, cost. The bar lives in
+ * its own column with a shared origin — the inline bar-chart idiom — so the
+ * ladder reads along one vertical line instead of as background staining; the
+ * leading row's name keeps full ink, the rest step down a shade.
  */
 export function RankRows({
   items,
@@ -28,26 +28,27 @@ export function RankRows({
 
   return (
     <ol className="rank">
-      {shown.map((i) => {
+      {shown.map((i, idx) => {
         const credit = i.counts.credits > 0 && i.total_tokens === 0;
         const measure = rankingByCost ? i.cost : i.total_tokens;
         const share = max > 0 ? Math.max((measure / max) * 100, measure > 0 ? 2 : 0) : 0;
         const [head, tail] = splitPath(i.label);
         return (
-          <li
-            className="rank-row"
-            key={i.key}
-            style={{
-              // a fading tail: the wash reads as a bar, not a stained block
-              backgroundImage:
-                "linear-gradient(90deg, var(--page-accent-soft), transparent 92%)",
-              backgroundSize: `${share}% 100%`,
-            }}
-          >
+          <li className="rank-row" key={i.key}>
             <div className="rank-line">
+              <span className="rank-no num" aria-hidden="true">
+                {String(idx + 1).padStart(2, "0")}
+              </span>
               <span className="rank-name" title={i.key}>
                 {head ? <span className="rank-dir">{head}</span> : null}
                 {tail}
+              </span>
+              {/* The ranking is a bar in its own column — one shared origin, so
+                  cross-row comparison is a single vertical line. A wash behind
+                  the row put the strongest tint under the name while the ranked
+                  figure sat at the far edge, and neighbouring shares blurred. */}
+              <span className="rank-bar" aria-hidden="true">
+                <i style={{ width: `${share}%` }} />
               </span>
               <span className="rank-tokens num">{credit ? "—" : compactTokens(i.total_tokens)}</span>
               <span className="rank-cost num" data-credit={credit || undefined} data-unpriced={!i.priced || undefined}>

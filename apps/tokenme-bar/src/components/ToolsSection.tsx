@@ -110,6 +110,35 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
           );
         })}
       </ol>
+      {showMoney && totalCost > 0 ? (
+        <div className="share">
+          <div className="share-bar" aria-hidden="true">
+            {ordered
+              .filter((t) => t.cost > 0)
+              .map((t) => (
+                <span
+                  key={t.key}
+                  style={
+                    {
+                      "--c": toolColor(t.key),
+                      width: `${(t.cost / totalCost) * 100}%`,
+                    } as React.CSSProperties
+                  }
+                />
+              ))}
+          </div>
+          <div className="share-legend">
+            {ordered
+              .filter((t) => t.cost > 0)
+              .map((t) => (
+                <span key={t.key} className="share-item">
+                  <i style={{ background: toolColor(t.key) }} />
+                  {toolDisplay(t.key)} <b className="num">{percent(totalCost > 0 ? (t.cost / totalCost) * 100 : 0, 0)}</b>
+                </span>
+              ))}
+          </div>
+        </div>
+      ) : null}
     </Section>
   );
 }
