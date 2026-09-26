@@ -114,7 +114,6 @@ pub fn tray_state(app: &AppHandle) -> Option<TrayState> {
         label: title.unwrap_or_default(),
         tooltip,
         mode: settings.tray_mode,
-        modes: TrayMode::ALL.to_vec(),
     })
 }
 

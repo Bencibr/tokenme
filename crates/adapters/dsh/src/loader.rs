@@ -66,14 +66,12 @@ pub fn read(file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error>
         }
         let Ok(line) = std::str::from_utf8(line) else { continue };
         if let parser::Parsed::Event(event) = stream.line(line, &key) {
-            events.push(event);
+            events.push(*event);
         }
     }
     Ok(ReadOutcome { events, cursor: ReadCursor(file.size) })
 }
 
 fn session_files(sessions: &PathBuf) -> impl Iterator<Item = PathBuf> {
-    WalkDir::new(sessions).into_iter().filter_map(|e| e.ok()).map(|e| e.into_path()).filter(|p| {
-        paths::is_session_file(&p)
-    })
+    WalkDir::new(sessions).into_iter().filter_map(|e| e.ok()).map(|e| e.into_path()).filter(|p| paths::is_session_file(p))
 }

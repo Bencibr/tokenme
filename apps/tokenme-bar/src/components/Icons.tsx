@@ -43,14 +43,6 @@ export function IconArrowUp(p: IconProps) {
 }
 
 /** Header's "back to the previous page". */
-export function IconBack(p: IconProps) {
-  return (
-    <Svg {...p}>
-      <path d="M15 5l-7 7 7 7" />
-    </Svg>
-  );
-}
-
 /** Points down when a list is folded; `.more-row[aria-expanded="true"]` turns it. */
 export function IconChevron(p: IconProps) {
   return (
@@ -73,15 +65,6 @@ export function IconFlat(p: IconProps) {
   return (
     <Svg {...p}>
       <path d="M5 12h14" />
-    </Svg>
-  );
-}
-
-export function IconClock(p: IconProps) {
-  return (
-    <Svg {...p}>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M12 7.5V12l3 2" />
     </Svg>
   );
 }

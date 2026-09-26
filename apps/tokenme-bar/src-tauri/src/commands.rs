@@ -17,7 +17,6 @@ pub struct TrayState {
     pub label: String,
     pub tooltip: String,
     pub mode: TrayMode,
-    pub modes: Vec<TrayMode>,
 }
 
 /// Returns the last report; `force` asks the engine for an immediate re-index.

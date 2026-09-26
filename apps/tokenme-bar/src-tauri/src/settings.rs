@@ -30,16 +30,6 @@ pub enum TrayMode {
 }
 
 impl TrayMode {
-    /// Cycle order as the user listed it: 仅托盘 → 仅Token → 仅花费 → the three 托盘 combos.
-    pub const ALL: [TrayMode; 6] = [
-        TrayMode::TrayOnly,
-        TrayMode::TokensOnly,
-        TrayMode::CostOnly,
-        TrayMode::TrayTokens,
-        TrayMode::TrayCost,
-        TrayMode::TrayTokensCost,
-    ];
-
     /// Whether the dual-ring icon is part of the display.
     pub fn shows_icon(self) -> bool {
         !matches!(self, TrayMode::TokensOnly | TrayMode::CostOnly)

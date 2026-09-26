@@ -166,7 +166,6 @@ export interface TrayState {
   label: string;
   tooltip: string;
   mode: TrayMode;
-  modes: TrayMode[];
 }
 
 export interface Bridge {
