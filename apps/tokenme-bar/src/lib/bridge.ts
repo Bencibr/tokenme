@@ -6,6 +6,10 @@ import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, Tr
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** The dismiss control is a Windows tray-panel affordance; macOS uses the
+ * native non-activating panel behavior and should not show a duplicate close. */
+export const isWindows = inTauri && /Windows/i.test(navigator.userAgent);
+
 /** `system` hands the media query back to the OS; a pin sets `data-theme`. */
 export function applyTheme(theme: ThemeKey): void {
   if (theme === "system") delete document.documentElement.dataset.theme;
@@ -158,6 +162,24 @@ export const bridge: Bridge = {
     await invoke<void>("set_show_money", { on });
   },
 
+  async setBubbleEnabled(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.bubble_enabled = on;
+      return;
+    }
+    await invoke<void>("set_bubble_enabled", { on });
+  },
+
+  async showPanel(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("show_panel");
+  },
+
+  async beginBubbleDrag(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("begin_bubble_drag");
+  },
+
   async quit(): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("quit_app");
@@ -170,5 +192,6 @@ const browserSettings: PanelSettings = {
   refresh_secs: 30,
   theme: "system",
   show_money: true,
+  bubble_enabled: true,
   version: "dev",
 };

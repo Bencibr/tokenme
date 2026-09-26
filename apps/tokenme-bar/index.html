@@ -2,9 +2,20 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=400, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>tokenme</title>
+    <script>
+      // Platform-scoped styling lives on <html data-platform> (see theme.css).
+      // Only the native Tauri windows need it — the web preview keeps its
+      // fake-desktop glass — and it must be set before the first paint so the
+      // surface never flashes translucent on a platform without blur.
+      if ("__TAURI_INTERNALS__" in window) {
+        var ua = navigator.userAgent;
+        document.documentElement.dataset.platform =
+          /Win/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "macos" : "linux";
+      }
+    </script>
     <style>
       /* Keep the transparent window transparent before the stylesheet loads. */
       html {

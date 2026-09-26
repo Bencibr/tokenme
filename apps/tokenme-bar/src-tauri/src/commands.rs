@@ -8,6 +8,7 @@ use usage_core::pricing::PricingOptions;
 use usage_core::{PricingMap, PricingMeta, Report};
 
 use crate::engine::{EngineChannel, Msg, Shared};
+use crate::{bubble, panel};
 use crate::settings::{Theme, TrayMode};
 use crate::tray;
 
@@ -134,6 +135,7 @@ pub struct PanelSettings {
     pub refresh_secs: u64,
     pub theme: Theme,
     pub show_money: bool,
+    pub bubble_enabled: bool,
     pub version: String,
 }
 
@@ -145,6 +147,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         refresh_secs: settings.refresh_secs,
         theme: settings.theme,
         show_money: settings.show_money,
+        bubble_enabled: settings.bubble_enabled,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -177,6 +180,36 @@ pub async fn set_show_money(app: AppHandle, on: bool) -> Result<(), String> {
     };
     settings.show_money = on;
     settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// Windows-only edge bubble. The command remains available on every target so
+/// the frontend bridge stays platform-neutral; non-Windows is a no-op.
+#[tauri::command]
+pub async fn set_bubble_enabled(app: AppHandle, on: bool) -> Result<(), String> {
+    {
+        let shared = app.state::<Shared>();
+        let Ok(mut settings) = shared.settings.lock() else {
+            return Err("settings busy".into());
+        };
+        settings.bubble_enabled = on;
+        settings.clone().save().map_err(|e| e.to_string())?;
+    }
+    bubble::set_enabled(&app, on);
+    Ok(())
+}
+
+/// Called by the Windows bubble when it is clicked.
+#[tauri::command]
+pub fn show_panel(app: AppHandle) {
+    panel::show(&app, None);
+}
+
+/// Hands the press to the Rust-side drag loop. `window.startDragging()` cannot
+/// move this non-activating window (see `bubble::begin_drag`); non-Windows is a
+/// no-op so the bridge stays platform-neutral.
+#[tauri::command]
+pub fn begin_bubble_drag(app: AppHandle) {
+    bubble::begin_drag(&app);
 }
 
 /// Persist the new fallback cadence, then wake the engine so the next wait

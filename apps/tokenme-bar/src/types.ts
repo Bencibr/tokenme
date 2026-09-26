@@ -183,6 +183,11 @@ export interface Bridge {
   setRefreshSecs: (secs: number) => Promise<void>;
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
+  setBubbleEnabled: (on: boolean) => Promise<void>;
+  showPanel: () => Promise<void>;
+  /** Hands the press to the Rust drag loop; the native move loop cannot move a
+   *  non-activating window. Resolves immediately; the drag runs in Rust. */
+  beginBubbleDrag: () => Promise<void>;
   quit: () => Promise<void>;
 }
 
@@ -194,5 +199,6 @@ export interface PanelSettings {
   refresh_secs: number;
   theme: ThemeKey;
   show_money: boolean;
+  bubble_enabled: boolean;
   version: string;
 }

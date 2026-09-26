@@ -7,7 +7,9 @@
   position: relative; /* the settings sheet anchors to the panel, not the window */
   display: flex;
   flex-direction: column;
-  width: 400px;
+  width: 100%;
+  max-width: 400px;
+  min-width: 0;
   height: 100vh;
   max-height: 100vh;
   background: var(--surface);
@@ -88,6 +90,9 @@
 
 .hdr {
   flex: none;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: var(--s3) var(--s4) 10px;
   border-bottom: 1px solid var(--hair);
 }
@@ -96,12 +101,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-width: 0;
 }
 
 .hdr-actions {
   display: flex;
   align-items: center;
   gap: var(--s1);
+  min-width: 0;
+  flex: none;
 }
 
 /* Windows tray panels still need an obvious way to dismiss the open surface;
@@ -111,6 +119,7 @@
   place-items: center;
   width: 22px;
   height: 22px;
+  flex: none;
   color: var(--ink-3);
   border-radius: var(--r-sm);
   transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
@@ -323,8 +332,12 @@
 
 .scroll {
   flex: 1;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
   scrollbar-width: thin;
 }
@@ -350,6 +363,8 @@
 /* ------------------------------------------------------------------- sections */
 
 .sec {
+  min-width: 0;
+  max-width: 100%;
   padding: 10px var(--s4) var(--s3);
   border-bottom: 1px solid var(--hair);
 }
@@ -500,6 +515,8 @@
    then one grid row per window. A flat list made Codex's 5-hour and weekly
    windows read as two unrelated tools. */
 .quota-group {
+  min-width: 0;
+  max-width: 100%;
   padding: 6px 0 7px;
 }
 
@@ -543,6 +560,8 @@
   align-items: center;
   gap: var(--s2);
   margin-bottom: 3px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .quota-head .dot {
@@ -559,6 +578,9 @@
   display: flex;
   gap: 3px;
   margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .quota-badge {
@@ -584,6 +606,8 @@
   align-items: center;
   gap: var(--s2);
   padding: 2px 0 2px 15px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .quota-name {
@@ -674,6 +698,8 @@
   list-style: none;
   margin: 0;
   padding: 0;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Same row language as the ranks page: the cost share is a wash of the tool's
@@ -829,6 +855,11 @@
 }
 
 /* ---------------------------------------------------------------- heatmap */
+
+.heat {
+  min-width: 0;
+  max-width: 100%;
+}
 
 .heat-months {
   position: relative;
@@ -1105,6 +1136,7 @@
 
 .status {
   flex: none;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1354,6 +1386,9 @@
 /* Page entry: a 4 px lift, so a switch reads as the same panel showing another
    slice rather than a new window. */
 .page {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   animation: page-in var(--dur-fast) var(--ease) both;
 }
 

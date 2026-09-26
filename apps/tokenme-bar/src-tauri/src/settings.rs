@@ -42,6 +42,12 @@ fn default_show_money() -> bool {
     true
 }
 
+/// The Windows-only edge bubble is opt-out: it is deliberately absent from
+/// non-Windows settings UI, but old settings files still get the safe default.
+fn default_bubble_enabled() -> bool {
+    true
+}
+
 /// The whole persisted surface: a tiny JSON file under the platform config dir.
 ///
 /// `budgets` is shared with the CLI: `tokenme budget set …` writes that one key of
@@ -52,7 +58,7 @@ fn default_show_money() -> bool {
 /// and `<tool>/<row id>` pairs. Absent entries fall back to the report's own
 /// (rank-stable) order, so a window that appears for the first time just joins
 /// the end instead of scrambling the saved arrangement.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub tray_mode: TrayMode,
@@ -66,11 +72,29 @@ pub struct Settings {
     /// some users would rather not see it.
     #[serde(default = "default_show_money")]
     pub show_money: bool,
+    #[serde(default = "default_bubble_enabled")]
+    pub bubble_enabled: bool,
     pub budgets: BTreeMap<String, usage_core::Budget>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub quota_tools: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub quota_rows: Vec<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            tray_mode: TrayMode::default(),
+            autostart: false,
+            theme: Theme::default(),
+            refresh_secs: default_refresh_secs(),
+            show_money: default_show_money(),
+            bubble_enabled: default_bubble_enabled(),
+            budgets: BTreeMap::new(),
+            quota_tools: Vec::new(),
+            quota_rows: Vec::new(),
+        }
+    }
 }
 
 impl Settings {

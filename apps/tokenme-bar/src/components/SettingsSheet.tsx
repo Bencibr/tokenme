@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { PanelSettings, ThemeKey } from "../types";
-import { bridge } from "../lib/bridge";
+import { bridge, isWindows } from "../lib/bridge";
 import { IconClose } from "./Icons";
 
 const INTERVALS: { secs: number; label: string }[] = [
@@ -55,6 +55,11 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
     void bridge.setShowMoney(on);
   };
 
+  const setBubble = (on: boolean) => {
+    setSettings((s) => (s ? { ...s, bubble_enabled: on } : s));
+    void bridge.setBubbleEnabled(on);
+  };
+
   const quit = () => {
     void bridge.quit();
   };
@@ -95,6 +100,23 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             ))}
           </div>
         </div>
+
+        {isWindows ? (
+          <div className="sheet-row">
+            <div>
+              <div className="sheet-label">边缘悬浮水滴</div>
+              <div className="sheet-hint">显示今日 Token 数，靠近屏幕边缘时自动吸附</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              className="switch"
+              aria-checked={settings?.bubble_enabled ?? true}
+              aria-label="边缘悬浮水滴"
+              onClick={() => setBubble(!(settings?.bubble_enabled ?? true))}
+            />
+          </div>
+        ) : null}
 
         <div className="sheet-row">
           <div className="sheet-label">外观</div>

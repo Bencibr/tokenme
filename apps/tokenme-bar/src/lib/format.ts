@@ -72,6 +72,34 @@ export function compactTokens(n: number): string {
   return unit ? `${value}${unit}` : value;
 }
 
+/**
+ * The bubble's text room: ~5 characters of number plus one unit letter inside a
+ * 76 px ball. Precision folds as the magnitude grows (9.87M / 12.3M / 100M) and
+ * rounding always carries into the next unit (999.6M → 1B) — it may never
+ * widen the string. The panel keeps `splitTokens`' precision; only the ball
+ * truncates.
+ */
+export function ballTokens(n: number): string {
+  const abs = Math.abs(n);
+  if (abs < 1e4) return Math.round(n).toLocaleString("en-US");
+  const thresholds = [1e4, 1e6, 1e9, 1e12];
+  const units = ["K", "M", "B", "T"];
+  let i = 0;
+  for (let k = thresholds.length - 1; k >= 0; k--) {
+    if (abs >= thresholds[k]) {
+      i = k;
+      break;
+    }
+  }
+  let v = abs / thresholds[i];
+  v = Number(v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2));
+  if (v >= 1000 && i < units.length - 1) {
+    i += 1;
+    v = Number((v / 1000).toFixed(2));
+  }
+  return `${n < 0 ? "-" : ""}${v}${units[i]}`;
+}
+
 export function money(n: number): string {
   if (n === 0) return "$0";
   if (n > 0 && n < 0.01) return "<$0.01";

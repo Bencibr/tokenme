@@ -285,6 +285,31 @@
   --page-accent-soft: color-mix(in srgb, var(--page-accent) 15%, transparent);
 }
 
+/* ------------------------------------------------------------------ platform
+   The glass surface depends on something blurring behind it. macOS gets the
+   under-window material (panel.rs); Windows and Linux Tauri windows have
+   nothing behind the transparent webview, so the alpha just lets the raw
+   desktop bleed through and the panel becomes unreadable. There the surface
+   pins to near-opaque — set after the theme blocks above so it wins the tie,
+   and gated on data-platform, which index.html only sets inside Tauri, so the
+   browser preview keeps its frosted fake desktop. */
+:root[data-platform="windows"],
+:root[data-platform="linux"] {
+  --surface: rgba(255, 255, 255, 0.97);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-platform="windows"]:not([data-theme="light"]),
+  :root[data-platform="linux"]:not([data-theme="light"]) {
+    --surface: rgba(19, 26, 38, 0.97);
+  }
+}
+
+:root[data-platform="windows"][data-theme="dark"],
+:root[data-platform="linux"][data-theme="dark"] {
+  --surface: rgba(19, 26, 38, 0.97);
+}
+
 /* ------------------------------------------------------------------- base */
 
 * {

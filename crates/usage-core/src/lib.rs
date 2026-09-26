@@ -87,4 +87,20 @@ impl Error {
     pub fn adapter(id: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Adapter { id: id.into(), message: message.into() }
     }
+    /// Whether the error says the database *file* no longer parses (damaged
+    /// pages, "not a database", I/O failures that a torn WAL or a bad header
+    /// also produce), as opposed to a statement that merely failed. Only a
+    /// rebuild from the source logs answers from such a file, so callers use
+    /// this to decide between reporting and quarantining.
+    pub fn is_corruption(&self) -> bool {
+        match self {
+            Error::Sqlite(message) => {
+                let message = message.to_lowercase();
+                message.contains("malformed")
+                    || message.contains("not a database")
+                    || message.contains("disk i/o")
+            }
+            _ => false,
+        }
+    }
 }

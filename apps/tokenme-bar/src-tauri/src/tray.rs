@@ -185,8 +185,10 @@ fn on_tray_event(tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent) {
             button_state: MouseButtonState::Up,
             rect,
             ..
-        }
-        | TrayIconEvent::DoubleClick { rect, .. } => panel::toggle(&app, Some(rect)),
+        } => panel::toggle(&app, Some(rect)),
+        // On Windows a double click is preceded by the first left-button-up
+        // click. Toggling here as well would immediately undo the first toggle.
+        TrayIconEvent::DoubleClick { .. } => {}
         _ => {}
     }
 }

@@ -1,4 +1,5 @@
 mod commands;
+mod bubble;
 mod engine;
 mod panel;
 mod settings;
@@ -40,6 +41,9 @@ pub fn run() {
             commands::set_refresh_secs,
             commands::set_theme,
             commands::set_show_money,
+            commands::set_bubble_enabled,
+            commands::begin_bubble_drag,
+            commands::show_panel,
             commands::quit_app
         ]);
 
@@ -55,6 +59,7 @@ pub fn run() {
             let handle = app.handle().clone();
             tray::build(&handle)?;
             panel::configure(&handle);
+            bubble::configure(&handle)?;
             engine_start(handle.clone(), rx);
             tray::reconcile_autostart(&handle);
             // Screenshots and manual QA need the panel up without a tray click.

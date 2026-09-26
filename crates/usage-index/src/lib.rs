@@ -107,6 +107,50 @@ pub(crate) fn sql_err(e: rusqlite::Error) -> Error {
     Error::Sqlite(e.to_string())
 }
 
+/// Moves a corrupted index and its sidecars aside, keeping them for forensics.
+/// The connection must already be closed.
+///
+/// The sidecars move first: a live peer (an app instance running an older
+/// build, say) can hold `-wal`/`-shm` open, and if only the main file were
+/// renamed away its next write would recreate them around the fresh database —
+/// two databases sharing one WAL path. If any rename fails the already-moved
+/// files are restored and the caller's error stands unchanged.
+fn quarantine(path: &Path) -> bool {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false };
+    let candidates: Vec<PathBuf> = ["-shm", "-wal", "-journal", ""]
+        .iter()
+        .filter_map(|suffix| {
+            let from = dir.join(format!("{name}{suffix}"));
+            from.exists().then_some(from)
+        })
+        .collect();
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for from in &candidates {
+        let to = from.with_file_name(format!(
+            "{}.corrupt-{stamp}",
+            from.file_name().and_then(|n| n.to_str()).unwrap_or_default()
+        ));
+        match std::fs::rename(from, &to) {
+            Ok(()) => moved.push((from.clone(), to)),
+            Err(_) => {
+                // Half-moved is worse than not moved: a live peer would keep
+                // writing through the old handles while the fresh database
+                // recreates the sidecars — two databases, one WAL path.
+                for (from, to) in &moved {
+                    let _ = std::fs::rename(to, from);
+                }
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub(crate) fn now_ms() -> i64 {
     usage_core::report::now_ms()
 }
@@ -152,18 +196,53 @@ pub struct Index {
 
 impl Index {
     /// Opens (creating if needed) the index at `path`.
+    ///
+    /// A file that no longer parses (damaged pages, a torn WAL) is quarantined
+    /// and recreated empty: every event is re-derivable from the source logs,
+    /// so the next ingest rebuilds the whole index instead of every read
+    /// failing forever with garbage-row errors.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let conn = Connection::open(&path).map_err(|e| Error::io(&path, std::io::Error::other(e)))?;
-        Self::setup(conn, Some(path))
+        match Self::open_connection(&path) {
+            Ok(index) => Ok(index),
+            Err(err) if err.is_corruption() => {
+                if quarantine(&path) {
+                    Self::open_connection(&path)
+                } else {
+                    // Something still holds the file (a live peer, an antivirus
+                    // scan); retrying now would just fail again — the next
+                    // open heals it.
+                    Err(err)
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(|e| Error::Sqlite(e.to_string()))?;
         Self::setup(conn, None)
+    }
+
+    fn open_connection(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path).map_err(|e| Error::io(path, std::io::Error::other(e)))?;
+        let index = Self::setup(conn, Some(path.to_path_buf()))?;
+        // `setup` can succeed on a damaged file (its schema pages still read)
+        // and the first bad row would then fail every report read with garbage
+        // errors forever. quick_check reads every page once here, at open,
+        // where recovery is a re-ingest instead of a dead panel.
+        let clean = index
+            .conn
+            .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+            .map(|row| row == "ok")
+            .unwrap_or(false);
+        if !clean {
+            return Err(Error::Sqlite("database disk image is malformed (quick_check)".into()));
+        }
+        Ok(index)
     }
 
     /// `~/.local/share/tokenme/index.db` style location, or `None` when the
@@ -565,5 +644,41 @@ mod tests {
         }
         tx.commit().unwrap();
         assert_eq!(idx.event_count().unwrap(), 3, "two NULLs plus one keyed row");
+    }
+
+    /// A damaged index must not wedge every future read into garbage-row errors:
+    /// open quarantines the file and hands back an empty one, and the next
+    /// ingest rebuilds everything from the source logs.
+    #[test]
+    fn a_corrupted_index_is_quarantined_and_reopened_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let idx = Index::open(&path).unwrap();
+            idx.conn
+                .execute(
+                    "INSERT INTO event(tool, ts_ms, session, meter, source) VALUES('t', 1, 's', 'tokens', '/x')",
+                    [],
+                )
+                .unwrap();
+        }
+        // Trash the first table root (page 2): the schema on page 1 still opens,
+        // but the b-trees no longer parse. The connection above must be closed
+        // first so the WAL is checkpointed into the main file.
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(4096)).unwrap();
+            file.write_all(&[0xFF; 64]).unwrap();
+        }
+        let idx = Index::open(&path).unwrap();
+        assert_eq!(idx.event_count().unwrap(), 0, "the damaged index was replaced, not reused");
+        let survivors: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".corrupt-"))
+            .collect();
+        assert_eq!(survivors.len(), 1, "the damaged file is kept for forensics: {survivors:?}");
     }
 }

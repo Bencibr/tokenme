@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PageKey, PeriodKey, Report, TrayMode, TrayState } from "./types";
-import { bridge, inTauri, applyTheme, applyMoney } from "./lib/bridge";
+import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { DisplayCtx } from "./lib/display";
 import { localDate } from "./lib/format";
 import { useEscape, useTicker } from "./lib/hooks";
@@ -17,10 +17,19 @@ import { Sources } from "./components/Sources";
 import { IconProvider } from "./components/ToolIcon";
 import { StatusBar } from "./components/StatusBar";
 import { ToolsSection } from "./components/ToolsSection";
+import { BubbleApp } from "./components/BubbleApp";
 
 const MODES: TrayMode[] = ["cost", "tokens", "quiet"];
 
 export default function App() {
+  // The bubble is a runtime-created Windows window that shares this frontend
+  // entrypoint. Keeping it in a separate component prevents panel hooks from
+  // ever running in the utility window.
+  const isBubble = inTauri && getCurrentWindow().label === "bubble";
+  return isBubble ? <BubbleApp /> : <PanelApp />;
+}
+
+function PanelApp() {
   const [report, setReport] = useState<Report | null>(null);
   const [period, setPeriod] = useState<PeriodKey>("day");
   const [page, setPage] = useState<PageKey>("overview");
@@ -157,7 +166,7 @@ export default function App() {
           onPeriod={setPeriod}
           page={page}
           onPage={goPage}
-          onClose={inTauri ? closePanel : undefined}
+          onClose={isWindows ? closePanel : undefined}
         />
 
         <main className="scroll" tabIndex={-1} ref={scroll}>
