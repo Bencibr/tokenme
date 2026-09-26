@@ -132,7 +132,9 @@ pub fn refresh(app: &AppHandle, report: &Report, mode: TrayMode) {
     // set_icon resets the template flag; without it macOS stops recoloring the
     // glyph and the black PNG ships as-is — invisible on a dark menu bar.
     let _ = tray.set_icon_as_template(true);
-    let _ = tray.set_title(title.as_deref());
+    // tray-icon's set_title(None) is a no-op, so clearing means an empty
+    // string — otherwise 仅托盘 keeps the previous mode's text forever.
+    let _ = tray.set_title(Some(title.as_deref().unwrap_or("")));
     let _ = tray.set_tooltip(Some(tooltip));
 }
 
