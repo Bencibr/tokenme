@@ -415,7 +415,7 @@ fn meter_sample(meter: Option<&Value>, name: &str, resets_at_ms: i64) -> Option<
         used_percent: percent,
         window_minutes: 0,
         resets_at_ms,
-        label: Some(format!("{name} · 剩 {}/{}", trim(remaining), trim(total))),
+        label: Some(format!("{name} · 已用 {}/{}", trim(total - remaining), trim(total))),
         id: Some("credits".into()),
     })
 }
@@ -480,7 +480,7 @@ mod tests {
         let s = samples_from_usage(usage);
         assert_eq!(s.len(), 1, "{s:?} — the 0/0 plan row is not a bar");
         assert!((s[0].used_percent - 22.0).abs() < 1e-9, "percentage arrives as a fraction");
-        assert_eq!(s[0].label.as_deref(), Some("资源包 · 剩 470/600"));
+        assert_eq!(s[0].label.as_deref(), Some("资源包 · 已用 130/600"));
         assert_eq!(s[0].resets_at_ms, 0, "the year-9999 sentinel is not a reset date");
         assert_eq!(s[0].window_minutes, 0);
     }
@@ -495,11 +495,11 @@ mod tests {
         let s = samples_from_usage(&usage);
         assert_eq!(s.len(), 2, "{s:?}");
         let plan = &s[0];
-        assert_eq!(plan.label.as_deref(), Some("套餐内 · 剩 499.5/2000"));
+        assert_eq!(plan.label.as_deref(), Some("套餐内 · 已用 1500.5/2000"));
         assert!((plan.used_percent - 75.03).abs() < 1e-9);
         assert_eq!(plan.resets_at_ms, 1_790_784_000_000, "the plan row carries the renewal");
         let pack = &s[1];
-        assert_eq!(pack.label.as_deref(), Some("资源包 · 剩 0/1500"));
+        assert_eq!(pack.label.as_deref(), Some("资源包 · 已用 1500/1500"));
         assert_eq!(pack.used_percent, 100.0, "percentage 1 means a whole, not 1 %");
         assert_eq!(pack.resets_at_ms, 0, "no own reset is advertised for a pack");
     }
@@ -527,11 +527,11 @@ mod tests {
         let s = samples_from_usage(&usage);
         let labels: Vec<&str> = s.iter().map(|x| x.label.as_deref().unwrap_or_default()).collect();
         assert_eq!(s.len(), 5, "{labels:?}");
-        assert_eq!(labels[0], "套餐内 · 剩 100/100");
-        assert!(labels.contains(&"内测礼包 · 剩 40/50"), "{labels:?}");
-        assert!(labels.contains(&"专属资源包 · 剩 30/30"), "an unnamed pack still gets a bar: {labels:?}");
+        assert_eq!(labels[0], "套餐内 · 已用 0/100");
+        assert!(labels.contains(&"内测礼包 · 已用 10/50"), "{labels:?}");
+        assert!(labels.contains(&"专属资源包 · 已用 0/30"), "an unnamed pack still gets a bar: {labels:?}");
         assert!(!labels.iter().any(|l| l.contains("过期包")), "{labels:?} — unavailable is not drawn");
-        assert!(labels.contains(&"共享资源包 · 剩 75/100"), "{labels:?}");
+        assert!(labels.contains(&"共享资源包 · 已用 25/100"), "{labels:?}");
     }
 
     #[test]

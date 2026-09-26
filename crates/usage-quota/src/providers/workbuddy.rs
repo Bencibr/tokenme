@@ -180,7 +180,7 @@ pub(crate) fn samples_from_resource(body: &Value) -> Vec<QuotaSample> {
             used_percent: ((1.0 - g.remain / g.size) * 100.0).clamp(0.0, 100.0),
             window_minutes: 0,
             resets_at_ms: g.resets_at_ms,
-            label: Some(format!("{name} · 剩 {}/{}", trim(g.remain), trim(g.size))),
+            label: Some(format!("{name} · 已用 {}/{}", trim(g.size - g.remain), trim(g.size))),
             id: Some("credits".into()),
         })
         .collect()
@@ -224,7 +224,7 @@ mod tests {
         let s = samples_from_resource(&body);
         assert_eq!(s.len(), 1, "{s:?}");
         let bar = &s[0];
-        assert_eq!(bar.label.as_deref(), Some("Bonus Pack · 剩 60/310"));
+        assert_eq!(bar.label.as_deref(), Some("Bonus Pack · 已用 250/310"));
         assert!((bar.used_percent - (1.0 - 60.0 / 310.0) * 100.0).abs() < 1e-9);
         // The reset is the nearest expiry among packs still holding credits,
         // not the exhausted pack's earlier date.
@@ -241,10 +241,10 @@ mod tests {
         ]}}});
         let s = samples_from_resource(&body);
         assert_eq!(s.len(), 2, "{s:?}");
-        assert_eq!(s[0].label.as_deref(), Some("Bonus Pack · 剩 30/30"));
+        assert_eq!(s[0].label.as_deref(), Some("Bonus Pack · 已用 0/30"));
         assert_eq!(s[0].used_percent, 0.0);
         assert_eq!(s[0].resets_at_ms, 0, "a capacity-only pack advertises no cycle reset");
-        assert_eq!(s[1].label.as_deref(), Some("套餐内 · 剩 500/2000"));
+        assert_eq!(s[1].label.as_deref(), Some("套餐内 · 已用 1500/2000"));
         assert_eq!(s[1].used_percent, 75.0);
     }
 

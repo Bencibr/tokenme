@@ -110,7 +110,7 @@ fn samples_from_balance(body: &Value) -> Vec<QuotaSample> {
         used_percent: used,
         window_minutes: WINDOW_MINUTES,
         resets_at_ms: 0,
-        label: Some(format!("套餐积分 · 剩 {}/{}", trim(available), trim(total))),
+        label: Some(format!("套餐积分 · 已用 {}/{}", trim(total - available), trim(total))),
         id: Some("credits".into()),
     });
     out
@@ -136,7 +136,7 @@ mod tests {
         let s = samples_from_balance(&body);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].used_percent, 0.0);
-        assert_eq!(s[0].label.as_deref(), Some("套餐积分 · 剩 1200/1200"));
+        assert_eq!(s[0].label.as_deref(), Some("套餐积分 · 已用 0/1200"));
         assert_eq!(s[0].id.as_deref(), Some("credits"));
         assert_eq!(s[0].window_minutes, 43_200, "月窗口");
         assert_eq!(s[0].resets_at_ms, 0, "无本地可见的重置时间");
@@ -147,7 +147,7 @@ mod tests {
         let body = json!({"code": 0, "data": {"totalCredits": "1200.00", "availableCredits": "300.00"}});
         let s = samples_from_balance(&body);
         assert_eq!(s[0].used_percent, 75.0);
-        assert_eq!(s[0].label.as_deref(), Some("套餐积分 · 剩 300/1200"));
+        assert_eq!(s[0].label.as_deref(), Some("套餐积分 · 已用 900/1200"));
     }
 
     #[test]
