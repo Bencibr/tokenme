@@ -6,16 +6,20 @@
 //! ZCode's usage panel is described by its own locale as 来自当前供应商额度接口,
 //! and that interface is plain HTTPS — no cached LevelDB snapshot in between:
 //!
+//! * Current ZCode desktop (`3.14.x`): `GET https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=...`
+//!   → `{code, data: {plans[], balances[]}}`. These are the Start Plan buckets
+//!   shown by the current panel and are the primary source below.
 //! * `GET {base}/api/monitor/usage/quota/limit` → `{code, data: {level,
 //!   limits[]}}`, the windows the panel draws. `base` is `https://bigmodel.cn`
 //!   for a BigModel coding plan and `https://api.z.ai` for a Z.ai one
 //!   (`ZCODE_BIGMODEL_USAGE_QUOTA_URL` / `BIGMODEL_USAGE_QUOTA_URL` override, the
-//!   same names the app itself honors). Measured 200 with both credentials below.
+//!   same names the app itself honors). This is retained as a legacy fallback.
 //! * `GET https://zcode.z.ai/api/v1/mcp/usage` → the "ZCode MCP" call meter.
 //! * `GET {base}/api/biz/subscription/list` → the plan's display name
 //!   (`GLM Coding Lite`), so a bar can say which tier it describes.
 //!
-//! Authorization is the account's coding-plan API key, which the app stores in
+//! The current balance endpoint uses the OAuth-issued `zcodejwttoken`; the
+//! legacy quota endpoint uses the account's coding-plan API key, which the app stores in
 //! `~/.zcode/v2/credentials.json` under
 //! `account-provider:coding-plan:account:<plan>:account:<id>:api-key`; the
 //! account's `oauth:<family>:access_token` answers the same endpoint (measured)
@@ -45,7 +49,7 @@
 //! * `nextResetTime` is epoch milliseconds on this endpoint (the mcp meter's
 //!   `next_refresh_at`, by contrast, is seconds).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::Aead;
 use sha2::Digest as _;
@@ -66,6 +70,14 @@ const QUOTA_PATH: &str = "/api/monitor/usage/quota/limit";
 const SUBSCRIPTION_PATH: &str = "/api/biz/subscription/list";
 /// The meter ZCode's own host polls every few minutes, over its own origin.
 const MCP_USAGE_URL: &str = "https://zcode.z.ai/api/v1/mcp/usage";
+
+/// ZCode 3.14.x replaced the old BigModel `limits` response with the balance
+/// buckets used by its own usage panel. The app sends the client metadata below
+/// as part of every request to this endpoint; in particular, the device id is
+/// required by the gateway and is read from the same local state file.
+const ZCODE_ORIGIN: &str = "https://zcode.z.ai";
+const ZCODE_PLAN_BALANCE_PATH: &str = "/api/v1/zcode-plan/billing/balance";
+const ZCODE_APP_VERSION: &str = "3.14.3";
 
 /// The same override pair the app honors, in the same order.
 const URL_OVERRIDES: [&str; 2] = ["ZCODE_BIGMODEL_USAGE_QUOTA_URL", "BIGMODEL_USAGE_QUOTA_URL"];
@@ -90,6 +102,9 @@ impl QuotaProbe for ZcodeQuota {
             .as_ref()
             .and_then(|a| quota_windows(a, plan.as_deref()))
             .unwrap_or_default();
+        if let Some(samples) = zcode_plan_windows() {
+            out.extend(samples);
+        }
         out.extend(mcp_meter(plan.as_deref()).unwrap_or_default());
         if let Some(db) = db_path() {
             if let Ok(conn) = Connection::open_with_flags(
@@ -165,6 +180,103 @@ fn usage_auth() -> Option<UsageAuth> {
     usage_auth_from(&store, &envelope_key())
 }
 
+/// Read the current Start Plan balance used by ZCode's 3.14.x usage panel.
+/// This is deliberately independent of `usage_auth`: the Start Plan endpoint
+/// accepts the OAuth-issued ZCode JWT, while the legacy limits endpoint uses a
+/// coding-plan API key.
+fn zcode_plan_windows() -> Option<Vec<QuotaSample>> {
+    let store = credential_store()?;
+    let key = envelope_key();
+    let token = opened(&store, "zcodejwttoken", &key)?;
+    let device_mid = device_mid();
+    let authorization = format!("Bearer {token}");
+    let headers = zcode_headers(&authorization, device_mid.as_deref());
+    let url = zcode_plan_balance_url();
+    let body = get_json(&url, &headers)?;
+    Some(samples_from_balance(&body))
+}
+
+fn zcode_plan_balance_url() -> String {
+    format!(
+        "{ZCODE_ORIGIN}{ZCODE_PLAN_BALANCE_PATH}?app_version={ZCODE_APP_VERSION}"
+    )
+}
+
+/// These are the same source headers ZCode's Node client adds before sending
+/// a request to its own origin. `X-Device-Mid` is not a secret, but omitting it
+/// makes the balance gateway answer code 3001 (parameter error).
+fn zcode_headers<'a>(authorization: &'a str, device_mid: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
+    let mut headers = vec![
+        ("authorization", authorization),
+        ("accept", "application/json"),
+        ("user-agent", "ZCode/3.14.3"),
+        ("http-referer", ZCODE_ORIGIN),
+        ("x-title", "Z Code@electron"),
+        ("x-zcode-app-version", ZCODE_APP_VERSION),
+        ("x-platform", zcode_platform_key()),
+        ("x-client-language", "unknown"),
+        ("x-client-timezone", "unknown"),
+        ("x-os-category", zcode_os_category()),
+    ];
+    if let Some(device_mid) = device_mid {
+        headers.push(("x-device-mid", device_mid));
+    }
+    headers
+}
+
+fn zcode_platform_key() -> &'static str {
+    let platform = if cfg!(target_os = "windows") {
+        "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        std::env::consts::OS
+    };
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else if cfg!(target_arch = "x86") {
+        "ia32"
+    } else {
+        std::env::consts::ARCH
+    };
+    // The production targets are the only ones ZCode labels specially. Keep
+    // the fallback platform/arch contract readable for other Rust targets.
+    match (platform, arch) {
+        ("win32", "x64") => "win32-x64",
+        ("win32", "arm64") => "win32-arm64",
+        ("darwin", "x64") => "darwin-x64",
+        ("darwin", "arm64") => "darwin-arm64",
+        ("linux", "x64") => "linux-x64",
+        ("linux", "arm64") => "linux-arm64",
+        _ => "unknown-unknown",
+    }
+}
+
+fn zcode_os_category() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+fn device_mid() -> Option<String> {
+    let raw = std::fs::read_to_string(zcode_home()?.join("v2").join("telemetry-state.json")).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("deviceMid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 /// The quota windows, straight from the interface the IDE reads. `None` means
 /// "this account answered nothing", which is not the same as "no windows".
 fn quota_windows(auth: &UsageAuth, plan: Option<&str>) -> Option<Vec<QuotaSample>> {
@@ -200,6 +312,108 @@ fn plan_name(auth: &UsageAuth) -> Option<String> {
 /// The windows the vendor reports, in the vendor's own order and naming.
 pub(crate) fn samples_from_limits(limits: &Value, plan: Option<&str>) -> Vec<QuotaSample> {
     limits.as_array().map(|arr| arr.iter().filter_map(|l| limit_sample(l, plan)).collect()).unwrap_or_default()
+}
+
+/// Convert the `data.plans`/`data.balances` envelope returned by ZCode 3.14.x.
+/// Only balances belonging to an active Start Plan are shown; this matches the
+/// vendor UI and prevents an expired or orphaned bucket from being presented as
+/// current quota.
+pub(crate) fn samples_from_balance(body: &Value) -> Vec<QuotaSample> {
+    let data = match body.get("data") {
+        Some(data) => data,
+        None => return Vec::new(),
+    };
+    let plans = match data.get("plans").and_then(Value::as_array) {
+        Some(plans) => plans,
+        None => return Vec::new(),
+    };
+    let active = plans.iter().find(|plan| {
+        plan.get("status").and_then(Value::as_str).is_some_and(|status| status.eq_ignore_ascii_case("active"))
+            && is_start_plan(plan)
+    });
+    let Some(active) = active else { return Vec::new() };
+    let plan_id = text_field(active, "plan_id");
+    let user_plan_id = text_field(active, "user_plan_id");
+    let plan_name = text_field(active, "name").or_else(|| plan_id.clone()).unwrap_or_else(|| "ZCode Start Plan".to_string());
+    data.get("balances")
+        .and_then(Value::as_array)
+        .map(|balances| {
+            balances
+                .iter()
+                .filter(|balance| {
+                    let same_user_plan = user_plan_id.as_deref().is_some_and(|id| text_field(balance, "user_plan_id").as_deref() == Some(id));
+                    let same_plan = plan_id.as_deref().is_some_and(|id| text_field(balance, "plan_id").as_deref() == Some(id));
+                    same_user_plan || same_plan
+                })
+                .filter_map(|balance| balance_sample(balance, &plan_name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_start_plan(plan: &Value) -> bool {
+    ["plan_id", "name"].iter().filter_map(|key| text_field(plan, key)).any(|value| {
+        let value = value.to_ascii_lowercase();
+        value.contains("start-plan") || value.contains("start plan")
+    })
+}
+
+fn text_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn number_field(value: &Value, key: &str) -> Option<f64> {
+    value.get(key).and_then(|raw| {
+        raw.as_f64().or_else(|| raw.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+    })
+}
+
+fn epoch_ms(value: Option<f64>) -> i64 {
+    let value = value.filter(|value| value.is_finite() && *value > 0.0).unwrap_or(0.0);
+    if value <= 0.0 {
+        0
+    } else if value < 100_000_000_000.0 {
+        (value * 1000.0) as i64
+    } else {
+        value as i64
+    }
+}
+
+fn balance_sample(balance: &Value, plan_name: &str) -> Option<QuotaSample> {
+    let total = number_field(balance, "total_units");
+    let used = number_field(balance, "used_units");
+    let remaining = number_field(balance, "remaining_units");
+    let denominator = total.or_else(|| Some(used? + remaining?))?;
+    if denominator <= 0.0 || !denominator.is_finite() {
+        return None;
+    }
+    let used = used.or_else(|| Some(denominator - remaining?))?.clamp(0.0, denominator);
+    let start = epoch_ms(number_field(balance, "period_start"));
+    let end = epoch_ms(number_field(balance, "period_end"));
+    let reset = epoch_ms(number_field(balance, "expires_at")).max(end);
+    let window_minutes = if end > start {
+        (end - start) / MINUTE
+    } else {
+        0
+    };
+    let bucket = text_field(balance, "bucket_id")
+        .or_else(|| text_field(balance, "entitlement_id"))
+        .unwrap_or_else(|| "balance".to_string());
+    let name = text_field(balance, "show_name")
+        .or_else(|| text_field(balance, "entitlement_id"))
+        .unwrap_or_else(|| "模型额度".to_string());
+    Some(QuotaSample {
+        used_percent: (used / denominator * 100.0).clamp(0.0, 100.0),
+        window_minutes,
+        resets_at_ms: reset,
+        label: Some(format!("{name} · {plan_name}")),
+        id: Some(format!("start-plan:{bucket}")),
+    })
 }
 
 fn limit_sample(limit: &Value, plan: Option<&str>) -> Option<QuotaSample> {
@@ -323,7 +537,7 @@ fn mcp_of(body: &Value) -> Option<QuotaSample> {
 // ------------------------------------------------------------- the credential
 
 fn credential_store() -> Option<Value> {
-    let raw = std::fs::read(dirs::home_dir()?.join(".zcode").join("v2").join("credentials.json")).ok()?;
+    let raw = std::fs::read(zcode_home()?.join("v2").join("credentials.json")).ok()?;
     serde_json::from_slice(&raw).ok()
 }
 
@@ -350,16 +564,65 @@ fn session() -> Option<Session> {
 }
 
 fn envelope_key() -> [u8; 32] {
-    let secret = std::env::var("ZCODE_CREDENTIAL_SECRET").unwrap_or_else(|_| {
-        // `darwin`, not Rust's `macos`: the string is Node's `os.platform()`, and
-        // one character off here reads as "every credential is unreadable".
-        format!(
-            "zcode-credential-fallback:darwin:{}:{}",
-            dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default(),
-            std::env::var("USER").unwrap_or_else(|_| "unknown".into()),
-        )
-    });
+    let secret = std::env::var("ZCODE_CREDENTIAL_SECRET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| credential_fallback_secret(&platform_name(), &home_dir(), &username()));
     sha2::Sha256::digest(secret.as_bytes()).into()
+}
+
+/// Must stay byte-for-byte compatible with ZCode's `os.platform()`,
+/// `os.homedir()`, and `os.userInfo().username` fallback secret.
+fn credential_fallback_secret(platform: &str, home: &Path, user: &str) -> String {
+    format!("zcode-credential-fallback:{platform}:{}:{user}", home.display())
+}
+
+fn platform_name() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        return "win32".to_string();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return "darwin".to_string();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return "linux".to_string();
+    }
+    #[allow(unreachable_code)]
+    std::env::consts::OS.to_string()
+}
+
+fn username() -> String {
+    #[cfg(windows)]
+    let names = ["USERNAME", "USER"];
+    #[cfg(not(windows))]
+    let names = ["USER", "USERNAME"];
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn home_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(home) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+            return PathBuf::from(home);
+        }
+    }
+    dirs::home_dir().unwrap_or_default()
+}
+
+fn zcode_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("ZCODE_HOME") {
+        let home = home.to_string_lossy().trim().to_string();
+        if !home.is_empty() {
+            return Some(PathBuf::from(home));
+        }
+    }
+    Some(home_dir().join(".zcode"))
 }
 
 /// One entry of the store, decrypted. Any failure is simply "no credential":
@@ -456,7 +719,7 @@ fn trim_k(n: f64) -> String {
 }
 
 fn db_path() -> Option<PathBuf> {
-    let db = dirs::home_dir()?.join(".zcode").join("cli").join("db").join("db.sqlite");
+    let db = zcode_home()?.join("cli").join("db").join("db.sqlite");
     db.is_file().then_some(db)
 }
 
@@ -547,6 +810,60 @@ mod tests {
     }
 
     #[test]
+    fn current_start_plan_balances_become_model_quota_rows() {
+        let body = json!({
+            "code": 0,
+            "data": {
+                "plans": [{
+                    "user_plan_id": "upl-1",
+                    "plan_id": "zcode-v3-start-plan-0924-wk-2",
+                    "name": "ZCode Weekend Build",
+                    "status": "active"
+                }],
+                "balances": [{
+                    "bucket_id": "bucket-1",
+                    "user_plan_id": "upl-1",
+                    "plan_id": "zcode-v3-start-plan-0924-wk-2",
+                    "entitlement_id": "ent-1",
+                    "show_name": "GLM-5.3-Flash",
+                    "total_units": 300000000,
+                    "used_units": 23109560,
+                    "remaining_units": 276890440,
+                    "period_start": 1790390948,
+                    "period_end": 1790557200,
+                    "expires_at": 1790557200
+                }]
+            }
+        });
+        let samples = samples_from_balance(&body);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].id.as_deref(), Some("start-plan:bucket-1"));
+        assert!((samples[0].used_percent - 7.7031866667).abs() < 0.00001);
+        assert_eq!(samples[0].window_minutes, (1790557200 - 1790390948) / 60);
+        assert_eq!(samples[0].resets_at_ms, 1790557200000);
+        assert_eq!(samples[0].label.as_deref(), Some("GLM-5.3-Flash · ZCode Weekend Build"));
+    }
+
+    #[test]
+    fn balance_parser_rejects_expired_or_orphaned_plans() {
+        let expired = json!({
+            "data": {
+                "plans": [{"plan_id": "zcode-start-plan", "name": "ZCode Start Plan", "status": "expired"}],
+                "balances": [{"plan_id": "zcode-start-plan", "total_units": 100, "used_units": 1, "remaining_units": 99}]
+            }
+        });
+        assert!(samples_from_balance(&expired).is_empty());
+
+        let orphan = json!({
+            "data": {
+                "plans": [{"plan_id": "zcode-start-plan", "name": "ZCode Start Plan", "status": "active"}],
+                "balances": [{"plan_id": "another-plan", "total_units": 100, "used_units": 1, "remaining_units": 99}]
+            }
+        });
+        assert!(samples_from_balance(&orphan).is_empty());
+    }
+
+    #[test]
     fn percentage_wins_over_the_counter_pair_because_usage_is_ambiguous() {
         // `usage` is the allowance on the tool-call record, so it is never
         // consulted; the fallback uses what does agree.
@@ -628,6 +945,25 @@ mod tests {
         let auth = usage_auth_from(&Value::Object(store), &key).expect("the measured fallback");
         assert_eq!(auth.authorization, "Bearer oauth-tok");
         assert_eq!(auth.base, "https://bigmodel.cn");
+    }
+
+    #[test]
+    fn credential_fallback_matches_zcode_platform_and_identity_contract() {
+        let home = Path::new(r"C:\Users\me");
+        assert_eq!(
+            credential_fallback_secret("win32", home, "sp"),
+            r"zcode-credential-fallback:win32:C:\Users\me:sp"
+        );
+        assert_eq!(
+            credential_fallback_secret("darwin", Path::new("/Users/me"), "sp"),
+            "zcode-credential-fallback:darwin:/Users/me:sp"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_uses_node_compatible_platform_name() {
+        assert_eq!(platform_name(), "win32");
     }
 
     #[test]
@@ -790,4 +1126,5 @@ mod tests {
             println!("[zcode] {:>6} min  {:>6.2}%  reset={:>13}  {}", s.window_minutes, s.used_percent, s.resets_at_ms, s.label.unwrap_or_default());
         }
     }
+
 }

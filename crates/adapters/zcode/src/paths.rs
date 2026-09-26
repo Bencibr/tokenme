@@ -44,11 +44,19 @@ pub const ROLLOUT_SUFFIX: &str = ".jsonl";
 /// `~/.zcode`, honouring `ZCODE_HOME`.
 pub fn zcode_home() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(ENV_ZCODE_HOME) {
-        if !dir.is_empty() {
-            return Some(PathBuf::from(dir));
+        let trimmed = dir.to_string_lossy().trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
         }
     }
-    dirs::home_dir().map(|h| h.join(".zcode"))
+    #[cfg(target_os = "windows")]
+    let home = std::env::var_os("USERPROFILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir);
+    #[cfg(not(target_os = "windows"))]
+    let home = dirs::home_dir();
+    home.map(|h| h.join(".zcode"))
 }
 
 pub fn cli_dir() -> Option<PathBuf> {
