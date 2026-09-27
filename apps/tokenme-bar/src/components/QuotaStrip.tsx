@@ -266,13 +266,6 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                 const cut = label.indexOf(" · ");
                 const head = cut === -1 ? label : label.slice(0, cut);
                 const tail = cut === -1 ? "" : label.slice(cut);
-                // A package bar carries its ledger in the label ("今日额度 ·
-                // 已用 51.96M/300M"); the spent figure belongs with the other
-                // numerics on the right edge of the name zone, not inline with
-                // the window name.
-                const usedAt = tail.indexOf("已用 ");
-                const amount = usedAt === -1 ? "" : tail.slice(usedAt);
-                const plan = usedAt === -1 ? tail : tail.slice(0, usedAt).replace(/\s*·\s*$/, "");
                 return (
                   <div
                     className="quota-row"
@@ -284,7 +277,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     <span className="quota-name" title={label}>
                       <span className="quota-text">
                         <span className="quota-win">{head}</span>
-                        {plan ? <span className="quota-sub">{plan}</span> : null}
+                        {tail ? <span className="quota-sub">{tail}</span> : null}
                       </span>
                       {mine && (
                         <span className="quota-badge" data-origin="budget">
@@ -318,14 +311,8 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                       <span className="quota-pct quota-pct--na">不限</span>
                     ) : (
                       <span className="quota-pct num" data-stage={stage}>
-                        <span className="quota-pct-v">
-                          {pct > 100 ? Math.round(pct) : pct < 10 ? pct.toFixed(1) : Math.round(pct)}
-                          <em>%</em>
-                        </span>
-                        {/* the spent ledger rides under the figure, same
-                            right edge — the numeric column answers both
-                            "how full" and "how much" */}
-                        {amount ? <span className="quota-amt">{amount.replace("已用 ", "")}</span> : null}
+                        {pct > 100 ? Math.round(pct) : pct < 10 ? pct.toFixed(1) : Math.round(pct)}
+                        <em>%</em>
                       </span>
                     )}
                     <span className="quota-reset num">

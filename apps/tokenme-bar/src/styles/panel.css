@@ -651,25 +651,11 @@
   flex: none;
 }
 
-
-
 .quota-pct {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  line-height: 1.3;
   font-size: 12px;
   font-weight: 600;
   text-align: right;
   font-variant-numeric: tabular-nums;
-}
-
-/* the spent ledger (X/Y) sits under the percentage at the same right edge */
-.quota-amt {
-  font-size: 10px;
-  font-weight: 500;
-  color: var(--ink-3);
-  white-space: nowrap;
 }
 
 /* The unit is decoration; the figure is the signal, so it sits back. */
