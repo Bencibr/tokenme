@@ -914,11 +914,53 @@
 }
 
 .rank-name {
+  position: relative;
   font-size: 12px;
   color: var(--ink-2);
+  cursor: default;
+  min-width: 0;
+}
+
+/* truncation belongs to the inner span — the name cell itself must not clip,
+   or the click-to-reveal tooltip would be cut by its own anchor */
+.rank-name .rank-text {
+  display: inline-block;
+  vertical-align: bottom;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* the directory prefix truncates on its own so the basename — the part a
+   human matches on — survives every truncation */
+.rank-name .rank-dir {
+  display: inline-block;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+/* click-to-reveal full label; below the row so the top rows never clip */
+.rank-tip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  max-width: 330px;
+  padding: 5px 9px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hair-2);
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-2);
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  z-index: 30;
 }
 
 .rank-row:first-child .rank-name {

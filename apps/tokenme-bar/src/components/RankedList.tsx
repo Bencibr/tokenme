@@ -22,6 +22,10 @@ export function RankRows({
 }) {
   const showMoney = useMoney();
   const shown = items.slice(0, limit);
+  // One tooltip at a time, keyed on the row: click the truncated name to see
+  // the full path — hover titles exist but a non-activating panel is exactly
+  // where nobody waits for a hover delay.
+  const [tipKey, setTipKey] = useState<string | null>(null);
   // Dollars off: rank by tokens — the list keeps its shape without pretending
   // to know what a model costs. The cost column follows showMoney alone so a
   // tokens-ranked section keeps the same columns as the rest of the page.
@@ -41,9 +45,19 @@ export function RankRows({
               <span className="rank-no num" aria-hidden="true">
                 {String(idx + 1).padStart(2, "0")}
               </span>
-              <span className="rank-name" title={i.key}>
-                {head ? <span className="rank-dir">{head}</span> : null}
-                {tail}
+              <span
+                className="rank-name"
+                title={i.key}
+                onClick={() => setTipKey(tipKey === i.key ? null : i.key)}
+                onMouseLeave={() => tipKey === i.key && setTipKey(null)}
+              >
+                {/* the truncation lives on an inner span: the tooltip anchors
+                    to the name cell and must not inherit its overflow clip */}
+                <span className="rank-text">
+                  {head ? <span className="rank-dir">{head}</span> : null}
+                  {tail}
+                </span>
+                {tipKey === i.key ? <span className="rank-tip">{i.label}</span> : null}
               </span>
               {/* The ranking is a bar in its own column — one shared origin, so
                   cross-row comparison is a single vertical line. A wash behind
