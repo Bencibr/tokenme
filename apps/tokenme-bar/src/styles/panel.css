@@ -23,7 +23,7 @@
    The radius matches the native content-view clip set in `panel::configure` —
    the page rounds itself for the web preview, the layer does it for real. */
 [data-env="tauri"] .panel {
-  border-radius: 12px;
+  border-radius: 0;
   border: 1px solid var(--hair-2);
   height: calc(100vh - 2px);
   /* Keep overlays, scroll content, and the WebView's own composited layers

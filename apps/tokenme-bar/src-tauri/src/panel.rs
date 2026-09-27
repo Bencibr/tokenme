@@ -717,7 +717,9 @@ pub fn configure(app: &AppHandle) {
             use tauri_nspanel::cocoa::base::{id, YES};
             use tauri_nspanel::objc::{msg_send, sel, sel_impl};
             /// Matches `[data-env="tauri"] .panel` in the panel stylesheet.
-            const CORNER: f64 = 12.0;
+            /// Square: a rounded clip leaves the four corners transparent, and
+            /// against a dark desktop they read as notched-out bites.
+            const CORNER: f64 = 0.0;
             let content: id = panel.content_view();
             let _: () = msg_send![content, setWantsLayer: YES];
             let layer: id = msg_send![content, layer];
