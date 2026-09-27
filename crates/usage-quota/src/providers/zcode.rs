@@ -443,7 +443,7 @@ fn balance_sample(balance: &Value, multi_bucket: bool) -> Option<QuotaSample> {
         window_minutes,
         resets_at_ms: reset,
         label: Some(format!(
-            "今日额度 · {lead}已用 {}/{}",
+            "Start Plan · {lead}已用 {}/{}",
             compact_units(used),
             compact_units(denominator)
         )),
@@ -876,7 +876,7 @@ mod tests {
         assert!((samples[0].used_percent - 7.7031866667).abs() < 0.00001);
         assert_eq!(samples[0].window_minutes, (1790557200 - 1790390948) / 60);
         assert_eq!(samples[0].resets_at_ms, 1790557200000);
-        assert_eq!(samples[0].label.as_deref(), Some("今日额度 · 已用 23.11M/300M"));
+        assert_eq!(samples[0].label.as_deref(), Some("Start Plan · 已用 23.11M/300M"));
     }
 
     #[test]
