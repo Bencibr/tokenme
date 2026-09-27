@@ -112,6 +112,12 @@ pub fn show(app: &AppHandle, rect: Option<Rect>) {
 
 fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     anchor(window, rect);
+    // Re-sync the native backing with the persisted theme on every open: a
+    // theme switch the app missed (label typo'd away once) or an OS
+    // appearance change while hidden otherwise leaves a stale layer under
+    // the translucent page until relaunch.
+    #[cfg(target_os = "macos")]
+    apply_window_background(window, None);
     let _ = window.show();
 
     // Windows tray panels are intentionally non-activating. Calling set_focus

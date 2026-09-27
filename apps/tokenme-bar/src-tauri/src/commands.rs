@@ -193,7 +193,7 @@ pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
     // the native backing must follow, or the window strip under the sheet
     // flashes the old theme's colour for the lifetime of the panel
     #[cfg(target_os = "macos")]
-    if let Some(w) = app.get_webview_window("panel") {
+    if let Some(w) = app.get_webview_window(crate::panel::LABEL) {
         crate::panel::apply_window_background(&w, Some(theme));
     }
     Ok(())
