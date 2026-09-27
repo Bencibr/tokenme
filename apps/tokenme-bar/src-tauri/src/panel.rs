@@ -732,6 +732,7 @@ pub fn configure(app: &AppHandle) {
             }
         }
         app.manage(PanelHandle(panel));
+        apply_window_background(&window, None);
     }
     // If the conversion fails the window stays a plain `alwaysOnTop` surface:
     // the tray toggle still works, it just cannot follow into full screen.
@@ -740,6 +741,38 @@ pub fn configure(app: &AppHandle) {
 }
 
 /// Hides the panel when the user switches Space or activates another app.
+/// The window's own backing shows wherever the webview viewport rounds a few
+/// pixels short of the window height (fractional-scale rounding) — a dark
+/// strip under the settings sheet on a light theme. Paint the panel backing
+/// with the theme's own surface so the strip and the sheet are one colour.
+#[cfg(target_os = "macos")]
+pub fn apply_window_background(window: &tauri::WebviewWindow, theme: Option<crate::settings::Theme>) {
+    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
+    use tauri_nspanel::WebviewWindowExt as _;
+
+    let resolved = theme.or_else(|| Some(crate::settings::Settings::load().theme));
+    // system follows the OS appearance the window itself reports
+    let dark = match resolved {
+        Some(crate::settings::Theme::Light) => false,
+        Some(crate::settings::Theme::Dark) => true,
+        _ => window.theme().ok() == Some(tauri::Theme::Dark),
+    };
+    // --surface-solid: light #f9fafc · dark #19212d
+    let (r, g, b) = if dark { (0.098, 0.129, 0.176) } else { (0.976, 0.980, 0.988) };
+    if let Ok(panel) = window.to_panel() {
+        unsafe {
+            let (fr, fg, fb) = (r as f64, g as f64, b as f64);
+            let color: id = msg_send![class!(NSColor), colorWithCalibratedRed: fr
+                green: fg blue: fb alpha: 1.0f64];
+            let _: () = msg_send![panel, setBackgroundColor: color];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn apply_window_background(_window: &tauri::WebviewWindow, _theme: Option<crate::settings::Theme>) {}
+
 #[cfg(target_os = "macos")]
 fn observe_context_switches(app: &AppHandle) {
     use std::ffi::CString;
