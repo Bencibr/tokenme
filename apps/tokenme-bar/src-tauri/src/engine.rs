@@ -75,9 +75,24 @@ impl Shared {
 /// Runs the engine on its own thread; `tx` is the same sender commands hold so
 /// the file-watcher wake-ups can be merged into one queue.
 pub fn start(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
+    // An engine panic must not take the whole panel down: catch it, log it,
+    // and let the thread end — the tray and the last report stay alive, the
+    // log says exactly which unwind killed the updates.
     std::thread::Builder::new()
         .name("tokenme-engine".into())
-        .spawn(move || run(app, rx, tx))
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(app, rx, tx)
+            }));
+            if let Err(panic) = result {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".into());
+                crate::logging::error(&format!("engine thread panicked: {msg} — updates stop until relaunch"));
+            }
+        })
         .expect("failed to spawn the tokenme engine thread");
 }
 
