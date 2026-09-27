@@ -127,13 +127,19 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
   // is group-level information: it rides the tool header once, and the rows
   // keep only their window names.
   const planOf = (rows: QuotaView[]): string => {
-    const tails = rows.map((q) => {
-      const label = windowName(q);
-      const cut = label.indexOf(" · ");
-      return cut === -1 ? "" : label.slice(cut + 3);
-    });
-    const first = tails[0] ?? "";
-    if (!first || first.includes("已用 ") || tails.some((t) => t !== first)) return "";
+    // Ledger rows (今日额度 · 已用 X/Y) are their own tail and never vote —
+    // a Start Plan bucket lives in every ZCode group, so requiring unanimous
+    // tails disabled the hoist forever.
+    const tails = rows
+      .filter((q) => !windowName(q).includes("已用 "))
+      .map((q) => {
+        const label = windowName(q);
+        const cut = label.indexOf(" · ");
+        return cut === -1 ? "" : label.slice(cut + 3);
+      });
+    if (tails.length === 0) return "";
+    const first = tails[0];
+    if (!first || tails.some((t) => t !== first)) return "";
     return first;
   };
   // The drag handlers run outside render, so the key lists they reorder from
