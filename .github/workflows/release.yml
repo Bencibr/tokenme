@@ -23,14 +23,15 @@ jobs:
       - name: Stage artifacts
         run: |
           B=apps/tokenme-bar/src-tauri/target/release/bundle
-          cd "$B/macos" && ditto -c -k --keepParent tokenme.app ../../../../tokenme-macos-arm64.app.zip
-          cd "$B/dmg" && cp tokenme_*.dmg ../../../../
-          cd "$GITHUB_WORKSPACE" && shasum -a 256 tokenme-macos-arm64.app.zip tokenme_*.dmg > sha256.txt
+          mkdir -p dist
+          ditto -c -k --keepParent "$B/macos/tokenme.app" dist/tokenme-macos-arm64.app.zip
+          cp "$B"/dmg/tokenme_*.dmg dist/
+          shasum -a 256 dist/* > sha256.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            tokenme-macos-arm64.app.zip
-            tokenme_*.dmg
+            dist/tokenme-macos-arm64.app.zip
+            dist/tokenme_*.dmg
             sha256.txt
             latest.json
           generate_release_notes: true
