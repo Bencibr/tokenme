@@ -336,7 +336,6 @@ pub(crate) fn samples_from_balance(body: &Value) -> Vec<QuotaSample> {
     let Some(active) = active else { return Vec::new() };
     let plan_id = text_field(active, "plan_id");
     let user_plan_id = text_field(active, "user_plan_id");
-    let plan_name = text_field(active, "name").or_else(|| plan_id.clone()).unwrap_or_else(|| "ZCode Start Plan".to_string());
     data.get("balances")
         .and_then(Value::as_array)
         .map(|balances| {
