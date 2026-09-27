@@ -831,7 +831,9 @@
 
 .tool-top {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 52px 74px;
+  /* the cost slot collapses when empty (money off): token figures hug the
+     right edge instead of floating beside a reserved column of nothing */
+  grid-template-columns: 24px minmax(0, 1fr) 52px auto;
   align-items: center;
   gap: var(--s2);
 }
