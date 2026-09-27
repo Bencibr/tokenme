@@ -747,11 +747,14 @@ pub fn apply_window_background(window: &tauri::WebviewWindow, theme: Option<crat
     use tauri_nspanel::WebviewWindowExt as _;
 
     let resolved = theme.or_else(|| Some(crate::settings::Settings::load().theme));
-    // system follows the OS appearance the window itself reports
+    // "system" must resolve the way the page's media query does — against the
+    // OS appearance, not tauri's window.theme(), which reports Aqua for a
+    // window created without an explicit theme even on a dark system (that
+    // mismatch painted a light layer under a dark page: a grey wash).
     let dark = match resolved {
         Some(crate::settings::Theme::Light) => false,
         Some(crate::settings::Theme::Dark) => true,
-        _ => window.theme().ok() == Some(tauri::Theme::Dark),
+        _ => os_appearance_is_dark(),
     };
     // --surface-solid: light #f9fafc · dark #19212d
     let (fr, fg, fb) = if dark { (0.098, 0.129, 0.176) } else { (0.976, 0.980, 0.988) };
@@ -843,6 +846,21 @@ fn observe_context_switches(app: &AppHandle) {
             let observer: id = &*block as *const _ as id;
             let _: id = msg_send![center, addObserverForName: ns_name object: nil queue: nil usingBlock: observer];
         }
+    }
+}
+
+/// The OS appearance as NSApplication resolves it — the same source the
+/// page's `prefers-color-scheme` media query follows.
+#[cfg(target_os = "macos")]
+fn os_appearance_is_dark() -> bool {
+    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let appearance: id = msg_send![app, effectiveAppearance];
+        let name: id = msg_send![appearance, name];
+        let utf8: *const std::ffi::c_char = msg_send![name, UTF8String];
+        std::ffi::CStr::from_ptr(utf8).to_bytes() == b"NSAppearanceNameDarkAqua"
     }
 }
 
