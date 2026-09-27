@@ -1320,6 +1320,24 @@
   flex: none;
 }
 
+/* a newer release answered the manifest: one quiet chip, mint outline */
+.update-chip {
+  appearance: none;
+  padding: 2px 8px;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.update-chip:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 .refresh {
   display: inline-flex;
   align-items: center;
@@ -1379,6 +1397,27 @@
 .settings-btn:hover {
   color: var(--ink);
   background: var(--fill-hover);
+}
+
+/* contact / releases rows: two quiet text buttons, no pill weight */
+.sheet-actions {
+  display: inline-flex;
+  gap: var(--s2);
+}
+
+.sheet-link {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.sheet-link:hover {
+  text-decoration: underline;
 }
 
 /* --------------------------------------------------------- settings sheet */

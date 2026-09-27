@@ -44,7 +44,8 @@ pub fn run() {
             commands::set_bubble_enabled,
             commands::begin_bubble_drag,
             commands::show_panel,
-            commands::quit_app
+            commands::quit_app,
+            commands::open_external
         ]);
 
     #[cfg(target_os = "macos")]

@@ -139,6 +139,28 @@ pub struct PanelSettings {
     pub version: String,
 }
 
+/// Open a release page / mailto link in the user's browser. The scheme
+/// whitelist is the whole of it: a panel that reads local files has no business
+/// being told to launch arbitrary URLs.
+#[tauri::command]
+pub fn open_external(url: String) -> Result<(), String> {
+    let allowed = url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("mailto:");
+    if !allowed {
+        return Err(format!("unsupported url scheme: {url}"));
+    }
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &url])
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(&url).spawn();
+    spawned.map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String> {
     let settings = app.state::<Shared>().settings();
@@ -167,7 +189,14 @@ pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
         return Err("settings busy".into());
     };
     settings.theme = theme;
-    settings.clone().save().map_err(|e| e.to_string())
+    settings.clone().save().map_err(|e| e.to_string())?;
+    // the native backing must follow, or the window strip under the sheet
+    // flashes the old theme's colour for the lifetime of the panel
+    #[cfg(target_os = "macos")]
+    if let Some(w) = app.get_webview_window("panel") {
+        crate::panel::apply_window_background(&w, Some(theme));
+    }
+    Ok(())
 }
 
 /// Like the theme, a webview-only concern: the panel hides its dollar figures

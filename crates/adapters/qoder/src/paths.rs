@@ -143,7 +143,7 @@ pub(crate) fn stat_file(path: &Path) -> Option<(u64, i64)> {
 }
 
 /// A connection that cannot block the IDE and, as far as the data goes, cannot
-/// write. Same ladder as the ccswitch adapter, and for the same reason.
+/// write. Same ladder as the workbuddy adapter, and for the same reason.
 ///
 /// Measured on this machine's cache db, which is in **WAL**: rung 1
 /// (`mode=ro&nolock=1`) answers `unable to open database file (14)` because the

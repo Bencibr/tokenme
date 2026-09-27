@@ -15,7 +15,6 @@ usage-adapter-cline.workspace = true
 usage-adapter-zcode.workspace = true
 usage-adapter-qoder.workspace = true
 usage-adapter-antigravity.workspace = true
-usage-adapter-ccswitch.workspace = true
 usage-adapter-agnes.workspace = true
 usage-adapter-atomcode.workspace = true
 usage-adapter-workbuddy.workspace = true
