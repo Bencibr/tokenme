@@ -881,9 +881,12 @@
 
 /* The numerals size themselves: a fixed 56 px cost column wrapped
    "0.42 credits" onto two lines and broke the row grid. */
+/* the token figure sits in a fixed column: every row's gap between bar and
+   number is identical, and the left edge of the numbers reads as one line —
+   an auto column let 7-char and 6-char values set different gaps per row */
 .rank-line {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) 60px auto auto;
+  grid-template-columns: 16px minmax(0, 1fr) 60px 56px auto;
   align-items: center;
   gap: var(--s2);
 }

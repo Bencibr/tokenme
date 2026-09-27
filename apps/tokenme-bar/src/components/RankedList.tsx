@@ -20,10 +20,12 @@ export function RankRows({
   limit?: number;
   weight?: "cost" | "tokens";
 }) {
+  const showMoney = useMoney();
   const shown = items.slice(0, limit);
-  // Dollars off: rank and wash by tokens — the list keeps its shape without
-  // pretending to know what a model costs.
-  const rankingByCost = weight === "cost" && useMoney();
+  // Dollars off: rank by tokens — the list keeps its shape without pretending
+  // to know what a model costs. The cost column follows showMoney alone so a
+  // tokens-ranked section keeps the same columns as the rest of the page.
+  const rankingByCost = weight === "cost" && showMoney;
   const max = shown.reduce((acc, i) => Math.max(acc, rankingByCost ? i.cost : i.total_tokens), 0);
 
   return (
@@ -54,7 +56,7 @@ export function RankRows({
               <span className="rank-cost num" data-credit={credit || undefined} data-unpriced={!i.priced || undefined}>
                 {credit
                   ? creditText(i.counts.credits)
-                  : !rankingByCost
+                  : !showMoney
                     ? ""
                     : i.priced
                       ? money(i.cost)
