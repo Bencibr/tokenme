@@ -106,7 +106,6 @@ impl QuotaProbe for ZcodeQuota {
             out.extend(samples);
         }
         out.extend(mcp_meter(plan.as_deref()).unwrap_or_default());
-        out.extend(start_plan_samples());
         if let Some(db) = db_path() {
             if let Ok(conn) = Connection::open_with_flags(
                 format!("file:{}?mode=ro", db.display()),
@@ -120,183 +119,6 @@ impl QuotaProbe for ZcodeQuota {
 }
 
 // ------------------------------------------------------- the Start Plan bucket
-
-/// The Start Plan marketplace (`account:*-start-plan`) meters its buckets —
-/// the "ZCode Weekend Build" token pools — on `billing/balance`, not on the
-/// coding-plan quota interface above. `billing/current` answers this module's
-/// session credential, but the balance endpoint does not: replaying the exact
-/// URL the app itself builds (`?app_version=…`) answers 400 parameter error,
-/// because the host gateway wraps the call with headers this module cannot
-/// reproduce. What the host *does* do is log the full balance payload — the
-/// same plans+balances JSON its panel renders — to the daily usage log on
-/// every poll (`billing/balance 请求完成 …`). The newest such line is exactly
-/// as fresh as the IDE's own number, so this meter reads the log, not the
-/// wire, and needs no credential at all.
-///
-/// The bucket is a one-time grant with an activity expiry, not a rolling
-/// window: `window_minutes` stays 0 and `resets_at_ms` carries the plan's
-/// `ends_at`, which the panel renders as the countdown-to-expiry column.
-const BALANCE_MARKER: &str = "billing/balance \u{8bf7}\u{6c42}\u{5b8c}\u{6210} ";
-
-fn start_plan_samples() -> Vec<QuotaSample> {
-    let Some(payload) = latest_balance_payload() else { return Vec::new() };
-    start_plan_from_payload(&payload)
-}
-
-/// Newest balance payload across the daily logs; file names sort by date, so
-/// the reverse scan is newest-first without any date math.
-fn latest_balance_payload() -> Option<Value> {
-    let dir = dirs::home_dir()?.join(".zcode").join("v2").join("logs");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "log"))
-        .collect();
-    files.sort();
-    files.into_iter().rev().find_map(|f| {
-        let text = std::fs::read_to_string(&f).ok()?;
-        last_balance_payload(&text)
-    })
-}
-
-/// The JSON object that follows the newest marker in one log file. The line is
-/// the payload plus whatever the logger appended, so it is brace-matched, not
-/// split at end-of-line.
-fn last_balance_payload(text: &str) -> Option<Value> {
-    let rest = &text[text.rfind(BALANCE_MARKER)? + BALANCE_MARKER.len()..];
-    let line = &rest[rest.find('{')?..];
-    let bytes = line.as_bytes();
-    let (mut depth, mut in_str, mut esc) = (0i32, false, false);
-    for (i, b) in bytes.iter().enumerate() {
-        if in_str {
-            if esc {
-                esc = false;
-            } else if *b == b'\\' {
-                esc = true;
-            } else if *b == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_str = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return serde_json::from_str(&line[..=i]).ok();
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// One bar per live bucket of an active plan. The qualifier names the model
-/// only when several buckets share the panel, so the common single-bucket
-/// account reads `今日额度 · 已用 6.65M/300M` instead of a ledger.
-pub(crate) fn start_plan_from_payload(body: &Value) -> Vec<QuotaSample> {
-    // The host logs the envelope it received; a direct probe would log the
-    // bare API body. Both shapes carry `data` one level down.
-    let data = body
-        .pointer("/payload/data")
-        .or_else(|| body.get("data"))
-        .unwrap_or(&Value::Null);
-    let plans = data.get("plans").and_then(Value::as_array);
-    let Some(balances) = data.get("balances").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let plan_of = |b: &Value| {
-        plans?.iter().find(|p| {
-            // The balance bucket names only its entitlement; the plan is the
-            // one whose entitlements list contains it. A plan_id on the bucket
-            // joins directly when a shape carries one.
-            let eid = b.get("entitlement_id").and_then(Value::as_str);
-            if let Some(eid) = eid {
-                let listed = p
-                    .get("entitlements")
-                    .and_then(Value::as_array)
-                    .is_some_and(|es| {
-                        es.iter()
-                            .any(|e| e.get("entitlement_id").and_then(Value::as_str) == Some(eid))
-                    });
-                if listed {
-                    return true;
-                }
-            }
-            let pid = p.get("user_plan_id").and_then(Value::as_str);
-            let bid = b
-                .get("user_plan_id")
-                .and_then(Value::as_str)
-                .or_else(|| b.get("plan_id").and_then(Value::as_str));
-            match (pid, bid) {
-                (Some(a), Some(c)) => a == c,
-                _ => false,
-            }
-        })
-    };
-    let mut out = Vec::new();
-    for b in balances {
-        let plan = plan_of(b);
-        let status = plan
-            .and_then(|p| p.get("status"))
-            .and_then(Value::as_str)
-            .unwrap_or("active");
-        if !LIVE.contains(&status) {
-            continue;
-        }
-        let Some(total) = b.get("total_units").and_then(Value::as_f64) else { continue };
-        if total <= 0.0 {
-            continue;
-        }
-        let used = b.get("used_units").and_then(Value::as_f64).unwrap_or(0.0);
-        let model = b.get("show_name").and_then(Value::as_str).unwrap_or("");
-        let multi_bucket = balances
-            .iter()
-            .filter(|x| x.get("total_units").and_then(Value::as_f64).is_some_and(|t| t > 0.0))
-            .count()
-            > 1;
-        let bucket = if multi_bucket && !model.is_empty() { format!("{model} · ") } else { String::new() };
-        let ends_at = plan
-            .and_then(|p| p.get("ends_at"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        out.push(QuotaSample {
-            used_percent: (used / total * 100.0).clamp(0.0, 100.0),
-            window_minutes: 0,
-            resets_at_ms: if ends_at > 0 { ends_at * 1000 } else { 0 },
-            label: Some(format!(
-                "今日额度 · {bucket}已用 {}/{}",
-                compact_units(used),
-                compact_units(total)
-            )),
-            id: b
-                .get("entitlement_id")
-                .and_then(Value::as_str)
-                .map(|s| format!("start-plan:{s}")),
-        });
-    }
-    out
-}
-
-/// 6650999 → 6.65M · 300000000 → 300M — bucket sizes are token counts, and the
-/// label stays inside the panel.
-fn compact_units(n: f64) -> String {
-    let (v, unit) = if n.abs() >= 1e9 {
-        (n / 1e9, "B")
-    } else if n.abs() >= 1e6 {
-        (n / 1e6, "M")
-    } else if n.abs() >= 1e3 {
-        (n / 1e3, "K")
-    } else {
-        (n, "")
-    };
-    let s = format!("{v:.2}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    format!("{s}{unit}")
-}
 
 // ------------------------------------------------- the provider quota interface
 
@@ -518,14 +340,18 @@ pub(crate) fn samples_from_balance(body: &Value) -> Vec<QuotaSample> {
     data.get("balances")
         .and_then(Value::as_array)
         .map(|balances| {
-            balances
+            let owned: Vec<&Value> = balances
                 .iter()
                 .filter(|balance| {
                     let same_user_plan = user_plan_id.as_deref().is_some_and(|id| text_field(balance, "user_plan_id").as_deref() == Some(id));
                     let same_plan = plan_id.as_deref().is_some_and(|id| text_field(balance, "plan_id").as_deref() == Some(id));
                     same_user_plan || same_plan
                 })
-                .filter_map(|balance| balance_sample(balance, &plan_name))
+                .collect();
+            let multi_bucket = owned.len() > 1;
+            owned
+                .iter()
+                .filter_map(|balance| balance_sample(balance, multi_bucket))
                 .collect()
         })
         .unwrap_or_default()
@@ -564,7 +390,24 @@ fn epoch_ms(value: Option<f64>) -> i64 {
     }
 }
 
-fn balance_sample(balance: &Value, plan_name: &str) -> Option<QuotaSample> {
+/// 6650999 → 6.65M · 300000000 → 300M — bucket sizes are token counts, and the
+/// label stays inside the panel.
+fn compact_units(n: f64) -> String {
+    let (v, unit) = if n.abs() >= 1e9 {
+        (n / 1e9, "B")
+    } else if n.abs() >= 1e6 {
+        (n / 1e6, "M")
+    } else if n.abs() >= 1e3 {
+        (n / 1e3, "K")
+    } else {
+        (n, "")
+    };
+    let s = format!("{v:.2}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    format!("{s}{unit}")
+}
+
+fn balance_sample(balance: &Value, multi_bucket: bool) -> Option<QuotaSample> {
     let total = number_field(balance, "total_units");
     let used = number_field(balance, "used_units");
     let remaining = number_field(balance, "remaining_units");
@@ -584,14 +427,22 @@ fn balance_sample(balance: &Value, plan_name: &str) -> Option<QuotaSample> {
     let bucket = text_field(balance, "bucket_id")
         .or_else(|| text_field(balance, "entitlement_id"))
         .unwrap_or_else(|| "balance".to_string());
-    let name = text_field(balance, "show_name")
+    // The row reads as a gauge, not a ledger: 已用 X/Y keeps text and bar in
+    // one point of view; the model name qualifies only when several buckets
+    // share the panel, so the common single-bucket account stays compact.
+    let model = text_field(balance, "show_name")
         .or_else(|| text_field(balance, "entitlement_id"))
         .unwrap_or_else(|| "模型额度".to_string());
+    let lead = if multi_bucket { format!("{model} · ") } else { String::new() };
     Some(QuotaSample {
         used_percent: (used / denominator * 100.0).clamp(0.0, 100.0),
         window_minutes,
         resets_at_ms: reset,
-        label: Some(format!("{name} · {plan_name}")),
+        label: Some(format!(
+            "今日额度 · {lead}已用 {}/{}",
+            compact_units(used),
+            compact_units(denominator)
+        )),
         id: Some(format!("start-plan:{bucket}")),
     })
 }
@@ -1021,7 +872,7 @@ mod tests {
         assert!((samples[0].used_percent - 7.7031866667).abs() < 0.00001);
         assert_eq!(samples[0].window_minutes, (1790557200 - 1790390948) / 60);
         assert_eq!(samples[0].resets_at_ms, 1790557200000);
-        assert_eq!(samples[0].label.as_deref(), Some("GLM-5.3-Flash · ZCode Weekend Build"));
+        assert_eq!(samples[0].label.as_deref(), Some("今日额度 · 已用 23.11M/300M"));
     }
 
     #[test]
@@ -1197,78 +1048,21 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------- the Start Plan
-
-    /// The measured envelope, 2026-09-27: one Weekend-Build plan, one
-    /// GLM-5.3-Flash bucket of 300M tokens, 6,650,999 used.
-    const START_PLAN_LOG_LINE: &str = r#"[host] billing/balance 请求完成 {"balanceCount":1,"balances":[],"code":0,"msg":"","payload":{"code":0,"msg":"","data":{"server_time":1790438630,"plans":[{"user_plan_id":"upl_1","plan_id":"zcode-v3-start-plan-0924-wk-2","name":"ZCode Weekend Build","status":"active","ends_at":1790557200,"entitlements":[{"entitlement_id":"ent-1","show_name":"GLM-5.3-Flash","meter":"model_usage","unit_type":"token","grant_units":300000000,"period":"one_time"}]}],"balances":[{"entitlement_id":"ent-1","show_name":"GLM-5.3-Flash","total_units":300000000,"used_units":6650999,"remaining_units":293349001}]},"logid":"x"}}"#;
-
     #[test]
-    fn the_newest_log_line_becomes_one_used_view_bucket() {
-        let s = start_plan_from_payload(&last_balance_payload(START_PLAN_LOG_LINE).expect("parses"));
-        assert_eq!(s.len(), 1);
-        let bar = &s[0];
-        assert_eq!(bar.window_minutes, 0, "a one-time grant is not a rolling window");
-        assert_eq!(bar.resets_at_ms, 1790557200000, "expiry, in milliseconds");
-        assert_eq!(bar.used_percent, 6650999.0 / 300000000.0 * 100.0);
-        assert_eq!(
-            bar.label.as_deref(),
-            Some("今日额度 · 已用 6.65M/300M"),
-            "single bucket reads as a gauge, not a ledger"
-        );
-        assert_eq!(bar.id.as_deref(), Some("start-plan:ent-1"));
-    }
-
-    #[test]
-    fn a_log_line_that_trails_the_payload_still_parses() {
-        let line = format!("{START_PLAN_LOG_LINE} [trailing host fields]");
-        assert_eq!(start_plan_from_payload(&last_balance_payload(&line).expect("parses")).len(), 1);
-    }
-
-    #[test]
-    fn an_expired_plan_takes_its_buckets_off_the_panel() {
-        let raw = START_PLAN_LOG_LINE.replace("\"status\":\"active\"", "\"status\":\"expired\"");
-        assert!(start_plan_from_payload(&last_balance_payload(&raw).expect("parses")).is_empty());
-        // An unattributable bucket still shows: the plan list is enrichment, not a gate.
-        let bare = r#"{"data":{"balances":[{"entitlement_id":"e","total_units":1000,"used_units":250}]}}"#;
-        let s = start_plan_from_payload(&serde_json::from_str::<Value>(bare).unwrap());
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].used_percent, 25.0);
-    }
-
-    #[test]
-    fn several_buckets_name_their_models_and_several_plans_could_too() {
-        let multi = r#"{"data":{
-            "plans":[
-              {"user_plan_id":"p1","name":"ZCode Weekend Build","status":"active","ends_at":1790557200},
-              {"user_plan_id":"p2","name":"Starter Pack","status":"active","ends_at":1791000000}],
-            "balances":[
-              {"entitlement_id":"e1","user_plan_id":"p1","show_name":"GLM-5.3-Flash","total_units":300000000,"used_units":30000000},
-              {"entitlement_id":"e2","user_plan_id":"p2","show_name":"GLM-5.3","total_units":1000000,"used_units":500000}]
-        }}"#;
-        let s = start_plan_from_payload(&serde_json::from_str::<Value>(multi).unwrap());
+    fn several_buckets_carry_the_plan_name_so_the_rows_stay_distinct() {
+        let body = json!({
+            "data": {
+                "plans": [{"plan_id": "zcode-v3-start-plan", "name": "ZCode Weekend Build", "status": "active"}],
+                "balances": [
+                    {"bucket_id": "b1", "plan_id": "zcode-v3-start-plan", "show_name": "GLM-5.3-Flash", "total_units": 300000000, "used_units": 30000000},
+                    {"bucket_id": "b2", "plan_id": "zcode-v3-start-plan", "show_name": "GLM-5.3", "total_units": 1000000, "used_units": 500000}
+                ]
+            }
+        });
+        let s = samples_from_balance(&body);
         let labels: Vec<&str> = s.iter().map(|x| x.label.as_deref().unwrap_or_default()).collect();
-        assert_eq!(s.len(), 2, "{labels:?}");
-        assert!(labels.iter().any(|l| l.contains("30M/300M")), "{labels:?}");
-        assert!(labels.iter().any(|l| l.contains("500K/1M")), "{labels:?}");
-    }
-
-    #[test]
-    fn a_broken_or_absent_log_answers_nothing() {
-        assert!(last_balance_payload("no marker here").is_none());
-        assert!(last_balance_payload("billing/balance 请求完成 {broken").is_none());
-        assert!(start_plan_from_payload(&Value::Null).is_empty());
-        let empty = r#"{"data":{"balances":[]}}"#;
-        assert!(start_plan_from_payload(&serde_json::from_str::<Value>(empty).unwrap()).is_empty());
-    }
-
-    #[test]
-    fn unit_sizes_stay_compact() {
-        assert_eq!(compact_units(6_650_999.0), "6.65M");
-        assert_eq!(compact_units(300_000_000.0), "300M");
-        assert_eq!(compact_units(999.0), "999");
-        assert_eq!(compact_units(12_340.0), "12.34K");
-        assert_eq!(compact_units(1_500_000_000.0), "1.5B");
+        assert!(labels.iter().any(|l| l.contains("GLM-5.3-Flash · ") && l.ends_with("已用 30M/300M")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.contains("GLM-5.3 · ") && l.ends_with("已用 500K/1M")), "{labels:?}");
     }
 
     /// The envelope format, proved against itself: a value encrypted the way
