@@ -754,30 +754,44 @@ pub fn apply_window_background(window: &tauri::WebviewWindow, theme: Option<crat
         _ => window.theme().ok() == Some(tauri::Theme::Dark),
     };
     // --surface-solid: light #f9fafc · dark #19212d
-    let (r, g, b) = if dark { (0.098, 0.129, 0.176) } else { (0.976, 0.980, 0.988) };
+    let (fr, fg, fb) = if dark { (0.098, 0.129, 0.176) } else { (0.976, 0.980, 0.988) };
+
+    // Build the CGColor through CoreGraphics itself. NSColor's -CGColor bridge
+    // answers nil for calibrated colours (what colorWithCalibratedRed returns),
+    // and a nil passed to setBackgroundColor silently leaves the layer clear —
+    // the black ring around the rounded panel on a light theme. A CGColorCreate
+    // in sRGB has no such failure mode.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        static kCGColorSpaceSRGB: id;
+        fn CGColorSpaceCreateWithName(name: id) -> id;
+        fn CGColorCreate(space: id, components: *const f64) -> id;
+    }
     if let Ok(panel) = window.to_panel() {
         unsafe {
-            let (fr, fg, fb) = (r as f64, g as f64, b as f64);
-            let color: id = msg_send![class!(NSColor), colorWithCalibratedRed: fr
-                green: fg blue: fb alpha: 1.0f64];
-            // The window backing alone cannot reach the corners: the content
-            // view's layer is rounded (masksToBounds), and outside its painted
-            // content the desktop showed through. Paint the layer itself, so
-            // the rounded rect — corners included — is the surface colour.
-            let _: () = msg_send![panel, setBackgroundColor: color];
-            let content: id = panel.content_view();
-            let _: () = msg_send![content, setWantsLayer: YES];
-            let layer: id = msg_send![content, layer];
-            if !layer.is_null() {
-                let cg: id = msg_send![color, CGColor];
-                let _: () = msg_send![layer, setBackgroundColor: cg];
+            let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            let comps = [fr, fg, fb, 1.0f64];
+            let cg = CGColorCreate(space, comps.as_ptr());
+            if !cg.is_null() {
+                // The window backing must stay CLEAR — an opaque window
+                // background is square and would fill the corners outside the
+                // radius, defeating the rounded clip. The rounded content
+                // layer is the only painter: corners, the 1-2px band the
+                // page's own rounded rect leaves, and any sub-pixel seam are
+                // the panel's own colour; outside the radius is desktop.
+                let clear: id = msg_send![class!(NSColor), clearColor];
+                let _: () = msg_send![panel, setBackgroundColor: clear];
+                let content: id = panel.content_view();
+                let _: () = msg_send![content, setWantsLayer: YES];
+                let layer: id = msg_send![content, layer];
+                if !layer.is_null() {
+                    let _: () = msg_send![layer, setBackgroundColor: cg];
+                }
             }
         }
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn apply_window_background(_window: &tauri::WebviewWindow, _theme: Option<crate::settings::Theme>) {}
 
 #[cfg(target_os = "macos")]
 fn observe_context_switches(app: &AppHandle) {
