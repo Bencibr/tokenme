@@ -95,6 +95,9 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
       </div>
 
       <div className="hero" aria-live="polite">
+        {/* the delta lives on the big number's baseline, right-aligned — a
+            figure and its change read as one line, not two stacked rows; when
+            the line is too tight the side wraps below, still right-aligned */}
         <div className="hero-main">
           <span className="hero-value" aria-hidden="true">
             {hero.value}
@@ -103,24 +106,24 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
             {hero.unit}
           </span>
           <span className="hero-unit-word">tokens</span>
+          <span className="hero-side">
+            {showMoney ? (
+              <span
+                className="hero-cost"
+                title={summary.credit_cost > 0 ? `含 ${money(summary.credit_cost)} 由 credits 按官方方案价折算` : undefined}
+              >
+                {summary.credit_cost > 0 ? "≈" : ""}
+                {money(summary.cost)}
+              </span>
+            ) : null}
+            <DeltaChip pct={showMoney ? win.delta_cost_pct : win.delta_tokens_pct} caption={prevLabel} />
+          </span>
         </div>
         <span className="sr">
           {showMoney
             ? `${win.label} ${compactTokens(summary.total_tokens)} tokens，花费 ${money(summary.cost)}，较${prevLabel} ${signedPercent(win.delta_cost_pct)}`
             : `${win.label} ${compactTokens(summary.total_tokens)} tokens，较${prevLabel} ${signedPercent(win.delta_tokens_pct)}`}
         </span>
-        <div className="hero-sub">
-          {showMoney ? (
-            <span
-              className="hero-cost"
-              title={summary.credit_cost > 0 ? `含 ${money(summary.credit_cost)} 由 credits 按官方方案价折算` : undefined}
-            >
-              {summary.credit_cost > 0 ? "≈" : ""}
-              {money(summary.cost)}
-            </span>
-          ) : null}
-          <DeltaChip pct={showMoney ? win.delta_cost_pct : win.delta_tokens_pct} caption={prevLabel} />
-        </div>
       </div>
 
       <div className="hdr-stats">

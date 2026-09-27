@@ -225,8 +225,19 @@
 
 .hero-main {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 2px;
+}
+
+/* the cost + delta pair rides the big number's baseline, right-aligned; a
+   tight line wraps it below (still right-aligned) instead of crushing it */
+.hero-side {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding-left: var(--s2);
 }
 
 .hero-value {
@@ -248,13 +259,6 @@
   font-size: var(--t-meta);
   color: var(--ink-3);
   letter-spacing: 0.02em;
-}
-
-.hero-sub {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  margin-top: var(--s1);
 }
 
 .hero-cost {

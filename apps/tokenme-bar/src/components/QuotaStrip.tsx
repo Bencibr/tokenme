@@ -218,7 +218,12 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
         onPointerCancel={finish}
       >
         {groups.map((g) => {
-          const origins = [...new Set(g.rows.map((r) => r.origin ?? "probe"))];
+          // Origins are noise when every row answers the same way — the common
+          // case is everything probed live. A group badge appears only when a
+          // row's number came from the tool's own records (日志), exactly the
+          // rows a reader must not mistake for a vendor meter; budget rows
+          // carry their own per-row badge already.
+          const logged = g.rows.some((r) => r.origin === "log");
           return (
             <div
               className="quota-group"
@@ -235,11 +240,11 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                 <ToolIcon tool={g.tool} size={18} />
                 <span className="quota-tool">{toolDisplay(g.tool)}</span>
                 <span className="quota-origins">
-                  {origins.map((o) => (
-                    <span key={o} className="quota-badge" data-origin={o}>
-                      {ORIGIN[o] ?? o}
+                  {logged ? (
+                    <span className="quota-badge" data-origin="log">
+                      {ORIGIN.log}
                     </span>
-                  ))}
+                  ) : null}
                 </span>
               </div>
               {g.rows.map((q) => {
