@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 微信交流群 | 扫码加入（图片：`docs/wechat-group.png`，放入后 README Community 表格显示） |
+| 微信交流群 | <img src="wechat-group.png" width="200" alt="TokenMe 微信交流群"> |
 | 问题反馈 | [GitHub Issues](https://github.com/sp/tokenme/issues) |
 | 邮箱 | 面板「设置 → 联系我们」直达；地址配置在 `apps/tokenme-bar/src/lib/about.ts` |
 | 版本发布 | [Releases](https://github.com/sp/tokenme/releases/latest) · 面板底栏会在有新版本时提示 |

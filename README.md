@@ -136,6 +136,23 @@ tokenme quota
 
 ---
 
+## 📚 Developer & Architecture Documentation
+
+- [Adapter Architecture & Reverse Engineering Notes](docs/internal/ADAPTERS_DESIGN.md)
+- [Verification & Integrity Test Scripts](scripts/)
+
+---
+
+## 💬 Community & Contact
+
+| | |
+| :--- | :--- |
+| 微信交流群 | <img src="docs/wechat-group.png" width="180" alt="TokenMe 微信交流群"> |
+| 问题反馈 | [GitHub Issues](https://github.com/sp/tokenme/issues) |
+| 邮箱 | 面板「设置 → 联系我们」直达（地址配置在 `apps/tokenme-bar/src/lib/about.ts`） |
+| 版本发布 | [Releases](https://github.com/sp/tokenme/releases/latest) · 面板底栏有新版时自动提示 |
+
 ## 📄 License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+
