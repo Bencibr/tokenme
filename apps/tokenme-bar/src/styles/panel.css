@@ -653,6 +653,16 @@
   flex: none;
 }
 
+/* the plan name rides the tool header once, dim and small */
+.quota-plan {
+  font-size: 10px;
+  color: var(--ink-3);
+  margin-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .quota-pct {
   font-size: 12px;
   font-weight: 600;

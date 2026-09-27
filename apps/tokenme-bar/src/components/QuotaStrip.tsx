@@ -123,6 +123,19 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
     tool,
     rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
   }));
+  // A plan suffix every window of a tool repeats ("5 小时 · GLM Coding Lite")
+  // is group-level information: it rides the tool header once, and the rows
+  // keep only their window names.
+  const planOf = (rows: QuotaView[]): string => {
+    const tails = rows.map((q) => {
+      const label = windowName(q);
+      const cut = label.indexOf(" · ");
+      return cut === -1 ? "" : label.slice(cut + 3);
+    });
+    const first = tails[0] ?? "";
+    if (!first || first.includes("已用 ") || tails.some((t) => t !== first)) return "";
+    return first;
+  };
   // The drag handlers run outside render, so the key lists they reorder from
   // must be the ones on screen right now.
   keysRef.current = {
@@ -221,6 +234,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
         onPointerCancel={finish}
       >
         {groups.map((g) => {
+          const plan = planOf(g.rows);
           // Origins are noise when every row answers the same way — the common
           // case is everything probed live. A group badge appears only when a
           // row's number came from the tool's own records (日志), exactly the
@@ -242,6 +256,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
               >
                 <ToolIcon tool={g.tool} size={18} />
                 <span className="quota-tool">{toolDisplay(g.tool)}</span>
+                {plan ? <span className="quota-plan">{plan}</span> : null}
                 <span className="quota-origins">
                   {logged ? (
                     <span className="quota-badge" data-origin="log">
@@ -269,6 +284,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                 const cut = label.indexOf(" · ");
                 const head = cut === -1 ? label : label.slice(0, cut);
                 const tail = cut === -1 ? "" : label.slice(cut);
+                const rowTail = tail === ` · ${plan}` ? "" : tail;
                 return (
                   <div
                     className="quota-row"
@@ -285,7 +301,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     >
                       <span className="quota-text">
                         <span className="quota-win">{head}</span>
-                        {tail ? <span className="quota-sub">{tail}</span> : null}
+                        {rowTail ? <span className="quota-sub">{rowTail}</span> : null}
                       </span>
                       {tipKey === rowKey(q) ? <span className="rank-tip">{label}</span> : null}
                       {mine && (
