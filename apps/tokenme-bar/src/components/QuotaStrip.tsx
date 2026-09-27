@@ -83,6 +83,9 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
   const live = quotas.filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now);
   const [order, setOrderState] = useState<QuotaOrder>(savedOrder);
   const [drag, setDrag] = useState<Drag | null>(null);
+  // Click a truncated window label to read it whole: the native hover title
+  // exists, but nobody waits out its delay in a non-activating panel.
+  const [tipKey, setTipKey] = useState<string | null>(null);
   const dragRef = useRef<Drag | null>(null);
   // The authoritative order: pointer moves arrive faster than renders, so the
   // drag handlers swap through the ref and never through stale state.
@@ -274,11 +277,17 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     data-dragging={drag?.kind === "row" && drag.key === rowKey(q) ? "" : undefined}
                     onPointerDown={(e) => beginPress(e, { kind: "row", key: rowKey(q) })}
                   >
-                    <span className="quota-name" title={label}>
+                    <span
+                      className="quota-name"
+                      title={label}
+                      onClick={() => setTipKey(tipKey === rowKey(q) ? null : rowKey(q))}
+                      onMouseLeave={() => tipKey === rowKey(q) && setTipKey(null)}
+                    >
                       <span className="quota-text">
                         <span className="quota-win">{head}</span>
                         {tail ? <span className="quota-sub">{tail}</span> : null}
                       </span>
+                      {tipKey === rowKey(q) ? <span className="rank-tip">{label}</span> : null}
                       {mine && (
                         <span className="quota-badge" data-origin="budget">
                           {ORIGIN.budget}
