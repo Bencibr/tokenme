@@ -100,13 +100,22 @@ fn which(name: &str) -> Option<PathBuf> {
 /// `{}` on every failure path: no CLI, no network, an old CLI, a timeout.
 fn run_usage() -> Option<String> {
     let bin = binary()?;
-    let mut child = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .args(["-p", "/usage", "--output-format", "json", "--print-timeout", "10s"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // The probe runs from the GUI bar and agy is a console binary: without
+    // CREATE_NO_WINDOW Windows gives it a visible console for the CLI's whole
+    // print budget, once per TTL. Non-Windows targets have no such flag.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().ok()?;
     let deadline = Instant::now() + RUN_BUDGET;
     loop {
         match child.try_wait() {
