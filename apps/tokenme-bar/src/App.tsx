@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PageKey, PeriodKey, Report, TrayMode, TrayState } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
+import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { DisplayCtx } from "./lib/display";
 import { localDate } from "./lib/format";
 import { useEscape, useTicker } from "./lib/hooks";
@@ -44,6 +45,7 @@ const [page, setPage] = useState<PageKey>(() => {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showMoney, setShowMoney] = useState(true);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const tick = useTicker(30_000);
 
   useEffect(() => {
@@ -60,6 +62,10 @@ const [page, setPage] = useState<PageKey>(() => {
       applyTheme(s.theme);
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
+      // One quiet version check per boot; any failure stays silent.
+      if (inTauri && s.version !== "dev") {
+        void checkForUpdate(s.version).then((u) => alive && setUpdate(u));
+      }
     });
     const un = bridge.onReport((r) => {
       setReport(r);
@@ -211,6 +217,7 @@ const [page, setPage] = useState<PageKey>(() => {
           onRefresh={() => void refresh()}
           onOpenSettings={() => setSettingsOpen(true)}
           tray={inTauri ? { mode: tray?.mode ?? "tray_tokens", onCycle: () => void cycleTrayMode() } : null}
+          update={update}
         />
 
         {settingsOpen ? (

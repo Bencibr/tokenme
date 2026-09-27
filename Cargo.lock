@@ -1315,7 +1315,6 @@ dependencies = [
  "usage-adapter-antigravity",
  "usage-adapter-atomcode",
  "usage-adapter-catpaw",
- "usage-adapter-ccswitch",
  "usage-adapter-claude",
  "usage-adapter-cline",
  "usage-adapter-codex",
@@ -1358,19 +1357,6 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-catpaw"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dirs",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "usage-core",
-]
-
-[[package]]
-name = "usage-adapter-ccswitch"
 version = "0.1.0"
 dependencies = [
  "chrono",

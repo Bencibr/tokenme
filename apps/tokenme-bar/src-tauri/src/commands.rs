@@ -139,6 +139,28 @@ pub struct PanelSettings {
     pub version: String,
 }
 
+/// Open a release page / mailto link in the user's browser. The scheme
+/// whitelist is the whole of it: a panel that reads local files has no business
+/// being told to launch arbitrary URLs.
+#[tauri::command]
+pub fn open_external(url: String) -> Result<(), String> {
+    let allowed = url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("mailto:");
+    if !allowed {
+        return Err(format!("unsupported url scheme: {url}"));
+    }
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &url])
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(&url).spawn();
+    spawned.map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String> {
     let settings = app.state::<Shared>().settings();

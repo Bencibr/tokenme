@@ -184,6 +184,14 @@ export const bridge: Bridge = {
     if (!inTauri) return;
     await invoke<void>("quit_app");
   },
+
+  async openExternal(url: string): Promise<void> {
+    if (!inTauri) {
+      window.open(url, "_blank", "noopener");
+      return;
+    }
+    await invoke<void>("open_external", { url });
+  },
 };
 
 /** The browser preview has nothing to persist; the sheet still works in memory. */

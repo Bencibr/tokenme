@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { PanelSettings, ThemeKey } from "../types";
 import { bridge, isWindows } from "../lib/bridge";
+import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
 import { IconClose } from "./Icons";
 
 const INTERVALS: { secs: number; label: string }[] = [
@@ -161,6 +162,30 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             aria-label="开机自动启动"
             onClick={() => setAutostart(!(settings?.autostart ?? false))}
           />
+        </div>
+
+        <div className="sheet-row">
+          <div>
+            <div className="sheet-label">联系我们</div>
+            <div className="sheet-hint">问题反馈 · 版本发布 · 交流群见 README</div>
+          </div>
+          <div className="sheet-actions">
+            <button
+              type="button"
+              className="sheet-link"
+              title={CONTACT_EMAIL}
+              onClick={() => void bridge.openExternal(`mailto:${CONTACT_EMAIL}`)}
+            >
+              发邮件
+            </button>
+            <button
+              type="button"
+              className="sheet-link"
+              onClick={() => void bridge.openExternal(RELEASE_PAGE_URL)}
+            >
+              Releases
+            </button>
+          </div>
         </div>
 
         {bridge.live ? (

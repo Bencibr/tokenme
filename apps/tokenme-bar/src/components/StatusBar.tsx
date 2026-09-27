@@ -1,5 +1,7 @@
 import type { PricingMeta, TrayMode } from "../types";
+import { bridge } from "../lib/bridge";
 import { TRAY_MODE_LABEL, count } from "../lib/format";
+import type { UpdateInfo } from "../lib/update";
 import { IconRefresh, IconSettings, IconWarn } from "./Icons";
 
 const SOURCE_LABEL: Record<PricingMeta["source"], string> = {
@@ -17,6 +19,7 @@ export function StatusBar({
   onRefresh,
   onOpenSettings,
   tray,
+  update,
 }: {
   pricing: PricingMeta;
   events: number;
@@ -25,6 +28,8 @@ export function StatusBar({
   onOpenSettings: () => void;
   /** Present only inside Tauri: a browser has no menu-bar title to configure. */
   tray?: { mode: TrayMode; onCycle: () => void } | null;
+  /** A newer release answered the manifest; the chip opens its download page. */
+  update?: UpdateInfo | null;
 }) {
   return (
     <footer className="status">
@@ -45,6 +50,16 @@ export function StatusBar({
         ) : null}
       </span>
       <span className="status-right">
+        {update ? (
+          <button
+            type="button"
+            className="update-chip num"
+            title={`前往下载 ${update.latest}`}
+            onClick={() => void bridge.openExternal(update.url)}
+          >
+            新版本 v{update.latest}
+          </button>
+        ) : null}
         {tray ? (
           <button type="button" className="tray-mode" onClick={tray.onCycle} title="菜单栏显示内容">
             {TRAY_MODE_LABEL[tray.mode]}

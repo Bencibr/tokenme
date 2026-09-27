@@ -195,6 +195,8 @@ export interface Bridge {
    *  non-activating window. Resolves immediately; the drag runs in Rust. */
   beginBubbleDrag: () => Promise<void>;
   quit: () => Promise<void>;
+  /** Release page / mailto — the Rust side whitelists http(s) and mailto only. */
+  openExternal: (url: string) => Promise<void>;
 }
 
 /** `system` defers to the OS media query; `light`/`dark` pin the panel. */
