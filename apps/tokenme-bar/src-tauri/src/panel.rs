@@ -742,7 +742,7 @@ pub fn configure(app: &AppHandle) {
 /// with the theme's own surface so the strip and the sheet are one colour.
 #[cfg(target_os = "macos")]
 pub fn apply_window_background(window: &tauri::WebviewWindow, theme: Option<crate::settings::Theme>) {
-    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::cocoa::base::{id, YES};
     use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
     use tauri_nspanel::WebviewWindowExt as _;
 
@@ -760,7 +760,18 @@ pub fn apply_window_background(window: &tauri::WebviewWindow, theme: Option<crat
             let (fr, fg, fb) = (r as f64, g as f64, b as f64);
             let color: id = msg_send![class!(NSColor), colorWithCalibratedRed: fr
                 green: fg blue: fb alpha: 1.0f64];
+            // The window backing alone cannot reach the corners: the content
+            // view's layer is rounded (masksToBounds), and outside its painted
+            // content the desktop showed through. Paint the layer itself, so
+            // the rounded rect — corners included — is the surface colour.
             let _: () = msg_send![panel, setBackgroundColor: color];
+            let content: id = panel.content_view();
+            let _: () = msg_send![content, setWantsLayer: YES];
+            let layer: id = msg_send![content, layer];
+            if !layer.is_null() {
+                let cg: id = msg_send![color, CGColor];
+                let _: () = msg_send![layer, setBackgroundColor: cg];
+            }
         }
     }
 }
