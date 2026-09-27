@@ -25,7 +25,10 @@
 [data-env="tauri"] .panel {
   border-radius: 12px;
   border: 1px solid var(--hair-2);
-  height: calc(100vh - 2px);
+  /* full height: the old -2px left a seam whose layer backing read as a
+     white line under the page's translucent surface; the native corner clip
+     needs no page-side inset */
+  height: 100vh;
   /* Keep overlays, scroll content, and the WebView's own composited layers
      inside the same rounded shape as the native window region. */
   clip-path: inset(0 round 12px);
