@@ -74,9 +74,14 @@ mod tests {
             Some(dir.path().join("sessions").as_path())
         );
         std::env::remove_var(ENV_DSH_HOME);
+        // The fallback is home-resolved even when the real `~/.dsh/sessions`
+        // is absent — a machine can carry `.dsh` without ever opening a
+        // session — so the existence filter belongs to the expectation, not
+        // to `sessions_dir`.
+        let expected = dirs::home_dir().map(|h| h.join(".dsh/sessions"));
         assert_eq!(
             sessions_dir().as_deref(),
-            dirs::home_dir().map(|h| h.join(".dsh/sessions")).as_deref()
+            expected.filter(|p| p.is_dir()).as_deref()
         );
     }
 
