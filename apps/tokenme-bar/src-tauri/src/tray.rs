@@ -168,8 +168,22 @@ fn paint(app: &AppHandle, report: &Report, mode: TrayMode) {
     }
     // tray-icon's set_title(None) is a no-op, so clearing means an empty
     // string — otherwise 仅托盘 keeps the previous mode's text forever.
-    let _ = tray.set_title(Some(title.as_deref().unwrap_or("")));
-    let _ = tray.set_tooltip(Some(tooltip));
+    // Same-value writes are skipped entirely: see LastPaint.
+    let title_str = title.clone().unwrap_or_default();
+    let mut changed = true;
+    if let Some(paint) = app.try_state::<LastPaint>() {
+        if let Ok(mut last) = paint.0.lock() {
+            if last.0 == title_str && last.1 == tooltip {
+                changed = false;
+            } else {
+                *last = (title_str.clone(), tooltip.clone());
+            }
+        }
+    }
+    if changed {
+        let _ = tray.set_title(Some(title_str.as_str()));
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
 }
 
 /// Keeps the checkable autostart row in sync with the settings file.
@@ -184,6 +198,13 @@ struct TrayAssets(tauri::image::Image<'static>);
 /// The last mode the status item was painted with — the guard that keeps
 /// periodic refreshes from re-setting the image (and flickering) on no-op.
 struct LastMode(std::sync::Mutex<Option<TrayMode>>);
+
+/// The strings the status item currently carries. Re-writing the same title
+/// and tooltip through AppKit on every engine cycle (the watcher can fire
+/// several times a second) churns NSStatusItem internals for zero visual
+/// change — and that churn path is where the pool drain meets KVO state.
+/// Only real changes are pushed; a same-value write is skipped.
+struct LastPaint(std::sync::Mutex<(String, String)>);
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -217,6 +238,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     // The builder already painted the icon for the startup mode's default;
     // seeding None makes the first publish apply the real mode's imagery.
     app.manage(LastMode(std::sync::Mutex::new(None)));
+    // Empty strings: build() painted icon-only, so the first publish always
+    // writes whatever the mode resolves to.
+    app.manage(LastPaint(std::sync::Mutex::new((String::new(), String::new()))));
 
     TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
