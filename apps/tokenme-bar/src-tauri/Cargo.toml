@@ -1,5 +1,5 @@
 [package]
-name = "tokenme-bar"
+name = "tokenme"
 version = "0.1.0"
 description = "tokenme menu-bar token & cost monitor"
 edition = "2021"

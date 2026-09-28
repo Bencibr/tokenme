@@ -154,7 +154,7 @@ export type PeriodKey = "day" | "week" | "month" | "year";
 /** The panel is four pages rather than one long scroll; see `App.tsx`. */
 export type PageKey = "overview" | "tools" | "ranks" | "detail";
 
-/** Tray label modes, mirrored from `tokenme_bar::TrayMode` (snake_case). */
+/** Tray label modes, mirrored from `tokenme::TrayMode` (snake_case). */
 export type TrayMode =
   | "tray_only"
   | "tokens_only"

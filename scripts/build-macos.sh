@@ -32,7 +32,7 @@ cargo test --workspace --all-targets
 # Tauri leaves the bundle carrying only the linker's ad-hoc signature, and
 # `codesign -v` rejects that ("code has no resources but signature indicates they
 # must be present", because Info.plist is not bound) while the bundle id reads
-# `tokenme_bar-<hash>` instead of `dev.tokenme.bar`. Re-signing ad-hoc binds the
+# `tokenme-<hash>` instead of `dev.tokenme.bar`. Re-signing ad-hoc binds the
 # plist and gives the app a stable identity — which is also what a keychain ACL
 # (e.g. Qoder's `Safe Storage` item) is matched against.
 codesign --force --sign - "$APP_DIR/tokenme.app"
