@@ -67,14 +67,21 @@ export function RankRows({
                 <i style={{ width: `${share}%` }} />
               </span>
               <span className="rank-tokens num">{credit ? "—" : compactTokens(i.total_tokens)}</span>
+              {/* credit rows read "N · credits" stacked so the column keeps
+                  its width and the bars above stay put */}
               <span className="rank-cost num" data-credit={credit || undefined} data-unpriced={!i.priced || undefined}>
-                {credit
-                  ? creditText(i.counts.credits)
-                  : !showMoney
-                    ? ""
-                    : i.priced
-                      ? money(i.cost)
-                      : "无价格"}
+                {credit ? (
+                  <span className="rank-credit">
+                    <b>{creditText(i.counts.credits)}</b>
+                    <em>credits</em>
+                  </span>
+                ) : !showMoney ? (
+                  ""
+                ) : i.priced ? (
+                  money(i.cost)
+                ) : (
+                  "无价格"
+                )}
               </span>
             </div>
           </li>

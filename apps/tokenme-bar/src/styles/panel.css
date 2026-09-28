@@ -1017,6 +1017,22 @@
   font-weight: 550;
 }
 
+/* a credits figure is two tokens, not one number: stacked, so it never
+   widens the column and shoves every bar out of line */
+.rank-credit {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.25;
+}
+
+.rank-credit em {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 9.5px;
+  color: var(--ink-3);
+}
+
 .tabs {
   display: flex;
   gap: var(--s1);
