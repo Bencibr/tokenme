@@ -197,6 +197,8 @@ export interface Bridge {
   quit: () => Promise<void>;
   /** Release page / mailto — the Rust side whitelists http(s) and mailto only. */
   openExternal: (url: string) => Promise<void>;
+  /** Reveal the diagnostic log directory in the file manager. */
+  openLogDir: () => Promise<void>;
 }
 
 /** `system` defers to the OS media query; `light`/`dark` pin the panel. */

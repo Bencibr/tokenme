@@ -17,6 +17,13 @@ fi
 command -v pnpm >/dev/null || { echo "pnpm is required (https://pnpm.io)"; exit 1; }
 command -v cargo >/dev/null || { echo "a Rust toolchain is required"; exit 1; }
 
+# The build id: bumped on every full build and printed, so "which build is
+# running" is one glance at the settings footer or the tray tooltip.
+BUILD_ID_FILE="$APP/src-tauri/BUILD_ID"
+BUILD=$(( $(cat "$BUILD_ID_FILE" 2>/dev/null || echo 0) + 1 ))
+echo "$BUILD" > "$BUILD_ID_FILE"
+echo "==> tokenme build id: $BUILD"
+
 # A stale dist/ would be bundled silently, so build it here rather than trusting it.
 (cd "$APP" && pnpm install --frozen-lockfile --prefer-offline && pnpm build)
 cargo test --workspace --all-targets

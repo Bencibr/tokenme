@@ -1,5 +1,6 @@
 mod commands;
 mod bubble;
+mod logging;
 mod engine;
 mod panel;
 mod settings;
@@ -45,7 +46,8 @@ pub fn run() {
             commands::begin_bubble_drag,
             commands::show_panel,
             commands::quit_app,
-            commands::open_external
+            commands::open_external,
+            commands::open_log_dir
         ]);
 
     #[cfg(target_os = "macos")]
@@ -56,6 +58,8 @@ pub fn run() {
             // Menu-bar only: no Dock tile, no app-switcher entry.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            logging::init();
 
             let handle = app.handle().clone();
             tray::build(&handle)?;

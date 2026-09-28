@@ -192,6 +192,11 @@ export const bridge: Bridge = {
     }
     await invoke<void>("open_external", { url });
   },
+
+  async openLogDir(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("open_log_dir");
+  },
 };
 
 /** The browser preview has nothing to persist; the sheet still works in memory. */

@@ -25,7 +25,10 @@
 [data-env="tauri"] .panel {
   border-radius: 12px;
   border: 1px solid var(--hair-2);
-  height: calc(100vh - 2px);
+  /* full height: the old -2px left a seam whose layer backing read as a
+     white line under the page's translucent surface; the native corner clip
+     needs no page-side inset */
+  height: 100vh;
   /* Keep overlays, scroll content, and the WebView's own composited layers
      inside the same rounded shape as the native window region. */
   clip-path: inset(0 round 12px);
@@ -628,12 +631,14 @@
 }
 
 .quota-name {
+  position: relative;
   font-size: 11.5px;
   color: var(--ink-2);
   display: flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
+  cursor: default;
 }
 
 /* The badge marks a cap the user set, so it can never be read as a vendor
@@ -646,6 +651,16 @@
 
 .quota-name .quota-badge {
   flex: none;
+}
+
+/* the plan name rides the tool header once, dim and small */
+.quota-plan {
+  font-size: 10px;
+  color: var(--ink-3);
+  margin-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .quota-pct {
@@ -816,7 +831,9 @@
 
 .tool-top {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 52px 74px;
+  /* the cost slot collapses when empty (money off): token figures hug the
+     right edge instead of floating beside a reserved column of nothing */
+  grid-template-columns: 24px minmax(0, 1fr) 52px auto;
   align-items: center;
   gap: var(--s2);
 }
@@ -887,6 +904,9 @@
    211 px). Fixed widths keep the bar's left edge on one vertical line. */
 .rank-line {
   display: grid;
+  /* the cost column collapses when empty (money off, no credits): the token
+     figure then hugs the right edge instead of floating beside a reserved
+     column of nothing */
   grid-template-columns: 16px minmax(0, 1fr) 60px 56px 68px;
   align-items: center;
   gap: var(--s2);
@@ -914,11 +934,53 @@
 }
 
 .rank-name {
+  position: relative;
   font-size: 12px;
   color: var(--ink-2);
+  cursor: default;
+  min-width: 0;
+}
+
+/* truncation belongs to the inner span — the name cell itself must not clip,
+   or the click-to-reveal tooltip would be cut by its own anchor */
+.rank-name .rank-text {
+  display: inline-block;
+  vertical-align: bottom;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* the directory prefix truncates on its own so the basename — the part a
+   human matches on — survives every truncation */
+.rank-name .rank-dir {
+  display: inline-block;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+/* click-to-reveal full label; below the row so the top rows never clip */
+.rank-tip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  max-width: 330px;
+  padding: 5px 9px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hair-2);
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-2);
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  z-index: 30;
 }
 
 .rank-row:first-child .rank-name {
@@ -953,6 +1015,22 @@
 .rank-cost[data-credit] {
   font-size: var(--t-meta);
   font-weight: 550;
+}
+
+/* a credits figure is two tokens, not one number: stacked, so it never
+   widens the column and shoves every bar out of line */
+.rank-credit {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.25;
+}
+
+.rank-credit em {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 9.5px;
+  color: var(--ink-3);
 }
 
 .tabs {

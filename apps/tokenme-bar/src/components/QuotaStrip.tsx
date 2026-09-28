@@ -83,6 +83,9 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
   const live = quotas.filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now);
   const [order, setOrderState] = useState<QuotaOrder>(savedOrder);
   const [drag, setDrag] = useState<Drag | null>(null);
+  // Click a truncated window label to read it whole: the native hover title
+  // exists, but nobody waits out its delay in a non-activating panel.
+  const [tipKey, setTipKey] = useState<string | null>(null);
   const dragRef = useRef<Drag | null>(null);
   // The authoritative order: pointer moves arrive faster than renders, so the
   // drag handlers swap through the ref and never through stale state.
@@ -120,6 +123,25 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
     tool,
     rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
   }));
+  // A plan suffix every window of a tool repeats ("5 小时 · GLM Coding Lite")
+  // is group-level information: it rides the tool header once, and the rows
+  // keep only their window names.
+  const planOf = (rows: QuotaView[]): string => {
+    // Ledger rows (今日额度 · 已用 X/Y) are their own tail and never vote —
+    // a Start Plan bucket lives in every ZCode group, so requiring unanimous
+    // tails disabled the hoist forever.
+    const tails = rows
+      .filter((q) => !windowName(q).includes("已用 "))
+      .map((q) => {
+        const label = windowName(q);
+        const cut = label.indexOf(" · ");
+        return cut === -1 ? "" : label.slice(cut + 3);
+      });
+    if (tails.length === 0) return "";
+    const first = tails[0];
+    if (!first || tails.some((t) => t !== first)) return "";
+    return first;
+  };
   // The drag handlers run outside render, so the key lists they reorder from
   // must be the ones on screen right now.
   keysRef.current = {
@@ -218,6 +240,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
         onPointerCancel={finish}
       >
         {groups.map((g) => {
+          const plan = planOf(g.rows);
           // Origins are noise when every row answers the same way — the common
           // case is everything probed live. A group badge appears only when a
           // row's number came from the tool's own records (日志), exactly the
@@ -239,6 +262,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
               >
                 <ToolIcon tool={g.tool} size={18} />
                 <span className="quota-tool">{toolDisplay(g.tool)}</span>
+                {plan ? <span className="quota-plan">{plan}</span> : null}
                 <span className="quota-origins">
                   {logged ? (
                     <span className="quota-badge" data-origin="log">
@@ -266,6 +290,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                 const cut = label.indexOf(" · ");
                 const head = cut === -1 ? label : label.slice(0, cut);
                 const tail = cut === -1 ? "" : label.slice(cut);
+                const rowTail = tail === ` · ${plan}` ? "" : tail;
                 return (
                   <div
                     className="quota-row"
@@ -274,11 +299,17 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     data-dragging={drag?.kind === "row" && drag.key === rowKey(q) ? "" : undefined}
                     onPointerDown={(e) => beginPress(e, { kind: "row", key: rowKey(q) })}
                   >
-                    <span className="quota-name" title={label}>
+                    <span
+                      className="quota-name"
+                      title={label}
+                      onClick={() => setTipKey(tipKey === rowKey(q) ? null : rowKey(q))}
+                      onMouseLeave={() => tipKey === rowKey(q) && setTipKey(null)}
+                    >
                       <span className="quota-text">
                         <span className="quota-win">{head}</span>
-                        {tail ? <span className="quota-sub">{tail}</span> : null}
+                        {rowTail ? <span className="quota-sub">{rowTail}</span> : null}
                       </span>
+                      {tipKey === rowKey(q) ? <span className="rank-tip">{label}</span> : null}
                       {mine && (
                         <span className="quota-badge" data-origin="budget">
                           {ORIGIN.budget}

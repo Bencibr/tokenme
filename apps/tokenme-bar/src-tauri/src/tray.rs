@@ -84,6 +84,7 @@ pub fn label_for(report: &Report, mode: TrayMode) -> (Option<String>, String) {
     );
     if day.summary.credits > 0.0 {
         tooltip.push_str(&format!(" · {:.2} credits", day.summary.credits));
+    tooltip.push_str(&format!(" · v{} build {}", env!("CARGO_PKG_VERSION"), env!("TOKENME_BUILD_ID")));
     }
     if let Some(q) = quota {
         tooltip.push_str(&format!(

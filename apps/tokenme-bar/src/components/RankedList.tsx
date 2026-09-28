@@ -22,6 +22,10 @@ export function RankRows({
 }) {
   const showMoney = useMoney();
   const shown = items.slice(0, limit);
+  // One tooltip at a time, keyed on the row: click the truncated name to see
+  // the full path — hover titles exist but a non-activating panel is exactly
+  // where nobody waits for a hover delay.
+  const [tipKey, setTipKey] = useState<string | null>(null);
   // Dollars off: rank by tokens — the list keeps its shape without pretending
   // to know what a model costs. The cost column follows showMoney alone so a
   // tokens-ranked section keeps the same columns as the rest of the page.
@@ -41,9 +45,19 @@ export function RankRows({
               <span className="rank-no num" aria-hidden="true">
                 {String(idx + 1).padStart(2, "0")}
               </span>
-              <span className="rank-name" title={i.key}>
-                {head ? <span className="rank-dir">{head}</span> : null}
-                {tail}
+              <span
+                className="rank-name"
+                title={i.key}
+                onClick={() => setTipKey(tipKey === i.key ? null : i.key)}
+                onMouseLeave={() => tipKey === i.key && setTipKey(null)}
+              >
+                {/* the truncation lives on an inner span: the tooltip anchors
+                    to the name cell and must not inherit its overflow clip */}
+                <span className="rank-text">
+                  {head ? <span className="rank-dir">{head}</span> : null}
+                  {tail}
+                </span>
+                {tipKey === i.key ? <span className="rank-tip">{i.label}</span> : null}
               </span>
               {/* The ranking is a bar in its own column — one shared origin, so
                   cross-row comparison is a single vertical line. A wash behind
@@ -53,14 +67,21 @@ export function RankRows({
                 <i style={{ width: `${share}%` }} />
               </span>
               <span className="rank-tokens num">{credit ? "—" : compactTokens(i.total_tokens)}</span>
+              {/* credit rows read "N · credits" stacked so the column keeps
+                  its width and the bars above stay put */}
               <span className="rank-cost num" data-credit={credit || undefined} data-unpriced={!i.priced || undefined}>
-                {credit
-                  ? creditText(i.counts.credits)
-                  : !showMoney
-                    ? ""
-                    : i.priced
-                      ? money(i.cost)
-                      : "无价格"}
+                {credit ? (
+                  <span className="rank-credit">
+                    <b>{creditText(i.counts.credits)}</b>
+                    <em>credits</em>
+                  </span>
+                ) : !showMoney ? (
+                  ""
+                ) : i.priced ? (
+                  money(i.cost)
+                ) : (
+                  "无价格"
+                )}
               </span>
             </div>
           </li>

@@ -185,6 +185,14 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             >
               Releases
             </button>
+            <button
+              type="button"
+              className="sheet-link"
+              title="崩溃与异常都记录在这里，反馈问题时附上"
+              onClick={() => void bridge.openLogDir()}
+            >
+              日志
+            </button>
           </div>
         </div>
 

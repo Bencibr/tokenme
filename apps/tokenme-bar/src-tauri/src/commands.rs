@@ -170,7 +170,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         theme: settings.theme,
         show_money: settings.show_money,
         bubble_enabled: settings.bubble_enabled,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: format!("{} (build {})", env!("CARGO_PKG_VERSION"), env!("TOKENME_BUILD_ID")),
     })
 }
 
@@ -193,7 +193,7 @@ pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
     // the native backing must follow, or the window strip under the sheet
     // flashes the old theme's colour for the lifetime of the panel
     #[cfg(target_os = "macos")]
-    if let Some(w) = app.get_webview_window("panel") {
+    if let Some(w) = app.get_webview_window(crate::panel::LABEL) {
         crate::panel::apply_window_background(&w, Some(theme));
     }
     Ok(())
@@ -201,6 +201,20 @@ pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
 
 /// Like the theme, a webview-only concern: the panel hides its dollar figures
 /// itself; persisting is what makes the choice survive a relaunch.
+/// Reveal the diagnostic log directory in the OS file manager.
+#[tauri::command]
+pub fn open_log_dir() -> Result<(), String> {
+    let dir = crate::logging::log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&dir).spawn();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("explorer").arg(&dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(&dir).spawn();
+    spawned.map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn set_show_money(app: AppHandle, on: bool) -> Result<(), String> {
     let shared = app.state::<Shared>();

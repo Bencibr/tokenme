@@ -112,6 +112,12 @@ pub fn show(app: &AppHandle, rect: Option<Rect>) {
 
 fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     anchor(window, rect);
+    // Re-sync the native backing with the persisted theme on every open: a
+    // theme switch the app missed (label typo'd away once) or an OS
+    // appearance change while hidden otherwise leaves a stale layer under
+    // the translucent page until relaunch.
+    #[cfg(target_os = "macos")]
+    apply_window_background(window, None);
     let _ = window.show();
 
     // Windows tray panels are intentionally non-activating. Calling set_focus
@@ -742,31 +748,59 @@ pub fn configure(app: &AppHandle) {
 /// with the theme's own surface so the strip and the sheet are one colour.
 #[cfg(target_os = "macos")]
 pub fn apply_window_background(window: &tauri::WebviewWindow, theme: Option<crate::settings::Theme>) {
-    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::cocoa::base::{id, YES};
     use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
     use tauri_nspanel::WebviewWindowExt as _;
 
     let resolved = theme.or_else(|| Some(crate::settings::Settings::load().theme));
-    // system follows the OS appearance the window itself reports
+    // "system" must resolve the way the page's media query does — against the
+    // OS appearance, not tauri's window.theme(), which reports Aqua for a
+    // window created without an explicit theme even on a dark system (that
+    // mismatch painted a light layer under a dark page: a grey wash).
     let dark = match resolved {
         Some(crate::settings::Theme::Light) => false,
         Some(crate::settings::Theme::Dark) => true,
-        _ => window.theme().ok() == Some(tauri::Theme::Dark),
+        _ => os_appearance_is_dark(),
     };
     // --surface-solid: light #f9fafc · dark #19212d
-    let (r, g, b) = if dark { (0.098, 0.129, 0.176) } else { (0.976, 0.980, 0.988) };
+    let (fr, fg, fb) = if dark { (0.098, 0.129, 0.176) } else { (0.976, 0.980, 0.988) };
+
+    // Build the CGColor through CoreGraphics itself. NSColor's -CGColor bridge
+    // answers nil for calibrated colours (what colorWithCalibratedRed returns),
+    // and a nil passed to setBackgroundColor silently leaves the layer clear —
+    // the black ring around the rounded panel on a light theme. A CGColorCreate
+    // in sRGB has no such failure mode.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        static kCGColorSpaceSRGB: id;
+        fn CGColorSpaceCreateWithName(name: id) -> id;
+        fn CGColorCreate(space: id, components: *const f64) -> id;
+    }
     if let Ok(panel) = window.to_panel() {
         unsafe {
-            let (fr, fg, fb) = (r as f64, g as f64, b as f64);
-            let color: id = msg_send![class!(NSColor), colorWithCalibratedRed: fr
-                green: fg blue: fb alpha: 1.0f64];
-            let _: () = msg_send![panel, setBackgroundColor: color];
+            let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            let comps = [fr, fg, fb, 1.0f64];
+            let cg = CGColorCreate(space, comps.as_ptr());
+            if !cg.is_null() {
+                // The window backing must stay CLEAR — an opaque window
+                // background is square and would fill the corners outside the
+                // radius, defeating the rounded clip. The rounded content
+                // layer is the only painter: corners, the 1-2px band the
+                // page's own rounded rect leaves, and any sub-pixel seam are
+                // the panel's own colour; outside the radius is desktop.
+                let clear: id = msg_send![class!(NSColor), clearColor];
+                let _: () = msg_send![panel, setBackgroundColor: clear];
+                let content: id = panel.content_view();
+                let _: () = msg_send![content, setWantsLayer: YES];
+                let layer: id = msg_send![content, layer];
+                if !layer.is_null() {
+                    let _: () = msg_send![layer, setBackgroundColor: cg];
+                }
+            }
         }
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn apply_window_background(_window: &tauri::WebviewWindow, _theme: Option<crate::settings::Theme>) {}
 
 #[cfg(target_os = "macos")]
 fn observe_context_switches(app: &AppHandle) {
@@ -818,6 +852,21 @@ fn observe_context_switches(app: &AppHandle) {
             let observer: id = &*block as *const _ as id;
             let _: id = msg_send![center, addObserverForName: ns_name object: nil queue: nil usingBlock: observer];
         }
+    }
+}
+
+/// The OS appearance as NSApplication resolves it — the same source the
+/// page's `prefers-color-scheme` media query follows.
+#[cfg(target_os = "macos")]
+fn os_appearance_is_dark() -> bool {
+    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let appearance: id = msg_send![app, effectiveAppearance];
+        let name: id = msg_send![appearance, name];
+        let utf8: *const std::ffi::c_char = msg_send![name, UTF8String];
+        std::ffi::CStr::from_ptr(utf8).to_bytes() == b"NSAppearanceNameDarkAqua"
     }
 }
 

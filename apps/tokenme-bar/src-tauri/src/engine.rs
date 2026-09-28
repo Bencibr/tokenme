@@ -75,9 +75,24 @@ impl Shared {
 /// Runs the engine on its own thread; `tx` is the same sender commands hold so
 /// the file-watcher wake-ups can be merged into one queue.
 pub fn start(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
+    // An engine panic must not take the whole panel down: catch it, log it,
+    // and let the thread end — the tray and the last report stay alive, the
+    // log says exactly which unwind killed the updates.
     std::thread::Builder::new()
         .name("tokenme-engine".into())
-        .spawn(move || run(app, rx, tx))
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(app, rx, tx)
+            }));
+            if let Err(panic) = result {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".into());
+                crate::logging::error(&format!("engine thread panicked: {msg} — updates stop until relaunch"));
+            }
+        })
         .expect("failed to spawn the tokenme engine thread");
 }
 
@@ -110,7 +125,7 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
             .ok();
     }
 
-    ingest(&app, &mut index, &adapters, &detected, &pricing);
+    ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan");
 
     loop {
         // Read per pass, so a cadence change from the panel applies on the next
@@ -120,15 +135,18 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
             Duration::from_secs(secs.clamp(10, 3600))
         };
         match wait_for_work(&rx, &mut pricing, fallback) {
-            Work::Ingest => ingest(&app, &mut index, &adapters, &detected, &pricing),
-            Work::Resummarize => resummarize(&app, &index, &adapters, &detected, &pricing),
+            Work::Ingest(reason) => ingest(&app, &mut index, &adapters, &detected, &pricing, reason),
+            Work::Resummarize => {
+                crate::logging::info("pricing refreshed — re-summarizing indexed events");
+                resummarize(&app, &index, &adapters, &detected, &pricing)
+            }
             Work::Quit => return,
         }
     }
 }
 
 enum Work {
-    Ingest,
+    Ingest(&'static str),
     Resummarize,
     Quit,
 }
@@ -145,10 +163,10 @@ fn wait_for_work(rx: &Receiver<Msg>, pricing: &mut PricingMap, fallback: Duratio
                 if !drain_debounce(rx, pricing) {
                     return Work::Quit;
                 }
-                return Work::Ingest;
+                return Work::Ingest("file change");
             }
-            Ok(Msg::Refresh) => return Work::Ingest,
-            Err(RecvTimeoutError::Timeout) => return Work::Ingest,
+            Ok(Msg::Refresh) => return Work::Ingest("manual refresh"),
+            Err(RecvTimeoutError::Timeout) => return Work::Ingest("cadence timer"),
             Err(RecvTimeoutError::Disconnected) => return Work::Quit,
         }
     }
@@ -179,6 +197,7 @@ fn ingest(
     adapters: &[Box<dyn SourceAdapter>],
     detected: &[DetectedSource],
     pricing: &PricingMap,
+    reason: &'static str,
 ) {
     let shared = app.state::<Shared>();
     // A second ingest while one is running adds nothing but latency.
@@ -188,10 +207,31 @@ fn ingest(
     let cutoff = cutoff_ms();
     let filter = DateFilter::new(Some(cutoff), None);
     // A failed pass keeps the previous report on screen rather than blanking it.
-    let _ = index.ingest(adapters, &filter);
+    let started = std::time::Instant::now();
+    let report = match index.ingest(adapters, &filter) {
+        Ok(r) => {
+            crate::logging::info(&format!(
+                "ingest({reason}): scanned {} changed {} new {} deduped {} purged {} — {} ms",
+                r.files_scanned, r.files_changed, r.new_events, r.deduped, r.purged, r.took_ms
+            ));
+            if r.new_events > 0 {
+                let per_tool: Vec<String> = r.per_tool.iter().map(|(t, n)| format!("{t}:{n}")).collect();
+                crate::logging::info(&format!("ingest indexed per tool: {}", per_tool.join(", ")));
+            }
+            Some(r)
+        }
+        Err(e) => {
+            crate::logging::error(&format!("ingest({reason}) failed: {e}"));
+            None
+        }
+    };
     let _ = index.prune(cutoff);
     let events = index.all_events().unwrap_or_default();
     let sources = index.source_statuses(detected).unwrap_or_else(|_| fallback_sources(detected));
+    if report.is_none() {
+        crate::logging::error(&format!("ingest({reason}) failed pass — previous report stays on screen"));
+    }
+    let _ = report;
     publish(app, &events, &sources, pricing, adapters);
 }
 
@@ -222,8 +262,25 @@ fn publish(
     // here; `usage-quota` caches each answer for its TTL, so this is at worst one
     // slow call per tool every five minutes, never per refresh.
     let polled_quota = {
+        let poll_started = std::time::Instant::now();
         let mut q = usage_core::report::poll_quota(adapters);
         q.extend(usage_quota::collect());
+        let per_tool: Vec<String> = q
+            .iter()
+            .map(|sample| {
+                format!(
+                    "{}:{}%",
+                    sample.tool,
+                    format_args!("{:.1}", sample.used_percent)
+                )
+            })
+            .collect();
+        crate::logging::info(&format!(
+            "quota poll: {} windows in {} ms [{}]",
+            q.len(),
+            poll_started.elapsed().as_millis(),
+            per_tool.join(", ")
+        ));
         q
     };
     let captured = now_ms();
