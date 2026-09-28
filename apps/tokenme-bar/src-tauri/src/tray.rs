@@ -118,8 +118,27 @@ pub fn tray_state(app: &AppHandle) -> Option<TrayState> {
     })
 }
 
-/// Pushes the current numbers onto the status bar. Runs on the engine thread.
+/// AppKit mutations (NSStatusItem, muda menu items) are main-thread-only on
+/// macOS, but the tray is poked from the engine thread and from async commands
+/// too. Every tray-touching body goes through here; calling this from the main
+/// thread itself is fine — the body then runs after the current handler
+/// returns. Skipping the update (instead of crashing the pool drain) when the
+/// event loop is already gone, i.e. during shutdown.
+fn on_main<F: FnOnce() + Send + 'static>(app: &AppHandle, body: F) {
+    if let Err(e) = app.run_on_main_thread(body) {
+        crate::logging::error(&format!("tray update dropped, event loop is gone: {e}"));
+    }
+}
+
+/// Pushes the current numbers onto the status bar. Callable from any thread;
+/// the painting itself is marshalled onto the main thread.
 pub fn refresh(app: &AppHandle, report: &Report, mode: TrayMode) {
+    let handle = app.clone();
+    let report = report.clone();
+    on_main(app, move || paint(&handle, &report, mode));
+}
+
+fn paint(app: &AppHandle, report: &Report, mode: TrayMode) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
     let (title, tooltip) = label_for(report, mode);
     // Re-setting the image repaints the status item — visible as a flicker on
@@ -255,7 +274,14 @@ fn toggle_autostart(app: &AppHandle) {
 
 /// The one writer for the login-item switch: tray menu and panel command both
 /// land here, so the plugin, the menu checkmark and the file can never drift.
+/// Marshalled onto the main thread — the checkmark is an AppKit mutation and
+/// the async command reaches this from the runtime thread.
 pub fn set_autostart(app: &AppHandle, on: bool) {
+    let handle = app.clone();
+    on_main(app, move || apply_autostart(&handle, on));
+}
+
+fn apply_autostart(app: &AppHandle, on: bool) {
     let plugin = app.autolaunch();
     if on {
         plugin.enable().ok();
