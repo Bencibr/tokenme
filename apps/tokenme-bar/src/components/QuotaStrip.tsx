@@ -133,9 +133,10 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
   const planOf = (rows: QuotaView[]): string => {
     // Ledger rows (今日额度 · 已用 X/Y) are their own tail and never vote —
     // a Start Plan bucket lives in every ZCode group, so requiring unanimous
-    // tails disabled the hoist forever.
+    // tails disabled the hoist forever. The bucket carries a stable id, and
+    // its gauge tail (X/Y, no 已用 verb) would otherwise poison the vote.
     const tails = rows
-      .filter((q) => !windowName(q).includes("已用 "))
+      .filter((q) => !windowName(q).includes("已用 ") && !q.id?.startsWith("start-plan:"))
       .map((q) => {
         const label = windowName(q);
         const cut = label.indexOf(" · ");
