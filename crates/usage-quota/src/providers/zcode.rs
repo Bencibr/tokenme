@@ -431,9 +431,9 @@ fn balance_sample(balance: &Value, multi_bucket: bool) -> Option<QuotaSample> {
     let bucket = text_field(balance, "bucket_id")
         .or_else(|| text_field(balance, "entitlement_id"))
         .unwrap_or_else(|| "balance".to_string());
-    // The row reads as a gauge, not a ledger: 已用 X/Y keeps text and bar in
-    // one point of view; the model name qualifies only when several buckets
-    // share the panel, so the common single-bucket account stays compact.
+    // The row reads as a gauge, not a ledger: X/Y beside the bar says used vs
+    // total without a ledger verb; the model name qualifies only when several
+    // buckets share the panel, so the common single-bucket account stays compact.
     let model = text_field(balance, "show_name")
         .or_else(|| text_field(balance, "entitlement_id"))
         .unwrap_or_else(|| "模型额度".to_string());
@@ -443,7 +443,7 @@ fn balance_sample(balance: &Value, multi_bucket: bool) -> Option<QuotaSample> {
         window_minutes,
         resets_at_ms: reset,
         label: Some(format!(
-            "Start Plan · {lead}已用 {}/{}",
+            "Start Plan · {lead}{}/{}",
             compact_units(used),
             compact_units(denominator)
         )),
@@ -876,7 +876,7 @@ mod tests {
         assert!((samples[0].used_percent - 7.7031866667).abs() < 0.00001);
         assert_eq!(samples[0].window_minutes, (1790557200 - 1790390948) / 60);
         assert_eq!(samples[0].resets_at_ms, 1790557200000);
-        assert_eq!(samples[0].label.as_deref(), Some("Start Plan · 已用 23.11M/300M"));
+        assert_eq!(samples[0].label.as_deref(), Some("Start Plan · 23.11M/300M"));
     }
 
     #[test]
@@ -1065,8 +1065,8 @@ mod tests {
         });
         let s = samples_from_balance(&body);
         let labels: Vec<&str> = s.iter().map(|x| x.label.as_deref().unwrap_or_default()).collect();
-        assert!(labels.iter().any(|l| l.contains("GLM-5.3-Flash · ") && l.ends_with("已用 30M/300M")), "{labels:?}");
-        assert!(labels.iter().any(|l| l.contains("GLM-5.3 · ") && l.ends_with("已用 500K/1M")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.contains("GLM-5.3-Flash · ") && l.ends_with("30M/300M")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.contains("GLM-5.3 · ") && l.ends_with("500K/1M")), "{labels:?}");
     }
 
     /// The envelope format, proved against itself: a value encrypted the way

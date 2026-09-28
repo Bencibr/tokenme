@@ -904,12 +904,20 @@
    211 px). Fixed widths keep the bar's left edge on one vertical line. */
 .rank-line {
   display: grid;
-  /* the cost column collapses when empty (money off, no credits): the token
-     figure then hugs the right edge instead of floating beside a reserved
-     column of nothing */
-  grid-template-columns: 16px minmax(0, 1fr) 60px 56px 68px;
+  /* Money off drops the cost column entirely (`.rank-flat` below): the token
+     figure — and a credits-only row's credits — hug the right edge instead of
+     floating beside a reserved column of nothing. The tracks stay fixed:
+     each row is its own grid, so an auto column lets a wide "$1.94" vs
+     "0.42 credits" resize the 1fr name cell per row and drift the bar's
+     shared origin (measured 242 vs 211 px). */
+  grid-template-columns: 16px minmax(0, 1fr) 60px 56px 78px;
   align-items: center;
   gap: var(--s2);
+}
+
+/* money off: no cost column — four tracks, figures flush right */
+.rank.rank-flat .rank-line {
+  grid-template-columns: 16px minmax(0, 1fr) 60px 56px;
 }
 
 .rank-no {
@@ -962,7 +970,9 @@
   vertical-align: bottom;
 }
 
-/* click-to-reveal full label; below the row so the top rows never clip */
+/* click-to-reveal full label; below the row so the top rows never clip,
+   `.up` flips it above for the bottom rows whose below-tip would leave
+   the panel */
 .rank-tip {
   position: absolute;
   left: 0;
@@ -981,6 +991,11 @@
   text-overflow: clip;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
   z-index: 30;
+}
+
+.rank-tip.up {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .rank-row:first-child .rank-name {
@@ -1017,20 +1032,8 @@
   font-weight: 550;
 }
 
-/* a credits figure is two tokens, not one number: stacked, so it never
-   widens the column and shoves every bar out of line */
-.rank-credit {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-end;
-  line-height: 1.25;
-}
-
-.rank-credit em {
-  font-style: normal;
-  font-weight: 400;
-  font-size: 9.5px;
-  color: var(--ink-3);
+.rank-tokens[data-credit] {
+  font-weight: 550;
 }
 
 .tabs {
@@ -1223,6 +1226,8 @@
  * the vendor's own hint share whatever is left and ellipsize. Fourteen sources at
  * two lines each pushed this section past 800 px — more than a full panel. */
 .src {
+  position: relative; /* anchors the click-to-reveal tip */
+  cursor: default;
   display: grid;
   grid-template-columns: 20px auto auto minmax(0, 1fr);
   align-items: baseline;
@@ -1267,6 +1272,33 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* click-to-reveal full root list, one path per line; below the row so the
+   top rows never clip, and `.up` flips it above for the bottom rows whose
+   below-tip would leave the panel */
+.src-tip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  max-width: 330px;
+  padding: 5px 9px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hair-2);
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-2);
+  line-height: 1.45;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.src-tip.up {
+  top: auto;
+  bottom: calc(100% + 4px);
 }
 
 .src[data-off] .src-name,

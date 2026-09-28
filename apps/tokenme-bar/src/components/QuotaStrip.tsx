@@ -123,15 +123,20 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
     tool,
     rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
   }));
+  // The strip rides the bottom of the overview page, so its last two rows flip
+  // the click tip above the row — a below-tip there would leave the panel
+  // (same rule as the ranks and sources lists).
+  const flipTips = new Set(groups.flatMap((g) => g.rows).slice(-2).map(rowKey));
   // A plan suffix every window of a tool repeats ("5 小时 · GLM Coding Lite")
   // is group-level information: it rides the tool header once, and the rows
   // keep only their window names.
   const planOf = (rows: QuotaView[]): string => {
     // Ledger rows (今日额度 · 已用 X/Y) are their own tail and never vote —
     // a Start Plan bucket lives in every ZCode group, so requiring unanimous
-    // tails disabled the hoist forever.
+    // tails disabled the hoist forever. The bucket carries a stable id, and
+    // its gauge tail (X/Y, no 已用 verb) would otherwise poison the vote.
     const tails = rows
-      .filter((q) => !windowName(q).includes("已用 "))
+      .filter((q) => !windowName(q).includes("已用 ") && !q.id?.startsWith("start-plan:"))
       .map((q) => {
         const label = windowName(q);
         const cut = label.indexOf(" · ");
@@ -309,7 +314,9 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                         <span className="quota-win">{head}</span>
                         {rowTail ? <span className="quota-sub">{rowTail}</span> : null}
                       </span>
-                      {tipKey === rowKey(q) ? <span className="rank-tip">{label}</span> : null}
+                      {tipKey === rowKey(q) ? (
+                        <span className={`rank-tip${flipTips.has(rowKey(q)) ? " up" : ""}`}>{label}</span>
+                      ) : null}
                       {mine && (
                         <span className="quota-badge" data-origin="budget">
                           {ORIGIN.budget}

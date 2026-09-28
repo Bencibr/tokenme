@@ -33,7 +33,7 @@ export function RankRows({
   const max = shown.reduce((acc, i) => Math.max(acc, rankingByCost ? i.cost : i.total_tokens), 0);
 
   return (
-    <ol className="rank">
+    <ol className={`rank${showMoney ? "" : " rank-flat"}`}>
       {shown.map((i, idx) => {
         const credit = i.counts.credits > 0 && i.total_tokens === 0;
         const measure = rankingByCost ? i.cost : i.total_tokens;
@@ -57,7 +57,12 @@ export function RankRows({
                   {head ? <span className="rank-dir">{head}</span> : null}
                   {tail}
                 </span>
-                {tipKey === i.key ? <span className="rank-tip">{i.label}</span> : null}
+                {tipKey === i.key ? (
+                  /* bottom rows flip the tip above the row — a below-tip
+                     there would leave the panel (same rule as the sources
+                     list: last two visible rows go up) */
+                  <span className={`rank-tip${idx >= shown.length - 2 ? " up" : ""}`}>{i.label}</span>
+                ) : null}
               </span>
               {/* The ranking is a bar in its own column — one shared origin, so
                   cross-row comparison is a single vertical line. A wash behind
@@ -66,22 +71,25 @@ export function RankRows({
               <span className="rank-bar" aria-hidden="true">
                 <i style={{ width: `${share}%` }} />
               </span>
-              <span className="rank-tokens num">{credit ? "—" : compactTokens(i.total_tokens)}</span>
-              {/* credit rows read "N · credits" stacked so the column keeps
-                  its width and the bars above stay put */}
-              <span className="rank-cost num" data-credit={credit || undefined} data-unpriced={!i.priced || undefined}>
-                {credit ? (
-                  <span className="rank-credit">
-                    <b>{creditText(i.counts.credits)}</b>
-                    <em>credits</em>
-                  </span>
-                ) : !showMoney ? (
-                  ""
-                ) : i.priced ? (
-                  money(i.cost)
-                ) : (
-                  "无价格"
-                )}
+              {/* Money off = the cost column does not exist (`.rank-flat`):
+                  the token figure owns the right edge, and a credits-only row
+                  puts its credits in that same slot — same position, different
+                  unit — instead of floating one column past it. */}
+              <span className="rank-tokens num" data-credit={(credit && !showMoney) || undefined}>
+                {credit && !showMoney
+                  ? creditText(i.counts.credits)
+                  : credit
+                    ? ""
+                    : compactTokens(i.total_tokens)}
+              </span>
+              <span className="rank-cost num" data-credit={(credit && showMoney) || undefined} data-unpriced={!i.priced || undefined}>
+                {!showMoney
+                  ? ""
+                  : credit
+                    ? creditText(i.counts.credits)
+                    : i.priced
+                      ? money(i.cost)
+                      : "无价格"}
               </span>
             </div>
           </li>

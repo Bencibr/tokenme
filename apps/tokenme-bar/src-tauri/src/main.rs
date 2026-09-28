@@ -3,5 +3,5 @@
 
 fn main() {
     eprintln!("tokenme v{} build {} starting", env!("CARGO_PKG_VERSION"), env!("TOKENME_BUILD_ID"));
-    tokenme_bar::run()
+    tokenme::run()
 }
