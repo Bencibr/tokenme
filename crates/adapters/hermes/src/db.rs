@@ -82,13 +82,15 @@ pub fn read(file: &SourceFile, cursor: ReadCursor) -> Result<(ReadOutcome, u64),
     let mut events = Vec::new();
     let mut high = cursor.0;
     for row in rows {
-        let (session_id, model, billing_provider, task, api_calls, input, output, cache_read, cache_write, reasoning, last_seen, cwd) =
+        let (session_id, model, billing_provider, task, _api_calls, input, output, cache_read, cache_write, reasoning, last_seen, cwd) =
             row.map_err(|source| Error::Io { path: file.path.clone(), source: std::io::Error::other(source) })?;
         let ts_ms = (last_seen.max(0.0) * 1000.0) as u64;
         high = high.max(ts_ms);
         // A session that opened but never answered: nothing to bill yet, and
-        // when that changes `last_seen` moves past the cursor.
-        if api_calls == 0 && input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
+        // when that changes `last_seen` moves past the cursor. The token
+        // columns are the billable truth — a call count without tokens is
+        // still an empty slice.
+        if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
             continue;
         }
         let mut event = UsageEvent::new(crate::TOOL_ID, ts_ms as i64, &session_id);
