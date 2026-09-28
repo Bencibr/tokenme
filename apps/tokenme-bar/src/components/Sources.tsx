@@ -14,6 +14,10 @@ import { useMoney } from "../lib/display";
  */
 export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime: Summary }) {
   const [showMissing, setShowMissing] = useState(false);
+  // One tooltip at a time, keyed on the row: the root paths truncate hard, and
+  // hover titles exist but a non-activating panel is exactly where nobody
+  // waits for a hover delay — same click-to-reveal idiom as the rank rows.
+  const [tipKey, setTipKey] = useState<string | null>(null);
   const showMoney = useMoney();
   const detected = sources.filter((s) => s.detected);
   const missing = sources.filter((s) => !s.detected);
@@ -23,8 +27,14 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
   return (
     <Section label="数据源" meta={`${detected.length}/${sources.length} 已检测 · ${count(events)} 事件`}>
       <ol className="src-list">
-        {listed.map((s) => (
-          <li className="src" key={s.id} data-off={!s.detected || undefined}>
+        {listed.map((s, idx) => (
+          <li
+            className="src"
+            key={s.id}
+            data-off={!s.detected || undefined}
+            onClick={() => setTipKey(tipKey === s.id ? null : s.id)}
+            onMouseLeave={() => tipKey === s.id && setTipKey(null)}
+          >
             {s.detected ? <ToolIcon tool={s.id} size={20} /> : <IconMissing size={12} className="src-icon" />}
             <span className="src-name">{s.display}</span>
             <span className="src-events num">{s.detected ? `${count(s.events_ingested)} 条` : "未检测到"}</span>
@@ -40,6 +50,14 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
                 </>
               ) : null}
             </div>
+            {/* the tip anchors to the row, not to .src-root — src-meta clips
+                its overflow and would behead the tip it carries. The bottom
+                rows flip above the row so the tip clears the panel edge. */}
+            {tipKey === s.id ? (
+              <span className={`src-tip${idx >= listed.length - 2 ? " up" : ""}`}>
+                {s.roots.join("\n") || "—"}
+              </span>
+            ) : null}
           </li>
         ))}
       </ol>

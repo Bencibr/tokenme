@@ -970,7 +970,9 @@
   vertical-align: bottom;
 }
 
-/* click-to-reveal full label; below the row so the top rows never clip */
+/* click-to-reveal full label; below the row so the top rows never clip,
+   `.up` flips it above for the bottom rows whose below-tip would leave
+   the panel */
 .rank-tip {
   position: absolute;
   left: 0;
@@ -989,6 +991,11 @@
   text-overflow: clip;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
   z-index: 30;
+}
+
+.rank-tip.up {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .rank-row:first-child .rank-name {

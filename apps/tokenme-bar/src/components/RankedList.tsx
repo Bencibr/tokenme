@@ -57,7 +57,12 @@ export function RankRows({
                   {head ? <span className="rank-dir">{head}</span> : null}
                   {tail}
                 </span>
-                {tipKey === i.key ? <span className="rank-tip">{i.label}</span> : null}
+                {tipKey === i.key ? (
+                  /* bottom rows flip the tip above the row — a below-tip
+                     there would leave the panel (same rule as the sources
+                     list: last two visible rows go up) */
+                  <span className={`rank-tip${idx >= shown.length - 2 ? " up" : ""}`}>{i.label}</span>
+                ) : null}
               </span>
               {/* The ranking is a bar in its own column — one shared origin, so
                   cross-row comparison is a single vertical line. A wash behind
