@@ -34,6 +34,13 @@ pub(crate) struct Product {
     /// one by mtime would silently drop 99 % of the history the moment either
     /// file is touched, and the two hold disjoint message ids.
     pub multi_db: bool,
+    /// The desktop app's Electron userData subdirectory (`data_dir()`-relative),
+    /// when the product ALSO ships as a desktop app writing there. Both roots
+    /// are read: measured 2026-09-29 on macOS, `~/.local/share/crow5` went quiet
+    /// on Sep 23-27 while the Crow5 Desktop app wrote every new session into
+    /// `Application Support/com.crow5.desktop/crow5/opencode.db` — disjoint
+    /// message ids, so the union bills each call exactly once.
+    pub desktop_rel: &'static [&'static str],
 }
 
 pub(crate) static OPENCODE: Product = Product {
@@ -43,6 +50,7 @@ pub(crate) static OPENCODE: Product = Product {
     default_rel: &[".local", "share", "opencode"],
     db_file: "opencode.db",
     multi_db: false,
+    desktop_rel: &[],
 };
 
 /// Crow5, an OpenCode fork. Same `message` table, same `data` JSON.
@@ -55,6 +63,7 @@ pub(crate) static CROW5: Product = Product {
     // only the fallback when the scan below finds nothing readable.
     db_file: "crow5.db",
     multi_db: true,
+    desktop_rel: &["com.crow5.desktop", "crow5"],
 };
 
 /// Mimocode, an OpenCode fork. Same `message` table, same `data` JSON, and its
@@ -67,6 +76,7 @@ pub(crate) static MIMOCODE: Product = Product {
     default_rel: &[".local", "share", "mimocode"],
     db_file: "mimocode.db",
     multi_db: false,
+    desktop_rel: &[],
 };
 
 /// OpenCode's data directory. The adapters resolve through [`data_dir_for`] with
@@ -78,16 +88,39 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
 }
 
 pub(crate) fn data_dir_for(product: &Product) -> Option<PathBuf> {
+    data_dirs_for(product).into_iter().next()
+}
+
+/// Every existing data directory for the product, priority order. The env
+/// override pins exactly one; otherwise the `~/.local/share` root and the
+/// desktop app's Electron userData root both count when they exist — the
+/// desktop product writes there while the legacy root keeps the older history,
+/// and the stores hold disjoint message ids.
+pub(crate) fn data_dirs_for(product: &Product) -> Vec<PathBuf> {
     if let Ok(v) = std::env::var(product.env_dir) {
         if !v.trim().is_empty() {
-            return Some(PathBuf::from(v.trim()));
+            return vec![PathBuf::from(v.trim())];
         }
     }
-    let mut dir = dirs::home_dir()?;
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut legacy = match dirs::home_dir() {
+        Some(h) => h,
+        None => return dirs,
+    };
     for part in product.default_rel {
-        dir = dir.join(part);
+        legacy = legacy.join(part);
     }
-    Some(dir)
+    dirs.push(legacy);
+    if !product.desktop_rel.is_empty() {
+        if let Some(data) = dirs::data_dir() {
+            let mut desktop = data;
+            for part in product.desktop_rel {
+                desktop = desktop.join(part);
+            }
+            dirs.push(desktop);
+        }
+    }
+    dirs.into_iter().filter(|p| p.is_dir()).collect()
 }
 
 /// OpenCode's database file, i.e. its name joined on, never globbed. See

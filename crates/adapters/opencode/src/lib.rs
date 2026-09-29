@@ -49,22 +49,24 @@ impl ProductAdapter {
     /// The tool's own `message` table is the whole detection test: counting rows
     /// fails for a missing file, a database we cannot open in any usable mode,
     /// and a build without the table, all of which mean "nothing to show".
-    fn located(&self) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>, i64)> {
-        let dir = paths::data_dir_for(self.0)?;
+    fn located(&self) -> Option<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>, i64)> {
+        let dirs = paths::data_dirs_for(self.0);
         let mut files = Vec::new();
         let mut rows = 0i64;
-        for db in paths::db_list_for(&dir, self.0) {
-            if paths::stat_file(&db).is_none() {
-                continue;
+        for dir in &dirs {
+            for db in paths::db_list_for(dir, self.0) {
+                if paths::stat_file(&db).is_none() {
+                    continue;
+                }
+                let Ok(conn) = paths::open_readonly(&db, paths::USABLE_SQL) else { continue };
+                // `max(rowid)` seeks the table btree's rightmost page; it is not a scan.
+                rows += conn
+                    .query_row("SELECT max(rowid) FROM message", [], |row| row.get(0))
+                    .unwrap_or(0);
+                files.push(db);
             }
-            let Ok(conn) = paths::open_readonly(&db, paths::USABLE_SQL) else { continue };
-            // `max(rowid)` seeks the table btree's rightmost page; it is not a scan.
-            rows += conn
-                .query_row("SELECT max(rowid) FROM message", [], |row| row.get(0))
-                .unwrap_or(0);
-            files.push(db);
         }
-        (!files.is_empty()).then_some((dir, files, rows))
+        (!files.is_empty()).then_some((dirs, files, rows))
     }
 }
 
@@ -103,7 +105,7 @@ impl SourceAdapter for ProductAdapter {
         Some(DetectedSource {
             id: self.0.id.to_string(),
             display: self.display_name().to_string(),
-            roots: vec![dir],
+            roots: dir,
             hint,
         })
     }
@@ -111,14 +113,17 @@ impl SourceAdapter for ProductAdapter {
     fn discover(&self, _filter: &DateFilter) -> Vec<SourceFile> {
         // One database holds every period, so `DateFilter` cannot prune the
         // *listing*; the rowid cursor is what keeps the read bounded instead.
-        let Some(dir) = paths::data_dir_for(self.0) else { return Vec::new() };
-        paths::db_list_for(&dir, self.0)
-            .into_iter()
-            .filter_map(|db| {
-                let (size, mtime_ms) = paths::stat_file(&db)?;
-                Some(SourceFile { path: db, kind: usage_core::FileKind::Sqlite, size, mtime_ms }.with_wal_activity())
-            })
-            .collect()
+        let mut out = Vec::new();
+        for dir in paths::data_dirs_for(self.0) {
+            for db in paths::db_list_for(&dir, self.0) {
+                let Some((size, mtime_ms)) = paths::stat_file(&db) else { continue };
+                out.push(
+                    SourceFile { path: db, kind: usage_core::FileKind::Sqlite, size, mtime_ms }
+                        .with_wal_activity(),
+                );
+            }
+        }
+        out
     }
 
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
