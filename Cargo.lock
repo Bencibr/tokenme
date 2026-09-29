@@ -1517,6 +1517,7 @@ dependencies = [
  "serde",
  "serde_json",
  "usage-adapter-all",
+ "usage-adapter-codex",
  "usage-adapter-dsh",
  "usage-core",
  "usage-index",

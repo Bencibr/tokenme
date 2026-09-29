@@ -40,7 +40,11 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
     const max = showMoney && t.priced ? costMax : tokenMax;
     const value = showMoney && t.priced ? t.cost : t.total_tokens;
     const share = max > 0 ? (value / max) * 100 : 0;
-    return Math.max(share, value > 0 ? 2 : 0);
+    // 3% floor: a 0.05% share is a sub-pixel sliver, and an invisible bar is
+    // the same lie as no bar. The floor keys on activity, not the money value:
+    // a tool whose cost computes to $0.00 (opencode's free tier, 9.8M tokens
+    // in a day) must still show its band, or silence reads as "did nothing".
+    return Math.max(share, t.total_tokens > 0 || t.cost > 0 ? 3 : 0);
   };
   const costMax = ordered.reduce((acc, t) => Math.max(acc, t.priced ? t.cost : 0), 0);
   const tokenMax = ordered.reduce((acc, t) => Math.max(acc, t.total_tokens), 0);
