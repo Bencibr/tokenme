@@ -19,7 +19,12 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
-      - run: ./scripts/build-macos.sh
+      - name: Build
+        id: build
+        run: ./scripts/build-macos.sh 2>&1 | tee build.log
+      - name: Surface build failure
+        if: failure() && steps.build.outcome == 'failure'
+        run: tail -c 4000 build.log | while IFS= read -r line; do echo "::error::$line"; done
       - name: Stage artifacts
         run: |
           B=apps/tokenme-bar/src-tauri/target/release/bundle
