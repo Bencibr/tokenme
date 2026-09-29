@@ -23,7 +23,7 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("antigravity", &["Antigravity"]),
     ("workbuddy", &["WorkBuddy AI", "WorkBuddy"]),
     ("catpaw", &["CatPawAI", "CatPaw"]),
-    ("cline", &["Cline"]),
+    ("cline", &["Cline", "cline", "cline-app", "code-sidecar"]),
     ("codex", &["codex", "Codex"]),
     ("claude", &["claude", "Claude"]),
     ("joycode", &["JoyCode"]),
