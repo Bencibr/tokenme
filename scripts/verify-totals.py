@@ -87,7 +87,7 @@ def claude():
     came from cache. So a per-stage maximum double-bills the cached prefix
     (1,432,576 tokens on this machine) and only the final snapshot is correct.
     """
-    out = defaultdict(lambda: [0.0] * 4)
+    out = defaultdict(lambda: [0.0] * 5)
     dup = monotonic = 0
     seen = {}
     for path in files("~/.claude/projects/**/*.jsonl"):
@@ -103,6 +103,9 @@ def claude():
                 num(u.get("cache_creation_input_tokens")),
                 num(u.get("cache_read_input_tokens")),
                 num(u.get("output_tokens")),
+                # Thinking is a sub-split of output_tokens, so it rides along the
+                # same last-write rule and never joins the billed total.
+                num((u.get("output_tokens_details") or {}).get("thinking_tokens")),
             )
             if key in seen:
                 dup += 1
@@ -113,10 +116,12 @@ def claude():
                     monotonic += 1
             seen[key] = cur
             out[key] = cur  # last write wins
-    billed = {k: v for k, v in out.items() if sum(v) > 0}
-    totals = [0.0] * 4
+    # The gate is on the four billable stages only: a thinking-only row would
+    # otherwise look billable while the adapter's `total()` ignores it.
+    billed = {k: v for k, v in out.items() if sum(v[:4]) > 0}
+    totals = [0.0] * 5
     for v in billed.values():
-        for i in range(4):
+        for i in range(5):
             totals[i] += v[i]
     return {
         "n": len(billed),
@@ -124,6 +129,7 @@ def claude():
         "cc": totals[1],
         "cr": totals[2],
         "out": totals[3],
+        "reason": totals[4],
         "notes": f"repeated ids={dup}, groups whose prompt+completion shrank: {monotonic} (must be 0)",
     }
 
@@ -741,6 +747,72 @@ def antigravity():
 # -------------------------------------------------------------------- harness
 
 
+# -------------------------------------------------------------- workbuddy
+#
+# Two independent readers of the same vendor payload: the Rust adapter and this
+# decoder. The rules come from the vendor's own shape, cross-checked against
+# `ChanningYuan/usageBar`'s WorkBuddyDetailScanner: `prompt_tokens` already
+# contains the cache hit, `completion_thinking_tokens` is a sub-split of
+# `completion_tokens`, and only `prompt_cache_hit_tokens` carries the hit — the
+# Anthropic-named twins next to it sit at 0 for this provider.
+
+
+def workbuddy():
+    """One event per `providerData.rawUsage` line of the app's transcripts."""
+    n = 0
+    tot = dict(in_tok=0.0, cc=0.0, cr=0.0, out=0.0, reason=0.0, credits=0.0)
+    hit_identity = inclusive_violation = zero_credit_rows = 0
+    roots = [Path(HOME) / ".workbuddy-ai" / "projects", Path(HOME) / ".workbuddy" / "projects"]
+    seen = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("**/*.jsonl")):
+            if str(path) in seen:
+                continue
+            seen.add(str(path))
+            for rec in rows(str(path)):
+                usage = (rec.get("providerData") or {}).get("rawUsage")
+                if not isinstance(usage, dict):
+                    continue
+                prompt = max(num(usage.get("prompt_tokens")), 0.0)
+                out = max(num(usage.get("completion_tokens")), 0.0)
+                if prompt == 0.0 and out == 0.0:
+                    continue
+                hit = min(max(num(usage.get("prompt_cache_hit_tokens")), 0.0), prompt)
+                write = min(max(num(usage.get("prompt_cache_write_tokens")) or num(usage.get("cache_creation_input_tokens")), 0.0), prompt - hit)
+                miss = num(usage.get("prompt_cache_miss_tokens"))
+                if prompt and abs(hit + miss - prompt) <= 1.0:
+                    hit_identity += 1
+                if prompt < hit + write:
+                    inclusive_violation += 1
+                n += 1
+                tot["in_tok"] += prompt - hit - write
+                tot["cc"] += write
+                tot["cr"] += hit
+                tot["out"] += out
+                tot["reason"] += max(num(usage.get("completion_thinking_tokens")), 0.0)
+                credit = num(usage.get("credit"))
+                tot["credits"] += max(credit, 0.0)
+                if credit == 0.0:
+                    zero_credit_rows += 1
+    return {
+        "n": n,
+        "in": tot["in_tok"],
+        "cc": tot["cc"],
+        "cr": tot["cr"],
+        "out": tot["out"],
+        "reason": tot["reason"],
+        "credits": tot["credits"],
+        "notes": (
+            f"hit+miss==prompt held for {hit_identity}/{n} rows; "
+            f"{zero_credit_rows} rows billed 0 credit (free model); "
+            f"{inclusive_violation} rows where prompt < hit+write; "
+            f"reason is a sub-split of out and never added to it"
+        ),
+    }
+
+
 def index_totals(db):
     conn = sqlite3.connect(sqlite_readonly_uri(db), uri=True)
     try:
@@ -769,6 +841,7 @@ def compute_all():
         "agnes": agnes(),
         "atomcode": atomcode(),
         "qoder": qoder(),
+        "workbuddy": workbuddy(),
         "antigravity": antigravity(),
         "ccswitch": ccswitch(),
     }
