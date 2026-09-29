@@ -833,8 +833,25 @@
   padding: 7px 6px;
   margin: 0 -6px;
   border-radius: var(--r-sm);
-  background-repeat: no-repeat;
-  transition: background-size var(--dur-slow) var(--ease);
+}
+
+/* Same bar-column language as the ranks page: one shared origin, so
+   cross-row comparison is a single vertical line. The fill is the tool's own
+   colour — this bar is the row's size share (cost where priced, tokens
+   otherwise), never a rate window. */
+.tool-bar {
+  height: 3px;
+  margin: 5px 0 1px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.tool-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--c) 70%, transparent);
 }
 
 .tool-top {
@@ -888,11 +905,6 @@
   padding-left: 32px;
   font-size: var(--t-meta);
   color: var(--ink-3);
-}
-
-/* 标注性附注（"按 tokens"一类）：比脚注更退一步 */
-.tool-foot .dim {
-  opacity: 0.7;
 }
 
 /* ------------------------------------------------------- ranked / call rows */
