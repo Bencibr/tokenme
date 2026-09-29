@@ -10,13 +10,13 @@
   <a href="https://github.com/your-org/tokenme"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.75%2B-orange.svg" alt="Rust Version"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-green.svg" alt="Platform Support">
-  <img src="https://img.shields.io/badge/privacy-100%25%20Local-success.svg" alt="Privacy First">
+  <img src="https://img.shields.io/badge/index-local--only-success.svg" alt="Local Index">
 </p>
 
 <p align="center">
   <b>Cross-tool AI coding token, cost, and real-time quota monitor.</b>
   <br>
-  Zero telemetry · Zero proxy · Instant scanning · 100% Local privacy
+  Zero telemetry · No third-party proxy · Instant scanning
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@ When developing with multiple AI coding tools (**Claude Code**, **Codex**, **Ope
 
 ## ✨ Features
 
-- 🔒 **100% Local Privacy**: Runs entirely offline. No telemetry, no remote proxies, and zero credential tampering.
+- 🔒 **Local index, read-only scanning**: Usage is indexed on your machine from the tools' own logs. No telemetry and no third-party proxies; live quota probes and the model price list are the only network calls.
 - ⚡ **Instant Scanning**: High-performance Rust incremental index scans hundreds of thousands of events in seconds.
 - 🎯 **15+ Tools Supported**: Out-of-the-box recognition for Claude Code, Codex, OpenCode, Cline, ZCode, Qoder, Pi, and more.
 - 📊 **Token & Cost Analytics**: Clear breakdown of input, cache read, output, and costs calculated via [models.dev](https://models.dev).
@@ -128,7 +128,7 @@ tokenme quota
 
 ## 🔒 Security & Data Paths
 
-- **Zero-Data-Exfiltration**: Your code, prompts, and tokens never leave your computer.
+- **Counts only, never content**: Your code and prompts are never indexed — only per-request token counts, model names and project paths.
 - **Read-Only**: Existing tool files are inspected in read-only mode to prevent corruption.
 - **Local Storage**:
   - SQLite Index: `~/Library/Application Support/tokenme/index.db` (macOS) / `~/.local/share/tokenme/` (Linux) / `%LOCALAPPDATA%\tokenme\` (Windows)

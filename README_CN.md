@@ -38,7 +38,7 @@
 
 ## ✨ 核心特性
 
-- 🔒 **100% 本地隐私安全**：完全离线运行。**不上传、不经过任何第三方代理、不修改原工具凭据**。
+- 🔒 **本地索引，只读扫描**：用量数据在本机建立索引。无自有遥测、无第三方代理；实时配额探测与价格清单是仅有的联网环节。
 - ⚡ **秒级极速扫描**：高性能 Rust 增量索引引擎，几十万条事件秒级处理，极低内存与 CPU 占用。
 - 🎯 **开箱即用支持 15+ 款工具**：自动识别 Claude Code、Codex、OpenCode、Cline、ZCode、Qoder、Pi 等。
 - 📊 **多维度成本与用量洞察**：清晰展示输入、缓存命中、推理、输出 Token 及折算金额（对接 [models.dev](https://models.dev) 价格清单）。
@@ -128,7 +128,7 @@ tokenme quota
 
 ## 🔒 隐私与本地存储位置
 
-- **安全承诺**：你的代码、Prompt 与 Token 数据**永不出本机**。所有扫描均为只读模式。
+- **只索引计数，不碰内容**：你的代码与 Prompt 不会被索引或存储——入库的只有每次请求的 token 计数、模型名与项目路径。
 - **本地数据路径**：
   - SQLite 索引数据库：macOS: `~/Library/Application Support/tokenme/index.db`；Linux: `~/.local/share/tokenme/index.db`；Windows: `%LOCALAPPDATA%\tokenme\index.db`
   - 配置文件：系统标准 Config 目录下的 `tokenme/settings.json`

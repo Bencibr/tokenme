@@ -8,7 +8,7 @@ export function EmptyState({ sources, onRefresh }: { sources: SourceStatus[]; on
     <div className="empty">
       <p className="empty-title">未检测到任何数据源</p>
       <p className="empty-body">
-        tokenme 只读本机已有的人工智能命令行日志，不上传任何内容。安装下列任意一个并运行一次会话后，点右下角刷新即可看到数据。
+        tokenme 只读本机已有的人工智能命令行日志并统计用量计数。安装下列任意一个并运行一次会话后，点右下角刷新即可看到数据。
       </p>
       <ul className="empty-list">
         {sources.map((s) => (
