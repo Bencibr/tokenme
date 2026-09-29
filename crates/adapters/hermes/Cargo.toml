@@ -1,0 +1,16 @@
+[package]
+name = "usage-adapter-hermes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "tokenme source adapter: hermes"
+
+[dependencies]
+usage-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

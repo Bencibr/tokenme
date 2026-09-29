@@ -1,0 +1,26 @@
+[package]
+name = "usage-adapter-all"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Static registry of built-in tokenme source adapters"
+
+[dependencies]
+usage-core.workspace = true
+usage-adapter-claude.workspace = true
+usage-adapter-codex.workspace = true
+usage-adapter-opencode.workspace = true
+usage-adapter-pi.workspace = true
+usage-adapter-cline.workspace = true
+usage-adapter-zcode.workspace = true
+usage-adapter-qoder.workspace = true
+usage-adapter-antigravity.workspace = true
+usage-adapter-agnes.workspace = true
+usage-adapter-atomcode.workspace = true
+usage-adapter-workbuddy.workspace = true
+usage-adapter-hermes.workspace = true
+usage-adapter-funide.workspace = true
+usage-adapter-joycode.workspace = true
+usage-adapter-catpaw = { path = "../catpaw" }
+usage-adapter-dsh = { path = "../dsh" }
+serde.workspace = true

@@ -1,0 +1,6 @@
+not json at all
+{
+[]
+"type":model_io
+
+{"completedAt":"2026-09-23T00:17:55.834Z","durationMs":5475,"requestId":"b0df2753-2722-4c18-a743-748c9c3fbdca","attempt":1,"model":{"modelId":"GLM-5.3-Flash","providerId":"account:bigmodel-individual-coding-plan"},"response":{"finishReason":"tool-calls","modelId":"GLM-5.3-Flash","providerMetadata":{"anthropic":{"usage":{"input_tokens":702,"output_tokens":43,"cache_read_input_tokens":381888,"server_tool_use":{"web_search_requests":0},"service_tier":"standard"},"cacheCreationInputTokens":null,"stopSequence":null,"iterations":null,"container":null,"contextManagement":null}},"responseId":"msg_202609230817509c2a0cab4481493a","usage":{"inputTokens":382590,"outputTokens":43,"totalTokens":382633,"cacheReadTokens":381888,"cacheWriteTokens":0}},"sessionId":"sess_7de7ea43-96fe-4efe-9bdb-4afd85127203","querySource":"main_turn","startedAt":"2026-09-23T00:17:50.359Z","traceId":"86e0d0a8-262d-411c-a130-6b4a4575db89","turnId":"turn_5d0e68d9-74c6-4360-951d-8714696b2f11","type":"tool_result","modelIOReset":{"maxFileBytes":67108864,"previousFileBytes":67216391,"reason":"session_file_size_limit"}}

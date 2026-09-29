@@ -1,0 +1,1719 @@
+/* ==========================================================================
+   tokenme · panel
+   400px wide, 8px rhythm, hairlines instead of cards, numbers right-aligned.
+   ========================================================================== */
+
+.panel {
+  position: relative; /* the settings sheet anchors to the panel, not the window */
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 400px;
+  min-width: 0;
+  height: 100vh;
+  max-height: 100vh;
+  background: var(--surface);
+  color: var(--ink);
+  /* the light-catching top edge of the glass */
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+  overflow: hidden;
+}
+
+/* Only the real tray window is a floating rounded panel over the desktop.
+   The radius matches the native content-view clip set in `panel::configure` —
+   the page rounds itself for the web preview, the layer does it for real. */
+[data-env="tauri"] .panel {
+  border-radius: 12px;
+  border: 1px solid var(--hair-2);
+  /* full height: the old -2px left a seam whose layer backing read as a
+     white line under the page's translucent surface; the native corner clip
+     needs no page-side inset */
+  height: 100vh;
+  /* Keep overlays, scroll content, and the WebView's own composited layers
+     inside the same rounded shape as the native window region. */
+  clip-path: inset(0 round 12px);
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.panel[data-open] {
+  animation: panel-in var(--dur-fast) var(--ease);
+}
+
+/* ---------------------------------------------------------------- boot state */
+
+/* Boot screen: the whole block sits centered in the panel — a spinning ring
+   echoing the dual-ring brand mark, with the status line underneath. */
+.boot {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.boot-ring {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid var(--track);
+  border-top-color: var(--accent);
+  animation: boot-spin 0.9s linear infinite;
+}
+
+@keyframes boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-ring {
+    animation: none;
+    border-top-color: var(--accent);
+  }
+}
+
+.boot-retry {
+  font-size: var(--t-meta);
+  color: var(--accent-ink);
+  padding: 2px 6px;
+  border: 1px solid var(--hair-2);
+  border-radius: var(--r-sm);
+}
+
+/* -------------------------------------------------------------------- header */
+
+.hdr {
+  flex: none;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: var(--s3) var(--s4) 10px;
+  border-bottom: 1px solid var(--hair);
+}
+
+.hdr-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.hdr-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  flex: none;
+}
+
+/* Windows tray panels still need an obvious way to dismiss the open surface;
+   this hides the panel and leaves the background process in the tray. */
+.panel-close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  color: var(--ink-3);
+  border-radius: var(--r-sm);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.panel-close:hover {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+.back {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: var(--s1);
+  margin-left: -5px; /* the brand keeps its old left edge, so the header does not shift */
+  border-radius: var(--r-sm);
+  color: var(--ink-3);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+}
+
+.back:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+.back:disabled {
+  opacity: 0.35;
+}
+
+/* One page at a time. The panel had grown into a 2,100 px scroll, which made
+   every section reachable only by scrolling past six others. */
+.page-tabs {
+  display: flex;
+  gap: var(--s3);
+  margin-top: 10px;
+  padding-top: var(--s2);
+  border-top: 1px solid var(--hair);
+}
+
+.page-tab {
+  padding: 3px 0 5px;
+  margin-bottom: -1px;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  border-bottom: 2px solid transparent;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.page-tab[aria-selected="true"] {
+  color: var(--accent-ink);
+  font-weight: 600;
+  /* one interaction colour: the underline is the same mint as the seg and the
+     refresh button, not a per-page hue */
+  border-bottom-color: var(--accent);
+}
+
+.brand {
+  font-size: var(--t-meta);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+}
+
+.seg-btn {
+  min-width: 30px;
+  padding: 2px var(--s2); /* the theme seg has word labels, not 日/周/月 */
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  border-radius: var(--r-sm);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.seg-btn:hover {
+  color: var(--ink);
+}
+
+.seg-btn[aria-checked="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+.hero {
+  margin-top: 10px;
+}
+
+.hero-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px;
+}
+
+/* the cost + delta pair rides the big number's baseline, right-aligned; a
+   tight line wraps it below (still right-aligned) instead of crushing it */
+.hero-side {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding-left: var(--s2);
+}
+
+.hero-value {
+  font-size: var(--t-hero);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+
+.hero-unit {
+  font-size: 19px;
+  font-weight: 550;
+  color: var(--ink-2);
+  letter-spacing: -0.01em;
+}
+
+.hero-unit-word {
+  margin-left: var(--s1);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  letter-spacing: 0.02em;
+}
+
+.hero-cost {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* A qualifier on a number that is derived rather than metered, e.g. credits
+   converted at a plan price. Quiet on purpose: the figure is the signal. */
+.hint {
+  color: var(--text-3, var(--text-2));
+  font-size: var(--t-meta);
+  opacity: 0.72;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: var(--t-meta);
+  color: var(--ink-2);
+}
+
+/* cost delta: down is money saved (green), up is more spent (red);
+   naked text glued to the figure it qualifies — no box of its own */
+.chip[data-dir="down"] {
+  color: var(--ok);
+}
+
+.chip[data-dir="up"] {
+  color: var(--bad);
+}
+
+.chip-v {
+  font-weight: 600;
+}
+
+.chip-cap {
+  color: var(--ink-3);
+  font-size: 10.5px;
+}
+
+.hdr-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s2);
+  margin-top: var(--s2);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  min-width: 0;
+  /* Numbers and their unit are one idea; a line may only break between items. */
+  white-space: nowrap;
+}
+
+.dot-sep {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--hair-2);
+  margin: 0 3px;
+  flex: none;
+}
+
+.grow {
+  flex: 1;
+}
+
+/* --------------------------------------------------------------------- scroll */
+
+.scroll {
+  flex: 1;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  /* no scrollbar: the wheel/trackpad is the affordance, the panel is narrow */
+  scrollbar-width: none;
+}
+
+.scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.scroll:focus-visible {
+  outline: none;
+}
+
+/* ------------------------------------------------------------------- sections */
+
+.sec {
+  min-width: 0;
+  max-width: 100%;
+  padding: 10px var(--s4) var(--s3);
+  border-bottom: 1px solid var(--hair);
+}
+
+.sec-hd {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+
+.sec-right {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  align-self: center;
+}
+
+/* 裸图标,无框:平时半隐,悬停/激活时全亮 */
+.sort-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  color: var(--ink-3);
+  opacity: 0.55;
+  border-radius: var(--r-sm);
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.sort-toggle:hover {
+  opacity: 1;
+  color: var(--ink);
+}
+
+.sec-label {
+  margin: 0;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+
+.sec-meta {
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.empty-row {
+  margin: 0;
+  padding: var(--s1) 0;
+  font-size: var(--t-body);
+  color: var(--ink-3);
+}
+
+.foot-note {
+  margin: var(--s2) 0 0;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+
+/* The tail of a truncated list. A control rather than content: hairline above,
+   label ink, and the hidden count stated before the click. */
+.more-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  width: 100%;
+  margin-top: var(--s1);
+  padding: 6px 0 1px;
+  border-top: 1px solid var(--hair);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  text-align: left;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.more-row:hover {
+  color: var(--ink);
+}
+
+.more-icon {
+  flex: none;
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.more-row[aria-expanded="true"] .more-icon {
+  transform: rotate(180deg);
+}
+
+/* Right-anchored, like every other numeral in the panel. */
+.more-n {
+  margin-left: auto;
+}
+
+/* shared 2px bar: quiet fill, the dots carry the colour */
+.track {
+  height: 2px;
+  background: var(--track);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.track i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--bar-fill);
+  transition: width var(--dur-slow) var(--ease);
+}
+
+.track i[data-hot] {
+  background: var(--bar-fill-hot);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--c, var(--accent));
+}
+
+/* A tool's own app icon, or the monogram that stands in when the machine has no
+   bundle for it. Both are the same square so a column of rows still lines up. */
+.tool-ic,
+.tool-mono {
+  flex: none;
+  border-radius: 5px;
+}
+
+.tool-ic {
+  display: block;
+  object-fit: contain;
+}
+
+/* Tint rather than fill: the glyph keeps the panel's own ink, so it stays legible
+   in both themes while the colour still carries the tool's identity. */
+.tool-mono {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.tool-mono::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--c, var(--accent));
+  opacity: 0.15;
+}
+
+/* Baseline rows would drop an icon onto its own bottom edge. */
+.src > .tool-ic,
+.src > .tool-mono,
+.sess > .tool-ic,
+.sess > .tool-mono {
+  align-self: center;
+}
+
+/* ---------------------------------------------------------------- quotas */
+
+/* One block per tool: a header with the tool and where its numbers came from,
+   then one grid row per window. A flat list made Codex's 5-hour and weekly
+   windows read as two unrelated tools. */
+.quota-group {
+  min-width: 0;
+  max-width: 100%;
+  padding: 6px 0 7px;
+}
+
+.quota-group + .quota-group {
+  border-top: 1px solid var(--hair);
+}
+
+/* Long-press a bar (or a tool header) and drag it; the arrangement persists in
+   settings.json. A still hold promotes to a drag, a moving one was a scroll,
+   so panning the panel never reorders anything by accident. */
+.quota-row,
+.quota-head {
+  touch-action: pan-y;
+}
+
+.quota-list[data-dragging] {
+  cursor: grabbing;
+  user-select: none;
+  touch-action: none;
+}
+
+.quota-list[data-dragging] .quota-row,
+.quota-list[data-dragging] .quota-head {
+  cursor: grabbing;
+}
+
+.quota-row[data-dragging] {
+  outline: 1px dashed var(--hair);
+  outline-offset: 1px;
+  border-radius: 5px;
+  background: var(--surface-2, transparent);
+  opacity: 0.85;
+}
+
+.quota-group[data-dragging] .quota-head {
+  opacity: 0.75;
+}
+
+.quota-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.quota-head .dot {
+  background: var(--c);
+}
+
+.quota-tool {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.quota-origins {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.quota-badge {
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  background: var(--surface-2, transparent);
+  border: 1px solid var(--hair);
+}
+
+.quota-badge[data-origin="budget"] {
+  color: var(--accent-ink);
+  border-color: var(--accent-soft);
+}
+
+/* name | gauge | used% | time to reset — the reset column is fixed so the
+   gauges of different windows line up. */
+.quota-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 42px 50px;
+  align-items: center;
+  gap: var(--s2);
+  /* child rows indent to the tool name's text origin (icon 18 + gap), so the
+     window ladder reads as one level under the header */
+  padding: 2px 0 2px 26px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.quota-name {
+  position: relative;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  cursor: default;
+}
+
+/* The badge marks a cap the user set, so it can never be read as a vendor
+   meter; the text next to it keeps its own ellipsis. */
+.quota-name .quota-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quota-name .quota-badge {
+  flex: none;
+}
+
+/* the plan name rides the tool header once, dim and small */
+.quota-plan {
+  font-size: 10px;
+  color: var(--ink-3);
+  margin-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quota-pct {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The unit is decoration; the figure is the signal, so it sits back. */
+.quota-pct em {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 10px;
+  margin-left: 1px;
+  opacity: 0.6;
+}
+
+.quota-pct[data-stage="mid"] {
+  color: var(--warn);
+}
+
+.quota-pct[data-stage="high"],
+.quota-pct[data-stage="over"] {
+  color: var(--bad);
+}
+
+/* the window name leads, the plan suffix follows dimmed */
+.quota-name .quota-sub {
+  color: var(--ink-3);
+  font-size: 10.5px;
+}
+
+/* stage legend in the section head */
+.quota-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.quota-legend i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 3px;
+  vertical-align: -1px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.quota-legend i[data-stage="mid"] {
+  background: color-mix(in srgb, var(--warn) 70%, transparent);
+}
+
+.quota-legend i[data-stage="high"] {
+  background: color-mix(in srgb, var(--bad) 75%, transparent);
+}
+
+.quota-reset {
+  font-size: 10.5px;
+  text-align: right;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The quota bar is a gauge, not a ranking, so it keeps a solid fill. */
+.quota-row .track {
+  height: 3px;
+}
+
+/* One hue per stage, the whole bar: <50% mint, 50-79% amber, ≥80% red. A
+   gradient left two colour semantics on one bar and let a 58% window glow
+   amber at its tip while the figure stayed quiet; a stage dyes bar and figure
+   together, and the legend in the section head names the stages. */
+.quota-row .track i {
+  background-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.quota-row .track i[data-stage="mid"] {
+  background-color: color-mix(in srgb, var(--warn) 70%, transparent);
+}
+
+.quota-row .track i[data-stage="high"] {
+  background-color: color-mix(in srgb, var(--bad) 75%, transparent);
+}
+
+/* Past the cap the gauge is already full; say so at full strength. */
+.quota-row .track i[data-stage="over"] {
+  background-color: var(--bad);
+}
+
+/* A source with no metered limit hatches its track: nothing is measured here. */
+.track-inf {
+  background: repeating-linear-gradient(115deg, var(--track) 0 4px, transparent 4px 8px);
+}
+
+/* A prepaid balance is not a gauge: the track runs as a plain dashed line
+   (straight, dimmer ink — the hatch above means unlimited, this means
+   measured in money, not percent). */
+.track-balance {
+  background: repeating-linear-gradient(90deg, var(--ink-3) 0 5px, transparent 5px 11px);
+  opacity: 0.55;
+}
+
+.quota-pct--na {
+  color: var(--ink-3);
+  font-weight: 400;
+  font-size: 10.5px;
+}
+
+/* cost share: one stacked strip in the tools' own slot colours, with a legend
+   that repeats the numbers the bars encode */
+.share {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hair);
+}
+
+.share-bar {
+  display: flex;
+  gap: 2px;
+  height: 8px;
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.share-bar span {
+  background: color-mix(in srgb, var(--c) 70%, transparent);
+}
+
+.share-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+
+.share-legend i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+
+/* ---------------------------------------------------------------- tools */
+
+.tool-list,
+.rank,
+.call-list,
+.sess-list,
+.src-list,
+.empty-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Same row language as the ranks page: the cost share is a wash of the tool's
+   own colour painted behind the row (inline background-size), so a hairline
+   separator between rows would only fight it. */
+.tool {
+  padding: 7px 6px;
+  margin: 0 -6px;
+  border-radius: var(--r-sm);
+  background-repeat: no-repeat;
+  transition: background-size var(--dur-slow) var(--ease);
+}
+
+.tool-top {
+  display: grid;
+  /* the cost slot collapses when empty (money off): token figures hug the
+     right edge instead of floating beside a reserved column of nothing */
+  grid-template-columns: 24px minmax(0, 1fr) 52px auto;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.tool-name {
+  font-size: var(--t-body);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-tokens {
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  text-align: right;
+}
+
+.tool-cost {
+  font-size: var(--t-body);
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.tool-cost[data-credit] {
+  font-size: var(--t-meta);
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.tool-cost[data-unpriced] {
+  font-size: var(--t-meta);
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+/* The meta line hangs under the tool's name, not under its icon. */
+.tool-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-top: 3px;
+  padding-left: 32px;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------- ranked / call rows */
+
+/* One line per row; the ranking is the accent wash painted behind the row
+   (inline background-size), so there are no separator hairlines to fight it.
+   The wash bleeds 6px past the section's text edge, which reads as the bar
+   rather than as a highlight on the text. */
+.rank-row {
+  padding: 5px 6px;
+  margin: 0 -6px;
+  border-radius: var(--r-sm);
+  background-repeat: no-repeat;
+  transition: background-size var(--dur-slow) var(--ease);
+}
+
+/* The numerals size themselves: a fixed 56 px cost column wrapped
+   "0.42 credits" onto two lines and broke the row grid. */
+/* Every figure after the bar sits in a fixed column: each row is its own
+   grid, so an auto column lets a wide "$1.94" vs "0.42 credits" resize the
+   1fr name cell per row and drift the bar's shared origin (measured 242 vs
+   211 px). Fixed widths keep the bar's left edge on one vertical line. */
+.rank-line {
+  display: grid;
+  /* Money off drops the cost column entirely (`.rank-flat` below): the token
+     figure — and a credits-only row's credits — hug the right edge instead of
+     floating beside a reserved column of nothing. The tracks stay fixed:
+     each row is its own grid, so an auto column lets a wide "$1.94" vs
+     "0.42 credits" resize the 1fr name cell per row and drift the bar's
+     shared origin (measured 242 vs 211 px). */
+  grid-template-columns: 16px minmax(0, 1fr) 60px 56px 78px;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* money off: no cost column — four tracks, figures flush right */
+.rank.rank-flat .rank-line {
+  grid-template-columns: 16px minmax(0, 1fr) 60px 56px;
+}
+
+.rank-no {
+  font-size: 9.5px;
+  color: var(--ink-3);
+}
+
+/* the ranking is a bar in its own column, one shared origin: cross-row
+   comparison is a single vertical line, not background staining */
+.rank-bar {
+  height: 3px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.rank-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.rank-name {
+  position: relative;
+  font-size: 12px;
+  color: var(--ink-2);
+  cursor: default;
+  min-width: 0;
+}
+
+/* truncation belongs to the inner span — the name cell itself must not clip,
+   or the click-to-reveal tooltip would be cut by its own anchor */
+.rank-name .rank-text {
+  display: inline-block;
+  vertical-align: bottom;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the directory prefix truncates on its own so the basename — the part a
+   human matches on — survives every truncation */
+.rank-name .rank-dir {
+  display: inline-block;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+/* click-to-reveal full label; below the row so the top rows never clip,
+   `.up` flips it above for the bottom rows whose below-tip would leave
+   the panel */
+.rank-tip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  max-width: 330px;
+  padding: 5px 9px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hair-2);
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-2);
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  z-index: 30;
+}
+
+.rank-tip.up {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.rank-row:first-child .rank-name {
+  color: var(--ink);
+  font-weight: 550;
+}
+
+/* Only the basename of a project path is worth full ink. */
+.rank-dir {
+  color: var(--ink-3);
+}
+
+.rank-tokens {
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.rank-cost {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.rank-cost[data-unpriced] {
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.rank-cost[data-credit] {
+  font-size: var(--t-meta);
+  font-weight: 550;
+}
+
+.rank-tokens[data-credit] {
+  font-weight: 550;
+}
+
+.tabs {
+  display: flex;
+  gap: var(--s1);
+  margin: -2px 0 var(--s2);
+  border-bottom: 1px solid var(--hair);
+}
+
+.tab {
+  padding: 4px var(--s2) 5px;
+  margin-bottom: -1px;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  border-bottom: 2px solid transparent;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--page-accent);
+}
+
+.tab-n {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.tab[aria-selected="true"] .tab-n {
+  color: var(--ink-2);
+}
+
+/* ---------------------------------------------------------------- heatmap */
+
+.heat {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.heat-months {
+  position: relative;
+  height: 14px;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.heat-months span {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+}
+
+.heat-svg {
+  display: block;
+}
+
+.heat-cell {
+  fill: var(--track);
+}
+
+.heat-cell[data-level="1"] {
+  fill: var(--heat-1);
+}
+.heat-cell[data-level="2"] {
+  fill: var(--heat-2);
+}
+.heat-cell[data-level="3"] {
+  fill: var(--heat-3);
+}
+.heat-cell[data-level="4"] {
+  fill: var(--heat-4);
+}
+
+.heat-cell[data-today] {
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+
+.heat-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-top: var(--s2);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.heat-read {
+  min-height: 16px;
+  color: var(--ink-2);
+}
+
+.heat-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.heat-legend i {
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--track);
+}
+
+.heat-legend i[data-level="1"] {
+  background: var(--heat-1);
+}
+.heat-legend i[data-level="2"] {
+  background: var(--heat-2);
+}
+.heat-legend i[data-level="3"] {
+  background: var(--heat-3);
+}
+.heat-legend i[data-level="4"] {
+  background: var(--heat-4);
+}
+
+/* --------------------------------------------------------------- sessions */
+
+.sess {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--s2);
+  padding: 6px 0;
+}
+
+.sess + .sess {
+  border-top: 1px solid var(--hair);
+}
+
+.sess-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.sess-name {
+  font-size: var(--t-body);
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sess-cost {
+  font-size: var(--t-body);
+  font-weight: 600;
+  flex: none;
+}
+
+.sess-cost[data-unpriced] {
+  font-size: var(--t-meta);
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+/* A credits-metered session has no dollar figure; the word is a qualifier,
+   not a price, so it sits back like the tools page's credit rows. */
+.sess-cost[data-credit] {
+  font-size: var(--t-meta);
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.sess-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-top: 2px;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  min-width: 0;
+}
+
+.sess-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46%;
+}
+
+/* ---------------------------------------------------------------- sources */
+
+/* One line per source: the name and the count size themselves, and the path plus
+ * the vendor's own hint share whatever is left and ellipsize. Fourteen sources at
+ * two lines each pushed this section past 800 px — more than a full panel. */
+.src {
+  position: relative; /* anchors the click-to-reveal tip */
+  cursor: default;
+  display: grid;
+  grid-template-columns: 20px auto auto minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: var(--s2);
+  padding: 4px 0;
+}
+
+.src + .src {
+  border-top: 1px solid var(--hair);
+}
+
+.src-icon {
+  color: var(--ink-3);
+  justify-self: center;
+}
+
+.src-name {
+  font-size: var(--t-body);
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.src-events {
+  font-size: var(--t-meta);
+  color: var(--ink-2);
+  text-align: right;
+}
+
+.src-meta {
+  grid-column: 4;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s1);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.src-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* click-to-reveal full root list, one path per line; below the row so the
+   top rows never clip, and `.up` flips it above for the bottom rows whose
+   below-tip would leave the panel */
+.src-tip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  max-width: 330px;
+  padding: 5px 9px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hair-2);
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-2);
+  line-height: 1.45;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.src-tip.up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+.src[data-off] .src-name,
+.src[data-off] .src-events {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.src-total {
+  margin: var(--s2) 0 0;
+  padding-top: var(--s2);
+  border-top: 1px solid var(--hair);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------ empty state */
+
+.empty {
+  padding: var(--s6) var(--s4) var(--s5);
+}
+
+.empty-title {
+  margin: 0 0 var(--s2);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.empty-body {
+  margin: 0 0 var(--s3);
+  font-size: var(--t-body);
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.empty-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: 5px 0;
+  border-top: 1px solid var(--hair);
+  font-size: var(--t-meta);
+}
+
+.empty-name {
+  color: var(--ink);
+  font-weight: 550;
+}
+
+.empty-path {
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: var(--s4);
+  padding: 5px var(--s3);
+  font-size: var(--t-meta);
+  color: var(--accent-ink);
+  border: 1px solid var(--hair-2);
+  border-radius: var(--r-md);
+}
+
+.empty-cta:hover {
+  background: var(--fill-hover);
+}
+
+/* ------------------------------------------------------------ status bar */
+
+.status {
+  flex: none;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: 7px var(--s4);
+  border-top: 1px solid var(--hair-2);
+  background: var(--surface);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.status-left {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  flex: none;
+}
+
+.badge {
+  padding: 1px 5px;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--r-sm);
+  flex: none;
+}
+
+.badge[data-source="bundled"],
+.badge[data-source="unavailable"] {
+  color: var(--warn);
+  border-color: var(--warn-soft);
+}
+
+.stale {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--warn);
+  flex: none;
+}
+
+/* a newer release answered the manifest: one quiet chip, mint outline */
+.update-chip {
+  appearance: none;
+  padding: 2px 8px;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.update-chip:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px var(--s2);
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--on-accent);
+  /* the one saturated button on the panel: single accent, no second hue */
+  background: var(--accent);
+  border: 0;
+  border-radius: var(--r-sm);
+  transition: filter var(--dur-fast) var(--ease);
+}
+
+.refresh:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.refresh:active:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+.refresh:disabled {
+  background: var(--fill-active);
+  color: var(--ink-3);
+}
+
+/* the dot says "tray is live" before the label is read */
+.tray-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px var(--s1);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  border-radius: var(--r-sm);
+}
+
+.tray-mode:hover {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+/* a 15 px glyph inside a 24 px target: an icon this load-bearing cannot be a
+   bare 13 px glyph squeezed between the tray label and the refresh button */
+.settings-btn {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--ink-2);
+  border-radius: var(--r-md);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.settings-btn:hover {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+/* contact / releases rows: two quiet text buttons, no pill weight */
+.sheet-actions {
+  display: inline-flex;
+  gap: var(--s2);
+}
+
+.sheet-link {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.sheet-link:hover {
+  text-decoration: underline;
+}
+
+/* --------------------------------------------------------- settings sheet */
+
+/* A bottom sheet, not a fifth page: settings are a detour, not a destination,
+   and the panel behind stays visible so the context is never lost. */
+.sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(20, 20, 24, 0.18);
+  animation: sheet-fade var(--dur-fast) var(--ease);
+}
+
+.sheet {
+  width: 100%;
+  padding: var(--s2) var(--s4) var(--s3);
+  background: var(--surface-solid);
+  border-top: 1px solid var(--hair-2);
+  border-radius: 10px 10px 0 0;
+  box-shadow: 0 -8px 24px rgba(20, 20, 24, 0.12);
+  animation: sheet-up var(--dur-fast) var(--ease);
+}
+
+@keyframes sheet-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+}
+
+.sheet-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s1) 0;
+}
+
+.sheet-close {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--ink-3);
+  border-radius: var(--r-sm);
+}
+
+.sheet-close:hover {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+.sheet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: 10px 0;
+  border-top: 1px solid var(--hair);
+}
+
+.sheet-row-danger .sheet-label {
+  color: var(--bad);
+}
+
+.quit-btn {
+  flex: none;
+  padding: 3px var(--s2);
+  font-size: var(--t-meta);
+  color: var(--bad);
+  border: 1px solid color-mix(in srgb, var(--bad) 38%, transparent);
+  border-radius: var(--r-sm);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.quit-btn:hover {
+  color: var(--surface);
+  background: var(--bad);
+}
+
+.sheet-label {
+  font-size: var(--t-body);
+  color: var(--ink);
+}
+
+.sheet-hint {
+  margin-top: 1px;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.sheet-foot {
+  margin: var(--s2) 0 0;
+  padding-top: var(--s2);
+  border-top: 1px solid var(--hair);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+/* iOS-shaped switch: the panel's only boolean, so it gets the control people
+   already know rather than a checkbox that reads as a form. */
+.switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--hair-2);
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface-solid);
+  box-shadow: 0 1px 3px rgba(20, 20, 24, 0.25);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.switch[aria-checked="true"] {
+  background: var(--accent);
+}
+
+.switch[aria-checked="true"]::after {
+  transform: translateX(14px);
+}
+
+/* ----------------------------------------------------------------- motion */
+
+/* Page entry: a 4 px lift, so a switch reads as the same panel showing another
+   slice rather than a new window. */
+.page {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  animation: page-in var(--dur-fast) var(--ease) both;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel[data-open] {
+    animation: none;
+  }
+  .page {
+    animation: none;
+  }
+  .sheet-backdrop,
+  .sheet {
+    animation: none;
+  }
+  .track i,
+  .seg-btn,
+  .refresh,
+  .more-row,
+  .more-icon {
+    transition: none;
+  }
+}

@@ -1,0 +1,230 @@
+.bubble-app {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100vw;
+  height: 100vh;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  animation: bubble-drop-in 420ms var(--ease) both;
+}
+
+/* The window is larger than the ball (shadow headroom); only the core reads
+   as clickable, the transparent ring around it stays cursor-neutral. */
+.bubble-core {
+  position: relative;
+  display: grid;
+  /* place-content centers the stacked rows in the ball: the default stretches
+     the auto rows apart, which pins the value to the upper half and the unit
+     to the lower half instead of reading as one centered block. The top
+     padding then drops the pair half a caption line lower, so the *value*
+     itself sits on the ball's center line and 今日 tokens reads as the
+     caption under it. */
+  place-content: center;
+  place-items: center;
+  padding-top: 10px;
+  width: 76px;
+  height: 76px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 50%;
+  color: #f7fffc;
+  /* Only the ball reads as clickable; the transparent ring the window adds for
+     the shadow's headroom stays cursor-neutral. */
+  cursor: pointer;
+  background:
+    radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 0.75), transparent 22%),
+    linear-gradient(145deg, rgba(47, 216, 177, 0.98), rgba(13, 117, 171, 0.94));
+  box-shadow:
+    inset -8px -10px 16px rgba(4, 59, 97, 0.28),
+    inset 8px 7px 14px rgba(255, 255, 255, 0.24),
+    0 9px 22px rgba(4, 50, 73, 0.32);
+  transition: transform 240ms var(--ease), box-shadow 240ms var(--ease), opacity 240ms var(--ease);
+}
+
+.bubble-core:hover,
+.bubble-app[data-expanded="true"] .bubble-core {
+  transform: scale(1.06);
+  box-shadow:
+    inset -8px -10px 16px rgba(4, 59, 97, 0.22),
+    inset 8px 7px 14px rgba(255, 255, 255, 0.3),
+    0 12px 30px rgba(4, 50, 73, 0.42);
+}
+
+.bubble-app[data-dock="left"] .bubble-core,
+.bubble-app[data-dock="right"] .bubble-core,
+.bubble-app[data-dock="top"] .bubble-core {
+  opacity: 0.92;
+}
+
+/* ---------------------------------------------------------------- pet mode
+   Docked, the ball turns into a robot pet peeking over the monitor edge: two
+   LED eyes and a small mouth on the visible half of the head, pupils pointing
+   at the cursor (--gx/--gy are set from BubbleApp's gaze poll). The numbers
+   give way — a pet's face is the message; hover still expands to the ball. */
+.bubble-face {
+  position: absolute;
+  display: none;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.bubble-app[data-dock="left"] .bubble-face,
+.bubble-app[data-dock="right"] .bubble-face,
+.bubble-app[data-dock="top"] .bubble-face {
+  display: flex;
+}
+
+/* Side docks show a vertical sliver: face on the visible half, centered. */
+.bubble-app[data-dock="left"] .bubble-face,
+.bubble-app[data-dock="right"] .bubble-face {
+  top: 25px;
+}
+.bubble-app[data-dock="right"] .bubble-face {
+  left: 6px;
+}
+.bubble-app[data-dock="left"] .bubble-face {
+  right: 6px;
+}
+/* Top dock hangs the head from the edge: the face sits under it. */
+.bubble-app[data-dock="top"] .bubble-face {
+  left: 0;
+  right: 0;
+  bottom: 10px;
+  justify-content: center;
+}
+
+.bubble-app[data-dock="left"] .bubble-value,
+.bubble-app[data-dock="left"] .bubble-unit,
+.bubble-app[data-dock="right"] .bubble-value,
+.bubble-app[data-dock="right"] .bubble-unit,
+.bubble-app[data-dock="top"] .bubble-value,
+.bubble-app[data-dock="top"] .bubble-unit,
+.bubble-app[data-dock="left"] .bubble-ripple,
+.bubble-app[data-dock="right"] .bubble-ripple,
+.bubble-app[data-dock="top"] .bubble-ripple {
+  display: none;
+}
+
+.bubble-eye {
+  position: relative;
+  width: 13px;
+  height: 17px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: #eafff8;
+  /* an LED eye, not a drawn one: the glow is the robot tell */
+  box-shadow: 0 0 9px rgba(214, 255, 244, 0.85), inset 0 -3px 4px rgba(4, 59, 97, 0.22);
+  animation: bubble-blink 5.6s infinite;
+}
+
+.bubble-pupil {
+  position: absolute;
+  left: 3.5px;
+  top: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #0b3a56;
+  transform: translate(var(--gx, 0px), var(--gy, 0px));
+  transition: transform 130ms var(--ease);
+}
+
+.bubble-mouth {
+  position: absolute;
+  top: 22px;
+  left: 50%;
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(234, 255, 248, 0.65);
+  transform: translateX(-50%);
+}
+
+@keyframes bubble-blink {
+  0%, 90%, 100% {
+    transform: scaleY(1);
+  }
+  93%, 95% {
+    transform: scaleY(0.08);
+  }
+}
+
+/* a patient little hover in place, as it waits at the edge */
+@keyframes bubble-peek {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(2px);
+  }
+}
+
+.bubble-app[data-dock="left"] .bubble-face,
+.bubble-app[data-dock="right"] .bubble-face,
+.bubble-app[data-dock="top"] .bubble-face {
+  animation: bubble-peek 3.4s ease-in-out infinite;
+}
+
+.bubble-value {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.bubble-unit {
+  margin-top: 1px;
+  font-size: 8px;
+  letter-spacing: 0.02em;
+  opacity: 0.82;
+  text-align: center;
+}
+
+.bubble-ripple {
+  position: absolute;
+  width: 72px;
+  height: 72px;
+  border: 1px solid rgba(65, 215, 185, 0.42);
+  border-radius: 50%;
+  animation: bubble-ripple 1.8s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes bubble-drop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-16px) scale(0.72);
+  }
+  70% {
+    transform: translateY(3px) scale(1.04);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes bubble-ripple {
+  0% {
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+  75%,
+  100% {
+    opacity: 0;
+    transform: scale(1.45);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble-app,
+  .bubble-ripple,
+  .bubble-eye,
+  .bubble-app[data-dock] .bubble-face {
+    animation: none;
+  }
+}
