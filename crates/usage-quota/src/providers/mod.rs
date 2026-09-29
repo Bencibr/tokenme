@@ -6,6 +6,7 @@ mod claude;
 mod cline;
 mod codex;
 mod copilot;
+mod dsh;
 mod gemini;
 mod opencode;
 mod qoder;
@@ -20,6 +21,7 @@ pub use claude::ClaudeQuota;
 pub use cline::ClineQuota;
 pub use codex::CodexQuota;
 pub use copilot::CopilotQuota;
+pub use dsh::DshQuota;
 pub use gemini::GeminiQuota;
 pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
@@ -43,5 +45,6 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(WorkBuddyQuota),
         Box::new(CatpawQuota),
         Box::new(ZcodeQuota),
+        Box::new(DshQuota),
     ]
 }
