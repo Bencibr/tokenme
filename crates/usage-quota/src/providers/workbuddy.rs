@@ -13,10 +13,13 @@
 //!
 //! ## The call
 //!
-//! Token sources, in order: the desktop app's auth file (`WORKBUDDY_AUTH_FILE`
-//! overrides), then a bare pasted token (`WORKBUDDY_TOKEN` or
-//! `tokenme/workbuddy.token`) — current app versions encrypt that file's
-//! accessToken in place, so the paste is what keeps current installs working.
+//! Transport, in order: **the running desktop app's wbipc broker** — the app
+//! itself proxies the meter call with its own login state, so a stock install
+//! needs no credential work at all (see `workbuddy_wbipc`) — then explicit
+//! tokens: the desktop app's auth file (`WORKBUDDY_AUTH_FILE` overrides), then
+//! a bare pasted token (`WORKBUDDY_TOKEN` or `tokenme/workbuddy.token`) —
+//! current app versions encrypt that file's accessToken in place, so the paste
+//! is what keeps installs without a running app working.
 //! `POST https://<domain>/billing/meter/get-user-resource` (global; the CN
 //! realm keeps the older `/v2/billing/meter/get-user-resource`, which is also
 //! the global 404 fallback), body
@@ -50,6 +53,17 @@ impl QuotaProbe for WorkBuddyQuota {
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
+        let body = request_body(chrono::Local::now());
+        // The app's own broker first: no token on disk needed. Silence there
+        // (app closed, logged out, protocol moved on) falls through to the
+        // explicit-token chain.
+        #[cfg(unix)]
+        if let Some(data) = super::workbuddy_wbipc::meter_envelope(&body) {
+            let samples = samples_from_resource(&data);
+            if !samples.is_empty() {
+                return samples;
+            }
+        }
         let Some(info) = read_auth()
             .or_else(saved_login_auth)
             .or_else(|| bare_token().map(synthesize_auth))
@@ -59,7 +73,6 @@ impl QuotaProbe for WorkBuddyQuota {
         if !token_is_fresh(&info, chrono::Utc::now().timestamp_millis()) {
             return Vec::new();
         }
-        let body = request_body(chrono::Local::now());
         let Some(data) = call(&info, &body) else { return Vec::new() };
         samples_from_resource(&data)
     }
