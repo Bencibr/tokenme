@@ -295,7 +295,17 @@ fn publish(
     let polled_quota = {
         let poll_started = std::time::Instant::now();
         let mut q = usage_core::report::poll_quota(adapters);
-        q.extend(usage_quota::collect());
+        // The host-exit pause: a tool whose application has exited stops
+        // getting vendor probes (the number cannot change) but keeps its last
+        // known answer on screen. Unmapped tools always keep probing.
+        if app.state::<Shared>().settings().host_exit_pause {
+            let alive = usage_quota::host::running_process_names();
+            q.extend(usage_quota::collect_gated(usage_quota::BUDGET, move |tool| {
+                usage_quota::host::any_host_running(tool, &alive)
+            }));
+        } else {
+            q.extend(usage_quota::collect());
+        }
         let per_tool: Vec<String> = q
             .iter()
             .map(|sample| {

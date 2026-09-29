@@ -44,7 +44,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use usage_core::QuotaSample;
 
-use crate::providers::workbuddy_wbipc::hmac_sha256;
+use crate::providers::hmac_sha256;
 use crate::QuotaProbe;
 
 pub struct JoycodeQuota;

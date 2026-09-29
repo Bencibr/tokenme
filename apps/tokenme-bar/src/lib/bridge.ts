@@ -167,6 +167,14 @@ export const bridge: Bridge = {
     await invoke<void>("set_show_money", { on });
   },
 
+  async setHostExitPause(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.host_exit_pause = on;
+      return;
+    }
+    await invoke<void>("set_host_exit_pause", { on });
+  },
+
   async setBubbleEnabled(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.bubble_enabled = on;
@@ -211,5 +219,6 @@ const browserSettings: PanelSettings = {
   theme: "system",
   show_money: true,
   bubble_enabled: true,
+  host_exit_pause: true,
   version: "dev",
 };

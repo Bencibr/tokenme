@@ -9,6 +9,7 @@
 //! re-probe a vendor every refresh.
 
 pub mod cache;
+pub mod host;
 mod http;
 mod providers;
 
@@ -63,6 +64,23 @@ pub fn collect_within(budget: Duration) -> Vec<QuotaView> {
     collect_probes_within(budget, built_in(), cache::Cache::open("tokenme/quota", TTL))
 }
 
+/// The panel's gated variant: a probe whose `gate` answers `false` (its host
+/// application has exited) is not asked — the vendor call would be for a
+/// number that cannot change — but its LAST KNOWN answer stays on screen, read
+/// from the cache however old it is. The gate is consulted once per pass, so
+/// a host that starts again resumes probing within one TTL.
+pub fn collect_gated(
+    budget: Duration,
+    gate: impl Fn(&str) -> bool + Send + Sync + 'static,
+) -> Vec<QuotaView> {
+    collect_probes_gated(
+        budget,
+        built_in(),
+        cache::Cache::open("tokenme/quota", TTL),
+        &gate,
+    )
+}
+
 /// Invalidate every cached quota answer, so the next [`collect`] re-probes
 /// the vendors for real. The panel's manual full refresh calls this; the idle
 /// cadence never does — a 5-minute-old answer is still worth showing there.
@@ -79,6 +97,19 @@ fn collect_probes_within(
     probes: Vec<Box<dyn QuotaProbe>>,
     cache: Option<cache::Cache>,
 ) -> Vec<QuotaView> {
+    collect_probes_gated(budget, probes, cache, &|_| true)
+}
+
+/// The gated core: a probe the `gate` refuses still contributes its cached
+/// answer — however old — so the row stays on screen frozen instead of
+/// blinking out; a probe with no cache entry at all (never answered) simply
+/// stays absent until its host returns.
+fn collect_probes_gated(
+    budget: Duration,
+    probes: Vec<Box<dyn QuotaProbe>>,
+    cache: Option<cache::Cache>,
+    gate: &dyn Fn(&str) -> bool,
+) -> Vec<QuotaView> {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -93,11 +124,16 @@ fn collect_probes_within(
         let cache = Arc::clone(&cache);
         let shared = Arc::clone(&shared);
         let done_count = Arc::clone(&done);
+        let gated_off = !gate(probe.tool());
         let spawned = std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(move || {
                 let cached: Option<&cache::Cache> = (*cache).as_ref();
-                let views = cache::probe(cached, probe.as_ref());
+                let views = match (gated_off, cached) {
+                    // The host is gone: serve the last known answer untouched.
+                    (true, Some(c)) => c.stale(probe.tool()).unwrap_or_default(),
+                    _ => cache::probe(cached, probe.as_ref()),
+                };
                 if let Ok(mut slot) = shared.lock() {
                     slot.extend(views);
                 }
@@ -146,6 +182,7 @@ pub const BUDGET: Duration = Duration::from_secs(5);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     /// Tools that answer a quota question but have no log adapter (yet). The
     /// assertion below still catches a typo in any `tool()`.
@@ -164,6 +201,68 @@ mod tests {
     /// A probe whose vendor needs longer than the caller's budget: without the
     /// grace supplement its bars vanish for a cycle and the panel reflows —
     /// the "cline jumps around" blink.
+    /// A gated-off probe (its host has exited) must not be asked — but its
+    /// last known answer stays on screen, however old. A gated-on probe runs
+    /// for real. This is the host-exit pause's whole contract.
+    #[test]
+    fn a_gated_off_probe_serves_stale_and_a_gated_on_probe_runs() {
+        struct Counting {
+            tool: &'static str,
+            calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl QuotaProbe for Counting {
+            fn tool(&self) -> &'static str {
+                self.tool
+            }
+            fn fetch(&self) -> Vec<QuotaSample> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                vec![QuotaSample {
+                    used_percent: 42.0,
+                    window_minutes: 300,
+                    resets_at_ms: 0,
+                    label: Some("fresh".into()),
+                    id: None,
+                }]
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_path_buf();
+        let calls_dsh = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_qoder = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // A fresh probe set per pass (the Arc counters survive); the cache
+        // lives on disk in between, exactly like the real cycle.
+        let probes = |d: _, q: _| -> Vec<Box<dyn QuotaProbe>> {
+            vec![
+                Box::new(Counting { tool: "dsh", calls: d }),
+                Box::new(Counting { tool: "qoder", calls: q }),
+            ]
+        };
+        // Warm the cache: one ungated pass answers both.
+        let out = collect_probes_gated(
+            BUDGET,
+            probes(calls_dsh.clone(), calls_qoder.clone()),
+            Some(cache::Cache::in_dir(cache_dir.clone(), TTL)),
+            &|_| true,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(calls_dsh.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_qoder.load(Ordering::SeqCst), 1);
+
+        // Now close DSH's host and re-pass: dsh is served stale (no call), and
+        // qoder's fresh cached answer is reused too. The contract here is the
+        // call COUNT: a gated-off probe is never asked.
+        let out = collect_probes_gated(
+            BUDGET,
+            probes(calls_dsh.clone(), calls_qoder.clone()),
+            Some(cache::Cache::in_dir(cache_dir, TTL)),
+            &|tool| tool != "dsh",
+        );
+        assert_eq!(out.len(), 2, "both rows stay on screen");
+        assert_eq!(calls_dsh.load(Ordering::SeqCst), 1, "the gated-off probe is never asked");
+        assert_eq!(calls_qoder.load(Ordering::SeqCst), 1, "a fresh cached answer is reused");
+    }
+
     #[test]
     fn a_probe_that_outruns_the_budget_is_carried_by_its_cached_answer() {
         struct Slow {
