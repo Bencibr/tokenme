@@ -6,6 +6,7 @@
 //!
 //! Owned by the `codex-opencode-adapters` workstream; public surface is frozen.
 
+mod doctor;
 mod loader;
 mod parser;
 mod paths;
@@ -15,6 +16,9 @@ use usage_core::{
 };
 
 pub const TOOL_ID: &str = "codex";
+
+/// The replay audit surface: `tokenme codex-doctor` and the scan log read this.
+pub use doctor::sessions as replay;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexAdapter;

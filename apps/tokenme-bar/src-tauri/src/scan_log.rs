@@ -125,6 +125,53 @@ pub fn pass(
         }
     }
 
+    // The codex replay audit rides the heartbeat line only: re-parsing every
+    // rollout from scratch is the one expensive fact here (hundreds of ms on a
+    // heavy machine), and hourly is plenty for a remote double-count check.
+    let mut codex_audit: serde_json::Value = serde_json::Value::Null;
+    if heartbeat_due {
+        let replay = usage_adapter_codex::replay(&usage_core::DateFilter::default());
+        let mut indexed: BTreeMap<String, (f64, f64, f64, f64, usize)> = BTreeMap::new();
+        for e in events.iter().filter(|e| e.tool == "codex") {
+            let slot = indexed.entry(e.session.clone()).or_insert((0.0, 0.0, 0.0, 0.0, 0));
+            slot.0 += e.counts.input;
+            slot.1 += e.counts.cache_creation;
+            slot.2 += e.counts.cache_read;
+            slot.3 += e.counts.output;
+            slot.4 += 1;
+        }
+        let mut mismatches: Vec<String> = Vec::new();
+        let mut checked = 0u64;
+        let mut sessions: Vec<_> = Vec::new();
+        for row in &replay {
+            let replay_json = json!({
+                "in": row.input, "out": row.output, "cached": row.cached, "calls": row.calls,
+            });
+            match indexed.get(&row.session) {
+                Some((i, cc, cr, o, n)) => {
+                    checked += 1;
+                    let matches = (*i - row.input).abs() < 0.5
+                        && (*o - row.output).abs() < 0.5
+                        && ((*cr + *cc) - row.cached).abs() < 0.5
+                        && *n == row.calls;
+                    if !matches {
+                        mismatches.push(row.session.clone());
+                    }
+                    sessions.push(json!({
+                        "id": row.session, "replay": replay_json,
+                        "index": { "in": i, "out": o, "cached": cr + cc, "calls": n },
+                        "match": matches,
+                    }));
+                }
+                None => {
+                    mismatches.push(format!("{row:?}", row = row.session));
+                    sessions.push(json!({ "id": row.session, "replay": replay_json, "index": null, "match": false }));
+                }
+            }
+        }
+        codex_audit = json!({ "sessions": checked, "mismatches": mismatches, "detail": sessions });
+    }
+
     let line = json!({
         "ts": Local::now().to_rfc3339(),
         "proc": "panel",
@@ -140,6 +187,7 @@ pub fn pass(
         "tools": tools,
         "dsh_regressions": dsh_regressions,
         "dsh_sessions": dsh_sessions,
+        "codex_audit": codex_audit,
     });
 
     append_line(&serde_json::to_string(&line).unwrap_or_default());

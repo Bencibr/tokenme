@@ -4274,6 +4274,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "thiserror 2.0.20",
  "usage-adapter-all",
+ "usage-adapter-codex",
  "usage-adapter-dsh",
  "usage-core",
  "usage-index",

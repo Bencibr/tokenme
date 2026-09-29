@@ -25,6 +25,7 @@ usage-core = { path = "../../../crates/usage-core" }
 usage-index = { path = "../../../crates/usage-index" }
 usage-adapter-all = { path = "../../../crates/adapters/all" }
 usage-adapter-dsh = { path = "../../../crates/adapters/dsh" }
+usage-adapter-codex = { path = "../../../crates/adapters/codex" }
 usage-quota = { path = "../../../crates/usage-quota" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
