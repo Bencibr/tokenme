@@ -43,6 +43,7 @@ pub fn run() {
             commands::set_refresh_secs,
             commands::set_theme,
             commands::set_show_money,
+            commands::set_host_exit_pause,
             commands::set_bubble_enabled,
             commands::begin_bubble_drag,
             commands::show_panel,

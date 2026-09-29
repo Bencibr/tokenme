@@ -63,6 +63,11 @@ fn default_bubble_enabled() -> bool {
     true
 }
 
+/// See the field: pausing an absent host's probes is the polite default.
+fn default_host_exit_pause() -> bool {
+    true
+}
+
 /// The whole persisted surface: a tiny JSON file under the platform config dir.
 ///
 /// `budgets` is shared with the CLI: `tokenme budget set …` writes that one key of
@@ -89,6 +94,11 @@ pub struct Settings {
     pub show_money: bool,
     #[serde(default = "default_bubble_enabled")]
     pub bubble_enabled: bool,
+    /// Stop asking vendors for a tool's quota once its host application has
+    /// exited: the number cannot change, and the calls are the user's own
+    /// account traffic. Default on; the last known answer stays on screen.
+    #[serde(default = "default_host_exit_pause")]
+    pub host_exit_pause: bool,
     pub budgets: BTreeMap<String, usage_core::Budget>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub quota_tools: Vec<String>,
@@ -105,6 +115,7 @@ impl Default for Settings {
             refresh_secs: default_refresh_secs(),
             show_money: default_show_money(),
             bubble_enabled: default_bubble_enabled(),
+            host_exit_pause: default_host_exit_pause(),
             budgets: BTreeMap::new(),
             quota_tools: Vec::new(),
             quota_rows: Vec::new(),

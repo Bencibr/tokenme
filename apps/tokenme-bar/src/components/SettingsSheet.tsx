@@ -61,6 +61,11 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
     void bridge.setBubbleEnabled(on);
   };
 
+  const setHostExitPause = (on: boolean) => {
+    setSettings((s) => (s ? { ...s, host_exit_pause: on } : s));
+    void bridge.setHostExitPause(on);
+  };
+
   const quit = () => {
     void bridge.quit();
   };
@@ -149,6 +154,21 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             aria-checked={settings?.show_money ?? true}
             aria-label="金额折算"
             onClick={() => setShowMoney(!(settings?.show_money ?? true))}
+          />
+        </div>
+
+        <div className="sheet-row">
+          <div>
+            <div className="sheet-label">退出后暂停配额</div>
+            <div className="sheet-hint">工具退出后停止探测其配额，保留最后数值</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            className="switch"
+            aria-checked={settings?.host_exit_pause ?? true}
+            aria-label="退出后暂停配额"
+            onClick={() => setHostExitPause(!(settings?.host_exit_pause ?? true))}
           />
         </div>
 

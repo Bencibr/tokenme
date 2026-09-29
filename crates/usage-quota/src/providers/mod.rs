@@ -2,11 +2,13 @@
 
 mod antigravity;
 mod atomcode;
+mod crypto;
 mod catpaw;
 mod claude;
 mod cline;
 mod codex;
 mod copilot;
+pub(crate) use crypto::hmac_sha256;
 mod dsh;
 mod funide;
 mod gemini;

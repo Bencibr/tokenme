@@ -57,23 +57,7 @@ fn discovery_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".workbuddy-ai").join("wbipc").join("endpoint.json"))
 }
 
-/// HMAC-SHA256 over `sha2`. The workspace has no `hmac` crate and this
-/// two-pad construction is pinned by the golden-vector tests below.
-pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut block = [0u8; 64];
-    if key.len() > 64 {
-        block[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let mut inner = Sha256::new();
-    inner.update(block.iter().map(|b| b ^ 0x36).collect::<Vec<u8>>());
-    inner.update(data);
-    let mut outer = Sha256::new();
-    outer.update(block.iter().map(|b| b ^ 0x5c).collect::<Vec<u8>>());
-    outer.update(inner.finalize());
-    outer.finalize().into()
-}
+use crate::providers::hmac_sha256;
 
 /// Length-prefixed concat — without it `a|bc` and `ab|c` share one transcript.
 fn transcript(role: &str, endpoint: &str, client_nonce: &str, server_nonce: &str) -> Vec<u8> {
