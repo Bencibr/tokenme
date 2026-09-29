@@ -27,7 +27,14 @@ jobs:
         run: set -o pipefail; ./scripts/build-macos.sh 2>&1 | tee build.log
       - name: Surface build failure
         if: failure()
-        run: tail -c 6000 build.log | while IFS= read -r line; do echo "::error::$line"; done
+        run: grep -nE "error(\[[0-9]*\])?:|FAILED|failures:|panicked at|warning: build failed|ELIFECYCLE|Command failed" build.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
       - name: Stage artifacts
         run: |
           B=apps/tokenme-bar/src-tauri/target/release/bundle
