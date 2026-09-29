@@ -1,6 +1,7 @@
 //! One module per vendor whose quota lives outside its logs.
 
 mod antigravity;
+mod atomcode;
 mod catpaw;
 mod claude;
 mod cline;
@@ -16,6 +17,7 @@ mod workbuddy_wbipc;
 mod zcode;
 
 pub use antigravity::AntigravityQuota;
+pub use atomcode::AtomCodeQuota;
 pub use catpaw::CatpawQuota;
 pub use claude::ClaudeQuota;
 pub use cline::ClineQuota;
@@ -36,6 +38,7 @@ use crate::QuotaProbe;
 pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
     vec![
         Box::new(AntigravityQuota),
+        Box::new(AtomCodeQuota),
         Box::new(ClineQuota),
         Box::new(OpenCodeQuota),
         Box::new(CodexQuota),

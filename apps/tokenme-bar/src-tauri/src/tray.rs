@@ -4,7 +4,8 @@ use tauri::menu::{CheckMenuItem, MenuBuilder, MenuEvent, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Rect};
 use tauri_plugin_autostart::ManagerExt;
-use usage_core::{QuotaView, Report};
+use usage_core::pricing::PricingOptions;
+use usage_core::{PricingMap, QuotaView, Report};
 
 use crate::commands::TrayState;
 use crate::engine::{EngineChannel, Msg, Shared};
@@ -278,8 +279,22 @@ fn on_tray_event(tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent) {
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id().as_ref() {
         "refresh" => {
+            // The full refresh the panel's 刷新 runs: a fresh models.dev price
+            // table first (the engine re-summarizes when it lands), then the
+            // manual pass — the engine drops the quota cache on Refresh, so
+            // every vendor is re-probed for real. The fetch blocks on network,
+            // so it runs off the menu-event thread.
             if let Some(channel) = app.try_state::<EngineChannel>() {
-                let _ = channel.0.send(Msg::Refresh);
+                let sender = channel.0.clone();
+                std::thread::spawn(move || {
+                    let map = PricingMap::refresh(&PricingOptions {
+                        offline: false,
+                        cache_dir: PricingOptions::default_cache_dir(),
+                        overrides: Default::default(),
+                    });
+                    let _ = sender.send(Msg::Pricing(map));
+                    let _ = sender.send(Msg::Refresh);
+                });
             }
         }
         "today" => panel::open_at(app, "day"),
