@@ -55,7 +55,18 @@ impl Watcher {
     pub fn spawn(roots: &[PathBuf], tx: Sender<()>) -> Result<Watcher> {
         // (expected path with symlinks resolved, deepest existing ancestor to watch)
         let plans: Vec<(PathBuf, PathBuf)> = roots.iter().filter_map(|r| resolve(r)).collect();
-        let expected: Vec<PathBuf> = plans.iter().map(|(e, _)| e.clone()).collect();
+        // `coarse` marks a root that does not exist yet: it is watched through
+        // an ancestor, so events reported at-or-above the root must count. A
+        // root that exists is strict — on macOS FSEvents coalesces a busy
+        // machine's unrelated churn into ancestor-level paths, and accepting
+        // those made the watcher fire for sibling tempdirs on CI.
+        let expected: Vec<(PathBuf, bool)> = plans
+            .iter()
+            .map(|(e, watch)| {
+                let canonical_watch = std::fs::canonicalize(watch).unwrap_or_else(|_| watch.clone());
+                (e.clone(), &canonical_watch != e)
+            })
+            .collect();
 
         let state = Arc::new(State {
             pending: Mutex::new(false),
@@ -73,8 +84,7 @@ impl Watcher {
             // so everything reported is filtered against the declared roots.
             if !ev.paths.iter().any(|p| relevant(&expected, p)) {
                 return;
-            }
-            callback_state.last_event_ms.store(epoch_ms(), Ordering::SeqCst);
+            }            callback_state.last_event_ms.store(epoch_ms(), Ordering::SeqCst);
             let mut pending = lock(&callback_state.pending);
             if !*pending {
                 *pending = true;
@@ -203,9 +213,16 @@ fn nearest_existing(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn relevant(expected: &[PathBuf], path: &Path) -> bool {
+fn relevant(expected: &[(PathBuf, bool)], path: &Path) -> bool {
     let Some(resolved) = nearest_existing(path) else {
         return false;
     };
-    expected.iter().any(|e| resolved.starts_with(e) || e.starts_with(&resolved))
+    expected.iter().any(|(e, coarse)| {
+        // Inside the root always counts. The ancestor direction — an event
+        // reported at-or-above the root — counts only for a root watched
+        // through its ancestor on purpose; for an existing root it is how a
+        // busy machine's unrelated churn (sibling tempdirs, runner scratch)
+        // leaks in, and it must stay out.
+        resolved.starts_with(e) || (*coarse && e.starts_with(&resolved))
+    })
 }
