@@ -4260,7 +4260,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokenme"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4274,6 +4274,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "thiserror 2.0.20",
  "usage-adapter-all",
+ "usage-adapter-dsh",
  "usage-core",
  "usage-index",
  "usage-quota",
@@ -4851,6 +4852,7 @@ dependencies = [
  "serde",
  "serde_json",
  "usage-core",
+ "walkdir",
 ]
 
 [[package]]

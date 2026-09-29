@@ -24,6 +24,7 @@ tauri-plugin-single-instance = "2"
 usage-core = { path = "../../../crates/usage-core" }
 usage-index = { path = "../../../crates/usage-index" }
 usage-adapter-all = { path = "../../../crates/adapters/all" }
+usage-adapter-dsh = { path = "../../../crates/adapters/dsh" }
 usage-quota = { path = "../../../crates/usage-quota" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
