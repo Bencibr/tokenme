@@ -20,9 +20,8 @@ import { useMoney } from "../lib/display";
  * in the same columns every time, so cross-tool comparison is a single glance.
  * The badge is the tool's own app icon where one is installed, which is what
  * lets twelve rows be scanned by shape instead of read one name at a time.
- * The size share is a solid bar under each row in the tool's own colour — the
- * same bar-column language as the ranks page (a wash behind the row blurred
- * neighbouring shares and vanished entirely for small ones).
+ * The size share is the tool's own colour washed across the full row — small
+ * shares ride a 2% floor so a quiet tool still reads as present.
  */
 export function ToolsSection({ tools }: { tools: Item[] }) {
   const showMoney = useMoney();
@@ -32,21 +31,20 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
     const dir = sort === "asc" ? 1 : -1;
     return [...tools].sort((a, b) => (a.total_tokens - b.total_tokens) * dir);
   }, [tools, sort]);
-  // Each row's bar speaks on a scale that is true for it: priced tools on
-  // cost, everything else on tokens. A tool the price list cannot name (DSH's
-  // deepseek-flash, say) must still show its relative size — dropping the bar
-  // read as "this tool did nothing", which was never the meaning.
-  const costMax = ordered.reduce((acc, t) => Math.max(acc, t.priced ? t.cost : 0), 0);
-  const tokenMax = ordered.reduce((acc, t) => Math.max(acc, t.total_tokens), 0);
-  const totalCost = ordered.reduce((acc, t) => acc + t.cost, 0);
-  const barShare = (t: Item) => {
+  // The wash follows each row's "size language": priced tools on cost, and
+  // everything else on tokens — money off, or a tool the price list cannot
+  // name (dsh's deepseek-flash). A row whose colour variable points past the
+  // palette (--cat-18 for dsh once) rendered the wash transparent, which read
+  // as "did nothing"; the palette now outgrows TOOL_ORDER with it.
+  const washOf = (t: Item) => {
     const max = showMoney && t.priced ? costMax : tokenMax;
     const value = showMoney && t.priced ? t.cost : t.total_tokens;
     const share = max > 0 ? (value / max) * 100 : 0;
-    // 3% floor: a 0.05% share is a sub-pixel sliver, and an invisible bar is
-    // the same lie as no bar. Honest smallness is a small bar, not none.
-    return Math.max(share, value > 0 ? 3 : 0);
+    return Math.max(share, value > 0 ? 2 : 0);
   };
+  const costMax = ordered.reduce((acc, t) => Math.max(acc, t.priced ? t.cost : 0), 0);
+  const tokenMax = ordered.reduce((acc, t) => Math.max(acc, t.total_tokens), 0);
+  const totalCost = ordered.reduce((acc, t) => acc + t.cost, 0);
 
   if (tools.length === 0) {
     return (
@@ -65,9 +63,19 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
       <ol className="tool-list">
         {ordered.map((t) => {
           const credit = t.counts.credits > 0 && t.total_tokens === 0;
-          const bar = barShare(t);
+          const wash = washOf(t);
           return (
-            <li className="tool" key={t.key} style={{ "--c": toolColor(t.key) } as React.CSSProperties}>
+            <li
+              className="tool"
+              key={t.key}
+              style={
+                {
+                  "--c": toolColor(t.key),
+                  backgroundImage: "linear-gradient(90deg, color-mix(in srgb, var(--c) 9%, transparent) 0 0)",
+                  backgroundSize: `${wash}% 100%`,
+                } as React.CSSProperties
+              }
+            >
               <div className="tool-top">
                 <ToolIcon tool={t.key} size={24} />
                 <span className="tool-name">{toolDisplay(t.key)}</span>
@@ -83,9 +91,6 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                       : "无价格"
                     : ""}
                 </span>
-              </div>
-              <div className="tool-bar" aria-hidden="true">
-                <i style={{ width: `${bar}%` }} />
               </div>
               {credit ? (
                 <div className="tool-foot">

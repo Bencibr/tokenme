@@ -63,6 +63,11 @@
   --cat-12: #7a2f2f;
   --cat-13: #2f7a4f;
   --cat-14: #6f5f3f;
+  --cat-15: #7a5f8f;
+  --cat-16: #4a7a8a;
+  --cat-17: #9e6a3f;
+  /* dsh 的品牌蓝；cat-15 起，主题色板必须长过 TOOL_ORDER */
+  --cat-18: #4a5fb0;
 
   /* activity scale, quiet → saturated */
   --heat-1: #d8e7e4;
@@ -177,6 +182,11 @@
     --cat-12: #d97f7f;
     --cat-13: #7fc79e;
     --cat-14: #bfae7f;
+    --cat-15: #b09ae0;
+    --cat-16: #7ac0d9;
+    --cat-17: #e0a06a;
+    /* dsh 的品牌蓝（暗色提亮） */
+    --cat-18: #8f9ff0;
 
     --heat-1: #1a3f36;
     --heat-2: #215c4d;
