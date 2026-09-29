@@ -51,6 +51,12 @@ $ tokenme daily --days 3
 
 **直接下载**安装包即可使用：到 [Releases](https://github.com/sp/tokenme/releases/latest) 获取 macOS 菜单栏应用（拖入 Applications）与 Windows 安装程序。也可从源码构建：
 
+> **macOS 首次打开**：安装包没有开发者证书签名（ad-hoc 签名），Gatekeeper 可能拦截。除了右键打开外，更直接的方式是清掉隔离标记后正常启动：
+>
+> ```bash
+> sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
+> ```
+
 ```bash
 git clone https://github.com/sp/tokenme.git
 cd tokenme

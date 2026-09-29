@@ -51,6 +51,12 @@ $ tokenme daily --days 3
 
 **Download** the installer from [Releases](https://github.com/sp/tokenme/releases/latest) — a macOS menu-bar app (drag to Applications) and a Windows setup. Or build from source:
 
+> **First launch on macOS**: the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may block it. Besides right-click → Open, the direct way is clearing the quarantine flag and launching normally:
+>
+> ```bash
+> sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
+> ```
+
 ```bash
 git clone https://github.com/sp/tokenme.git
 cd tokenme
