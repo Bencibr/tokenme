@@ -7,7 +7,7 @@
  * 自动重写并提交）；国内用户访问 GitHub 慢的话，把同一份 latest.json 丢到
  * 七牛等免费 OSS，把 URL 换成 OSS 直链即可，格式不变。
  */
-export const GITHUB_REPO = "sp/tokenme";
+export const GITHUB_REPO = "Bencibr/tokenme";
 export const RELEASE_PAGE_URL = `https://github.com/${GITHUB_REPO}/releases/latest`;
 export const UPDATE_MANIFEST_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/latest.json`;
 export const CONTACT_EMAIL = "benci@oksu.club";
