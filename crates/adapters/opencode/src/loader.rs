@@ -18,7 +18,7 @@ pub(crate) const BATCH_ROWS: i64 = 2000;
 /// The role filter runs inside SQLite so user messages never reach Rust, and the
 /// `CASE` guard matters: bare `json_extract` aborts the *whole query* the moment
 /// one row holds torn JSON, which would silently stall ingestion at that rowid.
-const SELECT: &str = "SELECT rowid, id, session_id, time_created, data FROM message \
+const SELECT: &str = "SELECT rowid, id, session_id, time_created, time_updated, data FROM message \
      WHERE rowid > ?1 \
        AND CASE WHEN json_valid(data) THEN json_extract(data, '$.role') ELSE NULL END = 'assistant' \
      ORDER BY rowid LIMIT ?2";
@@ -35,6 +35,7 @@ struct RowData {
     id: String,
     session_id: String,
     time_created: i64,
+    time_updated: i64,
     data: String,
 }
 
@@ -44,7 +45,8 @@ fn take_row(row: &Row<'_>) -> rusqlite::Result<RowData> {
         id: row.get(1)?,
         session_id: row.get(2)?,
         time_created: row.get(3)?,
-        data: row.get(4)?,
+        time_updated: row.get(4)?,
+        data: row.get(5)?,
     })
 }
 
@@ -65,6 +67,15 @@ pub(crate) fn read_batch(path: &Path, cursor: ReadCursor, source_key: &str, prod
 
 fn try_read(path: &Path, cursor: ReadCursor, source_key: &str, product: &Product, batch: i64) -> rusqlite::Result<ReadOutcome> {
     let conn = paths::open_readonly(path, paths::USABLE_SQL)?;
+    // A schema migration rebuilds the table with fresh rowids; a stored cursor
+    // above the table's own high-water mark then starves ingestion forever
+    // (measured 2026-09-29: five days of usage invisible after OpenCode's
+    // 09-24 migration). Restart from zero — every event carries the message's
+    // primary key as its dedupe key, so the replay is absorbed idempotently.
+    let max_rowid: i64 = conn
+        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM message", [], |r| r.get(0))
+        .unwrap_or(0);
+    let cursor = if cursor.0 as i64 > max_rowid { ReadCursor(0) } else { cursor };
     let rows = fetch_batch(&conn, cursor.0 as i64, batch).unwrap_or_default();
 
     let mut session_stmt = conn.prepare_cached(SELECT_SESSION).ok();
@@ -73,11 +84,23 @@ fn try_read(path: &Path, cursor: ReadCursor, source_key: &str, product: &Product
     let mut events = Vec::with_capacity(rows.len());
     // Cursor advances to the last row that actually decoded, so a torn batch
     // resumes there instead of replaying rows already turned into events.
+    // However, OpenCode writes a placeholder assistant row with zero tokens and
+    // fills it a few seconds later (time_updated >> time_created). If we advance
+    // past a recent zero row, its later update is forever lost because the rowid
+    // never moves. So a recent zero is treated as transient: we park the cursor
+    // before it and retry on the next pass.
     let mut last_rowid = cursor.0;
+    let now_ms = chrono::Local::now().timestamp_millis();
 
     for r in rows {
+        let Some(parsed) = parser::parse_message(&r.data) else {
+            if is_recent_transient_zero(&r.data, r.time_created, r.time_updated, now_ms) {
+                break;
+            }
+            last_rowid = r.rowid.max(0) as u64;
+            continue;
+        };
         last_rowid = r.rowid.max(0) as u64;
-        let Some(parsed) = parser::parse_message(&r.data) else { continue };
         let mut ev = UsageEvent::new(product.id, normalise_ms(r.time_created), r.session_id.clone());
         ev.project = project_of(session_stmt.as_mut(), &r.session_id, &mut dirs, parsed.cwd.as_deref());
         ev.model = parsed.model;
@@ -116,6 +139,27 @@ fn normalise_ms(ts: i64) -> i64 {
     } else {
         ts
     }
+}
+
+const RECENT_MS: i64 = 10 * 60 * 1000;
+
+fn is_recent_transient_zero(data: &str, time_created: i64, time_updated: i64, now_ms: i64) -> bool {
+    // Only defer a row that is still "in flight": assistant with zero tokens but
+    // created/updated within the last few minutes. An old zero (like 1723) is
+    // permanently unbillable and must be skipped, otherwise the cursor would
+    // never advance past it.
+    // We don't re-parse tokens here beyond a cheap check; any parse failure on
+    // a recent row is worth retrying because the writer may still be filling it.
+    let recent = |t: i64| {
+        let t = normalise_ms(t);
+        t > 0 && now_ms.saturating_sub(t) < RECENT_MS
+    };
+    if !(recent(time_created) || recent(time_updated)) {
+        return false;
+    }
+    // Heuristic: recent failure is likely a placeholder zero. We defer it.
+    // Checking the role is redundant (SQL already filtered), but cheap.
+    data.contains("\"role\":\"assistant\"") || data.contains("\"role\": \"assistant\"")
 }
 
 fn project_of(
@@ -201,5 +245,25 @@ mod tests {
             vec!["msg1", "msg2", "msg3", "msg4", "msg5"],
             "one batch per call, in rowid order, no row twice"
         );
+    }
+
+    /// A schema migration rebuilds the table with rowids that start over: a
+    /// cursor above the new high-water mark restarts from zero in the same
+    /// pass instead of starving forever, and the replay still dedupes by
+    /// message id.
+    #[test]
+    fn a_cursor_above_the_migrated_high_water_mark_restarts_from_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = five_row_db(dir.path());
+        // The old generation's cursor: far above anything the new table holds.
+        let recovered = read_batch(&path, ReadCursor(500), "db", &crate::paths::OPENCODE, 100);
+        assert_eq!(recovered.events.len(), 5, "the whole table replays in the same pass");
+        let keys: Vec<String> = recovered.events.iter().map(|e| e.dedupe_key.clone().unwrap()).collect();
+        assert_eq!(keys, vec!["msg1", "msg2", "msg3", "msg4", "msg5"]);
+        assert_eq!(recovered.cursor, ReadCursor(5));
+        // And the steady state afterwards is the ordinary append-only walk.
+        let done = read_batch(&path, recovered.cursor, "db", &crate::paths::OPENCODE, 100);
+        assert!(done.events.is_empty());
+        assert_eq!(done.cursor, ReadCursor(5));
     }
 }
