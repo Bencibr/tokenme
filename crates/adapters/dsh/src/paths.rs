@@ -81,6 +81,23 @@ pub fn is_session_file(path: &Path) -> bool {
     )
 }
 
+/// A v3 stream carries the session's per-call events. A v4 stream is
+/// header-only by design — its numbers live in the projection cache — so
+/// discovery reads v3 streams and skips v4 ones (see [`projcache_dir`]).
+pub fn is_v3_stream(path: &Path) -> bool {
+    path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some("session.jsonl.zstd")
+}
+
+/// `<harness>/storages/session_projcache/sessions` — the format-v4 session
+/// projections, one JSON per session, sibling of the sessions root. The
+/// v4 stream file stays a one-line header forever; this is where its tokens
+/// actually live (module notes in [`proj`]).
+pub fn projcache_dir() -> Option<PathBuf> {
+    let harness = sessions_dir()?.parent()?.to_path_buf();
+    let p = harness.join("storages").join("session_projcache").join("sessions");
+    p.is_dir().then_some(p)
+}
+
 #[cfg(test)]
 pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
