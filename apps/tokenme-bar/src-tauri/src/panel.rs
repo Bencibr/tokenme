@@ -142,7 +142,34 @@ fn request_visibility(window: &WebviewWindow, visible: bool) {
     if visible {
         let _ = window.show();
     } else {
+        // Tauri's visibility cache lags for the non-activating panel (the
+        // same lag the Windows click-away monitor works around below). Two
+        // hide requests landing in one event pass — the focus-loss handler
+        // and the NSWorkspace activation block — both read the stale "visible"
+        // and orderOut the panel twice, which is the SIGBUS path (build 25
+        // died twice there). Ask the native window; hidden means done.
+        #[cfg(target_os = "macos")]
+        if !native_window_visible(window) {
+            return;
+        }
         let _ = window.hide();
+    }
+}
+
+/// The NSWindow's own `isHidden` — the ground truth tauri's cached
+/// `is_visible` can trail. Only meaningful on macOS; other platforms keep
+/// their own native checks.
+#[cfg(target_os = "macos")]
+fn native_window_visible(window: &WebviewWindow) -> bool {
+    use tauri_nspanel::cocoa::base::{id, BOOL, NO};
+    use tauri_nspanel::objc::{msg_send, sel, sel_impl};
+    match window.ns_window() {
+        Ok(ns) if !ns.is_null() => unsafe {
+            let win = ns as id;
+            let hidden: BOOL = msg_send![win, isHidden];
+            hidden == NO
+        },
+        _ => true, // unknown native state: let the caller proceed
     }
 }
 
@@ -828,9 +855,10 @@ fn observe_context_switches(app: &AppHandle) {
             }
         }
         if let Some(window) = handle.get_webview_window(LABEL) {
-            if window.is_visible().unwrap_or(false) {
-                let _ = window.hide();
-            }
+            // Through the shared visibility choke point, not a raw hide: the
+            // focus-loss handler fires for the very same activation, and a
+            // double orderOut on the converted panel is the crash path.
+            request_visibility(&window, false);
         }
     });
     let block = block.copy();
