@@ -216,7 +216,6 @@ fn ingest(
     let cutoff = cutoff_ms();
     let filter = DateFilter::new(Some(cutoff), None);
     // A failed pass keeps the previous report on screen rather than blanking it.
-    let started = std::time::Instant::now();
     let report = match index.ingest(adapters, &filter) {
         Ok(r) => {
             crate::logging::info(&format!(
