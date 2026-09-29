@@ -1,14 +1,19 @@
 //! Where DSH (DeepSeek's agent desktop, `@deepseek-ai/dsh-app-boot`) keeps its
-//! usage, and which of the two trees is authoritative.
+//! usage, and which of the trees is authoritative.
 //!
-//! Measured on this machine (2026-09-25): `~/.dsh/sessions` and
+//! Measured on the macOS machine (2026-09-25): `~/.dsh/sessions` and
 //! `~/Library/Application Support/dsh-desktop/harness/sessions` hold the exact
 //! same 18 `session.jsonl.zstd` files (md5-identical) — mirrors, not sources.
-//! `~/.dsh` wins, reading both would double-bill.
+//! `~/.dsh` wins, reading both would double-bill. On Windows there is no
+//! `~/.dsh/sessions` at all (measured 2026-09-29: `~/.dsh` carries only
+//! agents/plugins/profiles/skills) and the writer's root is
+//! `%APPDATA%\dsh-desktop\harness\sessions` — so the roots form a fallback
+//! chain, first existing wins, still one source.
 //!
 //! ## Record shape
 //! Each file is a zstd-compressed JSONL event stream for one agent session:
-//! a `session` header line (`id`, `cwd`), `request/header` lines carrying
+//! a `session` header line (`id`, `cwd`; format v4 adds `"version":4` and
+//! renames the file `session.v4.jsonl.zstd`), `request/header` lines carrying
 //! `data.header.config.model`, and per-step `assistant/chunk` lines whose
 //! `data.chunk` is `{"type":"usage","usage":{inputTokens, outputTokens,
 //! cacheReadTokens, reasoningTokens}}` — one billed call each.
@@ -39,16 +44,41 @@ pub fn dsh_home() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".dsh"))
 }
 
-/// `~/.dsh/sessions/<workspace-slug>/<session>/session.jsonl.zstd`. The mirror
-/// under `~/Library/Application Support/dsh-desktop/harness/sessions` is
-/// deliberately not consulted (module notes).
+/// `~/.dsh/sessions/<workspace-slug>/<session>/session.jsonl.zstd` — the macOS
+/// layout, where the `Application Support/dsh-desktop/harness/sessions` mirror
+/// is deliberately not consulted while the primary exists (module notes).
+/// Windows has no `~/.dsh/sessions` at all (`~/.dsh` carries only
+/// agents/plugins/profiles/skills): there the writer's root is
+/// `%APPDATA%\dsh-desktop\harness\sessions`, the same tree the macOS mirror
+/// mirrors. First existing root wins — one root, never double-billed.
 pub fn sessions_dir() -> Option<PathBuf> {
-    let p = dsh_home()?.join("sessions");
-    p.is_dir().then_some(p)
+    if std::env::var_os(ENV_DSH_HOME).is_some() {
+        // The override is authoritative: a fixture home with no sessions
+        // answers "no sessions", it does not fall through to the real tree.
+        let p = dsh_home()?.join("sessions");
+        return p.is_dir().then_some(p);
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".dsh").join("sessions"));
+    }
+    if let Some(config) = dirs::config_dir() {
+        candidates.push(config.join("dsh-desktop").join("harness").join("sessions"));
+    }
+    candidates.into_iter().find(|p| p.is_dir())
 }
 
+/// The writer names its stream `session.jsonl.zstd`; format v4 (the session
+/// header carries `"version":4`, everything else the same shape) names it
+/// `session.v4.jsonl.zstd` — same directory layout either way.
 pub fn is_session_file(path: &Path) -> bool {
-    path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some("session.jsonl.zstd")
+    if !path.is_file() {
+        return false;
+    }
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("session.jsonl.zstd") | Some("session.v4.jsonl.zstd")
+    )
 }
 
 #[cfg(test)]
@@ -74,15 +104,34 @@ mod tests {
             Some(dir.path().join("sessions").as_path())
         );
         std::env::remove_var(ENV_DSH_HOME);
-        // The fallback is home-resolved even when the real `~/.dsh/sessions`
-        // is absent — a machine can carry `.dsh` without ever opening a
-        // session — so the existence filter belongs to the expectation, not
-        // to `sessions_dir`.
-        let expected = dirs::home_dir().map(|h| h.join(".dsh/sessions"));
-        assert_eq!(
-            sessions_dir().as_deref(),
-            expected.filter(|p| p.is_dir()).as_deref()
-        );
+        // The override lifted, the first *existing* root wins: `~/.dsh/sessions`
+        // where it exists, else the writer's app-data root (the Windows layout,
+        // identical-content mirror on macOS). A machine can carry `.dsh`
+        // without ever opening a session, so the existence filter belongs to
+        // the expectation, not to `sessions_dir`.
+        let fallbacks: Vec<PathBuf> = [
+            dirs::home_dir().map(|h| h.join(".dsh").join("sessions")),
+            dirs::config_dir().map(|c| c.join("dsh-desktop").join("harness").join("sessions")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let expected = fallbacks.into_iter().find(|p| p.is_dir());
+        assert_eq!(sessions_dir().as_deref(), expected.as_deref());
     }
 
+    #[test]
+    fn both_session_stream_names_are_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let v3 = dir.path().join("session.jsonl.zstd");
+        let v4 = dir.path().join("session.v4.jsonl.zstd");
+        std::fs::write(&v3, b"x").unwrap();
+        std::fs::write(&v4, b"x").unwrap();
+        assert!(is_session_file(&v3));
+        assert!(is_session_file(&v4));
+        // A workspace sibling that only looks close is not a stream.
+        let stray = dir.path().join("session.v4.jsonl");
+        std::fs::write(&stray, b"x").unwrap();
+        assert!(!is_session_file(&stray));
+    }
 }
