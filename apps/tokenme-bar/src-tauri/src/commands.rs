@@ -144,11 +144,27 @@ pub struct PanelSettings {
 /// being told to launch arbitrary URLs.
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), String> {
+    crate::logging::info(&format!("open_external: {url}"));
     let allowed = url.starts_with("https://")
         || url.starts_with("http://")
         || url.starts_with("mailto:");
     if !allowed {
         return Err(format!("unsupported url scheme: {url}"));
+    }
+    // The mail draft takes a beat to appear; a second click on the same
+    // button while it does reads as "nothing happened" and opens a second
+    // draft. Same URL within 1.5s is the same intent — swallow it.
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<(String, std::time::Instant)>>> =
+        std::sync::OnceLock::new();
+    let last = LAST.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut slot) = last.lock() {
+        let duplicate = slot
+            .as_ref()
+            .is_some_and(|(prev, at)| *prev == url && at.elapsed() < std::time::Duration::from_millis(1500));
+        *slot = Some((url.clone(), std::time::Instant::now()));
+        if duplicate {
+            return Ok(());
+        }
     }
     #[cfg(target_os = "macos")]
     let spawned = std::process::Command::new("open").arg(&url).spawn();
