@@ -186,7 +186,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         theme: settings.theme,
         show_money: settings.show_money,
         bubble_enabled: settings.bubble_enabled,
-        version: format!("{} (build {})", env!("CARGO_PKG_VERSION"), env!("TOKENME_BUILD_ID")),
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
 

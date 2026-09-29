@@ -23,7 +23,7 @@ pub fn init() {
     let _ = PATH.set(dir.join("panel.log"));
     install_panic_hook();
     info(&format!(
-        "tokenme v{} build {} starting",
+        "TokenMe v{} build {} starting",
         env!("CARGO_PKG_VERSION"),
         env!("TOKENME_BUILD_ID")
     ));

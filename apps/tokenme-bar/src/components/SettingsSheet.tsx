@@ -19,7 +19,7 @@ const THEMES: { key: ThemeKey; label: string }[] = [
 
 /**
  * The panel's only knobs, as a bottom sheet: fallback refresh cadence, the
- * login-item switch, and the build version. Both switches apply on click —
+ * login-item switch, and the version. Both switches apply on click —
  * there is no dirty state to save, so there is no save button.
  */
 export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMoney: (on: boolean) => void }) {
@@ -208,7 +208,7 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
           </div>
         ) : null}
 
-        <p className="sheet-foot num">TokenMe v{settings?.version ?? "…"} · 数据只存在本机</p>
+        <p className="sheet-foot num">TokenMe v{settings?.version ?? "…"}</p>
       </div>
     </div>
   );
