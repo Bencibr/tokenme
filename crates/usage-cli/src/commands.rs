@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{Datelike, Local, TimeZone};
-use usage_core::{summarize, Item, Summary, UsageEvent, Window};
+use usage_core::{summarize, DateFilter, Item, Summary, UsageEvent, Window};
 use usage_index::{retention_cutoff, IngestReport};
 
 use crate::args::{Group, Win};
@@ -1357,5 +1357,82 @@ pub fn dsh_doctor(ctx: &Ctx) -> Result<(), String> {
     print!("{}", table.render(false));
     println!("notes: tokenUsage is the main thread's ledger — subagent and pre-v4 spend sit outside it; a");
     println!("cumulative session day-buckets onto its last prompt day, so day views move as sessions age.");
+    Ok(())
+}
+
+/// Codex accuracy audit: every rollout replayed from scratch (cursor 0, no
+/// manifest, no dedupe) and aggregated per session, printed next to what the
+/// index holds. Codex has no vendor-side ledger — the rollouts are the only
+/// record — so replay IS the independent truth: a divergence is a cursor or
+/// dedupe failure in the indexer, and the row names which side moved.
+pub fn codex_doctor(ctx: &Ctx) -> Result<(), String> {
+    let replay = usage_adapter_codex::replay(&DateFilter::default());
+    let mut indexed: BTreeMap<String, (f64, f64, f64, f64, usize)> = BTreeMap::new();
+    for e in ctx.index.all_events().map_err(|e| e.to_string())?.into_iter().filter(|e| e.tool == "codex") {
+        let slot = indexed.entry(e.session.clone()).or_insert((0.0, 0.0, 0.0, 0.0, 0));
+        slot.0 += e.counts.input;
+        slot.1 += e.counts.cache_creation;
+        slot.2 += e.counts.cache_read;
+        slot.3 += e.counts.output;
+        slot.4 += 1;
+    }
+    let mut table = Table::new(&[
+        "session",
+        "replay in/out/cached/calls",
+        "index in/out/cached/calls",
+        "files",
+        "status",
+    ]);
+    let mut mismatches = 0usize;
+    let mut checked = 0usize;
+    for row in &replay {
+        let replay_str = format!(
+            "{:.0}/{:.0}/{:.0}/{}",
+            row.input, row.output, row.cached, row.calls
+        );
+        let (index_str, status) = match indexed.get(&row.session) {
+            Some((i, cc, cr, o, n)) => {
+                checked += 1;
+                let agree = (*i - row.input).abs() < 0.5
+                    && (*o - row.output).abs() < 0.5
+                    && ((*cr + *cc) - row.cached).abs() < 0.5
+                    && *n == row.calls;
+                let index_str = format!("{i:.0}/{o:.0}/{:.0}/{n}", cr + cc);
+                if agree { (index_str, "ok".to_string()) } else { mismatches += 1; (index_str, "MISMATCH".to_string()) }
+            }
+            None => {
+                ("—".to_string(), "not indexed (retention or ingest gap)".to_string())
+            }
+        };
+        table.push(vec![
+            row.session.chars().take(14).collect(),
+            replay_str,
+            index_str,
+            row.files.to_string(),
+            status,
+        ]);
+    }
+    for (session, (i, cc, cr, o, n)) in &indexed {
+        if !replay.iter().any(|r| r.session == *session) {
+            mismatches += 1;
+            table.push(vec![
+                session.chars().take(14).collect(),
+                "—".into(),
+                format!("{i:.0}/{o:.0}/{:.0}/{n}", cr + cc),
+                "?".into(),
+                "indexed but replay finds nothing".into(),
+            ]);
+        }
+    }
+    println!(
+        "Codex replay: {} sessions · index: {} sessions · {} checked · {} mismatched",
+        replay.len(),
+        indexed.len(),
+        checked,
+        mismatches
+    );
+    print!("{}", table.render(false));
+    println!("notes: the replay re-parses every rollout from scratch — the index side is what the panel");
+    println!("shows; a MISMATCH means the indexer counted some call twice or dropped it.");
     Ok(())
 }

@@ -9,8 +9,12 @@
 //!   classic double-scan, and `overlap_suspect` names the pair automatically
 //! - the pass counters (`scanned/changed/new/deduped/purged`) — a `new` spike
 //!   repeating over the same data is a cursor or dedupe failure
-//! - `dsh_sessions`: the per-session ledger the panel computed — a v4 session
+//! - `dsh_sessions`: the per-session figures the index holds — a v4 session
 //!   must show exactly one event with monotonically growing totals
+//! - `dsh_audit`: those same sessions reconciled against DSH's own projection
+//!   ledger, field by field — `match: false` is a double/under-count, named
+//!   per session, with `dsh_regressions` flagging any total that shrank (a
+//!   cumulative ledger only ever grows)
 //!
 //! Rotation keeps one 2 MiB generation; the file is always safe to delete.
 
@@ -24,6 +28,7 @@ use usage_core::UsageEvent;
 use crate::logging;
 
 static LAST_HEARTBEAT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static LAST_TOTALS: Mutex<BTreeMap<String, (f64, f64, f64, f64)>> = Mutex::new(BTreeMap::new());
 const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
 const MAX_BYTES: u64 = 2 << 20;
 
@@ -71,21 +76,101 @@ pub fn pass(
     for e in events {
         *tools.entry(e.tool.clone()).or_default() += 1;
     }
-    // The dsh sessions, verbatim: a v4 session must be exactly one event with
-    // totals that only ever grow — the sharpest duplicate-scan tripwire there is.
-    let dsh_sessions: Vec<_> = events
-        .iter()
-        .filter(|e| e.tool == "dsh")
-        .map(|e| {
-            json!({
-                "id": e.session,
-                "in": e.counts.input, "cc": e.counts.cache_creation,
-                "cr": e.counts.cache_read, "out": e.counts.output,
-                "events": 1, "model": e.model,
-                "ts": e.ts_ms,
-            })
-        })
-        .collect();
+    // The dsh reconciliation: what the index holds per session, what DSH's own
+    // projection ledger says, and whether any total moved backwards (a
+    // cumulative ledger only grows — a shrink is a re-read or double-write).
+    let dsh: Vec<&UsageEvent> = events.iter().filter(|e| e.tool == "dsh").collect();
+    let mut last_totals = LAST_TOTALS.lock().unwrap();
+    let mut dsh_regressions: Vec<String> = Vec::new();
+    let mut dsh_sessions: Vec<_> = Vec::new();
+    let mut ledger_by_id: BTreeMap<String, (f64, f64, f64, f64)> = BTreeMap::new();
+    for row in usage_adapter_dsh::ledger() {
+        ledger_by_id.insert(row.session.clone(), (row.input, row.output, row.cache_read, row.cache_write));
+    }
+    for e in &dsh {
+        let totals = (e.counts.input, e.counts.output, e.counts.cache_read, e.counts.cache_creation);
+        if let Some(prev) = last_totals.get(&e.session) {
+            if totals.0 < prev.0 || totals.1 < prev.1 || totals.2 < prev.2 || totals.3 < prev.3 {
+                dsh_regressions.push(e.session.clone());
+            }
+        }
+        last_totals.insert(e.session.clone(), totals);
+        let id = e.session.clone();
+        let audit = match ledger_by_id.get(&id) {
+            Some(l) => {
+                let (li, lo, lcr, lcc) = *l;
+                let matches = (totals.0 - li).abs() < 0.5
+                    && (totals.1 - lo).abs() < 0.5
+                    && (totals.2 - lcr).abs() < 0.5
+                    && (totals.3 - lcc).abs() < 0.5;
+                json!({ "ledger_in": li, "ledger_out": lo, "ledger_cr": lcr, "ledger_cc": lcc, "match": matches })
+            }
+            None => json!({ "ledger": "absent", "match": false }),
+        };
+        dsh_sessions.push(json!({
+            "id": id,
+            "in": totals.0, "cc": totals.3, "cr": totals.2, "out": totals.1,
+            "events": 1, "model": e.model, "ts": e.ts_ms,
+            "audit": audit,
+        }));
+    }
+    // A ledger row with no index event at all (usage the panel never picked up).
+    for (id, (li, lo, lcr, lcc)) in &ledger_by_id {
+        if !dsh.iter().any(|e| e.session == *id) && (li + lo + lcr + lcc) > 0.0 {
+            dsh_sessions.push(json!({
+                "id": id, "in": li, "out": lo, "cr": lcr, "cc": lcc,
+                "events": 0, "audit": { "ledger": "self", "match": false },
+            }));
+            dsh_regressions.push(format!("{id} (ledger has usage, index has none)"));
+        }
+    }
+
+    // The codex replay audit rides the heartbeat line only: re-parsing every
+    // rollout from scratch is the one expensive fact here (hundreds of ms on a
+    // heavy machine), and hourly is plenty for a remote double-count check.
+    let mut codex_audit: serde_json::Value = serde_json::Value::Null;
+    if heartbeat_due {
+        let replay = usage_adapter_codex::replay(&usage_core::DateFilter::default());
+        let mut indexed: BTreeMap<String, (f64, f64, f64, f64, usize)> = BTreeMap::new();
+        for e in events.iter().filter(|e| e.tool == "codex") {
+            let slot = indexed.entry(e.session.clone()).or_insert((0.0, 0.0, 0.0, 0.0, 0));
+            slot.0 += e.counts.input;
+            slot.1 += e.counts.cache_creation;
+            slot.2 += e.counts.cache_read;
+            slot.3 += e.counts.output;
+            slot.4 += 1;
+        }
+        let mut mismatches: Vec<String> = Vec::new();
+        let mut checked = 0u64;
+        let mut sessions: Vec<_> = Vec::new();
+        for row in &replay {
+            let replay_json = json!({
+                "in": row.input, "out": row.output, "cached": row.cached, "calls": row.calls,
+            });
+            match indexed.get(&row.session) {
+                Some((i, cc, cr, o, n)) => {
+                    checked += 1;
+                    let matches = (*i - row.input).abs() < 0.5
+                        && (*o - row.output).abs() < 0.5
+                        && ((*cr + *cc) - row.cached).abs() < 0.5
+                        && *n == row.calls;
+                    if !matches {
+                        mismatches.push(row.session.clone());
+                    }
+                    sessions.push(json!({
+                        "id": row.session, "replay": replay_json,
+                        "index": { "in": i, "out": o, "cached": cr + cc, "calls": n },
+                        "match": matches,
+                    }));
+                }
+                None => {
+                    mismatches.push(format!("{row:?}", row = row.session));
+                    sessions.push(json!({ "id": row.session, "replay": replay_json, "index": null, "match": false }));
+                }
+            }
+        }
+        codex_audit = json!({ "sessions": checked, "mismatches": mismatches, "detail": sessions });
+    }
 
     let line = json!({
         "ts": Local::now().to_rfc3339(),
@@ -100,7 +185,9 @@ pub fn pass(
         "roots": roots,
         "overlap_suspect": overlap_suspect,
         "tools": tools,
+        "dsh_regressions": dsh_regressions,
         "dsh_sessions": dsh_sessions,
+        "codex_audit": codex_audit,
     });
 
     append_line(&serde_json::to_string(&line).unwrap_or_default());

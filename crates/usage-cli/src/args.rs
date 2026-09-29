@@ -109,6 +109,10 @@ pub enum Cmd {
     /// DSH ledger-vs-index audit: the app's own numbers next to what got indexed
     DshDoctor,
 
+    /// Codex replay-vs-index audit: every rollout re-parsed from scratch,
+    /// next to what got indexed
+    CodexDoctor,
+
     /// Log in to WorkBuddy (browser SSO once; the token feeds the quota probe)
     WorkbuddyLogin,
 
