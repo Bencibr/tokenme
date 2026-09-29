@@ -22,6 +22,7 @@
 
 mod loader;
 mod parser;
+mod proj;
 mod paths;
 
 use usage_core::{
