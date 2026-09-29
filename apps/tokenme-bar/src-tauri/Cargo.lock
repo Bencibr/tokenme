@@ -4851,7 +4851,6 @@ dependencies = [
  "serde",
  "serde_json",
  "usage-core",
- "walkdir",
 ]
 
 [[package]]

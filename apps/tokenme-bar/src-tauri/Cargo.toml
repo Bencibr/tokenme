@@ -36,8 +36,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 tauri-build = { version = "2", features = [] }
 
 [profile.release]
-codegen-units = 1
-lto = true
+# thin LTO + parallel codegen compiles several times faster than the old
+# full-LTO single-unit setup, at near-identical size for this app; opt-level
+# "s" keeps the size intent.
+lto = "thin"
+codegen-units = 16
 opt-level = "s"
 # Kept unstripped on purpose: a stripped binary cannot be symbolicated from
 # its own .ips files (rebuilding with different flags shifts every offset —

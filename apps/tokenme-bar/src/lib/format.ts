@@ -38,6 +38,7 @@ const DISPLAY: Record<string, string> = {
   workbuddy: "WorkBuddy",
   crow5: "Crow5",
   mimocode: "Mimocode",
+  dsh: "DSH",
   cola: "Cola",
   gemini: "Gemini CLI",
   cursor: "Cursor",
