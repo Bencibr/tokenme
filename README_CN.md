@@ -82,6 +82,31 @@ tokenme quota           # 3. 实时查询订阅额度与重置倒计时
 | `tokenme budget set zcode --monthly 50` | 为无限额工具设定成本上限 |
 | `tokenme pricing explain <model>` | 审计定价来源 |
 
+## 🧩 支持的宿主 Agent 与实时配额
+
+配额条来自各工具自己的接口或本地凭据（只读探测，绝不刷新或代替你的登录态）。宿主应用退出后自动暂停对应工具的探测、保留最后数值，重新启动即恢复——设置里的"退出后暂停配额"开关可控制这一行为。
+
+| 宿主 Agent | 配额内容 | 说明 |
+| :--- | :--- | :--- |
+| Qoder | 订阅额度 | 官方用量接口，本地加密快照兜底 |
+| WorkBuddy AI | 会员点数 | 与桌面 app 同一计费接口 |
+| JoyCode | IDE 点数 | 读取 IDE 自身登录态 |
+| DSH | DeepSeek 账户余额 | 官方 user/balance + 桌面端凭据文件 |
+| ZCode | 5 小时/周期窗口 + 会话预算 | IDE 同款配额接口 + cookie 本地解密 |
+| OpenCode | Go 订阅三窗口 | 订阅美元窗口 |
+| Antigravity | 自算配额 | 调用其 CLI 的 `/usage` |
+| AtomCode | CodingPlan 配额 | 本地守护进程 |
+| CatPaw | 积分余额 | 积分门户接口 |
+| Cline | 账号窗口限额 | Cline 账号 API |
+| Codex | ChatGPT 速率窗口 | 官方后端 |
+| Claude Code | 5 小时/周期窗口 | 官方后端 |
+| Copilot | 高级请求额度 | 官方后端 |
+| FunIDE | GLM 套餐点数 | 云端点数接口 |
+| AgnesCode | 会员点数 | 需注入一次令牌（见下） |
+| Gemini CLI | 不支持 | 官方 CLI 未暴露配额接口 |
+
+> **AgnesCode 令牌注入**：其登录令牌只存在于应用内存，无法静默读取。登录 agnescode.agnes-ai.cn 后从请求头取 `access_token`，写入 `~/.config/tokenme/agnes.token`（或设置 `AGNES_TOKEN`）即可启用。
+
 完整参考：**[docs/COMMANDS.md](docs/COMMANDS.md)** · 场景指南：**[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · 架构总览：**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · 适配器逆向备忘：[docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
 
 ## 🔒 隐私与数据

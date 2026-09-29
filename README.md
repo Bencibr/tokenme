@@ -82,6 +82,31 @@ tokenme quota           # 3. live subscription quotas and reset timers
 | `tokenme budget set zcode --monthly 50` | Spend caps for unlimited-plan tools |
 | `tokenme pricing explain <model>` | Audit which price listing won |
 
+## 🧩 Supported Host Agents & Live Quota
+
+Quota bars come from each tool's own API or local credentials (read-only probes — your login state is never refreshed or replaced). When a host app quits, probing for that tool pauses automatically and the last numbers stay on screen; it resumes on relaunch. The "pause quota on host exit" toggle in Settings controls this.
+
+| Host agent | Quota | Notes |
+| :--- | :--- | :--- |
+| Qoder | subscription windows | vendor usage API, local encrypted snapshot fallback |
+| WorkBuddy AI | member credits | same billing API the desktop app uses |
+| JoyCode | IDE points | reads the IDE's own login state |
+| DSH | DeepSeek account balance | official user/balance + desktop credentials file |
+| ZCode | 5-hour/cycle windows + session budgets | the IDE's own quota API + local cookie decryption |
+| OpenCode | Go subscription, three dollar windows | |
+| Antigravity | self-computed quota | runs the CLI's `/usage` |
+| AtomCode | CodingPlan quota | local daemon |
+| CatPaw | points balance | points portal API |
+| Cline | account window limits | Cline account API |
+| Codex | ChatGPT rate windows | official backend |
+| Claude Code | 5-hour/weekly windows | official backend |
+| Copilot | premium-request allowance | official backend |
+| FunIDE | GLM-plan points | cloud points API |
+| AgnesCode | membership points | needs a one-time token (see below) |
+| Gemini CLI | not supported | the CLI exposes no quota endpoint |
+
+> **AgnesCode token**: the login token lives only in the app's memory and cannot be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` from an authenticated request into `~/.config/tokenme/agnes.token` (or set `AGNES_TOKEN`).
+
 Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Scenarios & panel guide: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · Adapter reverse-engineering notes: [docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
 
 ## 🔒 Privacy & Data
