@@ -32,7 +32,12 @@ pub use watcher::Watcher;
 
 /// Bumping this wipes `event`/`call`/`quota`/`file_state` on next open, because
 /// stale cursors would otherwise resume into a differently shaped row.
-const SCHEMA_VERSION: &str = "3";
+/// `4` — WorkBuddy changed caliber: its rows went from one rollup per closed
+/// session (`workbuddy#<session>`, credits only) to one per LLM call
+/// (`workbuddy#<call id>`, tokens + credits). The two key spaces never collide,
+/// so an index that kept both would bill every session twice; a version bump is
+/// what makes the old rows disappear instead of lingering as invisible money.
+const SCHEMA_VERSION: &str = "4";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS event(

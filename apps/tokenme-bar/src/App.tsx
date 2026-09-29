@@ -127,8 +127,8 @@ const [page, setPage] = useState<PageKey>(() => {
   const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
 
   // The tools page lists every *detected* source, not just the ones that
-  // billed this window: WorkBuddy (credits at session close) or a source
-  // whose store is unreadable would otherwise vanish for weeks at a time.
+  // billed this window: a credits-only tool that metered nothing here, or a
+  // source whose store is unreadable, would otherwise vanish for weeks.
   // Hooks rule: this must sit above the boot screen's early return.
   const tools = useMemo(() => {
     if (!report) return [];
