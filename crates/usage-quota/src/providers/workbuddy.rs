@@ -13,6 +13,10 @@
 //!
 //! ## The call
 //!
+//! Token sources, in order: the desktop app's auth file (`WORKBUDDY_AUTH_FILE`
+//! overrides), then a bare pasted token (`WORKBUDDY_TOKEN` or
+//! `tokenme/workbuddy.token`) — current app versions encrypt that file's
+//! accessToken in place, so the paste is what keeps current installs working.
 //! `POST https://<domain>/billing/meter/get-user-resource` (global; the CN
 //! realm keeps the older `/v2/billing/meter/get-user-resource`, which is also
 //! the global 404 fallback), body
@@ -46,7 +50,9 @@ impl QuotaProbe for WorkBuddyQuota {
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
-        let Some(info) = read_auth() else { return Vec::new() };
+        let Some(info) = read_auth().or_else(|| bare_token().map(synthesize_auth)) else {
+            return Vec::new();
+        };
         if !token_is_fresh(&info, chrono::Utc::now().timestamp_millis()) {
             return Vec::new();
         }
@@ -72,6 +78,32 @@ fn auth_file() -> Option<PathBuf> {
 fn read_auth() -> Option<Value> {
     let raw = std::fs::read_to_string(auth_file()?).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+/// A bare access token, for installs where the desktop app encrypts its auth
+/// file. WorkBuddy ≥ 2.48 stores `accessToken` behind its own `$wbEncrypted`
+/// at-rest scheme whose key never touches disk in extractable form, so the
+/// app's own file yields no token on current versions. The account token is
+/// long-lived (about a year), so pasting it once into `WORKBUDDY_TOKEN` or a
+/// one-line `tokenme/workbuddy.token` file keeps the probe fed until expiry.
+fn bare_token() -> Option<String> {
+    if let Some(raw) = std::env::var_os("WORKBUDDY_TOKEN") {
+        let t = raw.to_string_lossy().trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    let path = dirs::config_dir()?.join("tokenme").join("workbuddy.token");
+    let t = std::fs::read_to_string(path).ok()?;
+    let t = t.trim().to_string();
+    if t.is_empty() { None } else { Some(t) }
+}
+
+/// The minimal auth record `call` needs when only a bare token is known: the
+/// global domain default and no `expiresAt` (absent means fresh — the token's
+/// real expiry lives with whoever issued it).
+fn synthesize_auth(token: String) -> Value {
+    serde_json::json!({ "auth": { "accessToken": token, "domain": "www.workbuddy.ai" } })
 }
 
 /// An expired token is "no sample", never a refresh grant.
@@ -264,6 +296,20 @@ mod tests {
         let ms = parse_cycle_end("2026-10-13 01:18:53").unwrap();
         assert_eq!(ms, 1_791_825_533_000);
         assert!(parse_cycle_end("not a date").is_none());
+    }
+
+    #[test]
+    fn a_bare_token_synthesizes_a_working_auth_record() {
+        let info = synthesize_auth("tok-123".into());
+        assert_eq!(
+            info.pointer("/auth/accessToken").and_then(Value::as_str),
+            Some("tok-123")
+        );
+        // No expiresAt at all counts as fresh: the real expiry is the issuer's
+        // business, and an unparsable date must not silently kill the probe.
+        assert!(token_is_fresh(&info, i64::MAX - 1));
+        let auth = info.get("auth").unwrap();
+        assert_eq!(auth.get("domain").and_then(Value::as_str), Some("www.workbuddy.ai"));
     }
 
     #[test]

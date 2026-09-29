@@ -49,17 +49,22 @@ $ tokenme daily --days 3
 
 ## 🚀 Quick Start
 
+**Download** the installer from [Releases](https://github.com/sp/tokenme/releases/latest) — a macOS menu-bar app (drag to Applications) and a Windows setup. Or build from source:
+
 ```bash
 git clone https://github.com/sp/tokenme.git
 cd tokenme
-cargo install --path crates/usage-cli --bin tokenme
+cargo install --path crates/usage-cli --bin tokenme   # the CLI
+./scripts/build-macos.sh                              # the macOS panel
+```
 
+Then:
+
+```bash
 tokenme detect          # 1. discover local AI tools and logs
 tokenme daily --days 7  # 2. tokens and cost for the past week
 tokenme quota           # 3. live subscription quotas and reset timers
 ```
-
-macOS menu-bar panel: `./scripts/build-macos.sh` → `TokenMe.app`.
 
 ## 🛠️ Commands
 

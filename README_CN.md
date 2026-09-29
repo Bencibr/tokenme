@@ -49,17 +49,22 @@ $ tokenme daily --days 3
 
 ## 🚀 快速上手
 
+**直接下载**安装包即可使用：到 [Releases](https://github.com/sp/tokenme/releases/latest) 获取 macOS 菜单栏应用（拖入 Applications）与 Windows 安装程序。也可从源码构建：
+
 ```bash
 git clone https://github.com/sp/tokenme.git
 cd tokenme
-cargo install --path crates/usage-cli --bin tokenme
+cargo install --path crates/usage-cli --bin tokenme   # CLI
+./scripts/build-macos.sh                              # macOS 面板
+```
 
+然后：
+
+```bash
 tokenme detect          # 1. 自动探测本机工具与日志
 tokenme daily --days 7  # 2. 最近一周的每日消耗与账单
 tokenme quota           # 3. 实时查询订阅额度与重置倒计时
 ```
-
-macOS 菜单栏面板：`./scripts/build-macos.sh` → `TokenMe.app`。
 
 ## 🛠️ 常用命令
 
