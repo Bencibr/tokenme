@@ -1,0 +1,5 @@
+{"ts": 1780000000000, "session": "sess-a", "model": "claude-sonnet-4-6", "project": "/work/alpha", "id": "evt-1", "in": 1000, "cc": 200, "cr": 5000, "out": 300, "calls": [{"kind": "mcp", "name": "bugx"}]}
+{"ts": 1789000000000, "session": "sess-a", "model": "claude-sonnet-4-6", "project": "/work/alpha", "id": "evt-2", "in": 2000, "cr": 8000, "out": 500}
+{"ts": 1789086400000, "session": "sess-b", "model": "glm-5.3-flash", "project": "/work/beta", "id": "evt-3", "in": 3000, "out": 700, "reason": 256, "calls": [{"kind": "skill", "name": "review"}]}
+{"ts": 1789172800000, "session": "sess-b", "model": "glm-5.3-flash", "project": "/work/beta", "id": "evt-4", "in": 4000, "out": 900}
+{"ts": 1789259200000, "session": "sess-c", "model": "claude-opus-4-8", "project": "/work/gamma", "id": "evt-5", "in": 5000, "out": 1100}

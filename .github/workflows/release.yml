@@ -1,0 +1,42 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
+      - name: Build
+        id: build
+        run: ./scripts/build-macos.sh 2>&1 | tee build.log
+      - name: Surface build failure
+        if: failure() && steps.build.outcome == 'failure'
+        run: tail -c 4000 build.log | while IFS= read -r line; do echo "::error::$line"; done
+      - name: Stage artifacts
+        run: |
+          B=apps/tokenme-bar/src-tauri/target/release/bundle
+          mkdir -p dist
+          ditto -c -k --keepParent "$B/macos/tokenme.app" dist/tokenme-macos-arm64.app.zip
+          cp "$B"/dmg/tokenme_*.dmg dist/
+          shasum -a 256 dist/* > sha256.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tokenme-macos-arm64.app.zip
+            dist/tokenme_*.dmg
+            sha256.txt
+            latest.json
+          generate_release_notes: true
