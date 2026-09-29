@@ -123,7 +123,7 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     // appearance change while hidden otherwise leaves a stale layer under
     // the translucent page until relaunch.
     #[cfg(target_os = "macos")]
-    apply_window_background(window, None);
+    apply_window_background(window.app_handle(), None);
     let _ = window.show();
 
     // Windows tray panels are intentionally non-activating. Calling set_focus
@@ -715,9 +715,6 @@ pub fn configure(app: &AppHandle) {
     /// content view (1<<15).
     const STYLE: i32 = (1 << 7) | (1 << 15);
 
-    /// Keeps the swizzled panel alive for the lifetime of the app.
-    struct PanelHandle(#[allow(dead_code)] tauri_nspanel::Panel);
-
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
@@ -728,6 +725,19 @@ pub fn configure(app: &AppHandle) {
     // the single ground truth now; the page's translucent surface composites
     // onto it into exactly --surface-solid.
     if let Ok(panel) = window.to_panel() {
+        // The panel object must never deallocate: tauri-nspanel's
+        // RawNSPanel::dealloc calls [NSObject dealloc] directly — skipping
+        // NSPanel/NSWindow teardown — so any deallocation after the class
+        // swap is fatal (the pool-drain SIGBUS of builds 25-27). The crate's
+        // from_window also burns one retain per call (Id::from_retained_ptr
+        // takes ownership of a borrowed pointer), and to_panel used to run on
+        // every show. The window lives for the whole process anyway: pin it
+        // with one retain that is deliberately never released.
+        unsafe {
+            use tauri_nspanel::cocoa::base::id;
+            use tauri_nspanel::objc::{msg_send, sel, sel_impl};
+            let _: id = msg_send![panel, retain];
+        }
         panel.set_style_mask(STYLE);
         panel.set_collection_behaviour(
             NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
@@ -759,7 +769,7 @@ pub fn configure(app: &AppHandle) {
             }
         }
         app.manage(PanelHandle(panel));
-        apply_window_background(&window, None);
+        apply_window_background(app, None);
     }
     // If the conversion fails the window stays a plain `alwaysOnTop` surface:
     // the tray toggle still works, it just cannot follow into full screen.
@@ -767,16 +777,20 @@ pub fn configure(app: &AppHandle) {
     observe_context_switches(app);
 }
 
+/// Keeps the converted panel alive (and reachable) for the lifetime of the
+/// app: acquired once at setup, never re-converted — see the pinning note in
+/// `configure`.
+struct PanelHandle(tauri_nspanel::Panel);
+
 /// Hides the panel when the user switches Space or activates another app.
 /// The window's own backing shows wherever the webview viewport rounds a few
 /// pixels short of the window height (fractional-scale rounding) — a dark
 /// strip under the settings sheet on a light theme. Paint the panel backing
 /// with the theme's own surface so the strip and the sheet are one colour.
 #[cfg(target_os = "macos")]
-pub fn apply_window_background(window: &tauri::WebviewWindow, theme: Option<crate::settings::Theme>) {
+pub fn apply_window_background(app: &AppHandle, theme: Option<crate::settings::Theme>) {
     use tauri_nspanel::cocoa::base::{id, YES};
     use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
-    use tauri_nspanel::WebviewWindowExt as _;
 
     let resolved = theme.or_else(|| Some(crate::settings::Settings::load().theme));
     // "system" must resolve the way the page's media query does — against the
@@ -802,26 +816,32 @@ pub fn apply_window_background(window: &tauri::WebviewWindow, theme: Option<crat
         fn CGColorSpaceCreateWithName(name: id) -> id;
         fn CGColorCreate(space: id, components: *const f64) -> id;
     }
-    if let Ok(panel) = window.to_panel() {
-        unsafe {
-            let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            let comps = [fr, fg, fb, 1.0f64];
-            let cg = CGColorCreate(space, comps.as_ptr());
-            if !cg.is_null() {
-                // The window backing must stay CLEAR — an opaque window
-                // background is square and would fill the corners outside the
-                // radius, defeating the rounded clip. The rounded content
-                // layer is the only painter: corners, the 1-2px band the
-                // page's own rounded rect leaves, and any sub-pixel seam are
-                // the panel's own colour; outside the radius is desktop.
-                let clear: id = msg_send![class!(NSColor), clearColor];
-                let _: () = msg_send![panel, setBackgroundColor: clear];
-                let content: id = panel.content_view();
-                let _: () = msg_send![content, setWantsLayer: YES];
-                let layer: id = msg_send![content, layer];
-                if !layer.is_null() {
-                    let _: () = msg_send![layer, setBackgroundColor: cg];
-                }
+    // The panel handle was acquired once at setup (to_panel also burns a
+    // retain per call — see the pinning note in configure); reuse it here.
+    let Some(handle) = app.try_state::<PanelHandle>() else {
+        return; // conversion failed at setup: the window stays a plain surface
+    };
+    // Clone (a balanced objc retain/release pair — the object is pinned
+    // immortal anyway): the msg_send receiver needs the owned Id type.
+    let panel = handle.inner().0.clone();
+    unsafe {
+        let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        let comps = [fr, fg, fb, 1.0f64];
+        let cg = CGColorCreate(space, comps.as_ptr());
+        if !cg.is_null() {
+            // The window backing must stay CLEAR — an opaque window
+            // background is square and would fill the corners outside the
+            // radius, defeating the rounded clip. The rounded content
+            // layer is the only painter: corners, the 1-2px band the
+            // page's own rounded rect leaves, and any sub-pixel seam are
+            // the panel's own colour; outside the radius is desktop.
+            let clear: id = msg_send![class!(NSColor), clearColor];
+            let _: () = msg_send![panel, setBackgroundColor: clear];
+            let content: id = panel.content_view();
+            let _: () = msg_send![content, setWantsLayer: YES];
+            let layer: id = msg_send![content, layer];
+            if !layer.is_null() {
+                let _: () = msg_send![layer, setBackgroundColor: cg];
             }
         }
     }
