@@ -71,6 +71,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("funide", include_bytes!("../assets/funide.png")),
     // AtomCode: the logo the vendor's own coding-plan page serves (og:image).
     ("atomcode", include_bytes!("../assets/atomcode.png")),
+    ("pi", include_bytes!("../assets/pi.png")),
 ];
 
 /// Where a user-installed app lives. `~/Applications` first: a per-user install
