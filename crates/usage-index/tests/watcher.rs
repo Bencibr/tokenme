@@ -63,6 +63,11 @@ fn activity_outside_the_roots_stays_silent() {
     let other = tempfile::TempDir::new().unwrap();
     let (tx, rx) = mpsc::channel();
     let _watcher = Watcher::spawn(&[watched.path().to_path_buf()], tx).unwrap();
+    // FSEvents timestamps are coarse: the watched dir's own creation (seconds
+    // before the stream started) can be delivered as a "since now" event on a
+    // busy machine. Let that initial sweep flush before counting silence, or
+    // the assertion fails on a phantom.
+    std::thread::sleep(Duration::from_millis(1000));
 
     std::fs::write(other.path().join("else.jsonl"), b"{}\n").unwrap();
     std::fs::write(other.path().join("more.jsonl"), b"{}\n").unwrap();
