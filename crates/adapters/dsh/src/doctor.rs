@@ -41,17 +41,17 @@ pub struct LedgerRow {
 /// Every session the writer has state for, projections first-class.
 pub fn ledger() -> Vec<LedgerRow> {
     let mut out = Vec::new();
-    let Some(dir) = crate::paths::projcache_dir() else { return out };
-    let Ok(entries) = std::fs::read_dir(dir) else { return out };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        let session = stem.strip_prefix("session-").unwrap_or(stem).to_string();
+    for dir in crate::paths::projcache_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let session = stem.strip_prefix("session-").unwrap_or(stem).to_string();
         let totals = v.pointer("/record/rows/tokenUsage/val/totals");
         let num = |k: &str| {
             totals
@@ -88,6 +88,7 @@ pub fn ledger() -> Vec<LedgerRow> {
                 .unwrap_or(0),
             projection: Some(path),
         });
+        }
     }
     out.sort_by(|a, b| a.session.cmp(&b.session));
     out

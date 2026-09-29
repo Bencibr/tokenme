@@ -6,13 +6,18 @@
 //! exclusive token convention (`inputTokens` excludes `cacheReadTokens`);
 //! the step's model arrives earlier on `request/header`.
 //!
-//! The sessions root follows the writer's own layout (see [`paths`]):
-//! `~/.dsh/sessions` on the macOS layout, `%APPDATA%\dsh-desktop\harness\sessions`
-//! on Windows (where `~/.dsh` carries no sessions at all). Format v4 names the
-//! stream `session.v4.jsonl.zstd`; the header gains `"version":4` and the
-//! event shapes stay the ones parsed here. Only one root is ever read — the
-//! macOS `Application Support` tree is a mirror of `~/.dsh`, and reading both
-//! would double-bill.
+//! The sessions roots follow the writer's own layout (see [`paths`]): the
+//! macOS CLI-era tree `~/.dsh/sessions` first, the desktop app's
+//! `%APPDATA%\dsh-desktop\harness\sessions` (Windows) /
+//! `~/Library/Application Support/dsh-desktop/harness/sessions` (macOS) second.
+//! Format v4 names the stream `session.v4.jsonl.zstd`; the header gains
+//! `"version":4` and the tokens of such a session live in its projection
+//! cache, not the stream. All existing roots are read, one session each: the
+//! trees mirror each other by identity (workspace slug + session dir), and the
+//! first root in priority order wins a mirrored session — reading a session
+//! from both roots would double-bill, reading only one root hides the other's
+//! sessions entirely (measured 2026-09-29: the stale `~/.dsh` tree masked the
+//! live desktop app's sessions for a day).
 //!
 //! Cursor is `FileKind::Tree`: whole-file re-parse on change, stable
 //! `<session>#<seq>` dedupe keys absorbing the re-emit.
