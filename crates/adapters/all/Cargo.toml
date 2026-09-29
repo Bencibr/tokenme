@@ -19,6 +19,7 @@ usage-adapter-agnes.workspace = true
 usage-adapter-atomcode.workspace = true
 usage-adapter-workbuddy.workspace = true
 usage-adapter-hermes.workspace = true
+usage-adapter-funide.workspace = true
 usage-adapter-joycode.workspace = true
 usage-adapter-catpaw = { path = "../catpaw" }
 usage-adapter-dsh = { path = "../dsh" }

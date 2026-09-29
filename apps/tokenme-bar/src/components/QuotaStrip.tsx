@@ -287,18 +287,28 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                 // tool block never loses a line) but its track hatches: nothing
                 // here is being measured, and a 0% bar would claim otherwise.
                 const unlimited = (q.label ?? "").includes("无可查限额");
-                // A prepaid balance is not a gauge either: the figure slot
-                // carries the remaining money itself and the track runs
-                // dashed — nothing here is measured against a cap.
-                const balance = q.id === "dsh-balance";
-                const figure = balance ? (q.label ?? "").replace(/^余额\s*/, "") : null;
+                // A prepaid balance names its figure's unit in the row head
+                // and drops the figure from the label. Where the figure sits
+                // differs per row: DSH's balance replaces the percent (and its
+                // track runs dashed — no cap is measured); FunIDE's points
+                // keep the real percent and take the reset slot instead.
+                const BALANCE_HEADS: Record<string, string> = {
+                    "dsh-balance": "余额",
+                    "funide-points": "积分",
+                };
+                const balanceId = q.id ?? "";
+                const balance = balanceId in BALANCE_HEADS;
+                const figureInPct = balanceId === "dsh-balance";
+                const figure = balance
+                    ? (q.label ?? "").replace(new RegExp(`^${BALANCE_HEADS[balanceId]}\\s*`), "")
+                    : null;
                 const mine = (q.origin ?? "probe") === "budget";
                 // The window name leads at full ink; a plan suffix the source
                 // appended ("5 小时 · GLM Coding Lite") follows dimmed, so ten
                 // rows of the same plan stop shouting it.
                 const label = windowName(q);
                 const cut = label.indexOf(" · ");
-                const head = balance ? "余额" : cut === -1 ? label : label.slice(0, cut);
+                const head = balance ? BALANCE_HEADS[balanceId] : cut === -1 ? label : label.slice(0, cut);
                 const tail = balance ? "" : cut === -1 ? "" : label.slice(cut);
                 const rowTail = tail === ` · ${plan}` ? "" : tail;
                 return (
@@ -330,7 +340,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     </span>
                     {unlimited ? (
                       <span className="track track-inf" aria-hidden="true" />
-                    ) : balance ? (
+                    ) : figureInPct ? (
                       <span className="track track-balance" aria-hidden="true" />
                     ) : (
                       <span
@@ -354,7 +364,7 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     )}
                     {unlimited ? (
                       <span className="quota-pct quota-pct--na">不限</span>
-                    ) : balance ? (
+                    ) : figureInPct ? (
                       <span className="quota-pct quota-pct--na num">{figure}</span>
                     ) : (
                       <span className="quota-pct num" data-stage={stage}>
@@ -363,7 +373,11 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                       </span>
                     )}
                     <span className="quota-reset num">
-                      {q.resets_at_ms > 0 ? until(q.resets_at_ms, now) : "—"}
+                      {balance && !figureInPct
+                        ? figure
+                        : q.resets_at_ms > 0
+                          ? until(q.resets_at_ms, now)
+                          : "—"}
                     </span>
                   </div>
                 );

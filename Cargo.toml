@@ -14,6 +14,7 @@ members = [
     "crates/adapters/atomcode",
     "crates/adapters/workbuddy",
     "crates/adapters/hermes",
+    "crates/adapters/funide",
     "crates/adapters/catpaw",
     "crates/adapters/dsh",
     "crates/adapters/joycode",
@@ -46,6 +47,7 @@ usage-adapter-agnes = { path = "crates/adapters/agnes" }
 usage-adapter-atomcode = { path = "crates/adapters/atomcode" }
 usage-adapter-workbuddy = { path = "crates/adapters/workbuddy" }
 usage-adapter-hermes = { path = "crates/adapters/hermes" }
+usage-adapter-funide = { path = "crates/adapters/funide" }
 usage-adapter-joycode = { path = "crates/adapters/joycode" }
 usage-adapter-all = { path = "crates/adapters/all" }
 
