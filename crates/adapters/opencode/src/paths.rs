@@ -88,7 +88,21 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
 }
 
 pub(crate) fn data_dir_for(product: &Product) -> Option<PathBuf> {
-    data_dirs_for(product).into_iter().next()
+    // The frozen single-dir surface: join WITHOUT the existence filter — a
+    // missing directory is the caller's business (db_path_for falls back to
+    // the single-store name). Discovery goes through data_dirs_for, which
+    // filters on existence; this must keep answering the plain join or the
+    // frozen contract above breaks on machines without the tool installed.
+    if let Ok(v) = std::env::var(product.env_dir) {
+        if !v.trim().is_empty() {
+            return Some(PathBuf::from(v.trim()));
+        }
+    }
+    let mut dir = dirs::home_dir()?;
+    for part in product.default_rel {
+        dir = dir.join(part);
+    }
+    Some(dir)
 }
 
 /// Every existing data directory for the product, priority order. The env
