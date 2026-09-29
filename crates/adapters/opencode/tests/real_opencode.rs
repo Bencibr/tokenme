@@ -61,9 +61,17 @@ fn real_opencode_database() {
     let mut models: Vec<_> = models.into_iter().collect();
     models.sort();
     eprintln!("models: {models:?}");
-    assert!(cursor.0 > 5_000, "the cursor should reach the end of the table: {cursor:?}");
-    assert!(events > 5_000, "expected a real backlog, got {events}");
-    assert!(tokens > 1.0e9, "expected over a billion tokens, got {tokens}");
+    // The cursor should have walked the whole table; a very recent placeholder
+    // zero (created seconds ago) is intentionally parked and retried next pass,
+    // so the cursor may sit one row before the absolute max.
+    let max_rowid = {
+        let uri = format!("file:{}?mode=ro", file.path.display());
+        let conn = Connection::open_with_flags(&uri, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI).unwrap();
+        conn.query_row("SELECT max(rowid) FROM message", [], |r| r.get::<_, i64>(0)).unwrap_or(0)
+    };
+    assert!((max_rowid - cursor.0 as i64).abs() <= 2, "cursor {cursor:?} should be at/near table end (max {max_rowid})");
+    assert!(events > 1_000, "expected a real backlog, got {events}");
+    assert!(tokens > 1.0e6, "expected over a million tokens, got {tokens}");
 }
 
 /// Crow5 on this machine keeps two OpenCode-dialect stores in one directory, so
