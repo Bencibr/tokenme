@@ -13,7 +13,9 @@ use crate::{parser, paths, proj};
 
 pub fn probe() -> Option<DetectedSource> {
     let sessions = paths::sessions_dir()?;
-    let count = session_files(&sessions).chain(proj_files()).count();
+    // One entry per session: a v3 stream is one, a v4 stream is one (its
+    // projection belongs to the same session and is not counted again).
+    let count = session_files(&sessions).count();
     (count > 0).then(|| DetectedSource {
         id: crate::TOOL_ID.to_string(),
         display: crate::DISPLAY_NAME.to_string(),
@@ -24,13 +26,31 @@ pub fn probe() -> Option<DetectedSource> {
 
 pub fn discover(filter: &DateFilter) -> Vec<SourceFile> {
     let Some(sessions) = paths::sessions_dir() else { return Vec::new() };
+    // A v3 stream carries its session's per-call events; a v4 stream is
+    // header-only and its session speaks through the projection below. The
+    // projections of v3 sessions (which exist on the macOS layout) are never
+    // read — a projection joins only when its own v4 stream exists, so a
+    // session is billed from exactly one side on either platform.
+    let mut v4_sessions: Vec<String> = Vec::new();
+    for path in session_files(&sessions) {
+        if paths::is_v4_stream(&path) {
+            if let Some(dir) = path.parent().and_then(|d| d.file_name()) {
+                if let Some(id) = dir.to_str() {
+                    v4_sessions.push(id.to_string());
+                }
+            }
+        }
+    }
     let mut streams: Vec<SourceFile> = session_files(&sessions)
-        // v4 streams are header-only; their session speaks through its
-        // projection below. Reading both would double-bill.
         .filter(|p| paths::is_v3_stream(p))
         .filter_map(|path| tree_file(path, filter))
         .collect();
     let mut projections: Vec<SourceFile> = proj_files()
+        .filter(|p| {
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let id = stem.strip_prefix("session-").unwrap_or(stem);
+            v4_sessions.iter().any(|s| s == id)
+        })
         .filter_map(|path| tree_file(path, filter))
         .collect();
     let mut out = Vec::with_capacity(streams.len() + projections.len());

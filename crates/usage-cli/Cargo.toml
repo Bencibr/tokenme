@@ -14,6 +14,7 @@ usage-core.workspace = true
 usage-index.workspace = true
 usage-quota.workspace = true
 usage-adapter-all.workspace = true
+usage-adapter-dsh = { path = "../adapters/dsh" }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

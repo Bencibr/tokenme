@@ -1490,6 +1490,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "usage-core",
+ "walkdir",
 ]
 
 [[package]]
@@ -1516,6 +1517,7 @@ dependencies = [
  "serde",
  "serde_json",
  "usage-adapter-all",
+ "usage-adapter-dsh",
  "usage-core",
  "usage-index",
  "usage-quota",

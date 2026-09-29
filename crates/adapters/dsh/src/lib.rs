@@ -20,16 +20,21 @@
 //! Owned by the dsh-adapter workstream. The public surface (`DshAdapter`,
 //! `TOOL_ID`) is frozen — `usage-adapter-all` and the CLI link against it.
 
+mod doctor;
 mod loader;
 mod parser;
 mod proj;
 mod paths;
+
+/// The accuracy audit surface:  reads this.
 
 use usage_core::{
     DateFilter, DetectedSource, Error, ReadCursor, ReadOutcome, Semantics, SourceAdapter, SourceFile,
 };
 
 pub const TOOL_ID: &str = "dsh";
+
+pub use doctor::ledger;
 pub(crate) const DISPLAY_NAME: &str = "DSH";
 
 #[derive(Debug, Default, Clone, Copy)]

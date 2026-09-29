@@ -80,6 +80,7 @@ fn main() {
         Cmd::Report { window, group } => commands::report(&ctx, window, group),
         Cmd::Sessions { limit } => commands::sessions(&ctx, limit),
         Cmd::Quota => commands::quota(&ctx),
+        Cmd::DshDoctor => commands::dsh_doctor(&ctx),
         Cmd::WorkbuddyLogin => commands::workbuddy_login(),
         // Handled before the index was built; here only so the match stays total.
         Cmd::Budget { .. } | Cmd::Icons | Cmd::Pricing { action: PricingCmd::Explain { .. } } => Ok(()),

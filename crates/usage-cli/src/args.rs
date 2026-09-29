@@ -106,6 +106,9 @@ pub enum Cmd {
     /// Newest quota sample each source reported
     Quota,
 
+    /// DSH ledger-vs-index audit: the app's own numbers next to what got indexed
+    DshDoctor,
+
     /// Log in to WorkBuddy (browser SSO once; the token feeds the quota probe)
     WorkbuddyLogin,
 

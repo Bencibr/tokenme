@@ -239,6 +239,27 @@ fn ingest(
     if report.is_none() {
         crate::logging::error(&format!("ingest({reason}) failed pass — previous report stays on screen"));
     }
+    // When the DSH ledger moved, log what actually landed: the projection is
+    // cumulative and replaced on one key, so a misread surfaces later as a
+    // wrong day-bucket or a missing session — this line is the paper trail.
+    if let Some(r) = &report {
+        if r.new_events > 0 && r.per_tool.iter().any(|(t, _)| t == "dsh") {
+            for e in events.iter().filter(|e| e.tool == "dsh") {
+                crate::logging::info(&format!(
+                    "dsh ledger: {} in={} cc={} cr={} out={} model={:?} at={}",
+                    &e.session[..e.session.len().min(12)],
+                    e.counts.input,
+                    e.counts.cache_creation,
+                    e.counts.cache_read,
+                    e.counts.output,
+                    e.model,
+                    chrono::DateTime::from_timestamp_millis(e.ts_ms)
+                        .map(|d| d.format("%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| e.ts_ms.to_string()),
+                ));
+            }
+        }
+    }
     let _ = report;
     publish(app, &events, &sources, pricing, adapters);
 }
@@ -258,6 +279,7 @@ fn resummarize(
         .unwrap_or_else(|_| fallback_sources(detected));
     publish(app, &events, &sources, pricing, adapters);
 }
+
 
 fn publish(
     app: &AppHandle,

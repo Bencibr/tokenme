@@ -1266,3 +1266,96 @@ fn db_size(path: &std::path::Path) -> u64 {
         .map(|m| m.len())
         .sum()
 }
+
+/// DSH accuracy audit: the projection ledger the desktop app keeps, printed
+/// next to what the index actually holds, per session — plus the structural
+/// facts that explain honest drift (inherited pre-v4 events, subagent spend
+/// outside `tokenUsage`, a cumulative event that day-buckets onto its last
+/// prompt day). A row that agrees reads `ok`; anything else names the gap.
+pub fn dsh_doctor(ctx: &Ctx) -> Result<(), String> {
+    let ledger = usage_adapter_dsh::ledger();
+    let mut indexed: BTreeMap<String, (f64, f64, f64, f64, Option<String>, i64)> = BTreeMap::new();
+    for e in ctx.index.all_events().map_err(|e| e.to_string())?.into_iter().filter(|e| e.tool == "dsh") {
+        let slot = indexed.entry(e.session.clone()).or_insert((0.0, 0.0, 0.0, 0.0, None, 0));
+        slot.0 += e.counts.input;
+        slot.1 += e.counts.cache_creation;
+        slot.2 += e.counts.cache_read;
+        slot.3 += e.counts.output;
+        if slot.4.is_none() {
+            slot.4 = e.model.clone();
+        }
+        slot.5 += 1;
+    }
+    let mut table = Table::new(&[
+        "session",
+        "fmt",
+        "ledger in/out/cr/cc",
+        "index in/out/cr/cc",
+        "events",
+        "status",
+    ]);
+    let mut mismatches = 0usize;
+    for row in &ledger {
+        let slot = indexed.get(&row.session);
+        let ledger_str = format!("{:.0}/{:.0}/{:.0}/{:.0}", row.input, row.output, row.cache_read, row.cache_write);
+        let (index_str, events, status) = match slot {
+            Some((i, cc, cr, o, _, n)) if row.format >= 4 => {
+                let agree = (*i - row.input).abs() < 0.5
+                    && (*o - row.output).abs() < 0.5
+                    && (*cr - row.cache_read).abs() < 0.5
+                    && (*cc - row.cache_write).abs() < 0.5;
+                if agree {
+                    (format!("{:.0}/{:.0}/{:.0}/{:.0}", i, o, cr, cc), *n, "ok".to_string())
+                } else {
+                    mismatches += 1;
+                    (format!("{:.0}/{:.0}/{:.0}/{:.0}", i, o, cr, cc), *n, "MISMATCH".to_string())
+                }
+            }
+            Some((i, cc, cr, o, _, n)) => {
+                // A v3 stream carries per-call events; the ledger row is
+                // identity-only, so agreement is "events exist".
+                (format!("{:.0}/{:.0}/{:.0}/{:.0}", i, o, cr, cc), *n, "v3 stream".to_string())
+            }
+            None if row.input == 0.0 && row.output == 0.0 && row.cache_read == 0.0 && row.cache_write == 0.0 => {
+                ("—".to_string(), 0, "ok · empty".to_string())
+            }
+            None => {
+                mismatches += 1;
+                ("—".to_string(), 0, "not indexed".to_string())
+            }
+        };
+        let mut notes = Vec::new();
+        if row.inherited_events > 0 {
+            notes.push(format!("inherited {} pre-v4 events", row.inherited_events));
+        }
+        if row.subagents > 0 {
+            notes.push(format!("{} subagents (spend outside tokenUsage)", row.subagents));
+        }
+        table.push(vec![
+            row.session.chars().take(12).collect(),
+            row.format.to_string(),
+            ledger_str,
+            index_str,
+            events.to_string(),
+            if notes.is_empty() { status } else { format!("{status} · {}", notes.join("; ")) },
+        ]);
+    }
+    for (session, (i, cc, cr, o, _, n)) in &indexed {
+        if !ledger.iter().any(|r| r.session == *session) {
+            mismatches += 1;
+            table.push(vec![
+                session.chars().take(12).collect(),
+                "?".into(),
+                "—".into(),
+                format!("{i:.0}/{o:.0}/{cr:.0}/{cc:.0}"),
+                n.to_string(),
+                "indexed but no projection".into(),
+            ]);
+        }
+    }
+    println!("DSH ledger: {} sessions · index: {} sessions · {} mismatched", ledger.len(), indexed.len(), mismatches);
+    print!("{}", table.render(false));
+    println!("notes: tokenUsage is the main thread's ledger — subagent and pre-v4 spend sit outside it; a");
+    println!("cumulative session day-buckets onto its last prompt day, so day views move as sessions age.");
+    Ok(())
+}

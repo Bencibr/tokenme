@@ -88,6 +88,14 @@ pub fn is_v3_stream(path: &Path) -> bool {
     path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some("session.jsonl.zstd")
 }
 
+/// The format-v4 stream, named `session.v4.jsonl.zstd`. Its presence is what
+/// marks a session as projection-backed: a projection is read only when this
+/// file exists for the same session id, so a v3 session is never billed from
+/// both its stream and its projection.
+pub fn is_v4_stream(path: &Path) -> bool {
+    path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some("session.v4.jsonl.zstd")
+}
+
 /// `<harness>/storages/session_projcache/sessions` — the format-v4 session
 /// projections, one JSON per session, sibling of the sessions root. The
 /// v4 stream file stays a one-line header forever; this is where its tokens
