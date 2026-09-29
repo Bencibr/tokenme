@@ -2,11 +2,13 @@
 //!
 //! One source: `~/.workbuddy-ai/workbuddy.db`, the app's own SQLite store.
 //! WorkBuddy meters in **credits**, never tokens — the traces it writes carry
-//! `totalTokens: 0` and `session_usage.used/size` is context fullness, so the
-//! only consumption a session records is `credit_json`, written at close.
-//! What the indexer gets is therefore one [`Meter::Credits`] event per
-//! credited, completed session; the quota side of the story (the account's
-//! remaining credits) is the `usage-quota` provider's job, not this adapter's.
+//! `totalTokens: 0` (re-measured 2026-09-29) and `session_usage.used/size` is
+//! context fullness, so the only money signal a session records is
+//! `credit_json`, written at close. What the indexer gets is one
+//! [`Meter::Credits`] event per **completed** session — credited or not: a
+//! free-model session is still usage and must count as a 回话, it just carries
+//! zero credits. The quota side of the story (the account's remaining credits)
+//! is the `usage-quota` provider's job, not this adapter's.
 //!
 //! The public surface (`TOOL_ID`, `WorkBuddyAdapter`) follows the same frozen
 //! contract as the other adapters: `usage-adapter-all` links it.
@@ -57,7 +59,7 @@ impl SourceAdapter for WorkBuddyAdapter {
 
     fn discover(&self, _filter: &usage_core::DateFilter) -> Vec<SourceFile> {
         let Some(path) = paths::db_path() else { return Vec::new() };
-        let Some((size, mtime_ms)) = paths::stat_file(&path) else { return Vec::new() };
+        let Some((size, mtime_ms)) = paths::source_stat(&path) else { return Vec::new() };
         // One database holds every session: the date filter can only bound it
         // by the file's own last write, same rule the transcript walks use.
         vec![SourceFile { path, kind: FileKind::Sqlite, size, mtime_ms }]
