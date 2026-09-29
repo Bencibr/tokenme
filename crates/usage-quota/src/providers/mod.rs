@@ -1,5 +1,6 @@
 //! One module per vendor whose quota lives outside its logs.
 
+mod agnes;
 mod antigravity;
 mod atomcode;
 mod catpaw;
@@ -18,6 +19,7 @@ mod workbuddy;
 mod workbuddy_wbipc;
 mod zcode;
 
+pub use agnes::AgnesQuota;
 pub use antigravity::AntigravityQuota;
 pub use atomcode::AtomCodeQuota;
 pub use catpaw::CatpawQuota;
@@ -41,6 +43,7 @@ use crate::QuotaProbe;
 /// when the tool is not configured, and nothing else.
 pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
     vec![
+        Box::new(AgnesQuota),
         Box::new(AntigravityQuota),
         Box::new(AtomCodeQuota),
         Box::new(FunIdeQuota),
