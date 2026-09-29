@@ -19,10 +19,11 @@
 //! The membership Bearer token is NOT on disk in readable form (checked
 //! 2026-09-29): the agent home carries no token file, the keychain entry
 //! `agnes` holds only the MODEL gateway key (`{"AGNES_AI_API_KEY": …}`, which
-//! the membership endpoint rejects with 401 Login-expired), and the login
-//! itself lives in the Chromium partition's encrypted storage (safeStorage).
-//! The zero-interaction path is therefore the zcode-style decryption of that
-//! partition — not built yet.
+//! the membership endpoint rejects with 401 Login-expired — and that key IS
+//! the membership credential: a JWT whose exp ran out on 2026-09-01. The
+//! account's AgnesCode login session has simply expired; re-login inside
+//! AgnesCode refreshes this very keychain entry and the probe picks the new
+//! token up on its next pass with zero further work.
 //!
 //! What the probe ships today: a pasted token (`AGNES_TOKEN` env or
 //! `tokenme/agnes.token`) is the working source; the keychain `agnes` entry is
