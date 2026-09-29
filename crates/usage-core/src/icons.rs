@@ -69,6 +69,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("opencode", include_bytes!("../assets/opencode.png")),
     // FunIDE: the 256-px layer of the installed exe's own icon resource.
     ("funide", include_bytes!("../assets/funide.png")),
+    // AtomCode: the logo the vendor's own coding-plan page serves (og:image).
+    ("atomcode", include_bytes!("../assets/atomcode.png")),
 ];
 
 /// Where a user-installed app lives. `~/Applications` first: a per-user install
