@@ -1,6 +1,6 @@
 [package]
 name = "tokenme"
-version = "0.1.2"
+version = "0.1.3"
 description = "tokenme menu-bar token & cost monitor"
 edition = "2021"
 rust-version = "1.97"
