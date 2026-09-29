@@ -178,7 +178,9 @@ mod tests {
     fn touch(path: &Path, secs: u64) {
         std::fs::write(path, b"frame").unwrap();
         let when = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
-        let file = std::fs::File::open(path).unwrap();
+        // Windows gates SetFileTime behind FILE_WRITE_ATTRIBUTES: a read-only
+        // handle answers PermissionDenied there, while Unix futimens needs none.
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         file.set_times(std::fs::FileTimes::new().set_modified(when)).unwrap();
     }
 
