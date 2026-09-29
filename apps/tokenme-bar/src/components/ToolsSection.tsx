@@ -34,8 +34,22 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
   // With dollars off, the wash ranks by tokens instead of cost — the row has
   // to keep saying something about relative size.
   const keyOf = (t: Item) => (showMoney ? t.cost : t.total_tokens);
-  const costMax = ordered.reduce((acc, t) => Math.max(acc, keyOf(t)), 0);
+  const costMax = ordered.reduce((acc, t) => Math.max(acc, t.priced ? t.cost : 0), 0);
+  const tokenMax = ordered.reduce((acc, t) => Math.max(acc, t.total_tokens), 0);
   const totalCost = ordered.reduce((acc, t) => acc + t.cost, 0);
+  const totalTokens = ordered.reduce((acc, t) => acc + t.total_tokens, 0);
+  // Each row washes on a scale that is true for it: priced tools on cost,
+  // everything else on tokens. A tool the price list cannot name (DSH's
+  // deepseek-flash, say) must still show its relative size — hiding the wash
+  // read as "this tool did nothing", which was never the meaning.
+  const washOf = (t: Item) => {
+    const max = showMoney && t.priced ? costMax : tokenMax;
+    const value = showMoney && t.priced ? t.cost : t.total_tokens;
+    return max > 0 ? (value / max) * 100 : 0;
+  };
+  // A real share rounds to 0% too easily at these magnitudes (DSH's 0.05%);
+  // "<1%" keeps the number honest about being small instead of empty.
+  const shareText = (share: number) => (share > 0 && share < 1 ? "<1%" : percent(share, 0));
 
   if (tools.length === 0) {
     return (
@@ -54,7 +68,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
       <ol className="tool-list">
         {ordered.map((t) => {
           const credit = t.counts.credits > 0 && t.total_tokens === 0;
-          const share = costMax > 0 ? (keyOf(t) / costMax) * 100 : 0;
+          const wash = washOf(t);
           return (
             <li
               className="tool"
@@ -63,7 +77,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                 {
                   "--c": toolColor(t.key),
                   backgroundImage: "linear-gradient(90deg, color-mix(in srgb, var(--c) 9%, transparent) 0 0)",
-                  backgroundSize: `${Math.max(share, keyOf(t) > 0 ? 2 : 0)}% 100%`,
+                  backgroundSize: `${Math.max(wash, keyOf(t) > 0 ? 2 : 0)}% 100%`,
                 } as React.CSSProperties
               }
             >
@@ -102,7 +116,21 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                   <span className="grow" />
                   <span>
                     缓存 {percent(cachedOf(t.counts), 0)}
-                    {showMoney ? <> · 占 {percent(totalCost > 0 ? (t.cost / totalCost) * 100 : 0, 0)}</> : null}
+                    {showMoney ? (
+                      <>
+                        {" · 占 "}
+                        {t.priced ? (
+                          <span className="num">{shareText(totalCost > 0 ? (t.cost / totalCost) * 100 : 0)}</span>
+                        ) : t.total_tokens > 0 ? (
+                          <>
+                            <span className="num">{shareText(totalTokens > 0 ? (t.total_tokens / totalTokens) * 100 : 0)}</span>
+                            <span className="dim">（按 tokens）</span>
+                          </>
+                        ) : (
+                          <span className="num">{percent(0, 0)}</span>
+                        )}
+                      </>
+                    ) : null}
                   </span>
                 </div>
               )}

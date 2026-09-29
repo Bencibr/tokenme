@@ -3,7 +3,8 @@
 //! decompressed and re-parsed on change; every format-v4 session speaks
 //! through its projection cache JSON instead (its stream stays header-only).
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use usage_core::{DateFilter, DetectedSource, Error, FileKind, ReadCursor, ReadOutcome, SourceFile};
 use walkdir::WalkDir;
@@ -12,47 +13,73 @@ use crate::{parser, paths, proj};
 
 
 pub fn probe() -> Option<DetectedSource> {
-    let sessions = paths::sessions_dir()?;
-    // One entry per session: a v3 stream is one, a v4 stream is one (its
-    // projection belongs to the same session and is not counted again).
-    let count = session_files(&sessions).count();
+    let roots = paths::sessions_roots();
+    // One entry per session across every root: a mirrored session (same
+    // workspace slug + session dir in two roots) counts once.
+    let count = session_identities(&roots).len();
     (count > 0).then(|| DetectedSource {
         id: crate::TOOL_ID.to_string(),
         display: crate::DISPLAY_NAME.to_string(),
-        roots: vec![sessions],
+        roots,
         hint: Some(format!("{count} sessions")),
     })
 }
 
 pub fn discover(filter: &DateFilter) -> Vec<SourceFile> {
-    let Some(sessions) = paths::sessions_dir() else { return Vec::new() };
+    let roots = paths::sessions_roots();
+    if roots.is_empty() {
+        return Vec::new();
+    }
     // A v3 stream carries its session's per-call events; a v4 stream is
     // header-only and its session speaks through the projection below. The
     // projections of v3 sessions (which exist on the macOS layout) are never
     // read — a projection joins only when its own v4 stream exists, so a
-    // session is billed from exactly one side on either platform.
-    let mut v4_sessions: Vec<String> = Vec::new();
-    for path in session_files(&sessions) {
-        if paths::is_v4_stream(&path) {
-            if let Some(dir) = path.parent().and_then(|d| d.file_name()) {
-                if let Some(id) = dir.to_str() {
-                    v4_sessions.push(id.to_string());
+    // session is billed from exactly one side on every platform. Mirrored
+    // trees (the same identity in two roots) are read from the first root
+    // that carries them, priority order.
+    let identities = session_identities(&roots);
+    let mut v4_sessions: HashSet<String> = HashSet::new();
+    let mut streams: Vec<SourceFile> = Vec::new();
+    for identity in &identities {
+        match paths::is_v4_stream(&identity.path) {
+            true => {
+                // The id is the session DIRECTORY's name minus the `session-`
+                // prefix — exactly what the projection file stem carries after
+                // its own strip. The two sides must normalize identically or
+                // the join silently drops every projection (this asymmetry
+                // shipped once and hid all of Windows' v4 usage).
+                if let Some(dir) = identity.path.parent().and_then(Path::file_name).and_then(|d| d.to_str()) {
+                    let id = dir.strip_prefix("session-").unwrap_or(dir);
+                    v4_sessions.insert(id.to_string());
+                }
+            }
+            false => {
+                if let Some(f) = tree_file(identity.path.clone(), filter) {
+                    streams.push(f);
                 }
             }
         }
     }
-    let mut streams: Vec<SourceFile> = session_files(&sessions)
-        .filter(|p| paths::is_v3_stream(p))
-        .filter_map(|path| tree_file(path, filter))
-        .collect();
-    let mut projections: Vec<SourceFile> = proj_files()
-        .filter(|p| {
-            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let mut seen_projections: HashSet<String> = HashSet::new();
+    let mut projections: Vec<SourceFile> = Vec::new();
+    for dir in paths::projcache_dirs() {
+        for path in WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.into_path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
             let id = stem.strip_prefix("session-").unwrap_or(stem);
-            v4_sessions.iter().any(|s| s == id)
-        })
-        .filter_map(|path| tree_file(path, filter))
-        .collect();
+            // One projection per session id even when two roots mirror it.
+            if !v4_sessions.contains(id) || !seen_projections.insert(id.to_string()) {
+                continue;
+            }
+            if let Some(f) = tree_file(path, filter) {
+                projections.push(f);
+            }
+        }
+    }
     let mut out = Vec::with_capacity(streams.len() + projections.len());
     out.append(&mut streams);
     out.append(&mut projections);
@@ -126,17 +153,30 @@ fn read_projection(file: &SourceFile) -> Result<ReadOutcome, Error> {
     Ok(ReadOutcome { events, cursor: ReadCursor(file.size) })
 }
 
-fn session_files(sessions: &PathBuf) -> impl Iterator<Item = PathBuf> {
-    WalkDir::new(sessions).into_iter().filter_map(|e| e.ok()).map(|e| e.into_path()).filter(|p| paths::is_session_file(p))
+/// One session per identity: the workspace slug + session dir relative to its
+/// root. Mirrored trees repeat identities, and the first root in priority
+/// order wins — a mirrored session is read exactly once no matter how many
+/// roots carry it.
+struct Identity {
+    path: PathBuf,
 }
 
-/// The projection files, discovered independently: the dir may not exist at
-/// all on a macOS-only v3 machine.
-fn proj_files() -> impl Iterator<Item = PathBuf> {
-    let dir = paths::projcache_dir();
-    dir.into_iter()
-        .flat_map(WalkDir::new)
-        .filter_map(|e| e.ok())
-        .map(|e| e.into_path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+fn session_identities(roots: &[PathBuf]) -> Vec<Identity> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        for path in WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.into_path())
+            .filter(|p| paths::is_session_file(p))
+        {
+            let Ok(rel) = path.strip_prefix(root) else { continue };
+            let key = rel.to_string_lossy().into_owned();
+            if seen.insert(key) {
+                out.push(Identity { path });
+            }
+        }
+    }
+    out
 }

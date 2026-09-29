@@ -890,6 +890,11 @@
   color: var(--ink-3);
 }
 
+/* 标注性附注（"按 tokens"一类）：比脚注更退一步 */
+.tool-foot .dim {
+  opacity: 0.7;
+}
+
 /* ------------------------------------------------------- ranked / call rows */
 
 /* One line per row; the ranking is the accent wash painted behind the row
