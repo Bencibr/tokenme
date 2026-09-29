@@ -780,6 +780,7 @@ pub fn configure(app: &AppHandle) {
 /// Keeps the converted panel alive (and reachable) for the lifetime of the
 /// app: acquired once at setup, never re-converted — see the pinning note in
 /// `configure`.
+#[cfg(target_os = "macos")]
 struct PanelHandle(tauri_nspanel::Panel);
 
 /// Hides the panel when the user switches Space or activates another app.
