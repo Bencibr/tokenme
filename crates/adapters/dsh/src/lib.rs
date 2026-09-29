@@ -1,12 +1,18 @@
 //! dsh adapter.
 //!
-//! One source: `~/.dsh/sessions/<workspace>/<session>/session.jsonl.zstd` —
+//! One source: `<sessions-root>/<workspace>/<session>/session.jsonl.zstd` —
 //! zstd-compressed JSONL event streams, one file per agent session. Usage
 //! rides on `assistant/chunk` lines whose chunk is `{"type":"usage"}` with the
 //! exclusive token convention (`inputTokens` excludes `cacheReadTokens`);
-//! the step's model arrives earlier on `request/header`. The mirror tree under
-//! `~/Library/Application Support/dsh-desktop/harness/sessions` is identical
-//! and deliberately not read (module notes in [`paths`]).
+//! the step's model arrives earlier on `request/header`.
+//!
+//! The sessions root follows the writer's own layout (see [`paths`]):
+//! `~/.dsh/sessions` on the macOS layout, `%APPDATA%\dsh-desktop\harness\sessions`
+//! on Windows (where `~/.dsh` carries no sessions at all). Format v4 names the
+//! stream `session.v4.jsonl.zstd`; the header gains `"version":4` and the
+//! event shapes stay the ones parsed here. Only one root is ever read — the
+//! macOS `Application Support` tree is a mirror of `~/.dsh`, and reading both
+//! would double-bill.
 //!
 //! Cursor is `FileKind::Tree`: whole-file re-parse on change, stable
 //! `<session>#<seq>` dedupe keys absorbing the re-emit.
