@@ -1319,6 +1319,7 @@ dependencies = [
  "usage-adapter-cline",
  "usage-adapter-codex",
  "usage-adapter-dsh",
+ "usage-adapter-funide",
  "usage-adapter-hermes",
  "usage-adapter-opencode",
  "usage-adapter-pi",
@@ -1423,6 +1424,17 @@ dependencies = [
  "usage-core",
  "walkdir",
  "zstd",
+]
+
+[[package]]
+name = "usage-adapter-funide"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "usage-core",
 ]
 
 [[package]]

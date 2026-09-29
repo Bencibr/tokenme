@@ -8,6 +8,7 @@ mod cline;
 mod codex;
 mod copilot;
 mod dsh;
+mod funide;
 mod gemini;
 mod opencode;
 mod qoder;
@@ -24,6 +25,7 @@ pub use cline::ClineQuota;
 pub use codex::CodexQuota;
 pub use copilot::CopilotQuota;
 pub use dsh::DshQuota;
+pub use funide::FunIdeQuota;
 pub use gemini::GeminiQuota;
 pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
@@ -39,6 +41,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
     vec![
         Box::new(AntigravityQuota),
         Box::new(AtomCodeQuota),
+        Box::new(FunIdeQuota),
         Box::new(ClineQuota),
         Box::new(OpenCodeQuota),
         Box::new(CodexQuota),
