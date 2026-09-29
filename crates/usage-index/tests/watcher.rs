@@ -69,9 +69,10 @@ fn activity_outside_the_roots_stays_silent() {
     // queue until it goes quiet BEFORE writing, or the phantom sits in the
     // channel and the assertion reads it as "unrelated writes signalled".
     // Bounded: a watcher that genuinely cannot stay quiet is a real bug the
-    // assertion below must catch, not an infinite drain.
-    for _ in 0..10 {
-        if !signal_within(&rx, Duration::from_millis(150)) {
+    // assertion below must catch, not an infinite drain. The budget covers a
+    // cold CI VM, where FSEvents' first delivery has been measured past 1.5s.
+    for _ in 0..12 {
+        if !signal_within(&rx, Duration::from_millis(300)) {
             break;
         }
     }
