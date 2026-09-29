@@ -59,7 +59,7 @@ fn discovery_path() -> Option<PathBuf> {
 
 /// HMAC-SHA256 over `sha2`. The workspace has no `hmac` crate and this
 /// two-pad construction is pinned by the golden-vector tests below.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut block = [0u8; 64];
     if key.len() > 64 {
         block[..32].copy_from_slice(&Sha256::digest(key));

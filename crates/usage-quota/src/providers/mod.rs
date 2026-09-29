@@ -10,6 +10,7 @@ mod copilot;
 mod dsh;
 mod funide;
 mod gemini;
+mod joycode;
 mod opencode;
 mod qoder;
 mod workbuddy;
@@ -27,6 +28,7 @@ pub use copilot::CopilotQuota;
 pub use dsh::DshQuota;
 pub use funide::FunIdeQuota;
 pub use gemini::GeminiQuota;
+pub use joycode::JoycodeQuota;
 pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
 pub use workbuddy::WorkBuddyQuota;
@@ -47,6 +49,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(CodexQuota),
         Box::new(CopilotQuota),
         Box::new(GeminiQuota),
+        Box::new(JoycodeQuota),
         Box::new(QoderQuota),
         Box::new(WorkBuddyQuota),
         Box::new(CatpawQuota),
