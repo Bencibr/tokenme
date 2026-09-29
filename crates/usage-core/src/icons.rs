@@ -72,6 +72,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("funide", include_bytes!("../assets/funide.png")),
     // AtomCode: the logo the vendor's own coding-plan page serves (og:image).
     ("atomcode", include_bytes!("../assets/atomcode.png")),
+    ("pi", include_bytes!("../assets/pi.png")),
     // Hermes: the 256-px layer of the desktop app's own icon resource.
     ("hermes", include_bytes!("../assets/hermes.png")),
 ];
