@@ -1,9 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/tokenme-hero-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/tokenme-hero-light.svg">
-    <img alt="TokenMe Hero Banner" src="assets/tokenme-hero-dark.svg" width="100%">
-  </picture>
+  <img alt="TokenMe Hero Banner" src="assets/tokenme-hero-dark.svg" width="100%">
 </p>
 
 <p align="center">
