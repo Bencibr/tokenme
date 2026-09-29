@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/usage-core",
+    "crates/adapters/claude",
+    "crates/adapters/codex",
+    "crates/adapters/opencode",
+    "crates/adapters/pi",
+    "crates/adapters/cline",
+    "crates/adapters/zcode",
+    "crates/adapters/qoder",
+    "crates/adapters/antigravity",
+    "crates/adapters/agnes",
+    "crates/adapters/atomcode",
+    "crates/adapters/workbuddy",
+    "crates/adapters/hermes",
+    "crates/adapters/catpaw",
+    "crates/adapters/dsh",
+    "crates/adapters/all",
+    "crates/usage-index",
+    "crates/usage-quota",
+    "crates/usage-cli",
+]
+exclude = ["apps/tokenme-bar"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://gitea.sp.dev/sp/tokenme.git"
+
+[workspace.dependencies]
+usage-core = { path = "crates/usage-core" }
+usage-index = { path = "crates/usage-index" }
+usage-quota = { path = "crates/usage-quota" }
+usage-adapter-claude = { path = "crates/adapters/claude" }
+usage-adapter-codex = { path = "crates/adapters/codex" }
+usage-adapter-opencode = { path = "crates/adapters/opencode" }
+usage-adapter-pi = { path = "crates/adapters/pi" }
+usage-adapter-cline = { path = "crates/adapters/cline" }
+usage-adapter-zcode = { path = "crates/adapters/zcode" }
+usage-adapter-qoder = { path = "crates/adapters/qoder" }
+usage-adapter-antigravity = { path = "crates/adapters/antigravity" }
+usage-adapter-agnes = { path = "crates/adapters/agnes" }
+usage-adapter-atomcode = { path = "crates/adapters/atomcode" }
+usage-adapter-workbuddy = { path = "crates/adapters/workbuddy" }
+usage-adapter-hermes = { path = "crates/adapters/hermes" }
+usage-adapter-all = { path = "crates/adapters/all" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+ureq = { version = "2", features = ["json"] }
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+walkdir = "2"
+zstd = "0.13"
+notify = "6"
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+pbkdf2 = "0.12"
+sha1 = "0.10"
+aes-gcm = "0.10"
+sha2 = "0.10"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Security_Cryptography",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

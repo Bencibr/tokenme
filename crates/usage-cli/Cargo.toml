@@ -1,0 +1,21 @@
+[package]
+name = "usage-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "tokenme CLI: cross-tool token and cost reports (Linux primary)"
+
+[[bin]]
+name = "tokenme"
+path = "src/main.rs"
+
+[dependencies]
+usage-core.workspace = true
+usage-index.workspace = true
+usage-quota.workspace = true
+usage-adapter-all.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dirs.workspace = true

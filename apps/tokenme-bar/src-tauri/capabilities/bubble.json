@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "bubble",
+  "description": "The runtime-created Windows bubble: it drags itself (start-dragging) and moves itself when hovering, docking and expanding (set-position). Read-only window getters come with core:default.",
+  "windows": ["bubble"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-position"
+  ]
+}

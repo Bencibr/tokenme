@@ -1,0 +1,2 @@
+{"ts": 1789900000000, "session": "q", "model": "gpt-5", "id": "q-1", "in": 10, "quota": {"used_percent": 12.5, "window_minutes": 10080, "resets_at_ms": 1790000000000}}
+{"ts": 1789900060000, "session": "q", "model": "gpt-5", "id": "q-2", "in": 20, "quota": {"used_percent": 42.0, "window_minutes": 10080, "resets_at_ms": 1790000000000}}

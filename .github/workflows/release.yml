@@ -1,0 +1,53 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
+      - name: Build
+        id: build
+        # pipefail or the tee swallows the script's exit code: a mid-build
+        # failure would march on to Stage artifacts and die there, miles from
+        # the actual error.
+        run: set -o pipefail; ./scripts/build-macos.sh 2>&1 | tee build.log
+      - name: Surface build failure
+        if: failure()
+        run: |
+          grep -nE 'error(\[[0-9]*\])?:|FAILED|failures:|panicked at|warning: build failed|ELIFECYCLE|Command failed' build.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
+      - name: Stage artifacts
+        run: |
+          B=apps/tokenme-bar/src-tauri/target/release/bundle
+          mkdir -p dist
+          ditto -c -k --keepParent "$B/macos/tokenme.app" dist/tokenme-macos-arm64.app.zip
+          cp "$B"/dmg/tokenme_*.dmg dist/
+          shasum -a 256 dist/* > sha256.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tokenme-macos-arm64.app.zip
+            dist/tokenme_*.dmg
+            sha256.txt
+            latest.json
+          generate_release_notes: true
