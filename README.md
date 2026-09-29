@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/your-org/tokenme"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
+  <a href="https://github.com/sp/tokenme"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.75%2B-orange.svg" alt="Rust Version"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-green.svg" alt="Platform Support">
   <img src="https://img.shields.io/badge/index-local--only-success.svg" alt="Local Index">
@@ -23,28 +23,17 @@
   <b>English</b> | <a href="README_CN.md">简体中文</a>
 </p>
 
----
-
 ## 💡 Why TokenMe?
 
-When developing with multiple AI coding tools (**Claude Code**, **Codex**, **OpenCode**, **Cline**, **ZCode**, etc.), you often face a visibility black box:
-- *How many tokens did I actually consume today? How much did it cost?*
-- *How much quota remains in my 5-hour rolling pool or weekly plan?*
-- *What is my real prompt cache hit rate across projects?*
-
-**TokenMe** solves AI coding usage and billing anxiety. It reads native logs and local databases directly from your tools, builds an instant local SQLite index, and gives you a single dashboard with live quotas.
-
----
+When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cline, ZCode…), usage is a black box: *how much did today cost, how much of my 5-hour pool is left, how good is my cache hit rate?* TokenMe reads the tools' own logs and local databases into an instant SQLite index and answers all three in one dashboard — CLI and menu bar.
 
 ## ✨ Features
 
 - 🔒 **Local index, read-only scanning**: Usage is indexed on your machine from the tools' own logs. No telemetry and no third-party proxies; live quota probes and the model price list are the only network calls.
 - ⚡ **Instant Scanning**: High-performance Rust incremental index scans hundreds of thousands of events in seconds.
-- 🎯 **15+ Tools Supported**: Out-of-the-box recognition for Claude Code, Codex, OpenCode, Cline, ZCode, Qoder, Pi, and more.
-- 📊 **Token & Cost Analytics**: Clear breakdown of input, cache read, output, and costs calculated via [models.dev](https://models.dev).
-- ⏱️ **Live Quota Probes**: Real-time read-only probes for rolling 5-hour windows, weekly quotas, and MCP allowances.
-
----
+- 🎯 **16 Tools Supported**: Claude Code, Codex, OpenCode, Cline, ZCode, Qoder, Pi, Antigravity, WorkBuddy, AgnesCode, AtomCode, Crow5, Mimocode, Cola, DSH, Hermes.
+- 📊 **Token & Cost Analytics**: Input, cache read, output and cost breakdown via [models.dev](https://models.dev).
+- ⏱️ **Live Quota Probes**: Rolling 5-hour windows, weekly quotas, credit plans and reset countdowns.
 
 ## ⚡ Preview
 
@@ -60,99 +49,46 @@ $ tokenme daily --days 3
 ├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
 │ total      │      256 │   20,026 │ 111.8M │      2.76B │   7.4M │  2.88B │ $200.18 │  96.1% │
 └────────────┴──────────┴──────────┴────────┴────────────┴────────┴────────┴─────────┴────────┘
-last 3 days · 2026-09-25 → 2026-09-27
-prices: cached models.dev snapshot, 2,037 models
 ```
-
----
 
 ## 🚀 Quick Start
 
-### Installation
-
-Requires [Rust 1.75+](https://rustup.rs/):
-
 ```bash
-git clone https://github.com/your-org/tokenme.git
+git clone https://github.com/sp/tokenme.git
 cd tokenme
 cargo install --path crates/usage-cli --bin tokenme
+
+tokenme detect          # 1. discover local AI tools and logs
+tokenme daily --days 7  # 2. tokens and cost for the past week
+tokenme quota           # 3. live subscription quotas and reset timers
 ```
 
-### 3-Step Walkthrough
+macOS menu-bar panel: `./scripts/build-macos.sh` → `TokenMe.app`.
 
-```bash
-# 1. Discover local installed AI tools and logs
-tokenme detect
+## 🛠️ Commands
 
-# 2. View token usage and cost for the past 7 days
-tokenme daily --days 7
+| Command | What it does |
+| :--- | :--- |
+| `tokenme daily --days 30` | Daily throughput, cache rate & cost |
+| `tokenme report --window week --group model` | One window, broken down, with deltas |
+| `tokenme quota` | Live quotas and reset countdowns |
+| `tokenme budget set zcode --monthly 50` | Spend caps for unlimited-plan tools |
+| `tokenme pricing explain <model>` | Audit which price listing won |
 
-# 3. Check live subscription quotas and reset timers
-tokenme quota
-```
+Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Scenarios & panel guide: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · Adapter reverse-engineering notes: [docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
 
----
+## 🔒 Privacy & Data
 
-## 🛠️ Essential Commands
+Counts only, never content — your code and prompts are never indexed, just per-request token counts, model names and project paths. Scanning is read-only; no telemetry, no third-party proxies. The index lives under the OS data directory (`~/Library/Application Support/tokenme/` on macOS); per-tool log paths are in the [user guide](docs/USER_GUIDE.md).
 
-| Command | Description | Example |
-| :--- | :--- | :--- |
-| `tokenme detect` | Scan and list all detected AI tool directories | `tokenme detect` |
-| `tokenme daily` | Daily token throughput, cache rate & estimated cost | `tokenme daily --days 30` |
-| `tokenme weekly` | Weekly usage trends | `tokenme weekly --weeks 8` |
-| `tokenme monthly` | Long-term monthly billing summaries | `tokenme monthly --months 6` |
-| `tokenme quota` | Pull live quotas and window reset countdowns | `tokenme quota` |
-| `tokenme budget` | Set custom daily or monthly spending limits | `tokenme budget set zcode --monthly 50` |
-| `tokenme pricing` | Audit pricing sources and provider price diffs | `tokenme pricing explain deepseek-v4-flash` |
-
----
-
-## 🧩 Supported Ecosystem
-
-| Tool | Metric | Data Source |
-| :--- | :--- | :--- |
-| **Claude Code** | Tokens | `~/.claude/projects/**/*.jsonl` |
-| **Codex** | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
-| **OpenCode** | Tokens | `~/.local/share/opencode/opencode.db` |
-| **Pi** | Tokens | `~/.pi/agent/sessions/**` |
-| **Cline** | Tokens | `~/.cline/data/sessions/**` |
-| **ZCode** | Tokens | `~/.zcode/cli/db/db.sqlite` |
-| **Antigravity CLI** | Tokens | `~/.gemini/antigravity-cli/conversations/*.db` |
-| **Qoder** | Credits | `~/.qoder/projects/**/*.jsonl` |
-| **WorkBuddy AI** | Credits | `~/.workbuddy-ai/workbuddy.db` |
-| *Others* | Tokens | AgnesCode, AtomCode, Crow5, Mimocode, Cola... |
-
-> 📌 *Note: Cloud-only tools without local per-request logs (e.g. Cursor, VS Code Copilot) are not supported locally.*
-
----
-
-## 🔒 Security & Data Paths
-
-- **Counts only, never content**: Your code and prompts are never indexed — only per-request token counts, model names and project paths.
-- **Read-Only**: Existing tool files are inspected in read-only mode to prevent corruption.
-- **Local Storage**:
-  - SQLite Index: `~/Library/Application Support/tokenme/index.db` (macOS) / `~/.local/share/tokenme/` (Linux) / `%LOCALAPPDATA%\tokenme\` (Windows)
-  - Settings: `settings.json` in standard OS config directory.
-
----
-
-## 📚 Developer & Architecture Documentation
-
-- [Adapter Architecture & Reverse Engineering Notes](docs/internal/ADAPTERS_DESIGN.md)
-- [Verification & Integrity Test Scripts](scripts/)
-
----
-
-## 💬 Community & Contact
+## 💬 Community
 
 | | |
 | :--- | :--- |
-| WeChat user group | <img src="docs/wechat-group.png" width="180" alt="TokenMe WeChat group"> |
 | Issues | [GitHub Issues](https://github.com/sp/tokenme/issues) |
+| WeChat user group | <img src="docs/wechat-group.png" width="180" alt="TokenMe WeChat group"> |
 | Email | Panel → Settings → Contact (address in `apps/tokenme-bar/src/lib/about.ts`) |
-| Releases | [Releases](https://github.com/sp/tokenme/releases/latest) · the panel prompts when a new version lands |
 
 ## 📄 License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
-
+Licensed under [MIT](LICENSE).
