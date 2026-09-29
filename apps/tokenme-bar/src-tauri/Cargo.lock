@@ -4695,6 +4695,7 @@ dependencies = [
  "usage-adapter-codex",
  "usage-adapter-dsh",
  "usage-adapter-hermes",
+ "usage-adapter-joycode",
  "usage-adapter-opencode",
  "usage-adapter-pi",
  "usage-adapter-qoder",
@@ -4802,6 +4803,18 @@ dependencies = [
  "serde",
  "serde_json",
  "usage-core",
+]
+
+[[package]]
+name = "usage-adapter-joycode"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs 6.0.0",
+ "serde",
+ "serde_json",
+ "usage-core",
+ "walkdir",
 ]
 
 [[package]]
