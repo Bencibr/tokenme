@@ -3,11 +3,12 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write
+
 jobs:
   macos:
     runs-on: macos-14
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -42,12 +43,67 @@ jobs:
           mkdir -p dist
           ditto -c -k --keepParent "$B/macos/tokenme.app" dist/tokenme-macos-arm64.app.zip
           cp "$B"/dmg/tokenme_*.dmg dist/
-          shasum -a 256 dist/* > sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel
+          path: dist/*
+
+  cli:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        run: set -o pipefail; cargo build --locked --release -p usage-cli --target ${{ matrix.target }} 2>&1 | tee build-cli.log
+      - name: Surface build failure
+        if: failure()
+        shell: bash
+        run: |
+          grep -nE 'error(\[[0-9]*\])?:|error:|warning: build failed|linking with' build-cli.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          tar -czf "dist/tokenme-cli-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" tokenme
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "target/${{ matrix.target }}/release/tokenme.exe" -DestinationPath "dist/tokenme-cli-${{ matrix.target }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: [macos, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Hash
+        run: |
+          cd dist
+          sha256sum tokenme_*.dmg tokenme-macos-arm64.app.zip tokenme-cli-* > ../sha256.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/tokenme-macos-arm64.app.zip
             dist/tokenme_*.dmg
+            dist/tokenme-macos-arm64.app.zip
+            dist/tokenme-cli-*
             sha256.txt
             latest.json
           generate_release_notes: true
