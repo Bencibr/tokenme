@@ -287,14 +287,19 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                 // tool block never loses a line) but its track hatches: nothing
                 // here is being measured, and a 0% bar would claim otherwise.
                 const unlimited = (q.label ?? "").includes("无可查限额");
+                // A prepaid balance is not a gauge either: the figure slot
+                // carries the remaining money itself and the track runs
+                // dashed — nothing here is measured against a cap.
+                const balance = q.id === "dsh-balance";
+                const figure = balance ? (q.label ?? "").replace(/^余额\s*/, "") : null;
                 const mine = (q.origin ?? "probe") === "budget";
                 // The window name leads at full ink; a plan suffix the source
                 // appended ("5 小时 · GLM Coding Lite") follows dimmed, so ten
                 // rows of the same plan stop shouting it.
                 const label = windowName(q);
                 const cut = label.indexOf(" · ");
-                const head = cut === -1 ? label : label.slice(0, cut);
-                const tail = cut === -1 ? "" : label.slice(cut);
+                const head = balance ? "余额" : cut === -1 ? label : label.slice(0, cut);
+                const tail = balance ? "" : cut === -1 ? "" : label.slice(cut);
                 const rowTail = tail === ` · ${plan}` ? "" : tail;
                 return (
                   <div
@@ -325,6 +330,8 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     </span>
                     {unlimited ? (
                       <span className="track track-inf" aria-hidden="true" />
+                    ) : balance ? (
+                      <span className="track track-balance" aria-hidden="true" />
                     ) : (
                       <span
                         className="track"
@@ -347,6 +354,8 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
                     )}
                     {unlimited ? (
                       <span className="quota-pct quota-pct--na">不限</span>
+                    ) : balance ? (
+                      <span className="quota-pct quota-pct--na num">{figure}</span>
                     ) : (
                       <span className="quota-pct num" data-stage={stage}>
                         {pct > 100 ? Math.round(pct) : pct < 10 ? pct.toFixed(1) : Math.round(pct)}

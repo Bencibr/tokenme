@@ -759,6 +759,14 @@
   background: repeating-linear-gradient(115deg, var(--track) 0 4px, transparent 4px 8px);
 }
 
+/* A prepaid balance is not a gauge: the track runs as a plain dashed line
+   (straight, dimmer ink — the hatch above means unlimited, this means
+   measured in money, not percent). */
+.track-balance {
+  background: repeating-linear-gradient(90deg, var(--ink-3) 0 5px, transparent 5px 11px);
+  opacity: 0.55;
+}
+
 .quota-pct--na {
   color: var(--ink-3);
   font-weight: 400;
