@@ -194,6 +194,15 @@ fn index_line(ctx: &Ctx, report: Option<&IngestReport>) -> String {
     }
 }
 
+/// ------------------------------------------------------------ workbuddy-login
+
+pub fn workbuddy_login() -> Result<(), String> {
+    let summary = usage_quota::workbuddy_login()?;
+    println!("{summary}");
+    println!("run `tokenme quota` to see the WorkBuddy credit bars");
+    Ok(())
+}
+
 // -------------------------------------------------- daily / weekly / month
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use usage_core::{QuotaSample, QuotaView};
 
 pub use providers::ClaudeQuota;
+pub use providers::workbuddy_login;
 
 /// How long an answer stays trustworthy. Vendor windows reset on the hour at the
 /// earliest, so five minutes is well inside any meaningful resolution.

@@ -50,7 +50,10 @@ impl QuotaProbe for WorkBuddyQuota {
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
-        let Some(info) = read_auth().or_else(|| bare_token().map(synthesize_auth)) else {
+        let Some(info) = read_auth()
+            .or_else(saved_login_auth)
+            .or_else(|| bare_token().map(synthesize_auth))
+        else {
             return Vec::new();
         };
         if !token_is_fresh(&info, chrono::Utc::now().timestamp_millis()) {
@@ -104,6 +107,125 @@ fn bare_token() -> Option<String> {
 /// real expiry lives with whoever issued it).
 fn synthesize_auth(token: String) -> Value {
     serde_json::json!({ "auth": { "accessToken": token, "domain": "www.workbuddy.ai" } })
+}
+
+// ------------------------------------------------------------------- login
+
+/// The plugin device-authorization endpoint WorkBuddy's own CLI family uses
+/// (measured against `auto-checkin`'s login flow): ask for a state, finish
+/// Tencent SSO in the browser, then poll until the token lands.
+const LOGIN_BASE: &str = "https://copilot.tencent.com";
+const LOGIN_UA: &str = "CLI/2.63.2 CodeBuddy/2.63.2";
+
+fn saved_login_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("tokenme").join("workbuddy-auth.json"))
+}
+
+/// The credential saved by [`login`]: a JSON mirror of the auth file's `auth`
+/// section plus `uid`, so `token_is_fresh` and `call` read it unchanged.
+fn saved_login_auth() -> Option<Value> {
+    let raw = std::fs::read_to_string(saved_login_path()?).ok()?;
+    let cred: Value = serde_json::from_str(&raw).ok()?;
+    let auth = cred.get("auth")?.clone();
+    Some(serde_json::json!({ "auth": auth, "account": { "uid": cred.get("uid") } }))
+}
+
+fn open_browser(url: &str) {
+    let command = match std::env::consts::OS {
+        "macos" => vec!["open", url],
+        "windows" => vec!["cmd", "/c", "start", "", url],
+        _ => vec!["xdg-open", url],
+    };
+    let _ = std::process::Command::new(command[0]).args(&command[1..]).spawn();
+}
+
+/// Run the device login dance and persist the credential. Blocking (the CLI
+/// wraps it); `poll` and `deadline` are injectable so tests can fake both.
+pub fn login_with(
+    mut poll: impl FnMut(&str) -> Option<Value>,
+    mut sleep: impl FnMut(std::time::Duration),
+    attempts: usize,
+) -> Result<String, String> {
+    let state_body: Value = serde_json::json!({});
+    let state_resp = crate::http::post_json(
+        &format!("{LOGIN_BASE}/v2/plugin/auth/state?platform=CLI"),
+        &[("user-agent", LOGIN_UA), ("content-type", "application/json")],
+        state_body,
+    )
+    .ok_or("auth/state unreachable — check the network")?;
+    let state = state_resp
+        .pointer("/data/state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("auth/state returned no state: {state_resp}"))?
+        .to_string();
+    let auth_url = state_resp
+        .pointer("/data/authUrl")
+        .and_then(Value::as_str)
+        .ok_or("auth/state returned no authUrl")?
+        .to_string();
+    open_browser(&auth_url);
+
+    for _ in 0..attempts {
+        sleep(std::time::Duration::from_secs(5));
+        if let Some(token_data) = poll(&state) {
+            let access = token_data
+                .get("accessToken")
+                .or_else(|| token_data.get("access_token"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if access.is_empty() {
+                continue;
+            }
+            let expires_in = token_data
+                .get("expiresIn")
+                .or_else(|| token_data.get("expires_in"))
+                .and_then(Value::as_i64)
+                .unwrap_or(7 * 24 * 3600);
+            let cred = serde_json::json!({
+                "auth": {
+                    "accessToken": access,
+                    "refreshToken": token_data.get("refreshToken").or_else(|| token_data.get("refresh_token")),
+                    "expiresAt": chrono::Utc::now().timestamp_millis() + expires_in * 1000,
+                    "domain": token_data.get("domain").and_then(Value::as_str).unwrap_or("codebuddy.cn"),
+                },
+                "uid": token_data.get("uid").and_then(Value::as_str).unwrap_or("workbuddy"),
+            });
+            let path = saved_login_path().ok_or("no platform config dir")?;
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&cred).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            return Ok(path.to_string_lossy().to_string());
+        }
+    }
+    Err("login window elapsed (5 min) without a token — run workbuddy-login again".into())
+}
+
+/// The CLI entry: opens the browser, waits, saves. Returns a human summary.
+pub fn login() -> Result<String, String> {
+    let poll = |state: &str| {
+        let url = format!("{LOGIN_BASE}/v2/plugin/auth/token?state={state}");
+        crate::http::get_json(&url, &[("user-agent", LOGIN_UA)])
+    };
+    let path = login_with(poll, std::thread::sleep, 60)?;
+    let cred = serde_json::from_str::<Value>(
+        &std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?,
+    )
+    .map_err(|e| e.to_string())?;
+    let expires_at = cred.pointer("/auth/expiresAt").and_then(Value::as_i64).unwrap_or(0);
+    let when = chrono::DateTime::<chrono::Local>::from(
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(expires_at.max(0) as u64),
+    );
+    Ok(format!(
+        "WorkBuddy credentials saved to {} (token expires {})",
+        path,
+        when.format("%Y-%m-%d %H:%M")
+    ))
 }
 
 /// An expired token is "no sample", never a refresh grant.

@@ -106,6 +106,9 @@ pub enum Cmd {
     /// Newest quota sample each source reported
     Quota,
 
+    /// Log in to WorkBuddy (browser SSO once; the token feeds the quota probe)
+    WorkbuddyLogin,
+
     /// Where a price came from: models.dev sells most models through several
     /// providers, so a cost number is only meaningful together with the listing
     /// that won the precedence rule.

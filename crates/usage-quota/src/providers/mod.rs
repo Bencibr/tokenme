@@ -22,6 +22,7 @@ pub use gemini::GeminiQuota;
 pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
 pub use workbuddy::WorkBuddyQuota;
+pub use workbuddy::login as workbuddy_login;
 pub use zcode::ZcodeQuota;
 
 use crate::QuotaProbe;
