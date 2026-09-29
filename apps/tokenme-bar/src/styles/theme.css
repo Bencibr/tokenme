@@ -63,6 +63,10 @@
   --cat-12: #7a2f2f;
   --cat-13: #2f7a4f;
   --cat-14: #6f5f3f;
+  --cat-15: #155f7a;
+  --cat-16: #7a4a2f;
+  --cat-17: #4f5f2f;
+  --cat-18: #8a3f5f;
 
   /* activity scale, quiet → saturated */
   --heat-1: #d8e7e4;
@@ -177,6 +181,10 @@
     --cat-12: #d97f7f;
     --cat-13: #7fc79e;
     --cat-14: #bfae7f;
+    --cat-15: #5cb8d9;
+    --cat-16: #d9a58f;
+    --cat-17: #a8c98f;
+    --cat-18: #e08fa8;
 
     --heat-1: #1a3f36;
     --heat-2: #215c4d;
@@ -255,6 +263,10 @@
   --cat-12: #d97f7f;
   --cat-13: #7fc79e;
   --cat-14: #bfae7f;
+  --cat-15: #5cb8d9;
+  --cat-16: #d9a58f;
+  --cat-17: #a8c98f;
+  --cat-18: #e08fa8;
 
   --heat-1: #1a3f36;
   --heat-2: #215c4d;

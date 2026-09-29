@@ -33,7 +33,6 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
   }, [tools, sort]);
   // With dollars off, the wash ranks by tokens instead of cost — the row has
   // to keep saying something about relative size.
-  const keyOf = (t: Item) => (showMoney ? t.cost : t.total_tokens);
   const costMax = ordered.reduce((acc, t) => Math.max(acc, t.priced ? t.cost : 0), 0);
   const tokenMax = ordered.reduce((acc, t) => Math.max(acc, t.total_tokens), 0);
   const totalCost = ordered.reduce((acc, t) => acc + t.cost, 0);
@@ -77,7 +76,10 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                 {
                   "--c": toolColor(t.key),
                   backgroundImage: "linear-gradient(90deg, color-mix(in srgb, var(--c) 9%, transparent) 0 0)",
-                  backgroundSize: `${Math.max(wash, keyOf(t) > 0 ? 2 : 0)}% 100%`,
+                  // The 2% floor keys on activity, not money: a tool that moved
+                  // real tokens at a $0.00-computed cost (opencode's free tier)
+                  // must still show its band, or silence reads as "did nothing".
+                  backgroundSize: `${Math.max(wash, t.total_tokens > 0 || t.cost > 0 ? 2 : 0)}% 100%`,
                 } as React.CSSProperties
               }
             >
