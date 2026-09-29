@@ -86,6 +86,9 @@ const [page, setPage] = useState<PageKey>(() => {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
+      // Full refresh: fresh price table (the engine re-summarizes when it
+      // lands), re-ingest, and — engine-side — a forced quota re-probe.
+      if (inTauri) void bridge.refreshPricing();
       setReport(await bridge.fetchReport(true));
       setError(null);
     } catch (e) {

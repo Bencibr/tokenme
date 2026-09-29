@@ -165,7 +165,13 @@ fn wait_for_work(rx: &Receiver<Msg>, pricing: &mut PricingMap, fallback: Duratio
                 }
                 return Work::Ingest("file change");
             }
-            Ok(Msg::Refresh) => return Work::Ingest("manual refresh"),
+            Ok(Msg::Refresh) => {
+                // A manual refresh is "everything, now": dropping the quota
+                // cache makes this pass re-probe the vendors for real — the
+                // idle cadence keeps reading their 5-minute TTL answers.
+                usage_quota::clear_cache();
+                return Work::Ingest("manual refresh");
+            }
             Err(RecvTimeoutError::Timeout) => return Work::Ingest("cadence timer"),
             Err(RecvTimeoutError::Disconnected) => return Work::Quit,
         }
@@ -184,7 +190,10 @@ fn drain_debounce(rx: &Receiver<Msg>, pricing: &mut PricingMap) -> bool {
                 *pricing = map;
                 return false;
             }
-            Ok(Msg::Refresh) => return true,
+            Ok(Msg::Refresh) => {
+                usage_quota::clear_cache();
+                return true;
+            }
             Err(RecvTimeoutError::Timeout) => return true,
             Err(RecvTimeoutError::Disconnected) => return false,
         }

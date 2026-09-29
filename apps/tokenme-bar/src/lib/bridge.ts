@@ -59,6 +59,11 @@ export const bridge: Bridge = {
     return invoke<Report>("get_report", { force });
   },
 
+  async refreshPricing(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("refresh_pricing");
+  },
+
   async trayState(): Promise<TrayState | null> {
     if (!inTauri) return null;
     return invoke<TrayState>("get_tray_state");

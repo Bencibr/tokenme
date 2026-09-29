@@ -39,7 +39,7 @@ Display modes — cycle them in the panel settings:
 | 托盘·花费 | icon + cost |
 | 托盘·Token·花费 | icon + tokens + cost |
 
-Refresh cadence, theme, money display and the desktop bubble are in panel settings. Settings live in `settings.json` under the OS config directory.
+Refresh cadence, theme, money display and the desktop bubble are in panel settings. The cadence controls index re-scanning; vendor quota answers are cached for 5 minutes so probes stay polite. The status-bar refresh button is a full refresh: it re-scans logs, forces a fresh quota probe for every vendor (bypassing that cache) and pulls a new price table. Settings live in `settings.json` under the OS config directory.
 
 ## 4. Budgets
 

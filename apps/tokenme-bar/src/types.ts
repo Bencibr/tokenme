@@ -173,6 +173,7 @@ export interface Bridge {
   /** `window.__TAURI_INTERNALS__` present ⇒ real app; otherwise the dev fixture. */
   live: boolean;
   fetchReport: (force: boolean) => Promise<Report>;
+  refreshPricing: () => Promise<void>;
   trayState: () => Promise<TrayState | null>;
   setTrayMode: (mode: TrayMode) => Promise<TrayState | null>;
   onReport: (handler: (report: Report) => void) => () => void;

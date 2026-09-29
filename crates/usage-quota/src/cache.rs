@@ -88,6 +88,20 @@ impl Cache {
         Some(views(tool, cached.captured_at_ms, &cached.entries))
     }
 
+    /// Drop every cached answer. The manual "refresh everything" path calls
+    /// this before collecting, so the next pass re-probes every vendor for
+    /// real instead of reading a still-fresh TTL entry.
+    pub fn clear(&self) {
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "json") {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+    }
+
     /// Cached samples regardless of age, used when a probe fails or is offline.
     pub fn stale(&self, tool: &str) -> Option<Vec<QuotaView>> {
         let cached = self.read(tool)?;
@@ -222,6 +236,25 @@ pub fn now_ms() -> i64 {
 
 pub fn cache_dir(path: &Path) -> Option<PathBuf> {
     fs::canonicalize(path).ok()
+}
+
+#[cfg(test)]
+mod cache_clear_tests {
+    use super::Cache;
+
+    #[test]
+    fn clear_forces_the_next_read_to_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::in_dir(dir.path().to_path_buf(), crate::TTL);
+        cache.store("clear-test", &[]);
+        assert!(cache.fresh("clear-test").is_some(), "stored answer reads back fresh");
+
+        cache.clear();
+        assert!(
+            cache.fresh("clear-test").is_none(),
+            "after clear the read misses, so the next collect re-probes for real"
+        );
+    }
 }
 
 #[cfg(test)]

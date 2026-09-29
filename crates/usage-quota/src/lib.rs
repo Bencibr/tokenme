@@ -62,6 +62,15 @@ pub fn collect_within(budget: Duration) -> Vec<QuotaView> {
     collect_probes_within(budget, built_in(), cache::Cache::open("tokenme/quota", TTL))
 }
 
+/// Invalidate every cached quota answer, so the next [`collect`] re-probes
+/// the vendors for real. The panel's manual full refresh calls this; the idle
+/// cadence never does — a 5-minute-old answer is still worth showing there.
+pub fn clear_cache() {
+    if let Some(cache) = cache::Cache::open("tokenme/quota", TTL) {
+        cache.clear();
+    }
+}
+
 /// The same, over an injected probe set and cache — the seam the blink test
 /// uses.
 fn collect_probes_within(
