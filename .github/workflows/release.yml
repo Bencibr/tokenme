@@ -21,10 +21,13 @@ jobs:
           cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
       - name: Build
         id: build
-        run: ./scripts/build-macos.sh 2>&1 | tee build.log
+        # pipefail or the tee swallows the script's exit code: a mid-build
+        # failure would march on to Stage artifacts and die there, miles from
+        # the actual error.
+        run: set -o pipefail; ./scripts/build-macos.sh 2>&1 | tee build.log
       - name: Surface build failure
-        if: failure() && steps.build.outcome == 'failure'
-        run: tail -c 4000 build.log | while IFS= read -r line; do echo "::error::$line"; done
+        if: failure()
+        run: tail -c 6000 build.log | while IFS= read -r line; do echo "::error::$line"; done
       - name: Stage artifacts
         run: |
           B=apps/tokenme-bar/src-tauri/target/release/bundle

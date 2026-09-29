@@ -10,6 +10,8 @@ mod gemini;
 mod opencode;
 mod qoder;
 mod workbuddy;
+#[cfg(unix)]
+mod workbuddy_wbipc;
 mod zcode;
 
 pub use antigravity::AntigravityQuota;
