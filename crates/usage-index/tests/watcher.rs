@@ -65,9 +65,16 @@ fn activity_outside_the_roots_stays_silent() {
     let _watcher = Watcher::spawn(&[watched.path().to_path_buf()], tx).unwrap();
     // FSEvents timestamps are coarse: the watched dir's own creation (seconds
     // before the stream started) can be delivered as a "since now" event on a
-    // busy machine. Let that initial sweep flush before counting silence, or
-    // the assertion fails on a phantom.
-    std::thread::sleep(Duration::from_millis(1000));
+    // busy machine, and the debounce turns it into a queued signal. Drain the
+    // queue until it goes quiet BEFORE writing, or the phantom sits in the
+    // channel and the assertion reads it as "unrelated writes signalled".
+    // Bounded: a watcher that genuinely cannot stay quiet is a real bug the
+    // assertion below must catch, not an infinite drain.
+    for _ in 0..10 {
+        if !signal_within(&rx, Duration::from_millis(150)) {
+            break;
+        }
+    }
 
     std::fs::write(other.path().join("else.jsonl"), b"{}\n").unwrap();
     std::fs::write(other.path().join("more.jsonl"), b"{}\n").unwrap();
