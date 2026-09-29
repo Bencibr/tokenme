@@ -23,6 +23,7 @@ pub const TOOL_IDS: &[&str] = &[
     "atomcode",
     "workbuddy",
     "hermes",
+    "funide",
     "catpaw",
     "dsh",
     // Siblings of the adapters above: same storage dialect, different product.
@@ -45,6 +46,7 @@ pub fn builtin_adapters() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(usage_adapter_atomcode::AtomCodeAdapter),
         Box::new(usage_adapter_workbuddy::WorkBuddyAdapter),
         Box::new(usage_adapter_hermes::HermesAdapter),
+        Box::new(usage_adapter_funide::FunIdeAdapter),
         Box::new(usage_adapter_catpaw::CatpawAdapter),
         Box::new(usage_adapter_dsh::DshAdapter),
         Box::new(usage_adapter_opencode::Crow5Adapter),
