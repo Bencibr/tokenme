@@ -116,7 +116,7 @@ impl SourceAdapter for ProductAdapter {
             .into_iter()
             .filter_map(|db| {
                 let (size, mtime_ms) = paths::stat_file(&db)?;
-                Some(SourceFile { path: db, kind: usage_core::FileKind::Sqlite, size, mtime_ms })
+                Some(SourceFile { path: db, kind: usage_core::FileKind::Sqlite, size, mtime_ms }.with_wal_activity())
             })
             .collect()
     }

@@ -7,6 +7,12 @@
 //! costs a `stat` per file plus zero inserts, and only appended bytes are ever
 //! re-parsed.
 //!
+//! SQLite sources are statted through [`usage_core::SourceFile::with_wal_activity`]:
+//! rows a vendor has written but not checkpointed live in `<db>-wal` while the main
+//! file's own mtime stays frozen, so keying the change test on the main file held
+//! fresh conversations invisible until the next checkpoint — measured here at 2
+//! minutes on OpenCode's 1.6 GB store and a month on crow5's.
+//!
 //! The index deliberately stores **no money**. Prices change weekly, so cost is
 //! derived at query time by [`usage_core::report::summarize`] from the live
 //! [`usage_core::PricingMap`]; the index only stores token stages and credits.

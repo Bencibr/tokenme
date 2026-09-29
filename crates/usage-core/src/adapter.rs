@@ -35,6 +35,46 @@ impl SourceFile {
     pub fn unchanged_since(&self, size: u64, mtime_ms: i64) -> bool {
         self.size == size && self.mtime_ms == mtime_ms
     }
+
+    /// Fold the `-wal` sidecar's mtime into a SQLite source's activity signal.
+    ///
+    /// A WAL-mode database writes rows into `<db>-wal` and leaves the main file's
+    /// own mtime frozen until SQLite checkpoints, so change detection keyed on the
+    /// main file alone keeps a fresh conversation invisible for as long as the
+    /// vendor's checkpoint interval — measured here at 5 minutes on OpenCode's
+    /// 1.6 GB store (`opencode.db` 16:21:00 vs `opencode.db-wal` 16:23:15) and two
+    /// *days* on crow5, whose main file had not moved since 2026-08-27 while its
+    /// WAL carried rows through 2026-09-24.
+    ///
+    /// Only the mtime moves: the size stays the main file's, because the WAL
+    /// shrinks on every checkpoint and a shrinking stat is what the ingest reads
+    /// as "this log was rewritten — purge and start over". Call it on a freshly
+    /// statted [`SourceFile`]; a source already in the manifest gets re-read on the
+    /// next pass, which is the point.
+    pub fn with_wal_activity(mut self) -> Self {
+        if self.kind != FileKind::Sqlite {
+            return self;
+        }
+        let Some(wal_mtime) = wal_mtime_ms(&self.path) else { return self };
+        self.mtime_ms = self.mtime_ms.max(wal_mtime);
+        self
+    }
+}
+
+/// The `-wal` sidecar's mtime, or `None` when there is no sidecar to fold in.
+///
+/// The suffix is the one SQLite itself appends (`<db>-wal`), and a missing or
+/// unreadable sidecar means the database is in another journal mode — not an error.
+pub fn wal_mtime_ms(db: &std::path::Path) -> Option<i64> {
+    let mut name = db.file_name()?.to_os_string();
+    name.push("-wal");
+    std::fs::metadata(db.with_file_name(name))
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_millis() as i64)
 }
 
 /// Position within a source file. Meaning depends on [`FileKind`].
@@ -123,5 +163,47 @@ pub trait SourceAdapter: Send + Sync {
     /// the caller polls it on its own cadence rather than during `read`.
     fn quota(&self) -> Vec<crate::QuotaSample> {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn source(path: PathBuf, kind: FileKind, size: u64, mtime_ms: i64) -> SourceFile {
+        SourceFile { path, kind, size, mtime_ms }
+    }
+
+    fn touch(path: &Path, secs: u64) {
+        std::fs::write(path, b"frame").unwrap();
+        let when = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let file = std::fs::File::open(path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(when)).unwrap();
+    }
+
+    #[test]
+    fn an_uncheckpointed_wal_write_is_activity_even_while_the_main_file_sleeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        touch(&db, 1_780_000_000);
+        let folded = source(db.clone(), FileKind::Sqlite, 4, 1_780_000_000_000).with_wal_activity();
+        assert_eq!(folded.mtime_ms, 1_780_000_000_000, "no sidecar: the main file's own stat stands");
+
+        // The app writes rows into the sidecar and does not touch the main file.
+        touch(&dir.path().join("store.db-wal"), 1_780_000_600);
+        let folded = source(db, FileKind::Sqlite, 4, 1_780_000_000_000).with_wal_activity();
+        assert_eq!(folded.mtime_ms, 1_780_000_600_000, "the newer wal mtime is the activity signal");
+        assert_eq!(folded.size, 4, "the size stays the main file's, or a checkpoint would read as a rewrite");
+    }
+
+    #[test]
+    fn a_log_source_is_left_alone_because_its_own_file_is_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("rollout.jsonl");
+        touch(&log, 1_780_000_000);
+        touch(&dir.path().join("rollout.jsonl-wal"), 1_780_000_600);
+        let folded = source(log, FileKind::Jsonl, 4, 1_780_000_000_000).with_wal_activity();
+        assert_eq!(folded.mtime_ms, 1_780_000_000_000);
     }
 }

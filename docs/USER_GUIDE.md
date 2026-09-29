@@ -60,7 +60,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Cline | Tokens | `~/.cline/data/sessions/**` |
 | ZCode | Tokens | `~/.zcode/cli/db/db.sqlite` |
 | Antigravity CLI | Tokens | `~/.gemini/antigravity-cli/conversations/*.db` |
-| Qoder | Credits | `~/.qoder/projects/**/*.jsonl` |
+| Qoder | Credits + Tokens | `~/.qoder/projects/**/*.jsonl` (credits) · `~/Library/Application Support/Qoder{,CN}/SharedClientCache/cache/db/local.db` (tokens) |
 | WorkBuddy AI | Tokens + credits | `~/.workbuddy-ai/projects/**/<session>.jsonl` |
 | AgnesCode / AtomCode / Crow5 / Mimocode / Cola / DSH | Tokens | auto-discovered, same shape as their parent tools |
 

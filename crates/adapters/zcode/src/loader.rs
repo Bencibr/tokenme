@@ -148,7 +148,8 @@ fn push_file(out: &mut Vec<SourceFile>, path: &Path, kind: FileKind, filter: &Da
         kind,
         size: meta.len(),
         mtime_ms: mtime,
-    });
+    }
+    .with_wal_activity());
 }
 
 fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
