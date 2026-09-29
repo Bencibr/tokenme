@@ -833,25 +833,8 @@
   padding: 7px 6px;
   margin: 0 -6px;
   border-radius: var(--r-sm);
-}
-
-/* Same bar-column language as the ranks page: one shared origin, so
-   cross-row comparison is a single vertical line. The fill is the tool's own
-   colour — this bar is the row's size share (cost where priced, tokens
-   otherwise), never a rate window. */
-.tool-bar {
-  height: 3px;
-  margin: 5px 0 1px;
-  border-radius: 3px;
-  background: var(--track);
-  overflow: hidden;
-}
-
-.tool-bar i {
-  display: block;
-  height: 100%;
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--c) 70%, transparent);
+  background-repeat: no-repeat;
+  transition: background-size var(--dur-slow) var(--ease);
 }
 
 .tool-top {
