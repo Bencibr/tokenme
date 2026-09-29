@@ -21,11 +21,11 @@
 //!
 //! Everything here returns `None` on any failure — a probe that finds the app
 //! closed, logged out, or speaking a different protocol is silence, and the
-//! provider falls back to its explicit-token chain. Unix only for now; the
-//! Windows build names a pipe instead of a socket path and needs its own client.
+//! provider falls back to its explicit-token chain. Both platforms speak the
+//! same wire: the endpoint string names a unix socket path on macOS/Linux and
+//! a `\\.\pipe\` path on Windows, which opens as a read-write byte stream.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -90,7 +90,7 @@ pub(crate) fn meter_envelope(body: &Value) -> Option<Value> {
 
     let started = Instant::now();
     let mut conn = Connection {
-        stream: BufReader::new(UnixStream::connect(&endpoint).ok()?),
+        stream: BufReader::new(connect(&endpoint)?),
         next_id: 1,
         started,
     };
@@ -117,9 +117,66 @@ pub(crate) fn meter_envelope(body: &Value) -> Option<Value> {
 }
 
 struct Connection {
-    stream: BufReader<UnixStream>,
+    stream: BufReader<Stream>,
     next_id: u64,
     started: Instant,
+}
+
+/// The broker endpoint, per platform: an AF_UNIX socket path on macOS/Linux,
+/// a `\\.\pipe\` named pipe on Windows — which opens as a read-write byte
+/// stream, so both sides speak the same NDJSON frames over `Read + Write`.
+enum Stream {
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixStream),
+    #[cfg(windows)]
+    Pipe(std::fs::File),
+}
+
+fn connect(endpoint: &str) -> Option<Stream> {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(endpoint).ok().map(Stream::Unix)
+    }
+    #[cfg(windows)]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(endpoint)
+            .ok()
+            .map(Stream::Pipe)
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.read(buf),
+            #[cfg(windows)]
+            Stream::Pipe(f) => f.read(buf),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.write(buf),
+            #[cfg(windows)]
+            Stream::Pipe(f) => f.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.flush(),
+            #[cfg(windows)]
+            Stream::Pipe(f) => f.flush(),
+        }
+    }
 }
 
 impl Connection {

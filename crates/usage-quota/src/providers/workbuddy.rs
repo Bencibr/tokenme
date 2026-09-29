@@ -56,8 +56,8 @@ impl QuotaProbe for WorkBuddyQuota {
         let body = request_body(chrono::Local::now());
         // The app's own broker first: no token on disk needed. Silence there
         // (app closed, logged out, protocol moved on) falls through to the
-        // explicit-token chain.
-        #[cfg(unix)]
+        // explicit-token chain. Both platforms speak the same frames — the
+        // endpoint string names a socket or a pipe per platform.
         if let Some(data) = super::workbuddy_wbipc::meter_envelope(&body) {
             let samples = samples_from_resource(&data);
             if !samples.is_empty() {
