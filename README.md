@@ -147,10 +147,10 @@ tokenme quota
 
 | | |
 | :--- | :--- |
-| 微信交流群 | <img src="docs/wechat-group.png" width="180" alt="TokenMe 微信交流群"> |
-| 问题反馈 | [GitHub Issues](https://github.com/sp/tokenme/issues) |
-| 邮箱 | 面板「设置 → 联系我们」直达（地址配置在 `apps/tokenme-bar/src/lib/about.ts`） |
-| 版本发布 | [Releases](https://github.com/sp/tokenme/releases/latest) · 面板底栏有新版时自动提示 |
+| WeChat user group | <img src="docs/wechat-group.png" width="180" alt="TokenMe WeChat group"> |
+| Issues | [GitHub Issues](https://github.com/sp/tokenme/issues) |
+| Email | Panel → Settings → Contact (address in `apps/tokenme-bar/src/lib/about.ts`) |
+| Releases | [Releases](https://github.com/sp/tokenme/releases/latest) · the panel prompts when a new version lands |
 
 ## 📄 License
 
