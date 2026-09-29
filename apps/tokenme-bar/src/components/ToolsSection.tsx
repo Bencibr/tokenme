@@ -20,8 +20,9 @@ import { useMoney } from "../lib/display";
  * in the same columns every time, so cross-tool comparison is a single glance.
  * The badge is the tool's own app icon where one is installed, which is what
  * lets twelve rows be scanned by shape instead of read one name at a time.
- * The cost share is a wash of the tool's own colour behind the row — the same
- * language as the ranks page, so the eye learns it once.
+ * The size share is a solid bar under each row in the tool's own colour — the
+ * same bar-column language as the ranks page (a wash behind the row blurred
+ * neighbouring shares and vanished entirely for small ones).
  */
 export function ToolsSection({ tools }: { tools: Item[] }) {
   const showMoney = useMoney();
@@ -31,24 +32,23 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
     const dir = sort === "asc" ? 1 : -1;
     return [...tools].sort((a, b) => (a.total_tokens - b.total_tokens) * dir);
   }, [tools, sort]);
-  // With dollars off, the wash ranks by tokens instead of cost — the row has
-  // to keep saying something about relative size.
+  // Each row's bar speaks on a scale that is true for it: priced tools on
+  // cost, everything else on tokens. A tool the price list cannot name (DSH's
+  // deepseek-flash, say) must still show its relative size — dropping the bar
+  // read as "this tool did nothing", which was never the meaning.
   const costMax = ordered.reduce((acc, t) => Math.max(acc, t.priced ? t.cost : 0), 0);
   const tokenMax = ordered.reduce((acc, t) => Math.max(acc, t.total_tokens), 0);
   const totalCost = ordered.reduce((acc, t) => acc + t.cost, 0);
-  const totalTokens = ordered.reduce((acc, t) => acc + t.total_tokens, 0);
-  // Each row washes on a scale that is true for it: priced tools on cost,
-  // everything else on tokens. A tool the price list cannot name (DSH's
-  // deepseek-flash, say) must still show its relative size — hiding the wash
-  // read as "this tool did nothing", which was never the meaning.
-  const washOf = (t: Item) => {
+  const barShare = (t: Item) => {
     const max = showMoney && t.priced ? costMax : tokenMax;
     const value = showMoney && t.priced ? t.cost : t.total_tokens;
-    return max > 0 ? (value / max) * 100 : 0;
+    const share = max > 0 ? (value / max) * 100 : 0;
+    // 3% floor: a 0.05% share is a sub-pixel sliver, and an invisible bar is
+    // the same lie as no bar. The floor keys on activity, not the money value:
+    // a tool whose cost computes to $0.00 (opencode's free tier, 9.8M tokens
+    // in a day) must still show its band, or silence reads as "did nothing".
+    return Math.max(share, t.total_tokens > 0 || t.cost > 0 ? 3 : 0);
   };
-  // A real share rounds to 0% too easily at these magnitudes (DSH's 0.05%);
-  // "<1%" keeps the number honest about being small instead of empty.
-  const shareText = (share: number) => (share > 0 && share < 1 ? "<1%" : percent(share, 0));
 
   if (tools.length === 0) {
     return (
@@ -67,22 +67,9 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
       <ol className="tool-list">
         {ordered.map((t) => {
           const credit = t.counts.credits > 0 && t.total_tokens === 0;
-          const wash = washOf(t);
+          const bar = barShare(t);
           return (
-            <li
-              className="tool"
-              key={t.key}
-              style={
-                {
-                  "--c": toolColor(t.key),
-                  backgroundImage: "linear-gradient(90deg, color-mix(in srgb, var(--c) 9%, transparent) 0 0)",
-                  // The 2% floor keys on activity, not money: a tool that moved
-                  // real tokens at a $0.00-computed cost (opencode's free tier)
-                  // must still show its band, or silence reads as "did nothing".
-                  backgroundSize: `${Math.max(wash, t.total_tokens > 0 || t.cost > 0 ? 2 : 0)}% 100%`,
-                } as React.CSSProperties
-              }
-            >
+            <li className="tool" key={t.key} style={{ "--c": toolColor(t.key) } as React.CSSProperties}>
               <div className="tool-top">
                 <ToolIcon tool={t.key} size={24} />
                 <span className="tool-name">{toolDisplay(t.key)}</span>
@@ -98,6 +85,9 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                       : "无价格"
                     : ""}
                 </span>
+              </div>
+              <div className="tool-bar" aria-hidden="true">
+                <i style={{ width: `${bar}%` }} />
               </div>
               {credit ? (
                 <div className="tool-foot">
@@ -116,24 +106,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                   <span className="num">{count(t.sessions)}</span>
                   <span>会话</span>
                   <span className="grow" />
-                  <span>
-                    缓存 {percent(cachedOf(t.counts), 0)}
-                    {showMoney ? (
-                      <>
-                        {" · 占 "}
-                        {t.priced ? (
-                          <span className="num">{shareText(totalCost > 0 ? (t.cost / totalCost) * 100 : 0)}</span>
-                        ) : t.total_tokens > 0 ? (
-                          <>
-                            <span className="num">{shareText(totalTokens > 0 ? (t.total_tokens / totalTokens) * 100 : 0)}</span>
-                            <span className="dim">（按 tokens）</span>
-                          </>
-                        ) : (
-                          <span className="num">{percent(0, 0)}</span>
-                        )}
-                      </>
-                    ) : null}
-                  </span>
+                  <span>缓存 {percent(cachedOf(t.counts), 0)}</span>
                 </div>
               )}
             </li>
