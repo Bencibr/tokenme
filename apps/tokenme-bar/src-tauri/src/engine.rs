@@ -243,6 +243,7 @@ fn ingest(
     // cumulative and replaced on one key, so a misread surfaces later as a
     // wrong day-bucket or a missing session — this line is the paper trail.
     if let Some(r) = &report {
+        crate::scan_log::pass(reason, detected, r, &events);
         if r.new_events > 0 && r.per_tool.iter().any(|(t, _)| t == "dsh") {
             for e in events.iter().filter(|e| e.tool == "dsh") {
                 crate::logging::info(&format!(

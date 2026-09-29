@@ -2,6 +2,7 @@ mod commands;
 mod bubble;
 mod logging;
 mod engine;
+mod scan_log;
 mod panel;
 mod settings;
 mod tray;
