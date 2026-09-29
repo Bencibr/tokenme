@@ -27,6 +27,8 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("codex", &["codex", "Codex"]),
     ("claude", &["claude", "Claude"]),
     ("joycode", &["JoyCode"]),
+    ("agnes", &["AgnesCode", "agnesd"]),
+    ("crow5", &["Crow5", "crow5-cli"]),
 ];
 
 /// Whether the tool's host application is running. A tool with no mapping is
