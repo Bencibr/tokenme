@@ -21,9 +21,11 @@ const TOOL_ORDER = [
   "cola",
   "catpaw",
   "dsh",
+  "joycode",
 ];
 
 const DISPLAY: Record<string, string> = {
+  joycode: "JoyCode",
   claude: "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",

@@ -39,6 +39,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("atomcode", &[]),
     ("workbuddy", &["WorkBuddy AI", "WorkBuddy"]),
     ("crow5", &["Crow5"]),
+    ("joycode", &["JoyCode"]),
     ("mimocode", &[]),
     ("cola", &["Cola"]),
 ];
@@ -59,6 +60,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("antigravity", include_bytes!("../assets/antigravity.png")),
     ("agnes", include_bytes!("../assets/agnes.png")),
     ("crow5", include_bytes!("../assets/crow5.png")),
+    ("joycode", include_bytes!("../assets/joycode.png")),
     ("cola", include_bytes!("../assets/cola.png")),
     ("workbuddy", include_bytes!("../assets/workbuddy.png")),
     ("cline", include_bytes!("../assets/cline.png")),
