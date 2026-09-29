@@ -93,10 +93,15 @@ pub fn toggle(app: &AppHandle, rect: Option<Rect>) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
-    if window.is_visible().unwrap_or(false) {
+    // The flag, not tauri's cache: the cache lags for the non-activating
+    // panel, and a stale "visible" after a hide would send this toggle into
+    // the hide branch, eating the user's click.
+    if panel_hidden().load(Ordering::Acquire) {
+        if accept_visibility_request(true) {
+            show_window(&window, rect.or_else(|| tray::last_rect(app)));
+        }
+    } else {
         request_visibility(&window, false);
-    } else if accept_visibility_request(true) {
-        show_window(&window, rect.or_else(|| tray::last_rect(app)));
     }
 }
 
@@ -111,6 +116,7 @@ pub fn show(app: &AppHandle, rect: Option<Rect>) {
 }
 
 fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
+    panel_hidden().store(false, Ordering::Release);
     anchor(window, rect);
     // Re-sync the native backing with the persisted theme on every open: a
     // theme switch the app missed (label typo'd away once) or an OS
@@ -140,37 +146,30 @@ fn request_visibility(window: &WebviewWindow, visible: bool) {
         return;
     }
     if visible {
+        panel_hidden().store(false, Ordering::Release);
         let _ = window.show();
     } else {
-        // Tauri's visibility cache lags for the non-activating panel (the
-        // same lag the Windows click-away monitor works around below). Two
-        // hide requests landing in one event pass — the focus-loss handler
-        // and the NSWorkspace activation block — both read the stale "visible"
-        // and orderOut the panel twice, which is the SIGBUS path (build 25
-        // died twice there). Ask the native window; hidden means done.
-        #[cfg(target_os = "macos")]
-        if !native_window_visible(window) {
-            return;
+        // The panel's visibility cache lags (tauri `is_visible`), and asking
+        // the converted NSPanel itself is not an option — RawNSPanel does not
+        // answer `isHidden`, and that NSException took build 27 down. Our own
+        // record is the single truth: two hide requests in one event pass
+        // (focus loss + NSWorkspace activation of another app, e.g. clicking
+        // the panel's log button) coalesce into one orderOut — a double
+        // orderOut is the pool-drain SIGBUS path.
+        if panel_hidden().swap(true, Ordering::AcqRel) {
+            return; // already hidden — nothing to orderOut
         }
         let _ = window.hide();
     }
 }
 
-/// The NSWindow's own `isHidden` — the ground truth tauri's cached
-/// `is_visible` can trail. Only meaningful on macOS; other platforms keep
-/// their own native checks.
-#[cfg(target_os = "macos")]
-fn native_window_visible(window: &WebviewWindow) -> bool {
-    use tauri_nspanel::cocoa::base::{id, BOOL, NO};
-    use tauri_nspanel::objc::{msg_send, sel, sel_impl};
-    match window.ns_window() {
-        Ok(ns) if !ns.is_null() => unsafe {
-            let win = ns as id;
-            let hidden: BOOL = msg_send![win, isHidden];
-            hidden == NO
-        },
-        _ => true, // unknown native state: let the caller proceed
-    }
+/// The panel's real visibility, recorded here because neither tauri's cached
+/// `is_visible` nor the converted NSPanel itself (RawNSPanel lacks NSWindow
+/// selectors) can answer reliably. The window is created hidden
+/// (`visible: false` in tauri.conf.json).
+fn panel_hidden() -> &'static std::sync::atomic::AtomicBool {
+    static CELL: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::atomic::AtomicBool::new(true))
 }
 
 fn now_ms() -> u64 {
