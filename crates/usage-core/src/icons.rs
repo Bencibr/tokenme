@@ -33,6 +33,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("qoder", &["Qoder"]),
     ("catpaw", &["CatPawAI"]),
     ("dsh", &["DSH Desktop"]),
+    ("funide", &[]),
     ("antigravity", &["Antigravity"]),
     ("agnes", &["AgnesCode"]),
     ("atomcode", &[]),
@@ -64,6 +65,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     // OpenCode is a CLI, but the vendor ships an official mark (their own
     // apple-touch icon) — shipped, not scraped from an unrelated bundle.
     ("opencode", include_bytes!("../assets/opencode.png")),
+    // FunIDE: the 256-px layer of the installed exe's own icon resource.
+    ("funide", include_bytes!("../assets/funide.png")),
 ];
 
 /// Where a user-installed app lives. `~/Applications` first: a per-user install
