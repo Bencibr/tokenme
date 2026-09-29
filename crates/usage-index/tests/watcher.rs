@@ -1,9 +1,13 @@
 //! End-to-end checks for the debounced watcher. These exercise real filesystem
 //! events, so they are the slowest tests here; run with `--nocapture` when a
-//! platform backend misbehaves.
+//! platform backend misbehaves. They share one serial lock: on CI's busy
+//! runner the backend's event delivery bleeds across simultaneous watchers on
+//! sibling tempdirs, and a "stays silent" assertion then fails on someone
+//! else's traffic.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use usage_index::Watcher;
@@ -12,8 +16,14 @@ fn signal_within(rx: &mpsc::Receiver<()>, budget: Duration) -> bool {
     matches!(rx.recv_timeout(budget), Ok(()))
 }
 
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn touching_a_watched_file_signals_once() {
+    let _serial = serial();
     let dir = tempfile::TempDir::new().unwrap();
     let file = dir.path().join("rollout.jsonl");
     std::fs::write(&file, b"{}\n").unwrap();
@@ -33,6 +43,7 @@ fn touching_a_watched_file_signals_once() {
 
 #[test]
 fn a_root_that_does_not_exist_yet_is_watched_through_its_ancestor() {
+    let _serial = serial();
     let dir = tempfile::TempDir::new().unwrap();
     let future = dir.path().join(".claude-state/projects");
 
@@ -47,6 +58,7 @@ fn a_root_that_does_not_exist_yet_is_watched_through_its_ancestor() {
 
 #[test]
 fn activity_outside_the_roots_stays_silent() {
+    let _serial = serial();
     let watched = tempfile::TempDir::new().unwrap();
     let other = tempfile::TempDir::new().unwrap();
     let (tx, rx) = mpsc::channel();
@@ -59,6 +71,7 @@ fn activity_outside_the_roots_stays_silent() {
 
 #[test]
 fn dropping_the_watcher_stops_the_thread() {
+    let _serial = serial();
     let dir = tempfile::TempDir::new().unwrap();
     let (tx, rx) = mpsc::channel::<()>();
     let roots: Vec<PathBuf> = vec![dir.path().to_path_buf()];
