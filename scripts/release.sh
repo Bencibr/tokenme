@@ -11,7 +11,7 @@ sed -i '' "s/\"version\": \".*\"/\"version\": \"$V\"/" apps/tokenme-bar/src-taur
 cat > latest.json <<JSON
 {
   "version": "$V",
-  "url": "https://github.com/sp/tokenme/releases/latest",
+  "url": "https://github.com/Bencibr/tokenme/releases/latest",
   "notes": ""
 }
 JSON
