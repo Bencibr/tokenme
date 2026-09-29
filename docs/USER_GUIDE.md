@@ -61,7 +61,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | ZCode | Tokens | `~/.zcode/cli/db/db.sqlite` |
 | Antigravity CLI | Tokens | `~/.gemini/antigravity-cli/conversations/*.db` |
 | Qoder | Credits | `~/.qoder/projects/**/*.jsonl` |
-| WorkBuddy AI | Credits | `~/.workbuddy-ai/workbuddy.db` |
+| WorkBuddy AI | Tokens + credits | `~/.workbuddy-ai/projects/**/<session>.jsonl` |
 | AgnesCode / AtomCode / Crow5 / Mimocode / Cola / DSH | Tokens | auto-discovered, same shape as their parent tools |
 
 Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are not supported locally.

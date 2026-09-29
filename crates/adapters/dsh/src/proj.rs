@@ -21,8 +21,6 @@
 //! never read — the filename decides which side speaks, so a session is
 //! never billed twice.
 
-use std::path::Path;
-
 use serde_json::Value;
 use usage_core::{TokenCounts, UsageEvent};
 
@@ -63,11 +61,13 @@ pub fn parse(text: &str, session: &str, mtime_ms: i64, source_key: &str) -> Opti
         .and_then(Value::as_str)
         .filter(|m| !m.is_empty())
         .map(str::to_string);
+    // dsh sessions carry Windows cwds (`C:\Users\demo\ai-record`), and Path on
+    // a unix host sees that whole string as one separator-less component —
+    // split on both separators and take the last non-empty piece.
     event.project = identity
         .get("cwd")
         .and_then(Value::as_str)
-        .and_then(|c| Path::new(c).file_name())
-        .and_then(|n| n.to_str())
+        .and_then(|c| c.rsplit(['/', '\\']).find(|n| !n.is_empty()))
         .map(str::to_string);
     event.dedupe_key = Some(format!("{session}#proj"));
     event.source = source_key.to_string();

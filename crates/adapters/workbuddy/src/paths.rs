@@ -1,26 +1,39 @@
-//! Where WorkBuddy AI keeps its local database.
+//! Where WorkBuddy AI keeps its local store.
 //!
 //! The desktop app (com.workbuddy.workbuddy-ai) uses `~/.workbuddy-ai` as its
 //! user-data dir (`customUserDataDir` in the shipped product config); the
 //! `WORKBUDDY_CONFIG_DIR` env var overrides it, mirroring the vendor's own
-//! convention. CN/CodeBuddy editions are separate products with their own
-//! stores — not this adapter's business.
+//! convention. `~/.workbuddy` is the sibling the CLI-shaped install uses, and
+//! third-party WorkBuddy readers default to it, so both roots get walked — one
+//! machine can hold either, both, or neither. CN/CodeBuddy editions are separate
+//! products with their own stores — not this adapter's business.
 
 use std::path::{Path, PathBuf};
 
 pub const DB_NAME: &str = "workbuddy.db";
 
-/// The directory the database lives in, env override first.
-pub fn config_root() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("WORKBUDDY_CONFIG_DIR") {
-        return Some(PathBuf::from(dir));
+/// The vendor's own override for the data dir; an empty value means unset.
+pub const ENV_CONFIG_DIR: &str = "WORKBUDDY_CONFIG_DIR";
+
+/// Every data root that exists here, env override first, in walk order.
+pub fn config_roots() -> Vec<PathBuf> {
+    if let Some(dir) = std::env::var_os(ENV_CONFIG_DIR).filter(|dir| !dir.is_empty()) {
+        return vec![PathBuf::from(dir)];
     }
-    dirs::home_dir().map(|home| home.join(".workbuddy-ai"))
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    [".workbuddy-ai", ".workbuddy"]
+        .iter()
+        .map(|name| home.join(name))
+        .filter(|root| root.is_dir())
+        .collect()
 }
 
+/// The database path, preferring the first root that has one.
 pub fn db_path() -> Option<PathBuf> {
-    let path = config_root()?.join(DB_NAME);
-    path.is_file().then_some(path)
+    config_roots()
+        .into_iter()
+        .map(|root| root.join(DB_NAME))
+        .find(|path| path.is_file())
 }
 
 /// `(size, mtime_ms)` for the discover/manifest bookkeeping.
@@ -35,38 +48,10 @@ pub fn stat_file(path: &Path) -> Option<(u64, i64)> {
     Some((meta.len(), mtime_ms))
 }
 
-/// The stat the ingest change-detection keys on. The app runs the database in
-/// WAL mode — session writes land in `workbuddy.db-wal` and the main file's
-/// own stat stays frozen between checkpoints — so the WAL's mtime folds in as
-/// the activity signal. The size stays the main file's: the WAL shrinks on
-/// every checkpoint, and a shrinking stat is what the ingest reads as "this
-/// log was rewritten, purge and start over".
-pub fn source_stat(path: &Path) -> Option<(u64, i64)> {
-    let (size, mtime_ms) = stat_file(path)?;
-    let mut wal_name = path.file_name()?.to_os_string();
-    wal_name.push("-wal");
-    let wal = path.with_file_name(wal_name);
-    match stat_file(&wal) {
-        Some((_, wal_mtime)) => Some((size, mtime_ms.max(wal_mtime))),
-        None => Some((size, mtime_ms)),
-    }
-}
-
+/// Env vars are process-global, so every test that points the adapter at a temp
+/// home holds this lock (shared across the crate's test modules).
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_wal_write_is_activity_even_while_the_main_file_sleeps() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join(DB_NAME);
-        std::fs::write(&db, b"main").unwrap();
-        assert_eq!(source_stat(&db), stat_file(&db), "no wal: the plain stat stands");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(dir.path().join(format!("{DB_NAME}-wal")), b"wal").unwrap();
-        let (size, mtime) = source_stat(&db).unwrap();
-        let (_, db_mtime) = stat_file(&db).unwrap();
-        assert_eq!(size, stat_file(&db).unwrap().0, "the size stays the main file's");
-        assert!(mtime > db_mtime, "the newer wal mtime is the change signal");
-    }
+pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
