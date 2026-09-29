@@ -125,6 +125,21 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
             .ok();
     }
 
+    // The index persists across launches, so last-known numbers are already on
+    // disk: publish them before the scan touches anything and the panel renders
+    // instantly — the boot screen only shows when there is genuinely no index
+    // yet (fresh install). The quota probes are skipped here on purpose; they
+    // land with the post-scan publish a moment later.
+    if let Some(index) = index.as_ref() {
+        let events = index.all_events().unwrap_or_default();
+        if !events.is_empty() {
+            let sources =
+                index.source_statuses(&detected).unwrap_or_else(|_| fallback_sources(&detected));
+            publish_with_quota(&app, &events, &sources, &pricing, &adapters, false);
+            crate::logging::info("boot: published last-known report before the scan");
+        }
+    }
+
     ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan");
 
     loop {
@@ -289,10 +304,24 @@ fn publish(
     pricing: &PricingMap,
     adapters: &[Box<dyn SourceAdapter>],
 ) {
+    publish_with_quota(app, events, sources, pricing, adapters, true)
+}
+
+/// `poll_quota = false` publishes without waiting on the vendor probes — the
+/// boot path uses it to put last-known numbers on screen instantly; the probes
+/// land with the post-scan publish a moment later.
+fn publish_with_quota(
+    app: &AppHandle,
+    events: &[UsageEvent],
+    sources: &[SourceStatus],
+    pricing: &PricingMap,
+    adapters: &[Box<dyn SourceAdapter>],
+    poll_quota: bool,
+) {
     // Live quota (a keychain read, a vendor CLI, or an HTTPS call) is merged in
     // here; `usage-quota` caches each answer for its TTL, so this is at worst one
     // slow call per tool every five minutes, never per refresh.
-    let polled_quota = {
+    let polled_quota = if poll_quota {
         let poll_started = std::time::Instant::now();
         let mut q = usage_core::report::poll_quota(adapters);
         // The host-exit pause: a tool whose application has exited stops
@@ -323,6 +352,8 @@ fn publish(
             per_tool.join(", ")
         ));
         q
+    } else {
+        Vec::new()
     };
     let captured = now_ms();
     let opts = ReportOptions {
