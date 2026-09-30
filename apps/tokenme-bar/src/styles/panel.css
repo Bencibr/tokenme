@@ -227,9 +227,7 @@
   padding: 2px;
   background: var(--surface-2);
   border-radius: var(--r-md);
-  align-self: center; /* centre on the row, not baseline-dropped */
 }
-
 
 .seg-btn {
   min-width: 30px;
