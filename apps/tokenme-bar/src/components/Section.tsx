@@ -5,21 +5,28 @@ interface SectionProps {
   meta?: string;
   /** A compact control (e.g. the sort toggle) sitting beside the meta text. */
   trail?: React.ReactNode;
+  /** Replaces the label/meta pair outright, for a section whose header is a
+   *  control (the 活动 section's 今日/活动 view seg). */
+  head?: React.ReactNode;
   children: React.ReactNode;
 }
 
 /** A hairline-separated block. Deliberately not a card: no radius, no shadow. */
-export function Section({ label, meta, trail, children }: SectionProps) {
+export function Section({ label, meta, trail, head, children }: SectionProps) {
   return (
     <section className="sec">
       <div className="sec-hd">
-        <h2 className="sec-label">{label}</h2>
-        {meta || trail ? (
-          <span className="sec-right">
-            {trail}
-            {meta ? <span className="sec-meta num">{meta}</span> : null}
-          </span>
-        ) : null}
+        {head ?? (
+          <>
+            <h2 className="sec-label">{label}</h2>
+            {meta || trail ? (
+              <span className="sec-right">
+                {trail}
+                {meta ? <span className="sec-meta num">{meta}</span> : null}
+              </span>
+            ) : null}
+          </>
+        )}
       </div>
       {children}
     </section>

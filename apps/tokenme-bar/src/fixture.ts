@@ -1,6 +1,7 @@
 import type {
   Breakdown,
   HeatCell,
+  HourCell,
   Item,
   PricingMeta,
   QuotaView,
@@ -308,6 +309,27 @@ function buildHeatmap(today: Date): HeatCell[] {
   return cells;
 }
 
+/* ------------------------------------------------------------------- hourly */
+
+/** A plausible workday shape, peak-normalised; hours after `now` stay at zero
+ *  so the fixture behaves like the engine's (future hours read as zeros). */
+const HOUR_SHAPE = [
+  0.4, 0.2, 0.1, 0, 0, 0.1, 0.3, 1.6, 3.4, 5.2, 6.4, 4.6, 2.2, 3.1, 5.0, 6.8, 4.1, 2.7, 1.4, 2.2, 5.9, 4.4, 1.8, 0.7,
+];
+
+function buildHourly(now: Date): HourCell[] {
+  const hour = now.getHours();
+  return HOUR_SHAPE.map((k, i) => {
+    if (i > hour) return { total_tokens: 0, cost: 0, requests: 0 };
+    const total_tokens = Math.round(k * 86_000 + (i % 3) * 3_100);
+    return {
+      total_tokens,
+      cost: round2((total_tokens / 1_000_000) * 0.29),
+      requests: Math.max(1, Math.round(k * 9)),
+    };
+  });
+}
+
 /* ------------------------------------------------------------------- extras */
 
 const SOURCES: SourceStatus[] = [
@@ -575,6 +597,7 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     month,
     year,
     heatmap: buildHeatmap(localMidnight(now)),
+    hourly: buildHourly(now),
     quotas: quotasOf(nowMs2),
     sources: SOURCES,
     pricing: { ...PRICING, fetched_at_ms: nowMs2 - 42 * 60_000 },

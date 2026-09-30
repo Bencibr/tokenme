@@ -1074,12 +1074,111 @@
   color: var(--ink-2);
 }
 
-/* ---------------------------------------------------------------- heatmap */
+/* ------------------------------------------------- activity views (今日/活动) */
 
-.heat {
+/* One fixed height for either chart, so the seg switch changes the content and
+ * nothing below the section moves a pixel. */
+.view {
   min-width: 0;
   max-width: 100%;
+  height: 96px;
+  display: flex;
+  flex-direction: column;
 }
+
+/* Only the chart body re-enters on a view switch; the foot below is shared and
+ * must not animate, or its text would move. */
+.chart-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: page-in var(--dur-fast) var(--ease) both;
+}
+
+/* The shared readout row under either chart — one template, so text positions
+ * are pixel-identical across views. */
+.chart-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 16px;
+  margin-top: var(--s2);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.chart-read {
+  min-height: 16px;
+  color: var(--ink-2);
+}
+
+.chart-side {
+  margin-left: auto;
+  flex: none;
+}
+
+.hours-now {
+  color: var(--accent-ink);
+}
+
+.hours-chart {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+}
+
+.hb-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: var(--r-sm);
+}
+
+.hb-col:hover {
+  background: var(--fill-hover);
+}
+
+.hb-barw {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-end;
+}
+
+.hb-bar {
+  display: block;
+  width: 72%;
+  margin: 0 auto;
+  min-height: 2px; /* an empty hour is a stub, not a hole */
+  border-radius: 1.5px 1.5px 1px 1px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.hb-col[data-now] .hb-bar {
+  background: var(--accent);
+}
+
+/* Hours that have not happened yet: a short hatch, clearly "not data". */
+.hb-col[data-future] .hb-bar {
+  height: 5px !important;
+  min-height: 5px;
+  background: repeating-linear-gradient(115deg, var(--track) 0 3px, transparent 3px 6px);
+}
+
+.hb-lab {
+  height: 13px;
+  font-size: 9.5px;
+  line-height: 13px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- heatmap */
 
 .heat-months {
   position: relative;
@@ -1118,21 +1217,6 @@
 .heat-cell[data-today] {
   stroke: var(--ink);
   stroke-width: 1;
-}
-
-.heat-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s2);
-  margin-top: var(--s2);
-  font-size: var(--t-meta);
-  color: var(--ink-3);
-}
-
-.heat-read {
-  min-height: 16px;
-  color: var(--ink-2);
 }
 
 .heat-legend {
@@ -1746,6 +1830,9 @@
     animation: none;
   }
   .page {
+    animation: none;
+  }
+  .chart-body {
     animation: none;
   }
   .sheet-backdrop,

@@ -79,6 +79,13 @@ export interface HeatCell {
   requests: number;
 }
 
+/** One local-hour bucket of today; the hour is the array index. */
+export interface HourCell {
+  total_tokens: number;
+  cost: number;
+  requests: number;
+}
+
 export interface QuotaView {
   tool: string;
   used_percent: number;
@@ -142,6 +149,8 @@ export interface Report {
   month: Window;
   year: Window;
   heatmap: HeatCell[];
+  /** Today by local hour, 24 slots. Older snapshots may omit it (empty). */
+  hourly: HourCell[];
   quotas: QuotaView[];
   sources: SourceStatus[];
   pricing: PricingMeta;
