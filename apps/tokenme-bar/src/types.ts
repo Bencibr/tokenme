@@ -143,6 +143,8 @@ export interface Report {
   year: Window;
   heatmap: HeatCell[];
   quotas: QuotaView[];
+  /** True until the quota probes have run (boot publishes without them). */
+  quotas_pending?: boolean;
   sources: SourceStatus[];
   pricing: PricingMeta;
   recent_sessions: SessionRow[];

@@ -6,12 +6,16 @@ interface SectionProps {
   /** A compact control (e.g. the sort toggle) sitting beside the meta text. */
   trail?: React.ReactNode;
   children: React.ReactNode;
+  /** Default true. False drops the section's bottom hairline — for a section
+      whose body is a transient wait, where the line would strand in blank
+      panel space instead of separating two blocks of content. */
+  divider?: boolean;
 }
 
 /** A hairline-separated block. Deliberately not a card: no radius, no shadow. */
-export function Section({ label, meta, trail, children }: SectionProps) {
+export function Section({ label, meta, trail, children, divider = true }: SectionProps) {
   return (
-    <section className="sec">
+    <section className={divider ? "sec" : "sec sec-nodiv"}>
       <div className="sec-hd">
         <h2 className="sec-label">{label}</h2>
         {meta || trail ? (

@@ -5,6 +5,7 @@ import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
 import { DisplayCtx } from "./lib/display";
+import { Loading } from "./components/Loading";
 import { localDate } from "./lib/format";
 import { useEscape, useTicker } from "./lib/hooks";
 import { CallTabs } from "./components/CallTabs";
@@ -180,7 +181,7 @@ const [page, setPage] = useState<PageKey>(() => {
     return (
       <div className="panel" data-boot>
         <div className="boot">
-          <span className="boot-ring" aria-hidden="true" />
+          <Loading size={34} />
           <span className="boot-text">{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
           {!indexing ? (
             <button type="button" className="boot-retry" onClick={() => void refresh()}>
@@ -216,7 +217,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "overview" ? (
                 <>
                   <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} />
-                  <QuotaStrip quotas={report.quotas} now={now} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
