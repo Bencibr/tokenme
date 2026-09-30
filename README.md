@@ -27,7 +27,7 @@ When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cl
 
 - 🔒 **Local index, read-only scanning**: Usage is indexed on your machine from the tools' own logs. No telemetry and no third-party proxies; live quota probes and the model price list are the only network calls.
 - ⚡ **Instant Scanning**: High-performance Rust incremental index scans hundreds of thousands of events in seconds.
-- 🎯 **16 Tools Supported**: Claude Code, Codex, OpenCode, Cline, ZCode, Qoder, Pi, Antigravity, WorkBuddy, AgnesCode, AtomCode, Crow5, Mimocode, Cola, DSH, Hermes.
+- 🎯 **20 Tools Supported**: Claude Code, Codex, OpenCode, Cline, ZCode, Qoder, Pi, Antigravity, WorkBuddy, AgnesCode, AtomCode, Crow5, Mimocode, Cola, DSH, Hermes, JoyCode, FunIDE, CatPaw, Trae.
 - 📊 **Token & Cost Analytics**: Input, cache read, output and cost breakdown via [models.dev](https://models.dev).
 - ⏱️ **Live Quota Probes**: Rolling 5-hour windows, weekly quotas, credit plans and reset countdowns.
 
@@ -86,24 +86,36 @@ tokenme quota           # 3. live subscription quotas and reset timers
 
 Quota bars come from each tool's own API or local credentials (read-only probes — your login state is never refreshed or replaced). When a host app quits, probing for that tool pauses automatically and the last numbers stay on screen; it resumes on relaunch. The "pause quota on host exit" toggle in Settings controls this.
 
-| Host agent | Quota | Notes |
-| :--- | :--- | :--- |
-| Qoder | subscription windows | vendor usage API, local encrypted snapshot fallback |
-| WorkBuddy AI | member credits | same billing API the desktop app uses |
-| JoyCode | IDE points | reads the IDE's own login state |
-| DSH | DeepSeek account balance | official user/balance + desktop credentials file |
-| ZCode | 5-hour/cycle windows + session budgets | the IDE's own quota API + local cookie decryption |
-| OpenCode | Go subscription, three dollar windows | |
-| Antigravity | self-computed quota | runs the CLI's `/usage` |
-| AtomCode | CodingPlan quota | local daemon |
-| CatPaw | points balance | points portal API |
-| Cline | account window limits | Cline account API |
-| Codex | ChatGPT rate windows | official backend |
-| Claude Code | 5-hour/weekly windows | official backend |
-| Copilot | premium-request allowance | official backend |
-| FunIDE | GLM-plan points | cloud points API |
-| AgnesCode | membership points | needs a one-time token (see below) |
-| Gemini CLI | not supported | the CLI exposes no quota endpoint |
+Every host below ships as a built-in adapter — 20 tools, indexed from the logs and local databases each one already writes:
+
+| Host agent | Live quota | Compatibility test | Platform verification |
+| :--- | :--- | :--- | :--- |
+| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 5-hour / weekly windows — official backend | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT rate windows — official backend | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Go subscription, three dollar windows | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | account window limits — Cline account API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour/cycle windows + session budgets — the IDE's own quota API + local cookie decryption | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | subscription windows — vendor usage API, local encrypted snapshot fallback | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | self-computed quota — runs the CLI's `/usage` | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | membership points — needs a one-time token (see below) | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota — local daemon | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** | member credits — the desktop app's own billing API / local broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points — cloud points API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | points balance — points portal API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance — official user/balance + desktop credentials file | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
+| **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | plan quota — vendor billing API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE points — reads the IDE's own login state | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | subscription quota — vendor v1 API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
+
+> **Compatibility test** — every adapter carries a fixture test suite that CI runs on each commit, and each integration was verified against a real machine's data before landing.
+>
+> **Platform verification** — updated as each host is proven on real hardware. ⏳ means the paths are implemented for that platform but not yet verified there; flip the mark when a verification run passes.
+>
+> Quota-only sources: **Copilot** (premium-request allowance, official backend) is probed without indexing its usage; the **Gemini CLI** probe is deliberately dark — its on-disk OAuth token expires and refreshing credentials is out of scope for a read-only probe.
 
 > **AgnesCode token**: the login token lives only in the app's memory and cannot be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` from an authenticated request into `~/.config/tokenme/agnes.token` (or set `AGNES_TOKEN`).
 

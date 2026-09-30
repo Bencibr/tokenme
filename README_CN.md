@@ -27,7 +27,7 @@
 
 - 🔒 **本地索引，只读扫描**：用量数据在本机建立索引。无自有遥测、无第三方代理；实时配额探测与价格清单是仅有的联网环节。
 - ⚡ **秒级极速扫描**：高性能 Rust 增量索引引擎，几十万条事件秒级处理，极低内存与 CPU 占用。
-- 🎯 **开箱即用支持 16 款工具**：Claude Code、Codex、OpenCode、Cline、ZCode、Qoder、Pi、Antigravity、WorkBuddy、AgnesCode、AtomCode、Crow5、Mimocode、Cola、DSH、Hermes。
+- 🎯 **开箱即用支持 20 款工具**：Claude Code、Codex、OpenCode、Cline、ZCode、Qoder、Pi、Antigravity、WorkBuddy、AgnesCode、AtomCode、Crow5、Mimocode、Cola、DSH、Hermes、JoyCode、FunIDE、CatPaw、Trae。
 - 📊 **多维度成本与用量洞察**：输入、缓存命中、推理、输出 Token 及折算金额（对接 [models.dev](https://models.dev) 价格清单）。
 - ⏱️ **实时配额只读探针**：5 小时滚动池、周度额度、Credit 计划与重置倒计时。
 
@@ -86,24 +86,36 @@ tokenme quota           # 3. 实时查询订阅额度与重置倒计时
 
 配额条来自各工具自己的接口或本地凭据（只读探测，绝不刷新或代替你的登录态）。宿主应用退出后自动暂停对应工具的探测、保留最后数值，重新启动即恢复——设置里的"退出后暂停配额"开关可控制这一行为。
 
-| 宿主 Agent | 配额内容 | 说明 |
-| :--- | :--- | :--- |
-| Qoder | 订阅额度 | 官方用量接口，本地加密快照兜底 |
-| WorkBuddy AI | 会员点数 | 与桌面 app 同一计费接口 |
-| JoyCode | IDE 点数 | 读取 IDE 自身登录态 |
-| DSH | DeepSeek 账户余额 | 官方 user/balance + 桌面端凭据文件 |
-| ZCode | 5 小时/周期窗口 + 会话预算 | IDE 同款配额接口 + cookie 本地解密 |
-| OpenCode | Go 订阅三窗口 | 订阅美元窗口 |
-| Antigravity | 自算配额 | 调用其 CLI 的 `/usage` |
-| AtomCode | CodingPlan 配额 | 本地守护进程 |
-| CatPaw | 积分余额 | 积分门户接口 |
-| Cline | 账号窗口限额 | Cline 账号 API |
-| Codex | ChatGPT 速率窗口 | 官方后端 |
-| Claude Code | 5 小时/周期窗口 | 官方后端 |
-| Copilot | 高级请求额度 | 官方后端 |
-| FunIDE | GLM 套餐点数 | 云端点数接口 |
-| AgnesCode | 会员点数 | 需注入一次令牌（见下） |
-| Gemini CLI | 不支持 | 官方 CLI 未暴露配额接口 |
+以下宿主全部为内置适配器——共 20 款，直接从各工具自己落盘的日志与数据库建立索引：
+
+| 宿主 Agent | 实时配额 | 兼容性测试 | 平台验证 |
+| :--- | :--- | :--- | :--- |
+| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 5 小时/周期窗口 — 官方后端 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT 速率窗口 — 官方后端 | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Go 订阅三窗口（美元额度） | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 — Cline 账号 API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 — IDE 同款配额接口 + cookie 本地解密 | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 — 官方用量接口，本地加密快照兜底 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算配额 — 调用其 CLI 的 `/usage` | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | 会员点数 — 需注入一次令牌（见下） | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan 配额 — 本地守护进程 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** | 会员点数 — 桌面 app 同款计费接口 / 本地 broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 — 云端点数接口 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | 积分余额 — 积分门户接口 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek 账户余额 — 官方 user/balance + 桌面端凭据文件 | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
+| **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | 套餐配额 — 官方 billing 接口，本地凭据解密 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE 点数 — 读取 IDE 自身登录态 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | 订阅配额 — 官方 v1 接口，本地凭据解密 | ✅ | macOS ✅ · Windows ⏳ |
+
+> **兼容性测试**：每款适配器都带夹具测试套件，CI 每次提交全量运行；每项接入落地前都用真实机器的数据验证过。
+>
+> **平台验证**：随实机验证进度更新。⏳ 表示该平台的路径已实现、但尚未在实机上跑通；验证通过后更新标记即可。
+>
+> 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——其落盘 OAuth 令牌会过期，而刷新凭据超出了只读探测的边界。
 
 > **AgnesCode 令牌注入**：其登录令牌只存在于应用内存，无法静默读取。登录 agnescode.agnes-ai.cn 后从请求头取 `access_token`，写入 `~/.config/tokenme/agnes.token`（或设置 `AGNES_TOKEN`）即可启用。
 
