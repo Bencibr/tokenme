@@ -29,6 +29,10 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("joycode", &["JoyCode"]),
     ("agnes", &["AgnesCode", "agnesd"]),
     ("crow5", &["Crow5", "crow5-cli"]),
+    // Cola's billing token sits in auth.json regardless, but with no host
+    // running nothing is spending against it — the bundled cola-server counts
+    // as alive too (it outlives the window on some exits).
+    ("cola", &["Cola", "cola-server"]),
 ];
 
 /// Whether the tool's host application is running. A tool with no mapping is
@@ -159,5 +163,22 @@ mod tests {
         alive.insert("FunIDE".to_string());
         assert!(matches(&alive, "funide"));
         assert!(matches(&alive, "funide.exe"));
+    }
+
+    /// Cola gates on either the Electron main process or the bundled
+    /// cola-server (exact names, never substrings — "Cola Helper" does not
+    /// count on its own once the main process is gone).
+    #[test]
+    fn cola_follows_its_host_or_server() {
+        let mut alive: HashSet<String> = HashSet::new();
+        assert!(!any_host_running("cola", &alive), "closed means paused");
+        alive.insert("cola-server".to_string());
+        assert!(any_host_running("cola", &alive));
+        alive.clear();
+        alive.insert("Cola".to_string());
+        assert!(any_host_running("cola", &alive));
+        alive.clear();
+        alive.insert("Cola Helper (Renderer)".to_string());
+        assert!(!any_host_running("cola", &alive), "helpers alone are not the host");
     }
 }

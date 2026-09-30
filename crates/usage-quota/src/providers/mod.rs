@@ -7,6 +7,7 @@ mod crypto;
 mod catpaw;
 mod claude;
 mod cline;
+mod cola;
 mod codex;
 mod copilot;
 pub(crate) use crypto::hmac_sha256;
@@ -26,6 +27,7 @@ pub use atomcode::AtomCodeQuota;
 pub use catpaw::CatpawQuota;
 pub use claude::ClaudeQuota;
 pub use cline::ClineQuota;
+pub use cola::ColaQuota;
 pub use codex::CodexQuota;
 pub use copilot::CopilotQuota;
 pub use dsh::DshQuota;
@@ -47,6 +49,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(AgnesQuota),
         Box::new(AntigravityQuota),
         Box::new(AtomCodeQuota),
+        Box::new(ColaQuota),
         Box::new(FunIdeQuota),
         Box::new(ClineQuota),
         Box::new(OpenCodeQuota),
