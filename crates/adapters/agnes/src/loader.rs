@@ -346,7 +346,7 @@ fn push_file(out: &mut Vec<SourceFile>, path: &Path, kind: FileKind, filter: &Da
     if filter.until_ms.is_some_and(|until| mtime > until) {
         return;
     }
-    out.push(SourceFile { path: path.to_path_buf(), kind, size: meta.len(), mtime_ms: mtime });
+    out.push(SourceFile { path: path.to_path_buf(), kind, size: meta.len(), mtime_ms: mtime }.with_wal_activity());
 }
 
 fn mtime_ms(meta: &std::fs::Metadata) -> i64 {

@@ -88,7 +88,10 @@ fn discover(filter: &DateFilter) -> Vec<SourceFile> {
     if filter.until_ms.is_some_and(|until| mtime > until) {
         return out;
     }
-    out.push(SourceFile { path: db, kind: usage_core::FileKind::Sqlite, size: meta.len(), mtime_ms: mtime });
+    out.push(
+        SourceFile { path: db, kind: usage_core::FileKind::Sqlite, size: meta.len(), mtime_ms: mtime }
+            .with_wal_activity(),
+    );
     out
 }
 

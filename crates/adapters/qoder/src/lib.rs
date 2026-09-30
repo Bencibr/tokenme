@@ -123,8 +123,9 @@ impl SourceAdapter for QoderAdapter {
                 // One database holds every session, so `DateFilter` can only bound
                 // it by the file's own last write — the same rule the transcript
                 // walk uses.
-                if filter.since_ms.is_none_or(|since| mtime_ms >= since) {
-                    files.push(SourceFile { path, kind: FileKind::Sqlite, size, mtime_ms });
+                let sf = SourceFile { path, kind: FileKind::Sqlite, size, mtime_ms }.with_wal_activity();
+                if filter.since_ms.is_none_or(|since| sf.mtime_ms >= since) {
+                    files.push(sf);
                 }
             }
         }
