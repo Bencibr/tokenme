@@ -31,6 +31,7 @@ pub const TOOL_IDS: &[&str] = &[
     "mimocode",
     "cola",
     "joycode",
+    "trae",
 ];
 
 pub fn builtin_adapters() -> Vec<Box<dyn SourceAdapter>> {
@@ -54,6 +55,7 @@ pub fn builtin_adapters() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(usage_adapter_opencode::MimocodeAdapter),
         Box::new(usage_adapter_pi::ColaAdapter),
         Box::new(usage_adapter_joycode::JoycodeAdapter),
+        Box::new(usage_adapter_trae::TraeAdapter),
     ]
 }
 

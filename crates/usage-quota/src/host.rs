@@ -33,6 +33,9 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     // running nothing is spending against it — the bundled cola-server counts
     // as alive too (it outlives the window on some exits).
     ("cola", &["Cola", "cola-server"]),
+    // Trae's main binary ships as the generic "Electron"; its helpers are the
+    // only processes that name the product, and they live and die with it.
+    ("trae", &["Trae Helper", "Trae Helper (GPU)", "Trae Helper (Renderer)", "Trae Helper (Plugin)"]),
 ];
 
 /// Whether the tool's host application is running. A tool with no mapping is

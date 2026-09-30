@@ -17,6 +17,7 @@ mod gemini;
 mod joycode;
 mod opencode;
 mod qoder;
+mod trae;
 mod workbuddy;
 mod workbuddy_wbipc;
 mod zcode;
@@ -36,6 +37,7 @@ pub use gemini::GeminiQuota;
 pub use joycode::JoycodeQuota;
 pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
+pub use trae::TraeQuota;
 pub use workbuddy::WorkBuddyQuota;
 pub use workbuddy::login as workbuddy_login;
 pub use zcode::ZcodeQuota;
@@ -62,5 +64,6 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(CatpawQuota),
         Box::new(ZcodeQuota),
         Box::new(DshQuota),
+        Box::new(TraeQuota),
     ]
 }

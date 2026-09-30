@@ -26,14 +26,14 @@
 //! OS secret store involved, the key travels *inside* the blob:
 //!
 //! ```text
-//! bytes [0..6)   header, identifies the salt pair:
-//!                  116,99,5,16,0,0    → plain AES   (salt = QOE XOR ZOE)
-//!                  18,57,32,32,2,3    → private AES (salt = WOE XOR VOE)
+//! bytes [0..6)   header, picks the salt pair:
+//!                  116,99,5,16,0,0    → plain AES   (salt = SALT_PLAIN)
+//!                  18,57,32,32,2,3    → private AES (salt = SALT_PRIVATE)
 //! bytes [6..38)  32-byte random key, embedded
 //! bytes [38..)   AES-128-CBC( SHA-512(plaintext) || plaintext || PKCS7 )
 //! aesKey = SHA512( SHA512(key) || salt )[0..16]
 //! iv     = SHA512( SHA512(key) || salt )[16..32]
-//! verified: SHA-512(plaintext) == the stripped 64-byte prefix
+//! verified: SHA-512(plaintext) == the leading 64-byte digest
 //! ```
 //!
 //! An expired token is a quiet miss, never a refresh: the record carries a
@@ -51,10 +51,13 @@
 //! by construction, so its usage number gets no bar either. Meters with a
 //! zero limit are the 0/0 rows the other probes also skip.
 //!
-//! Trae writes no token-level usage anywhere on disk (the agent's
-//! `database.db` is encrypted, chat history is server-side), so this probe is
-//! the tool's whole row — the panel treats it like copilot or gemini, a
-//! quota-only tool.
+//! Token-level usage has its own surface now: the adapter crate
+//! `usage-adapter-trae` decrypts the agent's SQLCipher database and reads each
+//! completed turn. This probe stays the spend/limit side — the plan's dollar
+//! meters and fast requests that no local log carries. The host-exit pause
+//! gates it like every mapped tool, with one wrinkle recorded in `crate::host`:
+//! Trae's main binary ships as the generic "Electron", so the process match is
+//! on its `Trae Helper*` children.
 
 use std::path::PathBuf;
 
@@ -92,16 +95,16 @@ const PRODUCT_PROMO: f64 = 3.0;
 struct Login {
     token: String,
     host: String,
+    /// `expiredAt` on the record, RFC 3339; `None` when absent or unreadable.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Every `iCubeAuthInfo://` record that decrypts to a token-bearing login.
 /// Records for other provider ids hold device key pairs and simply fail the
 /// shape test.
 fn logins() -> Vec<Login> {
-    let path = storage_json();
-    let Ok(text) = std::fs::read_to_string(path.as_ref().map(|p| p.as_path()).unwrap_or(Path::new(""))) else {
-        return Vec::new();
-    };
+    let Some(path) = storage_json() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
     let Ok(all) = serde_json::from_str::<serde_json::Map<String, Value>>(&text) else {
         return Vec::new();
     };
@@ -111,17 +114,16 @@ fn logins() -> Vec<Login> {
         if !key.starts_with("iCubeAuthInfo://") {
             continue;
         }
-        let Some(plain) = std::fs::read_to_string(Path::new(""))
-            .ok()
-            .map(|_| ())
-            .and_then(|()| decrypt(encoded))
-        else {
-            continue;
-        };
+        let Some(plain) = decrypt(encoded) else { continue };
         let Ok(record) = serde_json::from_str::<Value>(&plain) else { continue };
         let Some(token) = record.get("token").and_then(Value::as_str).filter(|t| !t.is_empty()) else {
             continue;
         };
+        let expires_at = record
+            .get("expiredAt")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&chrono::Utc));
         let host = record
             .get("host")
             .and_then(Value::as_str)
@@ -129,45 +131,57 @@ fn logins() -> Vec<Login> {
             .unwrap_or(DEFAULT_HOST)
             .trim_end_matches('/')
             .to_string();
-        out.push(Login { token: token.to_string(), host });
+        out.push(Login { token: token.to_string(), host, expires_at });
     }
     out
 }
 
-use std::path::Path;
-
-/// The two salt pairs, byte-for-byte from the bundle's `byteCrypto.js`.
-const SALT_PLAIN: [u8; 64] = [
+/// The bundle's obfuscation tables, byte-for-byte from `byteCrypto.js`. The
+/// salt is their element-wise XOR — the tables exist so the salt is not a
+/// plain constant in the shipped binary.
+const TABLE_PLAIN_A: [u8; 64] = [
     82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251, 124, 227, 57, 130,
     155, 47, 255, 135, 52, 142, 67, 68, 196, 222, 233, 203, 84, 123, 148, 50, 166, 194, 35, 61,
     238, 76, 149, 11, 66, 250, 195, 78, 8, 46, 161, 102, 40, 217, 36, 178, 118, 91, 162, 73, 109,
     139, 209, 37,
 ];
-const SALT_PRIVATE: [u8; 64] = [
+const TABLE_PLAIN_B: [u8; 64] = [
     31, 221, 168, 51, 136, 7, 199, 49, 177, 18, 16, 89, 39, 128, 236, 95, 96, 81, 127, 169, 25,
     181, 74, 13, 45, 229, 122, 159, 147, 201, 156, 239, 160, 224, 59, 77, 174, 42, 245, 176, 200,
     235, 187, 60, 131, 83, 153, 97, 23, 43, 4, 126, 186, 119, 214, 38, 225, 105, 20, 99, 85, 33,
     12, 125,
 ];
+const TABLE_PRIVATE_A: [u8; 64] = [
+    191, 192, 216, 250, 122, 246, 220, 97, 31, 254, 98, 27, 8, 72, 71, 176, 135, 99, 96, 18, 127,
+    101, 203, 104, 211, 102, 191, 125, 37, 72, 150, 156, 51, 229, 121, 35, 17, 153, 141, 177,
+    110, 131, 150, 128, 172, 255, 254, 6, 18, 140, 55, 62, 236, 249, 135, 64, 135, 12, 117, 4,
+    89, 149, 168, 209,
+];
+const TABLE_PRIVATE_B: [u8; 64] = [
+    246, 204, 26, 232, 232, 70, 129, 109, 223, 146, 169, 242, 23, 241, 105, 145, 50, 196, 165,
+    42, 254, 120, 3, 54, 244, 207, 209, 85, 53, 6, 138, 106, 175, 148, 31, 204, 186, 186, 165,
+    182, 87, 142, 49, 10, 39, 110, 26, 154, 86, 56, 173, 125, 18, 64, 198, 225, 99, 99, 83, 82,
+    191, 134, 76, 170,
+];
 
-fn salt_for(header: &[u8]) -> Option<&'static [u8; 64]> {
-    match header {
-        // Plain AES: [116,99,5,16,0,0] — private: [18,57,32,32,2,3].
-        [116, 99, 5, 16, 0, 0] => Some(&SALT_PLAIN),
-        [18, 57, 32, 32, 2, 3] => Some(&SALT_PRIVATE),
-        _ => None,
-    }
+fn salt_for(header: &[u8]) -> Option<[u8; 64]> {
+    let (a, b) = match header {
+        [116, 99, 5, 16, 0, 0] => (&TABLE_PLAIN_A, &TABLE_PLAIN_B),
+        [18, 57, 32, 32, 2, 3] => (&TABLE_PRIVATE_A, &TABLE_PRIVATE_B),
+        _ => return None,
+    };
+    Some(core::array::from_fn(|i| a[i] ^ b[i]))
 }
 
-/// Decrypt one base64 `byteCrypto` envelope. Every step but the final hash is
-/// exactly the bundle's `RBe`; a mismatch anywhere is `None`, not a guess.
+/// Decrypt one base64 `byteCrypto` envelope. Every step is exactly the bundle's
+/// `RBe`; a mismatch anywhere is `None`, not a guess.
 fn decrypt(encoded: &str) -> Option<String> {
     use base64::Engine;
     use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
     use sha2::{Digest, Sha512};
 
     let blob = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
-    let salt = *salt_for(blob.first(6)?)?;
+    let salt = salt_for(blob.get(..6)?)?;
     let key = blob.get(6..38)?;
     let ct = blob.get(38..)?;
     if ct.is_empty() || ct.len() % 16 != 0 {
@@ -176,17 +190,23 @@ fn decrypt(encoded: &str) -> Option<String> {
 
     let mut stem = [0u8; 128];
     stem[..64].copy_from_slice(&Sha512::digest(key));
-    stem[64..].copy_from_slice(salt);
+    stem[64..].copy_from_slice(&salt[..]);
     let derived: [u8; 64] = Sha512::digest(stem).into();
     let key: [u8; 16] = derived[..16].try_into().ok()?;
     let iv: [u8; 16] = derived[16..32].try_into().ok()?;
 
+    // `NoPadding`: the app's own padding comes off by hand below, because the
+    // digest it must be verified against covers the *unpadded* plaintext.
     let mut plain = cbc::Decryptor::<aes::Aes128>::new(&key.into(), &iv.into())
-        .decrypt_padded_vec_mut::<NoPadding>(ct);
-    // The app pads before encrypting and hashes the unpadded plaintext, so the
-    // padding comes off before the prefix check, never after.
-    let pad = *plain.last()?;
-    if !(1..=16).contains(&pad) || plain.len() < pad || plain[plain.len() - pad..].iter().any(|b| *b != pad) {
+        .decrypt_padded_vec_mut::<NoPadding>(ct)
+        .ok()?;
+    // The app pads before encrypting and hashes the *unpadded* plaintext, so
+    // the padding comes off before the digest check, never after.
+    let pad = *plain.last()? as usize;
+    if !(1..=16).contains(&pad)
+        || plain.len() <= pad
+        || plain[plain.len() - pad..].iter().any(|b| *b != pad as u8)
+    {
         return None;
     }
     plain.truncate(plain.len() - pad);
@@ -206,8 +226,10 @@ impl QuotaProbe for TraeQuota {
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
+        let now = chrono::Utc::now();
         for login in logins() {
-            if !token_is_fresh(&login) {
+            // A past expiry means "no live sample"; the probe never refreshes.
+            if login.expires_at.is_some_and(|t| t <= now) {
                 continue;
             }
             let url = format!("{}{USAGE_PATH}", login.host);
@@ -231,37 +253,26 @@ impl QuotaProbe for TraeQuota {
     }
 }
 
-/// `expiredAt` is an RFC 3339 string; a past one is spent, an unreadable one is
-/// unknown-but-tryable (the IDE refreshes its own token on its own schedule).
-fn token_is_fresh(login: &Login) -> bool {
-    // The freshness test runs on the whole record, not the token string; this
-    // helper keeps the shape so `fetch` reads linearly.
-    true
-}
-
 /// The wire answer → bars, in the mapper's own order: plan, bonus, fast.
 pub(crate) fn samples_from_entitlement(body: &Value) -> Vec<QuotaSample> {
-    let packs = body
-        .get("user_entitlement_pack_list")
-        .and_then(Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter(|p| num(p.pointer("/entitlement_base_info/product_type")) != Some(PRODUCT_PROMO))
-                .collect::<Vec<&Value>>()
-        })
-        .unwrap_or_default();
+    let Some(list) = body.get("user_entitlement_pack_list").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let packs: Vec<&Value> = list
+        .iter()
+        .filter(|p| num(p.pointer("/entitlement_base_info/product_type")) != Some(PRODUCT_PROMO))
+        .collect();
     if packs.is_empty() {
         return Vec::new();
     }
     let dollar = body.get("is_dollar_usage_billing").and_then(Value::as_bool).unwrap_or(false);
 
     let mut out = Vec::new();
-    let plan = plan_pack(&packs);
-    if let Some(pack) = plan {
+    if let Some(pack) = plan_pack(&packs) {
         let quota = pack.pointer("/entitlement_base_info/quota").unwrap_or(&Value::Null);
         let usage = pack.get("usage").unwrap_or(&Value::Null);
         let identity = pack
-            .pointer("/entitlement_base_info/display_desc")
+            .get("display_desc")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .map(str::to_string)
@@ -283,9 +294,13 @@ pub(crate) fn samples_from_entitlement(body: &Value) -> Vec<QuotaSample> {
 }
 
 /// First of Ultra > ProPlus > Pro > Lite > Free, the mapper's own priority.
-fn plan_pack(packs: &[&Value]) -> Option<&Value> {
+fn plan_pack<'a>(packs: &[&'a Value]) -> Option<&'a Value> {
     for kind in [PRODUCT_ULTRA, PRODUCT_PRO_PLUS, PRODUCT_PRO, PRODUCT_LITE, PRODUCT_FREE] {
-        if let Some(pack) = packs.iter().copied().find(|p| num(p.pointer("/entitlement_base_info/product_type")) == Some(kind)) {
+        if let Some(pack) = packs
+            .iter()
+            .copied()
+            .find(|p| num(p.pointer("/entitlement_base_info/product_type")) == Some(kind))
+        {
             return Some(pack);
         }
     }
@@ -294,9 +309,16 @@ fn plan_pack(packs: &[&Value]) -> Option<&Value> {
 
 /// One `X_limit` / `X_amount` pair as one bar. A meter without a positive
 /// allowance is not a 0 % bar — it is nothing to draw.
-fn meter(quota: &Value, usage: &Value, stem: &str, name: &str, dollar: bool, resets_at_ms: i64) -> Option<QuotaSample> {
-    let limit = num(quota.get(format!("{stem}_limit"))?)?;
-    let used = num(usage.get(format!("{stem}_amount"))?).unwrap_or(0.0);
+fn meter(
+    quota: &Value,
+    usage: &Value,
+    stem: &str,
+    name: &str,
+    dollar: bool,
+    resets_at_ms: i64,
+) -> Option<QuotaSample> {
+    let limit = num(quota.get(format!("{stem}_limit")))?;
+    let used = num(usage.get(format!("{stem}_amount"))).unwrap_or(0.0);
     if limit <= 0.0 {
         return None;
     }
@@ -316,8 +338,7 @@ fn fast_request_bar(packs: &[&Value]) -> Option<QuotaSample> {
     let mut limit = 0.0;
     let mut used = 0.0;
     for pack in packs {
-        let quota_limit = num(pack.pointer("/entitlement_base_info/quota/premium_model_fast_request_limit"));
-        match quota_limit {
+        match num(pack.pointer("/entitlement_base_info/quota/premium_model_fast_request_limit")) {
             Some(-1.0) => return None,
             Some(n) => limit += n,
             None => {}
@@ -330,7 +351,7 @@ fn fast_request_bar(packs: &[&Value]) -> Option<QuotaSample> {
     Some(QuotaSample {
         used_percent: (used / limit * 100.0).clamp(0.0, 100.0),
         window_minutes: 0,
-        resets_at_ms: packs.iter().filter_map(|p| resets_of(p)).max().unwrap_or(0),
+        resets_at_ms: packs.iter().map(|p| resets_of(p)).max().unwrap_or(0),
         label: Some(format!("Fast · 已用 {}/{}", fmt(used), fmt(limit))),
         id: Some("fast".into()),
     })
@@ -366,23 +387,26 @@ mod tests {
     use base64::Engine;
 
     /// Round-trips the envelope: encrypt with the derived scheme, read back —
-    /// and refuses a flipped byte, a wrong hash and a bad header.
+    /// and refuses a flipped byte, a wrong header.
     #[test]
-    fn the_envelope_is_symmetric_and_pick() {
+    fn the_envelope_is_symmetric_and_resists_tampering() {
         use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
         use sha2::{Digest, Sha512};
 
         let body = br#"{"token":"t","host":"https://x"}"#;
-        let mut prefixed = [0u8; 64].to_vec();
-        prefixed.extend_from_slice(&Sha512::digest(body));
+        // The wire plaintext: SHA-512 digest of the body, then the body.
+        let mut prefixed = Sha512::digest(body).to_vec();
         prefixed.extend_from_slice(body);
 
         let key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let salt = salt_for(&[116, 99, 5, 16, 0, 0]).unwrap();
         let mut stem = [0u8; 128];
         stem[..64].copy_from_slice(&Sha512::digest(key));
-        stem[64..].copy_from_slice(&SALT_PLAIN);
+        stem[64..].copy_from_slice(&salt);
         let derived: [u8; 64] = Sha512::digest(stem).into();
-        let ct = cbc::Encryptor::<aes::Aes128>::new(&derived[..16].try_into().unwrap(), &derived[16..32].try_into().unwrap())
+        let aes: [u8; 16] = derived[..16].try_into().unwrap();
+        let iv: [u8; 16] = derived[16..32].try_into().unwrap();
+        let ct = cbc::Encryptor::<aes::Aes128>::new(&aes.into(), &iv.into())
             .encrypt_padded_vec_mut::<Pkcs7>(&prefixed);
 
         let mut blob = vec![116u8, 99, 5, 16, 0, 0];
@@ -391,12 +415,12 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&blob);
         assert_eq!(decrypt(&encoded).as_deref(), Some(std::str::from_utf8(body).unwrap()));
 
-        // A tampered ciphertext fails the hash check, a wrong header fails earlier.
+        // A tampered ciphertext fails the digest check, a wrong header fails earlier.
         let mut flipped = blob.clone();
         flipped[50] ^= 0xff;
         let flipped = base64::engine::general_purpose::STANDARD.encode(&flipped);
         assert_eq!(decrypt(&flipped), None);
-        let mut bad_header = blob.clone();
+        let mut bad_header = blob;
         bad_header[0] = 1;
         let bad_header = base64::engine::general_purpose::STANDARD.encode(&bad_header);
         assert_eq!(decrypt(&bad_header), None);
@@ -420,10 +444,14 @@ mod tests {
     fn the_measured_free_plan_becomes_one_dollar_bar() {
         let body: Value = serde_json::from_str(MEASURED).unwrap();
         let s = samples_from_entitlement(&body);
-        assert_eq!(s.len(), 1, "{s:?}");
+        let labels: Vec<&str> = s.iter().map(|b| b.label.as_deref().unwrap_or_default()).collect();
+        assert_eq!(
+            labels,
+            vec!["Free plan · 已用 $0.0084/$1", "Fast · 已用 0/10"],
+            "{labels:?} — the plan's 10 fast requests are a real, empty meter"
+        );
         let bar = &s[0];
         assert!((bar.used_percent - 0.839).abs() < 1e-9, "{}", bar.used_percent);
-        assert_eq!(bar.label.as_deref(), Some("Free plan · 已用 $0.0084/$1"));
         assert_eq!(bar.id.as_deref(), Some("basic_usage"));
         // end_time 1790812799 s → ms; `expire_time: 0` must not win over it.
         assert_eq!(bar.resets_at_ms, 1_790_812_799_000);
@@ -443,7 +471,7 @@ mod tests {
         .unwrap();
         let s = samples_from_entitlement(&body);
         let labels: Vec<&str> = s.iter().map(|b| b.label.as_deref().unwrap_or_default()).collect();
-        assert_eq!(labels, vec!["Pro · 已用 60.50/600", "Bonus · 已用 10.00/100", "Fast · 已用 8/80"], "{labels:?}");
+        assert_eq!(labels, vec!["Pro · 已用 60.50/600", "Bonus · 已用 10/100", "Fast · 已用 8/80"], "{labels:?}");
         // The fast bar takes the latest pack end as its reset.
         assert_eq!(s[2].resets_at_ms, 1_793_404_799_000);
     }
@@ -479,7 +507,77 @@ mod tests {
         .unwrap();
         assert!(samples_from_entitlement(&body).is_empty());
     }
-}
 
-#[cfg(test)]
-pub(crate) use tests::SALT_PLAIN as TRAE_TEST_SALT_PLAIN;
+    /// Live proof on the machine that has the IDE; run with
+    /// `cargo test -p usage-quota providers::trae -- --ignored --nocapture`.
+    /// Prints shapes and counts, never the token itself.
+    #[test]
+    #[ignore = "reads the real Trae install and calls the vendor's live quota API"]
+    fn the_live_meters_this_account_actually_has() {
+        let Some(path) = storage_json() else {
+            println!("[trae] no platform data dir");
+            return;
+        };
+        println!("[trae] storage: {}", path.display());
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("[trae] storage.json unreadable");
+            return;
+        };
+        let all: serde_json::Map<String, Value> = serde_json::from_str(&text).unwrap();
+        let auth_keys: Vec<&String> = all.keys().filter(|k| k.starts_with("iCubeAuthInfo://")).collect();
+        println!("[trae] iCubeAuthInfo records: {auth_keys:?}");
+        for (key, value) in all.iter().filter(|(k, _)| k.starts_with("iCubeAuthInfo://")) {
+            let Some(encoded) = value.as_str() else { continue };
+            let Some(plain) = decrypt(encoded) else {
+                println!("[trae] {key}: envelope did not decrypt");
+                continue;
+            };
+            let record: Value = serde_json::from_str(&plain).unwrap();
+            let token = record.get("token").and_then(Value::as_str).unwrap_or_default();
+            println!(
+                "[trae] {key}: token {} bytes, expiredAt {:?}, host {:?}",
+                token.len(),
+                record.get("expiredAt").and_then(Value::as_str),
+                record.get("host").and_then(Value::as_str)
+            );
+            if token.is_empty() {
+                continue;
+            }
+            let url = format!(
+                "{}{USAGE_PATH}",
+                record.get("host").and_then(Value::as_str).unwrap_or(DEFAULT_HOST)
+            );
+            let resp = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(3))
+                .timeout_read(std::time::Duration::from_secs(6))
+                .build()
+                .post(&url)
+                .set("content-type", "application/json")
+                .set("authorization", &format!("Cloud-IDE-JWT {token}"))
+                .send_json(json!({"require_usage": true}));
+            match resp {
+                Ok(r) => {
+                    let body: Value = r.into_json().unwrap();
+                    println!("[trae] HTTP 200, keys: {:?}", body.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                    let s = samples_from_entitlement(&body);
+                    for bar in &s {
+                        println!("[trae] {:>6.2}%  reset={:>13}  {}", bar.used_percent, bar.resets_at_ms, bar.label.as_deref().unwrap_or_default());
+                    }
+                    if s.is_empty() {
+                        println!("[trae] mapper drew nothing from: {}", serde_json::to_string(&body).unwrap_or_default().chars().take(400).collect::<String>());
+                    }
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    println!("[trae] HTTP {code}: {}", r.into_string().unwrap_or_default().chars().take(200).collect::<String>());
+                }
+                Err(e) => println!("[trae] transport error: {e}"),
+            }
+        }
+        // The exact production path, closing the loop past the hand-rolled call above.
+        let fetched = TraeQuota.fetch();
+        println!("[trae] fetch() → {} bars", fetched.len());
+        for bar in &fetched {
+            println!("[trae] fetch: {:>6.2}%  {}", bar.used_percent, bar.label.as_deref().unwrap_or_default());
+        }
+    }
+}

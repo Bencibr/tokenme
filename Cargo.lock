@@ -1325,6 +1325,7 @@ dependencies = [
  "usage-adapter-opencode",
  "usage-adapter-pi",
  "usage-adapter-qoder",
+ "usage-adapter-trae",
  "usage-adapter-workbuddy",
  "usage-adapter-zcode",
  "usage-core",
@@ -1503,6 +1504,21 @@ dependencies = [
  "tempfile",
  "usage-core",
  "walkdir",
+]
+
+[[package]]
+name = "usage-adapter-trae"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "cbc",
+ "dirs",
+ "pbkdf2",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "usage-core",
 ]
 
 [[package]]

@@ -18,6 +18,7 @@ members = [
     "crates/adapters/catpaw",
     "crates/adapters/dsh",
     "crates/adapters/joycode",
+    "crates/adapters/trae",
     "crates/adapters/all",
     "crates/usage-index",
     "crates/usage-quota",
@@ -49,6 +50,7 @@ usage-adapter-workbuddy = { path = "crates/adapters/workbuddy" }
 usage-adapter-hermes = { path = "crates/adapters/hermes" }
 usage-adapter-funide = { path = "crates/adapters/funide" }
 usage-adapter-joycode = { path = "crates/adapters/joycode" }
+usage-adapter-trae = { path = "crates/adapters/trae" }
 usage-adapter-all = { path = "crates/adapters/all" }
 
 serde = { version = "1", features = ["derive"] }

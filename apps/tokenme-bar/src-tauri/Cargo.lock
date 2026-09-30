@@ -4730,6 +4730,7 @@ dependencies = [
  "usage-adapter-opencode",
  "usage-adapter-pi",
  "usage-adapter-qoder",
+ "usage-adapter-trae",
  "usage-adapter-workbuddy",
  "usage-adapter-zcode",
  "usage-core",
@@ -4895,6 +4896,20 @@ dependencies = [
  "serde_json",
  "usage-core",
  "walkdir",
+]
+
+[[package]]
+name = "usage-adapter-trae"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "cbc",
+ "dirs 6.0.0",
+ "pbkdf2",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "usage-core",
 ]
 
 [[package]]

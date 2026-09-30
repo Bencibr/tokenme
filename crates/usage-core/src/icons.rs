@@ -43,6 +43,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("joycode", &["JoyCode"]),
     ("mimocode", &[]),
     ("cola", &["Cola"]),
+    ("trae", &["Trae"]),
 ];
 
 /// PNGs shipped with the panel, consulted only when the bundle lookup above
@@ -75,6 +76,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("pi", include_bytes!("../assets/pi.png")),
     // Hermes: the 256-px layer of the desktop app's own icon resource.
     ("hermes", include_bytes!("../assets/hermes.png")),
+    // Trae: the 128-px layer of the installed Trae.icns.
+    ("trae", include_bytes!("../assets/trae.png")),
 ];
 
 /// Where a user-installed app lives. `~/Applications` first: a per-user install

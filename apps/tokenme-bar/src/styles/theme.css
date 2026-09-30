@@ -71,6 +71,8 @@
   /* dsh 的品牌蓝（槽位因 funide 插入顺移）；cat-20 = joycode */
   --cat-19: #4a5fb0;
   --cat-20: #8f6fd0;
+  /* trae 的品牌薄荷绿 */
+  --cat-21: #1f8f6f;
 
   /* activity scale, quiet → saturated */
   --heat-1: #d8e7e4;
@@ -193,6 +195,8 @@
     /* dsh 的品牌蓝（暗色提亮）；cat-20 = joycode */
     --cat-19: #8f9ff0;
     --cat-20: #b09ae0;
+    /* trae 的品牌薄荷绿（暗色提亮） */
+    --cat-21: #4fd9a3;
 
     --heat-1: #1a3f36;
     --heat-2: #215c4d;
@@ -277,6 +281,8 @@
   --cat-18: #e08fa8;
   --cat-19: #8f9ff0;
   --cat-20: #b09ae0;
+  /* trae 的品牌薄荷绿（暗色提亮） */
+  --cat-21: #4fd9a3;
 
   --heat-1: #1a3f36;
   --heat-2: #215c4d;
