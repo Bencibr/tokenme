@@ -8,6 +8,8 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags};
 
@@ -215,6 +217,68 @@ fn encode_uri_path(path: &Path) -> String {
 /// Proves a connection can read the one table this adapter ingests.
 pub(crate) const USABLE_SQL: &str = "SELECT count(*) FROM message";
 
+/// The table every product of this dialect ingests. Also the cheap cache-hit
+/// probe (schema presence only) that keeps the full-table `USABLE_SQL` count
+/// off the per-pass path.
+const DIALECT_TABLE: &str = "message";
+
+/// How long a proven ladder rung is reused without re-running its proof. The
+/// proof walks the whole table — seconds on a multi-gigabyte live store — and
+/// discover + read repeat it on every ingest pass. A rung only stops being the
+/// right one when the writer flips between running and exited; the first bad
+/// open under it forgets it (`forget_rung`), and this TTL is the backstop.
+const RUNG_TTL: Duration = Duration::from_secs(30);
+
+const LADDER: [(&str, OpenFlags, bool); 3] = [
+    ("mode=ro&nolock=1", OpenFlags::SQLITE_OPEN_READ_ONLY, false),
+    ("mode=ro", OpenFlags::SQLITE_OPEN_READ_ONLY, false),
+    ("mode=rw", OpenFlags::SQLITE_OPEN_READ_WRITE, true),
+];
+
+/// The ladder rung last proven to open `path`, and when it was proven.
+static RUNG_CACHE: Mutex<Option<std::collections::HashMap<PathBuf, (usize, Instant)>>> = Mutex::new(None);
+
+fn cached_rung(path: &Path) -> Option<usize> {
+    let map = RUNG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = map.as_ref()?;
+    let (rung, at) = map.get(path)?;
+    (at.elapsed() < RUNG_TTL).then_some(*rung)
+}
+
+fn remember_rung(path: &Path, rung: usize) {
+    let mut guard = RUNG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(Default::default).insert(path.to_path_buf(), (rung, Instant::now()));
+}
+
+/// Drops the cached rung after a failed open or read, so the next attempt
+/// re-runs the full ladder instead of trusting a rung that stopped working.
+pub(crate) fn forget_rung(path: &Path) {
+    let mut guard = RUNG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = guard.as_mut() {
+        map.remove(path);
+    }
+}
+
+fn open_rung(path: &Path, rung: usize) -> rusqlite::Result<Connection> {
+    let (query, flags, fence) = LADDER[rung];
+    let conn = open_with_flags(path, query, flags)?;
+    if fence {
+        conn.execute_batch("PRAGMA query_only = 1;")?;
+    }
+    Ok(conn)
+}
+
+/// Cache-hit proof: schema presence only. The real proof of a rung is the read
+/// it serves; when that read fails, the caller forgets the rung.
+fn cheap_prove(conn: &Connection) -> rusqlite::Result<()> {
+    conn.query_row(
+        &format!("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{DIALECT_TABLE}'"),
+        [],
+        |_| Ok(()),
+    )?;
+    Ok(())
+}
+
 fn open_with_flags(path: &Path, query: &str, extra: OpenFlags) -> rusqlite::Result<Connection> {
     let uri = format!("file:{}?{query}", encode_uri_path(path));
     Connection::open_with_flags(&uri, OpenFlags::SQLITE_OPEN_URI | extra)
@@ -238,15 +302,25 @@ fn open_with_flags(path: &Path, query: &str, extra: OpenFlags) -> rusqlite::Resu
 /// `usable_sql` counts the table the caller is about to read, which is what makes
 /// a half-broken open fall through instead of surfacing as a read error.
 pub(crate) fn open_readonly(path: &Path, usable_sql: &str) -> rusqlite::Result<Connection> {
-    let attempts = [
-        ("mode=ro&nolock=1", OpenFlags::SQLITE_OPEN_READ_ONLY, false),
-        ("mode=ro", OpenFlags::SQLITE_OPEN_READ_ONLY, false),
-        ("mode=rw", OpenFlags::SQLITE_OPEN_READ_WRITE, true),
-    ];
+    // A rung proven recently is opened directly, proved by schema presence
+    // only: re-running the full-table proof on every ingest pass is what made
+    // a 2.5 GB live store cost a b-tree walk per pass.
+    if let Some(rung) = cached_rung(path) {
+        match open_rung(path, rung).and_then(|conn| {
+            cheap_prove(&conn)?;
+            Ok(conn)
+        }) {
+            Ok(conn) => return Ok(conn),
+            Err(_) => forget_rung(path),
+        }
+    }
     let mut last = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(14), Some("no usable open mode".into()));
-    for (query, flags, fence) in attempts {
-        match try_open(path, query, flags, fence, usable_sql) {
-            Ok(c) => return Ok(c),
+    for (rung, (query, flags, fence)) in LADDER.iter().enumerate() {
+        match try_open(path, query, *flags, *fence, usable_sql) {
+            Ok(c) => {
+                remember_rung(path, rung);
+                return Ok(c);
+            }
             Err(e) => last = e,
         }
     }

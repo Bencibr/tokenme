@@ -60,8 +60,13 @@ pub(crate) fn read_batch(path: &Path, cursor: ReadCursor, source_key: &str, prod
     match try_read(path, cursor, source_key, product, batch) {
         Ok(out) => out,
         // A missing, locked or mid-migration database is not something the caller
-        // can act on: report nothing this pass and leave the cursor alone.
-        Err(_) => ReadOutcome { events: Vec::new(), cursor },
+        // can act on: report nothing this pass and leave the cursor alone. The
+        // cached open rung — if one was trusted here — proved wrong, so forget it
+        // and let the next pass re-run the full ladder.
+        Err(_) => {
+            paths::forget_rung(path);
+            ReadOutcome { events: Vec::new(), cursor }
+        }
     }
 }
 
@@ -76,7 +81,15 @@ fn try_read(path: &Path, cursor: ReadCursor, source_key: &str, product: &Product
         .query_row("SELECT COALESCE(MAX(rowid), 0) FROM message", [], |r| r.get(0))
         .unwrap_or(0);
     let cursor = if cursor.0 as i64 > max_rowid { ReadCursor(0) } else { cursor };
-    let rows = fetch_batch(&conn, cursor.0 as i64, batch).unwrap_or_default();
+    let rows = match fetch_batch(&conn, cursor.0 as i64, batch) {
+        Ok(rows) => rows,
+        // A batch that cannot be fetched under the (possibly cached) open rung
+        // is the read failing, not the table being empty: forget the rung.
+        Err(_) => {
+            paths::forget_rung(path);
+            Vec::new()
+        }
+    };
 
     let mut session_stmt = conn.prepare_cached(SELECT_SESSION).ok();
     // One query per distinct session per batch, not one per row.
