@@ -137,6 +137,7 @@ pub struct PanelSettings {
     pub show_money: bool,
     pub bubble_enabled: bool,
     pub host_exit_pause: bool,
+    pub auto_update_check: bool,
     pub version: String,
 }
 
@@ -188,6 +189,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         show_money: settings.show_money,
         bubble_enabled: settings.bubble_enabled,
         host_exit_pause: settings.host_exit_pause,
+        auto_update_check: settings.auto_update_check,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
