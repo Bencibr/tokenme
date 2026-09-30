@@ -77,7 +77,15 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [profile.release]
-codegen-units = 1
-lto = true
+# Size-tuned but link-affordable: thin LTO keeps the cross-crate inlining that
+# mattered at this size, while fat LTO (`lto = true`) re-optimized the whole
+# program at every link — even a frontend-only change paid a full re-link.
+# codegen-units stays at the default so code generation parallelizes.
+lto = "thin"
 opt-level = "s"
 strip = true
+
+[profile.dev]
+# Tests pay full-DWARF link time for backtraces nobody reads; line tables keep
+# the line numbers at a fraction of the link cost.
+debug = "line-tables-only"

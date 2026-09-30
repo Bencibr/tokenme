@@ -13,5 +13,8 @@ apps/tokenme-bar/src-tauri/gen/schemas
 apps/tokenme-bar/report.json
 apps/tokenme-bar/icons.json
 
+# build-macos.sh: hash of everything the test gate compiles; unchanged-since-green skip marker
+.cargo-test-stamp
+
 # global gitignore excludes apps/; the panel is product code, keep it here
 !apps/
