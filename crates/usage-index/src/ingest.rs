@@ -6,8 +6,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rusqlite::{params, OptionalExtension};
-use usage_core::{DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent};
+use chrono::{Local, NaiveDate, TimeZone};
+use rusqlite::{params, OptionalExtension, Transaction};
+use usage_core::{local_day_of, DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent};
 
 use crate::{call_kind_str, meter_str, now_ms, sql_err, Index, INSERT_EVENT};
 
@@ -33,6 +34,145 @@ const CLAIM_KEY: &str = "index_claim";
 /// A claim without a refresh for this long belongs to a dead process, so a
 /// killed peer cannot wedge the index.
 pub const CLAIM_TTL_MS: i64 = 120_000;
+
+// ---- event_rollup write path -------------------------------------------------
+//
+// Every event that survives dedupe also lands in `event_rollup`, inside the
+// same transaction as its `event` row: the rollup is a *cache*, and a cache
+// updated out of step with its source is worse than none. Reads that find the
+// cache empty (first publish after the upgrade, a fail-safe wipe) rebuild it
+// from `event` and go on — see `facts.rs`.
+
+/// Per-event upsert: sums the new event into its (day, tool, session, project,
+/// model, meter) group. `project`/`model` arrive as the `''` NULL sentinel and
+/// `n` is the literal 1 — one row per event before conflict resolution.
+pub(crate) const ROLLUP_UPSERT: &str = "\
+INSERT INTO event_rollup(day, tool, session, project, model, meter, \
+    in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14, ?14) \
+ON CONFLICT(day, tool, session, project, model, meter) DO UPDATE SET \
+    in_tok     = in_tok     + excluded.in_tok, \
+    cc_tok     = cc_tok     + excluded.cc_tok, \
+    cr_tok     = cr_tok     + excluded.cr_tok, \
+    out_tok    = out_tok    + excluded.out_tok, \
+    reason_tok = reason_tok + excluded.reason_tok, \
+    credits    = credits    + excluded.credits, \
+    n          = n          + excluded.n, \
+    nonzero    = nonzero    + excluded.nonzero, \
+    min_ts     = min(min_ts, excluded.min_ts), \
+    max_ts     = max(max_ts, excluded.max_ts)";
+
+/// One rollup day, rebuilt from `event` inside the caller's transaction. `lo`
+/// and `hi` are the day's half-open ms bounds, computed by the caller in chrono
+/// — SQL must never derive a local day itself, or the rollup's bucketing and
+/// the report fold's could disagree at a DST edge.
+pub(crate) fn recompute_day_tx(tx: &Transaction<'_>, day_key: &str, lo: i64, hi: i64) -> Result<()> {
+    tx.execute("DELETE FROM event_rollup WHERE day = ?1", params![day_key]).map_err(sql_err)?;
+    tx.execute(
+        "INSERT INTO event_rollup(day, tool, session, project, model, meter, \
+             in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+         SELECT ?1, tool, session, IFNULL(project, ''), IFNULL(model, ''), meter, \
+             IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
+             IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
+             count(*), \
+             sum(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) \
+                 + COALESCE(out_tok, 0) + COALESCE(credits, 0) > 0), \
+             min(ts_ms), max(ts_ms) \
+         FROM event \
+         WHERE ts_ms >= ?2 AND ts_ms < ?3 \
+         GROUP BY tool, session, project, model, meter",
+        params![day_key, lo, hi],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}
+
+/// Half-open `[lo, hi)` ms bounds of one local calendar day, resolved the same
+/// way the report's day boundaries are. `None` only where no local midnight
+/// can be resolved at all — callers treat that as "wipe the rollup" rather
+/// than guess.
+pub(crate) fn local_day_bounds(day: NaiveDate) -> Option<(i64, i64)> {
+    fn midnight(d: NaiveDate) -> Option<i64> {
+        d.and_hms_opt(0, 0, 0)
+            .and_then(|n| Local.from_local_datetime(&n).single())
+            .map(|dt| dt.timestamp_millis())
+    }
+    let lo = midnight(day)?;
+    let hi = midnight(day + chrono::Duration::days(1))?;
+    Some((lo, hi))
+}
+
+/// Recomputes the rollup across a contiguous deletion (prune's whole-prefix
+/// delete, purge's per-file delete) inside the caller's transaction.
+///
+/// This never fails: any problem — absurd timestamps with no local day, a day
+/// whose bounds cannot be resolved, an error mid-recompute — ends in an EMPTY
+/// rollup, which the next read rebuilds from `event`. A stale rollup would be
+/// silently wrong money; an empty one costs one lazy rebuild and nothing else.
+pub(crate) fn recompute_span_tx(tx: &Transaction<'_>, lo_ts: i64, hi_ts: i64) -> Result<()> {
+    let clear = |tx: &Transaction<'_>| -> Result<()> {
+        tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+        Ok(())
+    };
+    let (Some(first), Some(last)) = (local_day_of(lo_ts), local_day_of(hi_ts)) else {
+        // An unrepresentable timestamp was among the doomed rows: its rollup
+        // group lives in the `""` bucket, which only a full rebuild fills.
+        return clear(tx);
+    };
+    // More doomed days than the retention window can hold means the timestamps
+    // are junk (retention itself deletes a 400-day window); a per-day sweep
+    // would take minutes for data the next rebuild refills in seconds.
+    if (last - first).num_days() > RETENTION_DAYS {
+        return clear(tx);
+    }
+    let mut day = first;
+    loop {
+        let day_key = day.format("%Y-%m-%d").to_string();
+        match local_day_bounds(day) {
+            Some((lo, hi)) => {
+                if recompute_day_tx(tx, &day_key, lo, hi).is_err() {
+                    return clear(tx);
+                }
+            }
+            None => return clear(tx),
+        }
+        if day == last {
+            return Ok(());
+        }
+        day += chrono::Duration::days(1);
+    }
+}
+
+/// Same maintenance as [`recompute_span_tx`], but the affected days come from
+/// the doomed rows' own timestamps (a purge touches scattered days, not a
+/// range). One unrepresentable ts wipes the whole rollup — its `""` bucket is
+/// only ever filled correctly by the full lazy rebuild.
+pub(crate) fn recompute_days_tx(tx: &Transaction<'_>, doomed_ts: &[i64]) -> Result<()> {
+    if doomed_ts.iter().any(|t| local_day_of(*t).is_none()) {
+        tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+        return Ok(());
+    }
+    let mut days: Vec<NaiveDate> =
+        doomed_ts.iter().filter_map(|t| local_day_of(*t)).collect();
+    days.sort_unstable();
+    days.dedup();
+    if days.len() > RETENTION_DAYS as usize {
+        tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+        return Ok(());
+    }
+    for day in days {
+        let day_key = day.format("%Y-%m-%d").to_string();
+        let Some((lo, hi)) = local_day_bounds(day) else {
+            tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+            return Ok(());
+        };
+        if recompute_day_tx(tx, &day_key, lo, hi).is_err() {
+            tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+            return Ok(());
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct IngestReport {
@@ -96,12 +236,29 @@ impl Default for IngestOptions {
     }
 }
 
+/// Pre-discovered file lists keyed by adapter id, handed in by a caller that
+/// already knows which roots changed: adapters whose roots were not touched
+/// reuse the previous snapshot (already restatted fresh) instead of re-walking
+/// their whole tree. `None` for an adapter falls back to its full `discover`.
+pub type DiscoverHint<'a> = dyn Fn(&str) -> Option<Vec<SourceFile>> + 'a;
+
 pub(crate) fn run<'a>(
     idx: &mut Index,
     adapters: impl Iterator<Item = &'a dyn SourceAdapter>,
     filter: &DateFilter,
     opts: &IngestOptions,
     clear_first: bool,
+) -> Result<IngestReport> {
+    run_with_hints(idx, adapters, filter, opts, clear_first, &|_| None)
+}
+
+pub(crate) fn run_with_hints<'a>(
+    idx: &mut Index,
+    adapters: impl Iterator<Item = &'a dyn SourceAdapter>,
+    filter: &DateFilter,
+    opts: &IngestOptions,
+    clear_first: bool,
+    hints: &DiscoverHint<'_>,
 ) -> Result<IngestReport> {
     if !idx.claim(opts)? {
         // A peer owns the lease: report the index exactly as it stands rather
@@ -116,7 +273,7 @@ pub(crate) fn run<'a>(
             ..Default::default()
         });
     }
-    let outcome = pass(idx, adapters, filter, clear_first);
+    let outcome = pass(idx, adapters, filter, clear_first, hints);
     idx.release_claim();
     outcome
 }
@@ -126,6 +283,7 @@ fn pass<'a>(
     adapters: impl Iterator<Item = &'a dyn SourceAdapter>,
     filter: &DateFilter,
     clear_first: bool,
+    hints: &DiscoverHint<'_>,
 ) -> Result<IngestReport> {
     let started = Instant::now();
     let mut acc = Acc::default();
@@ -135,7 +293,7 @@ fn pass<'a>(
     for adapter in adapters {
         // One broken adapter must degrade to "that tool is missing this pass",
         // never to a failed report for everything else.
-        if let Err(e) = one_adapter(idx, adapter, filter, &mut acc) {
+        if let Err(e) = one_adapter(idx, adapter, filter, &mut acc, hints) {
             acc.errors.push(format!("{}: {e}", adapter.id()));
         }
     }
@@ -234,14 +392,22 @@ fn one_adapter(
     adapter: &dyn SourceAdapter,
     filter: &DateFilter,
     acc: &mut Acc,
+    hints: &DiscoverHint<'_>,
 ) -> Result<()> {
     let tool = adapter.id();
-    let files = match catch_unwind(AssertUnwindSafe(|| adapter.discover(filter))) {
-        Ok(files) => files,
-        Err(_) => {
-            acc.errors.push(format!("{tool}: discover panicked"));
-            return Ok(());
-        }
+    let files = match hints(tool) {
+        // The caller materialized this list moments ago with fresh stats, so
+        // neither the tree walk nor the panic guard around it is needed; what
+        // matters downstream (diff vs `file_state`, `unchanged_since`) is that
+        // the numbers are current, which the hint contract guarantees.
+        Some(files) => files,
+        None => match catch_unwind(AssertUnwindSafe(|| adapter.discover(filter))) {
+            Ok(files) => files,
+            Err(_) => {
+                acc.errors.push(format!("{tool}: discover panicked"));
+                return Ok(());
+            }
+        },
     };
     let stored = stored_state(idx)?;
 
@@ -430,6 +596,9 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                  VALUES(?1,?2,?3,?4,?5)",
             )
             .map_err(sql_err)?;
+        // Prepared once per persist, not once per event: on a first ingest of a
+        // big file this statement runs as often as INSERT_EVENT.
+        let mut up_rollup = tx.prepare(ROLLUP_UPSERT).map_err(sql_err)?;
         for ev in &events {
             let c = &ev.counts;
             let changed = ins_event
@@ -451,7 +620,8 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                 ])
                 .map_err(sql_err)?;
             // 0 changes means the partial unique index swallowed it: this record
-            // was already indexed, possibly under another file id.
+            // was already indexed, possibly under another file id. The rollup
+            // must not see it twice either, so it is skipped together.
             if changed == 0 {
                 acc.deduped += 1;
                 continue;
@@ -467,6 +637,31 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                     .execute(params![id, q.used_percent, q.window_minutes, q.resets_at_ms, q.label])
                     .map_err(sql_err)?;
             }
+            // Same transaction as the event row above: the rollup is a cache of
+            // exactly these rows, and a crash may lose both or neither, never
+            // one. A ts with no representable local day lands in the `""` day
+            // bucket, which only all_time reads — the report's own fold skips
+            // it, exactly like the event path skips unparseable days.
+            let day =
+                local_day_of(ev.ts_ms).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+            up_rollup
+                .execute(params![
+                    day,
+                    tool,
+                    ev.session,
+                    ev.project.as_deref().unwrap_or(""),
+                    ev.model.as_deref().unwrap_or(""),
+                    meter_str(ev.meter),
+                    c.input,
+                    c.cache_creation,
+                    c.cache_read,
+                    c.output,
+                    c.reasoning,
+                    c.credits,
+                    (c.total() > 0.0) as i64,
+                    ev.ts_ms,
+                ])
+                .map_err(sql_err)?;
         }
     }
     // The cursor only becomes durable once the events it covers are durable, so
@@ -503,12 +698,39 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
 }
 
 impl Index {
+    /// `ingest_with` with pre-discovered snapshots: for an adapter whose id the
+    /// `hints` closure answers `Some(files)`, those files replace `discover` —
+    /// the engine's root-scoped reuse of the previous snapshot. One call still
+    /// means one claim, one `per_tool_counts` and one `last_ingest_ms` write,
+    /// exactly like the plain pass.
+    pub fn ingest_with_hints(
+        &mut self,
+        adapters: &[Box<dyn SourceAdapter>],
+        filter: &DateFilter,
+        opts: &IngestOptions,
+        hints: &DiscoverHint<'_>,
+    ) -> Result<IngestReport> {
+        run_with_hints(self, adapters.iter().map(|a| &**a), filter, opts, false, hints)
+    }
+}
+
+impl Index {
     /// Drops everything ingested from one source file, returning the row count.
     pub(crate) fn purge_source(&mut self, key: &str) -> Result<u64> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql_err)?;
+        // The doomed rows' timestamps name the rollup days that must be
+        // recomputed; they have to be read here, before the delete below
+        // removes them.
+        let doomed_ts: Vec<i64> = {
+            let mut stmt = tx
+                .prepare("SELECT ts_ms FROM event WHERE source = ?1")
+                .map_err(sql_err)?;
+            let rows = stmt.query_map(params![key], |r| r.get(0)).map_err(sql_err)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?
+        };
         tx
             .execute(
                 "DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE source = ?1)",
@@ -523,6 +745,10 @@ impl Index {
             .map_err(sql_err)?;
         let n = tx.execute("DELETE FROM event WHERE source = ?1", params![key]).map_err(sql_err)?;
         tx.execute("DELETE FROM file_state WHERE source_key = ?1", params![key]).map_err(sql_err)?;
+        // Same transaction as the deletes: the rollup never shows the purged
+        // file's spend, and `recompute_days_tx` degrades to a full wipe rather
+        // than ever leaving it stale.
+        recompute_days_tx(&tx, &doomed_ts)?;
         tx.commit().map_err(sql_err)?;
         Ok(n as u64)
     }
@@ -625,5 +851,122 @@ mod claim_tests {
         hold_claim(&mut idx, "thief", now_ms());
         idx.release_claim();
         assert!(claim_row(&idx).unwrap().starts_with("thief:"), "the thief keeps its row");
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use usage_core::{DetectedSource, FileKind, ReadOutcome, Semantics};
+
+    /// An adapter that counts its `discover` calls, so a test can prove a hint
+    /// replaced the walk instead of supplementing it.
+    struct Counting {
+        path: PathBuf,
+        discovers: Arc<AtomicUsize>,
+    }
+
+    impl Counting {
+        /// The list a real discover would build: one file, freshly statted.
+        fn discover_list(&self) -> Vec<SourceFile> {
+            let meta = std::fs::metadata(&self.path).unwrap();
+            let mtime_ms = meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            vec![SourceFile {
+                path: self.path.clone(),
+                kind: FileKind::Jsonl,
+                size: meta.len(),
+                mtime_ms,
+            }]
+        }
+    }
+
+    impl SourceAdapter for Counting {
+        fn id(&self) -> &'static str {
+            "counting"
+        }
+        fn display_name(&self) -> &'static str {
+            "Counting"
+        }
+        fn semantics(&self) -> Semantics {
+            Semantics::TOKENS_PER_CALL_INLINE
+        }
+        fn probe(&self) -> Option<DetectedSource> {
+            None
+        }
+        fn discover(&self, _filter: &DateFilter) -> Vec<SourceFile> {
+            self.discovers.fetch_add(1, Ordering::SeqCst);
+            self.discover_list()
+        }
+        fn read(&self, _file: &SourceFile, cursor: ReadCursor) -> usage_core::Result<ReadOutcome> {
+            // One event per call, cursor unchanged: the pass reads exactly once.
+            Ok(ReadOutcome { events: vec![UsageEvent::new("counting", 1_780_000_000_000, "s")], cursor })
+        }
+    }
+
+    #[test]
+    fn a_hint_supplies_the_files_so_discover_never_runs_and_events_still_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        std::fs::write(&path, b"{}\n").unwrap();
+        let discovers = Arc::new(AtomicUsize::new(0));
+        let counting = Counting { path: path.clone(), discovers: Arc::clone(&discovers) };
+        let hinted = counting.discover_list();
+        let adapters: Vec<Box<dyn SourceAdapter>> = vec![Box::new(counting)];
+        let mut idx = Index::open_in_memory().unwrap();
+
+        let filter = DateFilter::default();
+        let opts = IngestOptions::default();
+        let hints = |id: &str| (id == "counting").then(|| hinted.clone());
+
+        // Pass 1: the hint replaces discover, and its files still flow through
+        // the normal diff → read → persist path into real indexed events.
+        let report = idx.ingest_with_hints(&adapters, &filter, &opts, &hints).unwrap();
+        assert_eq!(discovers.load(Ordering::SeqCst), 0, "a hint must replace discover");
+        assert_eq!(report.files_scanned, 1);
+        assert_eq!(report.new_events, 1, "hint files produce events like discovered ones");
+        assert_eq!(idx.event_count().unwrap(), 1);
+
+        // Pass 2: the same fresh snapshot is unchanged against file_state.
+        let report = idx.ingest_with_hints(&adapters, &filter, &opts, &hints).unwrap();
+        assert_eq!(report.new_events, 0, "an unchanged hinted file is skipped, not re-read");
+        assert_eq!(discovers.load(Ordering::SeqCst), 0);
+
+        // The no-hint path still walks: same stats, so nothing new, but the
+        // adapter's discover is the source of the file list again.
+        let report = idx.ingest_with(&adapters, &filter, &opts).unwrap();
+        assert_eq!(discovers.load(Ordering::SeqCst), 1, "a None hint falls back to discover");
+        assert_eq!(report.new_events, 0, "fresh-stat equivalence holds whoever statted");
+    }
+
+    #[test]
+    fn a_hinted_pass_still_honours_a_foreign_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        std::fs::write(&path, b"{}\n").unwrap();
+        let discovers = Arc::new(AtomicUsize::new(0));
+        let counting = Counting { path, discovers: Arc::clone(&discovers) };
+        let hinted = counting.discover_list();
+        let adapters: Vec<Box<dyn SourceAdapter>> = vec![Box::new(counting)];
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+                params![CLAIM_KEY, format!("other:{}", now_ms())],
+            )
+            .unwrap();
+
+        let hints = |id: &str| (id == "counting").then(|| hinted.clone());
+        let report =
+            idx.ingest_with_hints(&adapters, &DateFilter::default(), &IngestOptions::default(), &hints)
+                .unwrap();
+        assert_eq!(report.files_scanned, 0, "a peer's lease skips the pass even with hints");
+        assert_eq!(discovers.load(Ordering::SeqCst), 0);
     }
 }

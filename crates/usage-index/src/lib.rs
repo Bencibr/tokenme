@@ -17,6 +17,7 @@
 //! derived at query time by [`usage_core::report::summarize`] from the live
 //! [`usage_core::PricingMap`]; the index only stores token stages and credits.
 
+mod facts;
 mod ingest;
 mod watcher;
 
@@ -101,6 +102,35 @@ CREATE TABLE IF NOT EXISTS file_state(
     events     INTEGER,
     updated_ms INTEGER
 );
+-- P1 publish path: one row per local (day, tool, session, project, model,
+-- meter) group, maintained in the same transaction as the event inserts, so a
+-- report can fold ~2.2k of these instead of ~390k events. `project`/`model`
+-- are NOT NULL with `''` standing in for the event table's NULL (a NOT NULL
+-- group key keeps the upsert simple); the fold maps `''` back to `None`.
+-- Additive to the frozen `event` schema: if it ever disagrees with the events,
+-- the reads below wipe and rebuild it lazily rather than losing data.
+CREATE TABLE IF NOT EXISTS event_rollup(
+    day        TEXT    NOT NULL,
+    tool       TEXT    NOT NULL,
+    session    TEXT    NOT NULL,
+    project    TEXT    NOT NULL DEFAULT '',
+    model      TEXT    NOT NULL DEFAULT '',
+    meter      TEXT    NOT NULL,
+    in_tok     REAL    NOT NULL,
+    cc_tok     REAL    NOT NULL,
+    cr_tok     REAL    NOT NULL,
+    out_tok    REAL    NOT NULL,
+    reason_tok REAL    NOT NULL,
+    credits    REAL    NOT NULL,
+    n          INTEGER NOT NULL,
+    nonzero    INTEGER NOT NULL,
+    min_ts     INTEGER NOT NULL,
+    max_ts     INTEGER NOT NULL,
+    PRIMARY KEY(day, tool, session, project, model, meter)
+);
+-- Serves the per-session correlated lookups (first project / last model) and
+-- the newest-event probe without a full scan.
+CREATE INDEX IF NOT EXISTS event_tool_session ON event(tool, session);
 -- Keys: `schema_version`, `index_id`, `last_ingest_ms`, and `index_claim` — the
 -- single-row ingest lease that keeps two processes off the same cursors.
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -173,7 +203,7 @@ pub(crate) fn meter_str(m: Meter) -> &'static str {
     }
 }
 
-fn meter_of(s: &str) -> Meter {
+pub(crate) fn meter_of(s: &str) -> Meter {
     match s {
         "credits" => Meter::Credits,
         _ => Meter::Tokens,
@@ -187,7 +217,7 @@ pub(crate) fn call_kind_str(k: CallKind) -> &'static str {
     }
 }
 
-fn call_kind_of(s: &str) -> CallKind {
+pub(crate) fn call_kind_of(s: &str) -> CallKind {
     match s {
         "skill" => CallKind::Skill,
         _ => CallKind::Mcp,
@@ -281,7 +311,7 @@ impl Index {
             // survive as a table that cannot answer the new queries.
             conn.execute_batch(
                 "DROP TABLE IF EXISTS event; DROP TABLE IF EXISTS call; DROP TABLE IF EXISTS quota; \
-                 DROP TABLE IF EXISTS file_state;",
+                 DROP TABLE IF EXISTS file_state; DROP TABLE IF EXISTS event_rollup;",
             )
             .map_err(sql_err)?;
             conn.execute_batch(SCHEMA).map_err(sql_err)?;
@@ -402,7 +432,10 @@ impl Index {
     /// Empties the data tables but keeps the schema and `index_id`.
     pub fn clear(&mut self) -> Result<()> {
         self.conn
-            .execute_batch("DELETE FROM event; DELETE FROM call; DELETE FROM quota; DELETE FROM file_state;")
+            .execute_batch(
+                "DELETE FROM event; DELETE FROM call; DELETE FROM quota; \
+                 DELETE FROM file_state; DELETE FROM event_rollup;",
+            )
             .map_err(sql_err)?;
         Ok(())
     }
@@ -528,6 +561,70 @@ impl Index {
         Ok(out)
     }
 
+    /// Newest event timestamp for one tool, if any.
+    pub fn newest_ts_ms(&self, tool: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT max(ts_ms) FROM event WHERE tool = ?1",
+                params![tool],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .map_err(sql_err)
+    }
+
+    /// One tool's events in insertion order, null tokens read as 0 exactly like
+    /// [`Index::all_events`]. The narrow shape is what session analytics need;
+    /// `all_events` stays the report path's full-width fetch.
+    pub fn tool_events(&self, tool: &str) -> Result<Vec<ToolEventRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session, model, ts_ms, in_tok, cc_tok, cr_tok, out_tok \
+                 FROM event WHERE tool = ?1 ORDER BY id",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![tool], |r| {
+                Ok(ToolEventRow {
+                    session: r.get(0)?,
+                    model: r.get(1)?,
+                    ts_ms: r.get(2)?,
+                    input: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                    cache_creation: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                    cache_read: r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                    output: r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+                })
+            })
+            .map_err(sql_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
+    }
+
+    /// Per-session token totals for one tool, ordered by session. `IFNULL`
+    /// matches `fetch`: a sum over all-NULL columns is 0, not NULL.
+    pub fn tool_session_totals(&self, tool: &str) -> Result<Vec<ToolSessionTotals>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session, IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), \
+                        IFNULL(sum(cr_tok), 0), IFNULL(sum(out_tok), 0), count(*) \
+                 FROM event WHERE tool = ?1 GROUP BY session ORDER BY session",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![tool], |r| {
+                Ok(ToolSessionTotals {
+                    session: r.get(0)?,
+                    input: r.get(1)?,
+                    cache_creation: r.get(2)?,
+                    cache_read: r.get(3)?,
+                    output: r.get(4)?,
+                    events: r.get::<_, i64>(5)?.max(0) as u64,
+                })
+            })
+            .map_err(sql_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
+    }
+
     pub fn files_tracked(&self) -> Result<usize> {
         self.conn
             .query_row("SELECT count(*) FROM file_state", [], |r| r.get::<_, i64>(0))
@@ -548,6 +645,15 @@ impl Index {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql_err)?;
+        // The doomed rows' ts span decides which rollup days need recomputing;
+        // read it before the deletes, inside the same transaction.
+        let doomed: (Option<i64>, Option<i64>) = tx
+            .query_row(
+                "SELECT min(ts_ms), max(ts_ms) FROM event WHERE ts_ms < ?1",
+                params![cutoff_ms],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(sql_err)?;
         tx.execute(
             "DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE ts_ms < ?1)",
             params![cutoff_ms],
@@ -560,9 +666,22 @@ impl Index {
         .map_err(sql_err)?;
         let removed =
             tx.execute("DELETE FROM event WHERE ts_ms < ?1", params![cutoff_ms]).map_err(sql_err)?;
+        // Nothing removed, nothing to fix; and absent doomed rows there is no
+        // span to iterate.
+        if removed > 0 {
+            if let (Some(lo), Some(hi)) = doomed {
+                ingest::recompute_span_tx(&tx, lo, hi)?;
+            }
+        }
         tx.commit().map_err(sql_err)?;
-        let _ = self.conn.execute_batch("PRAGMA optimize;");
         Ok(removed as u64)
+    }
+
+    /// The query planner's own statistics refresh. It scans enough of the index
+    /// that running it on every ingest pass was pure overhead; the engine calls
+    /// this once per idle cadence pass instead.
+    pub fn optimize(&self) {
+        let _ = self.conn.execute_batch("PRAGMA optimize;");
     }
 
     /// Merges what the adapters can see with what is actually indexed, so the UI
@@ -602,6 +721,29 @@ impl Index {
         }
         Ok(out)
     }
+}
+
+/// Narrow per-event row for session analytics ([`Index::tool_events`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolEventRow {
+    pub session: String,
+    pub model: Option<String>,
+    pub ts_ms: i64,
+    pub input: f64,
+    pub cache_creation: f64,
+    pub cache_read: f64,
+    pub output: f64,
+}
+
+/// One session's summed tokens for one tool ([`Index::tool_session_totals`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolSessionTotals {
+    pub session: String,
+    pub input: f64,
+    pub cache_creation: f64,
+    pub cache_read: f64,
+    pub output: f64,
+    pub events: u64,
 }
 
 /// `events` and `ids` are ascending by rowid and the incoming items are ordered

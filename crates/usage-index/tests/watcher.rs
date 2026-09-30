@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use usage_index::Watcher;
 
-fn signal_within(rx: &mpsc::Receiver<()>, budget: Duration) -> bool {
-    matches!(rx.recv_timeout(budget), Ok(()))
+fn signal_within(rx: &mpsc::Receiver<PathBuf>, budget: Duration) -> bool {
+    matches!(rx.recv_timeout(budget), Ok(_))
 }
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {
@@ -39,6 +39,24 @@ fn touching_a_watched_file_signals_once() {
     // long enough to see whether a second signal was queued behind the first.
     std::thread::sleep(Duration::from_millis(900));
     assert!(rx.try_recv().is_err(), "the burst produced more than one coalesced signal");
+}
+
+#[test]
+fn the_wake_names_the_root_that_was_touched() {
+    let _serial = serial();
+    let dir = tempfile::TempDir::new().unwrap();
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let roots = vec![a, b.clone()];
+    let _watcher = Watcher::spawn(&roots, tx).unwrap();
+
+    std::fs::write(b.join("late.jsonl"), b"{}\n").unwrap();
+    let root = rx.recv_timeout(Duration::from_secs(3)).expect("no signal within 3s");
+    assert_eq!(root, b, "the payload is the touched root, not just a bare wake");
 }
 
 #[test]
@@ -92,7 +110,7 @@ fn activity_outside_the_roots_stays_silent() {
 fn dropping_the_watcher_stops_the_thread() {
     let _serial = serial();
     let dir = tempfile::TempDir::new().unwrap();
-    let (tx, rx) = mpsc::channel::<()>();
+    let (tx, rx) = mpsc::channel::<PathBuf>();
     let roots: Vec<PathBuf> = vec![dir.path().to_path_buf()];
     {
         let watcher = Watcher::spawn(&roots, tx).unwrap();

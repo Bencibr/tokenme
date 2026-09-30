@@ -2,8 +2,11 @@
 //!
 //! JSONL logs are appended token-by-token, so a raw notify stream would fire
 //! hundreds of times per turn and every signal costs an ingest pass. Events are
-//! coalesced into one `()` per quiet period and duplicate pending notifications
-//! are dropped, so a busy machine still refreshes about once per settle-down.
+//! coalesced into one touched-root path per quiet period and duplicate pending
+//! notifications are dropped, so a busy machine still refreshes about once per
+//! settle-down. The payload is what lets the engine scope a pass: adapters
+//! whose roots were not touched can reuse their last snapshot instead of
+//! re-walking the whole forest for one tree's write.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -30,8 +33,10 @@ pub struct Watcher {
 
 /// `pending` is set by the notify callback and cleared by the debounce thread
 /// just before it signals — that is what drops duplicate pending notifications.
+/// It holds the touched root: the first root an event matched during the quiet
+/// period, because the signal must name where the change happened.
 struct State {
-    pending: Mutex<bool>,
+    pending: Mutex<Option<PathBuf>>,
     wake: Condvar,
     last_event_ms: AtomicI64,
 }
@@ -48,28 +53,35 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Watcher {
-    /// Watches every root recursively and pings `tx` once the tree goes quiet.
-    /// A root that does not exist yet is not an error: its nearest existing
-    /// ancestor is watched instead, so the source shows up as soon as the tool
-    /// creates its directory.
-    pub fn spawn(roots: &[PathBuf], tx: Sender<()>) -> Result<Watcher> {
-        // (expected path with symlinks resolved, deepest existing ancestor to watch)
-        let plans: Vec<(PathBuf, PathBuf)> = roots.iter().filter_map(|r| resolve(r)).collect();
+    /// Watches every root recursively and pings `tx` with the touched root once
+    /// the tree goes quiet. The payload is the declared root as passed in here
+    /// (first match when one event spans several roots), so the receiver can
+    /// map it straight back to the sources that declare it. A root that does
+    /// not exist yet is not an error: its nearest existing ancestor is watched
+    /// instead, so the source shows up as soon as the tool creates its
+    /// directory.
+    pub fn spawn(roots: &[PathBuf], tx: Sender<PathBuf>) -> Result<Watcher> {
+        // (declared root reported in wakes, expected path with symlinks
+        // resolved, deepest existing ancestor to watch)
+        let plans: Vec<(PathBuf, PathBuf, PathBuf)> = roots
+            .iter()
+            .filter_map(|r| resolve(r).map(|(e, watch)| (r.clone(), e, watch)))
+            .collect();
         // `coarse` marks a root that does not exist yet: it is watched through
         // an ancestor, so events reported at-or-above the root must count. A
         // root that exists is strict — on macOS FSEvents coalesces a busy
         // machine's unrelated churn into ancestor-level paths, and accepting
         // those made the watcher fire for sibling tempdirs on CI.
-        let expected: Vec<(PathBuf, bool)> = plans
+        let expected: Vec<(PathBuf, bool, PathBuf)> = plans
             .iter()
-            .map(|(e, watch)| {
+            .map(|(declared, e, watch)| {
                 let canonical_watch = std::fs::canonicalize(watch).unwrap_or_else(|_| watch.clone());
-                (e.clone(), &canonical_watch != e)
+                (e.clone(), &canonical_watch != e, declared.clone())
             })
             .collect();
 
         let state = Arc::new(State {
-            pending: Mutex::new(false),
+            pending: Mutex::new(None),
             wake: Condvar::new(),
             last_event_ms: AtomicI64::new(0),
         });
@@ -81,13 +93,19 @@ impl Watcher {
             };
             // Ancestor watching is deliberately coarse — `$HOME` is a
             // legitimate stand-in for a not-yet-created `~/.claude/projects` —
-            // so everything reported is filtered against the declared roots.
-            if !ev.paths.iter().any(|p| relevant(&expected, p)) {
+            // so everything reported is filtered against the declared roots,
+            // and an event matching none of them is skipped rather than
+            // reported against a guessed root.
+            let Some(root) = ev.paths.iter().find_map(|p| matching_root(&expected, p)) else {
                 return;
-            }            callback_state.last_event_ms.store(epoch_ms(), Ordering::SeqCst);
+            };
+            callback_state.last_event_ms.store(epoch_ms(), Ordering::SeqCst);
             let mut pending = lock(&callback_state.pending);
-            if !*pending {
-                *pending = true;
+            if pending.is_none() {
+                // First root wins. A second root touched inside the same quiet
+                // period surfaces on its own next event or the cadence timer,
+                // which re-discovers everything anyway.
+                *pending = Some(root);
                 callback_state.wake.notify_all();
             }
         })
@@ -99,7 +117,7 @@ impl Watcher {
         })?;
 
         let mut watched: Vec<&PathBuf> = Vec::new();
-        for (_, target) in &plans {
+        for (_, _, target) in &plans {
             if target.parent().is_none() {
                 // Never install a machine-wide watch on the filesystem root; a
                 // later `spawn` after the tool creates its dir is the fix.
@@ -142,11 +160,11 @@ impl Drop for Watcher {
     }
 }
 
-fn debounce(state: Arc<State>, stop: Arc<AtomicBool>, tx: Sender<()>) {
+fn debounce(state: Arc<State>, stop: Arc<AtomicBool>, tx: Sender<PathBuf>) {
     let mut guard = lock(&state.pending);
     loop {
         // The timeout is only a safety net against a lost notification.
-        while !*guard && !stop.load(Ordering::SeqCst) {
+        while guard.is_none() && !stop.load(Ordering::SeqCst) {
             let (g, _) = state
                 .wake
                 .wait_timeout(guard, Duration::from_millis(QUIET_MS as u64))
@@ -172,9 +190,14 @@ fn debounce(state: Arc<State>, stop: Arc<AtomicBool>, tx: Sender<()>) {
         }
         // Cleared before sending, so an event racing the send re-arms the
         // pending flag rather than being swallowed.
-        *guard = false;
+        let root = match guard.take() {
+            Some(root) => root,
+            // The wait above only releases while a root is pending; if that
+            // ever fails to hold, waiting again beats sending a guessed root.
+            None => continue,
+        };
         drop(guard);
-        if tx.send(()).is_err() {
+        if tx.send(root).is_err() {
             return;
         }
         guard = lock(&state.pending);
@@ -213,16 +236,18 @@ fn nearest_existing(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn relevant(expected: &[(PathBuf, bool)], path: &Path) -> bool {
-    let Some(resolved) = nearest_existing(path) else {
-        return false;
-    };
-    expected.iter().any(|(e, coarse)| {
-        // Inside the root always counts. The ancestor direction — an event
-        // reported at-or-above the root — counts only for a root watched
-        // through its ancestor on purpose; for an existing root it is how a
-        // busy machine's unrelated churn (sibling tempdirs, runner scratch)
-        // leaks in, and it must stay out.
-        resolved.starts_with(e) || (*coarse && e.starts_with(&resolved))
-    })
+/// The declared root an event path belongs to, or `None` when it matches none.
+fn matching_root(expected: &[(PathBuf, bool, PathBuf)], path: &Path) -> Option<PathBuf> {
+    let resolved = nearest_existing(path)?;
+    expected
+        .iter()
+        .find(|(e, coarse, _)| {
+            // Inside the root always counts. The ancestor direction — an event
+            // reported at-or-above the root — counts only for a root watched
+            // through its ancestor on purpose; for an existing root it is how a
+            // busy machine's unrelated churn (sibling tempdirs, runner scratch)
+            // leaks in, and it must stay out.
+            resolved.starts_with(e) || (*coarse && e.starts_with(&resolved))
+        })
+        .map(|(_, _, declared)| declared.clone())
 }
