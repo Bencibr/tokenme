@@ -21,13 +21,15 @@ const VIEW_LABEL: Record<ViewMode, string> = { hours: "今日", heat: "活动" }
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
-/** Monday-anchored columns; the leading partial week is trimmed. */
+/** Monday-anchored columns; the leading partial week is trimmed and the
+ * trailing one is kept short — the graph must reach today, or "活动" reads as
+ * silently stale every day of the week after Sunday. */
 function toWeeks(cells: HeatCell[]): HeatCell[][] {
   if (cells.length === 0) return [];
   const offset = (new Date(`${cells[0].date}T00:00:00`).getDay() + 6) % 7;
   const aligned = cells.slice(offset);
   const cols: HeatCell[][] = [];
-  for (let i = 0; i + 7 <= aligned.length; i += 7) cols.push(aligned.slice(i, i + 7));
+  for (let i = 0; i < aligned.length; i += 7) cols.push(aligned.slice(i, i + 7));
   return cols.slice(-WEEKS_SHOWN);
 }
 
