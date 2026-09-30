@@ -66,7 +66,6 @@ const [page, setPage] = useState<PageKey>(() => {
       .fetchReport(false)
       .then((r) => alive && setReport(r))
       .catch((e: unknown) => alive && setError(String(e)));
-    void bridge.trayState().then((s) => alive && setTray(s));
     // The theme pin and the money flag live in settings.json; applying them
     // before the first paint matters more than the rest of the sheet's state,
     // so they load at boot.
@@ -104,9 +103,22 @@ const [page, setPage] = useState<PageKey>(() => {
       quietCheck();
     });
     const updateTick = window.setInterval(quietCheck, 24 * 60 * 60 * 1000);
+    // get_tray_state needs a published report to answer; the mount-time read
+    // loses that race ("indexing") on a cold boot, so the label would pin to
+    // the default mode forever. Re-read on every report — the status bar then
+    // tracks the persisted 显示模式 instead of the fallback.
+    const readTray = () =>
+      void bridge
+        .trayState()
+        .then((s) => {
+          if (alive && s) setTray(s);
+        })
+        .catch(() => {});
+    readTray();
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
+      readTray();
     });
     // The tray menu's "本周"/"今日" entries open the panel already focused on
     // that period, so the numbers match the menu item that was clicked.
