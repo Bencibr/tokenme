@@ -196,6 +196,7 @@ export interface Bridge {
   checkUpdate: () => Promise<UpdateStatus>;
   downloadUpdate: () => Promise<UpdateStatus>;
   installUpdate: () => Promise<void>;
+  onUpdateProgress: (handler: (progress: DownloadProgress) => void) => () => void;
   showPanel: () => Promise<void>;
   /** Hands the press to the Rust drag loop; the native move loop cannot move a
    *  non-activating window. Resolves immediately; the drag runs in Rust. */
@@ -225,4 +226,11 @@ export interface UpdateStatus {
   phase: string;
   message: string;
   version: string | null;
+}
+
+/** Streamed while the update artifact downloads: `下载中 {percent}%`. */
+export interface DownloadProgress {
+  percent: number;
+  downloaded: number;
+  total: number;
 }

@@ -26,10 +26,29 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
   const [settings, setSettings] = useState<PanelSettings | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  // 0–100 while the artifact streams in; the button reads 下载中 {n}%.
+  const [progress, setProgress] = useState<number | null>(null);
+
+  useEffect(() => bridge.onUpdateProgress((p) => setProgress(p.percent)), []);
 
   useEffect(() => {
     let alive = true;
-    void bridge.panelSettings().then((s) => alive && setSettings(s));
+    void bridge.panelSettings().then((s) => {
+      if (!alive) return;
+      setSettings(s);
+      // 打开设置就问一次（开关开着时）：底部的版本行不必等到用户切开关才有答案。
+      if (s.auto_update_check && s.version !== "dev") {
+        setUpdateBusy(true);
+        void bridge
+          .checkUpdate()
+          .then((status) => {
+            // quiet = 检查失败或已是最新：没有可行动的信息就不渲染任何行。
+            if (alive) setUpdate(status.phase === "available" || status.phase === "downloaded" ? status : null);
+          })
+          .catch(() => alive && setUpdate(null))
+          .finally(() => alive && setUpdateBusy(false));
+      }
+    });
     return () => {
       alive = false;
     };
@@ -102,6 +121,7 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
       setUpdate({ phase: "error", message: String(e), version: null });
     } finally {
       setUpdateBusy(false);
+      setProgress(null);
     }
   };
 
@@ -214,7 +234,7 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
         <div className="sheet-row">
           <div>
             <div className="sheet-label">自动检查更新</div>
-            <div className="sheet-hint">开启后启动时检查 GitHub 最新版，发现新版本弹窗询问</div>
+            <div className="sheet-hint">开启后启动时和每天各静默检查一次，发现新版本在底部提示</div>
           </div>
           <button
             type="button"
@@ -225,24 +245,6 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             onClick={() => setAutoUpdateCheck(!(settings?.auto_update_check ?? false))}
           />
         </div>
-
-        {update ? (
-          <div className="sheet-row">
-            <div>
-              <div className="sheet-label">{update.message}</div>
-              {update.phase === "available" || update.phase === "downloaded" ? (
-                <button
-                  type="button"
-                  className="sheet-action"
-                  disabled={updateBusy}
-                  onClick={() => void runUpdate()}
-                >
-                  {updateBusy ? "处理中…" : update.phase === "available" ? "下载并安装" : "重启到新版本"}
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
 
         <div className="sheet-row">
           <div className="sheet-label">开机自动启动</div>
@@ -300,7 +302,30 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
           </div>
         ) : null}
 
-        <p className="sheet-foot num">TokenMe v{settings?.version ?? "…"}</p>
+        <p className="sheet-foot num">
+          <span>TokenMe v{settings?.version ?? "…"}</span>
+          {update ? (
+            <span className="sheet-foot-update">
+              <span className={update.phase === "error" ? "update-error" : undefined}>{update.message}</span>
+              {update.phase === "available" || update.phase === "downloaded" ? (
+                <button
+                  type="button"
+                  className="sheet-action"
+                  disabled={updateBusy}
+                  onClick={() => void runUpdate()}
+                >
+                  {updateBusy
+                    ? progress != null
+                      ? `下载中 ${Math.round(progress)}%`
+                      : "处理中…"
+                    : update.phase === "available"
+                      ? "下载并安装"
+                      : "重启到新版本"}
+                </button>
+              ) : null}
+            </span>
+          ) : null}
+        </p>
       </div>
     </div>
   );

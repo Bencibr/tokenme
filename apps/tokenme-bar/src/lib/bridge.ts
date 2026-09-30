@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
-import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus } from "../types";
+import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -196,6 +196,20 @@ export const bridge: Bridge = {
   async installUpdate(): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("install_update");
+  },
+
+  onUpdateProgress(handler: (progress: DownloadProgress) => void): () => void {
+    if (!inTauri) return () => {};
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void listen<DownloadProgress>("update-download-progress", (event) => handler(event.payload)).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   },
 
   async setBubbleEnabled(on: boolean): Promise<void> {

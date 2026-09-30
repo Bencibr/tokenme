@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { PageKey, PeriodKey, Report, TrayMode, TrayState } from "./types";
+import type { PageKey, PanelSettings, PeriodKey, Report, TrayMode, TrayState } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
@@ -59,28 +59,37 @@ const [page, setPage] = useState<PageKey>(() => {
     // The theme pin and the money flag live in settings.json; applying them
     // before the first paint matters more than the rest of the sheet's state,
     // so they load at boot.
+    let known: PanelSettings | null = null;
+    // One quiet version check per boot plus one per day: a menu-bar panel
+    // stays running for weeks, so boot-only would effectively never check.
+    // Any failure stays silent. With auto_update_check on, the check runs
+    // through the updater commands so the settings sheet can offer a
+    // one-click download + install.
+    const quietCheck = () => {
+      const s = known;
+      if (!s || !inTauri || s.version === "dev") return;
+      if (s.auto_update_check) {
+        void bridge
+          .checkUpdate()
+          .then((status) => {
+            if (status.phase === "available" && status.version) {
+              alive && setUpdate({ latest: status.version, url: RELEASE_PAGE_URL });
+            }
+          })
+          .catch(() => {});
+      } else {
+        void checkForUpdate(s.version).then((u) => alive && setUpdate(u));
+      }
+    };
     void bridge.panelSettings().then((s) => {
+      if (!alive) return;
+      known = s;
       applyTheme(s.theme);
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
-      // One quiet version check per boot; any failure stays silent. With
-      // auto_update_check on, the check runs through the updater commands so
-      // the settings sheet can offer a one-click download + install.
-      if (inTauri && s.version !== "dev") {
-        if (s.auto_update_check) {
-          void bridge
-            .checkUpdate()
-            .then((status) => {
-              if (status.phase === "available" && status.version) {
-                alive && setUpdate({ latest: status.version, url: RELEASE_PAGE_URL });
-              }
-            })
-            .catch(() => {});
-        } else {
-          void checkForUpdate(s.version).then((u) => alive && setUpdate(u));
-        }
-      }
+      quietCheck();
     });
+    const updateTick = window.setInterval(quietCheck, 24 * 60 * 60 * 1000);
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
@@ -92,6 +101,7 @@ const [page, setPage] = useState<PageKey>(() => {
     });
     return () => {
       alive = false;
+      window.clearInterval(updateTick);
       un();
       unPeriod();
     };

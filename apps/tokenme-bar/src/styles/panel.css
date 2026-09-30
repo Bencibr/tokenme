@@ -1658,11 +1658,32 @@
 }
 
 .sheet-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
   margin: var(--s2) 0 0;
   padding-top: var(--s2);
   border-top: 1px solid var(--hair);
   font-size: var(--t-meta);
   color: var(--ink-3);
+}
+
+/* 更新提示跟在版本号后面：一句话 + 文字级按钮，窄面板上换行不打架。 */
+.sheet-foot-update {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--accent);
+}
+
+.sheet-foot-update .sheet-action {
+  margin-top: 0;
+}
+
+.sheet-foot-update .update-error {
+  color: var(--bad);
 }
 
 /* iOS-shaped switch: the panel's only boolean, so it gets the control people
