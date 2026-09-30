@@ -9,12 +9,16 @@ interface SectionProps {
    *  control (the 活动 section's 今日/活动 view seg). */
   head?: React.ReactNode;
   children: React.ReactNode;
+  /** Default true. False drops the section's bottom hairline — for a section
+      whose body is a transient wait, where the line would strand in blank
+      panel space instead of separating two blocks of content. */
+  divider?: boolean;
 }
 
 /** A hairline-separated block. Deliberately not a card: no radius, no shadow. */
-export function Section({ label, meta, trail, head, children }: SectionProps) {
+export function Section({ label, meta, trail, head, children, divider = true }: SectionProps) {
   return (
-    <section className="sec">
+    <section className={divider ? "sec" : "sec sec-nodiv"}>
       <div className="sec-hd">
         {head ?? (
           <>

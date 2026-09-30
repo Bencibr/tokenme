@@ -169,6 +169,13 @@ pub struct Report {
     #[serde(default)]
     pub hourly: Vec<HourCell>,
     pub quotas: Vec<QuotaView>,
+    /// True while the quota probes have not run yet: the boot publish skips
+    /// them on purpose and the post-scan publish carries the numbers. The
+    /// frontend shows a loading state instead of a strip that vanishes for no
+    /// visible reason. Defaults off — reports without the field (older
+    /// snapshots, the browser preview) read as "already settled".
+    #[serde(default)]
+    pub quotas_pending: bool,
     pub sources: Vec<SourceStatus>,
     pub pricing: PricingMeta,
     pub recent_sessions: Vec<SessionRow>,
@@ -785,6 +792,9 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         heatmap,
         hourly,
         quotas,
+        // The caller (the panel engine) flips this when its boot publish
+        // skipped the probes; summarize itself has no opinion.
+        quotas_pending: false,
         sources: opts.sources.clone(),
         pricing: opts.pricing.meta().clone(),
         recent_sessions,

@@ -152,6 +152,8 @@ export interface Report {
   /** Today by local hour, 24 slots. Older snapshots may omit it (empty). */
   hourly: HourCell[];
   quotas: QuotaView[];
+  /** True until the quota probes have run (boot publishes without them). */
+  quotas_pending?: boolean;
   sources: SourceStatus[];
   pricing: PricingMeta;
   recent_sessions: SessionRow[];

@@ -64,25 +64,52 @@
   color: var(--ink-3);
 }
 
-.boot-ring {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: 3px solid var(--track);
-  border-top-color: var(--accent);
-  animation: boot-spin 0.9s linear infinite;
+/* 通用加载动画：品牌同心双半环反向旋转（外环逆时针、内弧顺时针）。
+   任何耗时的等待处直接 <Loading />。 */
+.loading {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
 }
 
-@keyframes boot-spin {
+/* transform-origin 相对 viewBox：两段弧的公共圆心 (24,24)。 */
+.loading path {
+  transform-box: view-box;
+  transform-origin: center;
+}
+
+.loading .loading-arc-hi {
+  stroke: var(--accent);
+  animation: loading-spin-ccw 1.3s linear infinite;
+}
+
+.loading .loading-arc-lo {
+  stroke: color-mix(in srgb, var(--accent) 28%, transparent);
+  animation: loading-spin-cw 0.9s linear infinite;
+}
+
+.loading-label {
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+@keyframes loading-spin-cw {
   to {
     transform: rotate(360deg);
   }
 }
 
+@keyframes loading-spin-ccw {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .boot-ring {
+  .loading .loading-arc-hi,
+  .loading .loading-arc-lo {
     animation: none;
-    border-top-color: var(--accent);
   }
 }
 
@@ -361,6 +388,12 @@
   max-width: 100%;
   padding: 10px var(--s4) var(--s3);
   border-bottom: 1px solid var(--hair);
+}
+
+/* 等待型区块（配额探测中）不带底线：下面是空白面板，分隔线没有分隔
+   的对象，只会读成一根多余的横线。 */
+.sec-nodiv {
+  border-bottom: none;
 }
 
 .sec-hd {
@@ -1768,6 +1801,14 @@
 
 .sheet-foot-update .update-error {
   color: var(--bad);
+}
+
+/* 配额探测进行中的等待行：内容居中，弱化到与区块同级。 */
+.quota-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s3) 0 var(--s2);
 }
 
 /* iOS-shaped switch: the panel's only boolean, so it gets the control people

@@ -366,7 +366,10 @@ fn publish_with_quota(
         polled_quota,
         budgets: app.state::<Shared>().settings().budgets,
     };
-    let report = usage_core::report::summarize(events, &opts);
+    let mut report = usage_core::report::summarize(events, &opts);
+    // The boot publish deliberately skips the probes: until the post-scan
+    // publish lands, the quota strip shows "探测中" instead of vanishing.
+    report.quotas_pending = !poll_quota;
     if let Ok(mut slot) = app.state::<Shared>().report.lock() {
         *slot = Some(report.clone());
     }

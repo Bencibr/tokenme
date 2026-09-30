@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Loading } from "./Loading";
 import type { QuotaOrder, QuotaView } from "../types";
 import { bridge } from "../lib/bridge";
 import { toolColor, toolDisplay, until } from "../lib/format";
@@ -79,7 +80,16 @@ const MOVE_CANCEL_PX = 8;
  * because a "日/月" cap sitting between vendor windows reads as one of them
  * otherwise.
  */
-export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }) {
+export function QuotaStrip({
+  quotas,
+  now,
+  pending,
+}: {
+  quotas: QuotaView[];
+  now: number;
+  /** True while the boot publish has not run the probes yet. */
+  pending?: boolean;
+}) {
   const live = quotas.filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now);
   const [order, setOrderState] = useState<QuotaOrder>(savedOrder);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -111,7 +121,22 @@ export function QuotaStrip({ quotas, now }: { quotas: QuotaView[]; now: number }
       .catch(() => {});
   }, []);
 
-  if (live.length === 0) return null;
+  if (live.length === 0) {
+    // 探测未跑（boot 的首次发布故意跳过配额）：给一个可见的等待，
+    // 而不是让配额区块无声消失。pending 为假且为空 = 真没有配额。
+    if (pending) {
+      return (
+        // divider={false}: 探测没跑完时下面是空白面板，底线会孤零零悬在
+        // 空白里，看起来像一根多余的横线。
+        <Section label="配额" divider={false}>
+          <div className="quota-loading">
+            <Loading size={22} label="配额探测中…" />
+          </div>
+        </Section>
+      );
+    }
+    return null;
+  }
 
   const byTool = new Map<string, QuotaView[]>();
   for (const q of live) {
