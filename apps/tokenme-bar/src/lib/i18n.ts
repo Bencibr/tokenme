@@ -17,7 +17,11 @@ function detect(): Lang {
   return sys.toLowerCase().startsWith("en") ? "en" : "zh";
 }
 
-export const lang: Lang = detect();
+export const lang: Lang = detect()
+
+// Accessibility and translation tools read the document language; keep it in
+// step with the dictionary actually rendering.
+document.documentElement.lang = lang === "en" ? "en" : "zh-CN";;
 
 const zh = {
   /* 周期与相对时间 -------------------------------------------------------- */
