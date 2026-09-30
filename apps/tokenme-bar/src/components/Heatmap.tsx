@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import type { HeatCell, HourCell } from "../types";
+import type { HeatCell, HourCell, PeriodKey } from "../types";
 import { compactTokens, count, formatDateLabel, money } from "../lib/format";
 import { useMoney } from "../lib/display";
-import { monthLabel, t } from "../lib/i18n";
+import { monthLabel, t, weekdayLabel } from "../lib/i18n";
 import { Section } from "./Section";
 
 /* The two pitches are decoupled on purpose: 7 rows can never fill a 96px body
@@ -18,9 +18,32 @@ const LEVELS = [1, 2, 3, 4];
 
 const VIEWS = ["hours", "heat"] as const;
 type ViewMode = (typeof VIEWS)[number];
-const VIEW_LABEL: Record<ViewMode, () => string> = { hours: () => t("view.today"), heat: () => t("view.heat") };
+const VIEW_HEAT = () => t("view.heat");
+/* The bars view's tab reads with the top period: 今日 / 本周 / 本月 / 今年. */
+const PERIOD_VIEW: Record<PeriodKey, () => string> = {
+  day: () => t("view.today"),
+  week: () => t("period.week"),
+  month: () => t("period.month"),
+  year: () => t("period.year"),
+};
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** One bar of the week/month/year views, derived from the heatmap's daily
+ * cells — never from the period summary. The readout sums exactly these bars,
+ * so chart and total agree even minutes after a publish (the hours view's
+ * dayTotals contract, extended). */
+interface Bar {
+  tokens: number;
+  cost: number;
+  requests: number;
+  future: boolean;
+  now: boolean;
+  axis: string;
+  hover: string;
+}
+
+const isoDate = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 
 /** Monday-anchored columns; the leading partial week is trimmed and the
  * trailing one is kept short — the graph must reach today, or "活动" reads as
@@ -59,9 +82,10 @@ function monthMarkers(weeks: HeatCell[][]) {
   return out;
 }
 
-export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: string; hours: HourCell[] }) {
+export function Heatmap({ cells, today, hours, period }: { cells: HeatCell[]; today: string; hours: HourCell[]; period: PeriodKey }) {
   const [hover, setHover] = useState<HeatCell | null>(null);
   const [hoverHour, setHoverHour] = useState<number | null>(null);
+  const [hoverBar, setHoverBar] = useState<Bar | null>(null);
   // An old snapshot reports no hourly vec; the section then stays heat-only.
   const [mode, setMode] = useState<ViewMode>(() => (hours.length === HOUR_SLOTS ? "hours" : "heat"));
   const showMoney = useMoney();
@@ -96,6 +120,81 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
   const maxHour = Math.max(...hours.map((h) => h.total_tokens), 1);
   const nowHour = new Date().getHours();
 
+  /* Week/month/year bars from the same daily cells the heatmap renders. A day
+   * past today (or an empty past month) has no cell and stays a stub; days the
+   * calendar puts after today get the future hatch. The year view undercounts
+   * only a January that predates the 371-day window. */
+  let bars: Bar[] = [];
+  let weekRange = "";
+  if (period === "week") {
+    const t0 = new Date(`${today}T00:00:00`);
+    const monday = new Date(t0);
+    monday.setDate(t0.getDate() - ((t0.getDay() + 6) % 7));
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+    weekRange = `${monday.getMonth() + 1}/${monday.getDate()} – ${sunday.getMonth() + 1}/${sunday.getDate()}`;
+    const cellMap = new Map(cells.map((c) => [c.date, c]));
+    bars = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + i);
+      const date = isoDate(d);
+      const cell = cellMap.get(date);
+      return {
+        tokens: cell?.total_tokens ?? 0,
+        cost: cell?.cost ?? 0,
+        requests: cell?.requests ?? 0,
+        future: date > today,
+        now: date === today,
+        axis: weekdayLabel(i),
+        hover: formatDateLabel(date),
+      };
+    });
+  } else if (period === "month") {
+    const y = Number(today.slice(0, 4));
+    const m = Number(today.slice(5, 7));
+    const dayNum = Number(today.slice(8, 10));
+    const days = new Date(y, m, 0).getDate();
+    const cellMap = new Map(cells.map((c) => [c.date, c]));
+    bars = Array.from({ length: days }, (_, i) => {
+      const d = i + 1;
+      const date = `${y}-${pad2(m)}-${pad2(d)}`;
+      const cell = cellMap.get(date);
+      return {
+        tokens: cell?.total_tokens ?? 0,
+        cost: cell?.cost ?? 0,
+        requests: cell?.requests ?? 0,
+        future: d > dayNum,
+        now: d === dayNum,
+        // 31 labels never fit under these columns; every fifth dates the axis.
+        axis: d === 1 || d % 5 === 0 ? String(d) : "",
+        hover: formatDateLabel(date),
+      };
+    });
+  } else if (period === "year") {
+    const y = today.slice(0, 4);
+    const curM = Number(today.slice(5, 7));
+    bars = Array.from({ length: 12 }, (_, i) => {
+      const m = i + 1;
+      const prefix = `${y}-${pad2(m)}`;
+      let tokens = 0;
+      let cost = 0;
+      let requests = 0;
+      for (const c of cells) {
+        if (c.date.startsWith(prefix)) {
+          tokens += c.total_tokens;
+          cost += c.cost;
+          requests += c.requests;
+        }
+      }
+      return { tokens, cost, requests, future: m > curM, now: m === curM, axis: monthLabel(m), hover: monthLabel(m) };
+    });
+  }
+  const barTotals = bars.reduce(
+    (acc, b) => ({ tokens: acc.tokens + b.tokens, cost: acc.cost + b.cost }),
+    { tokens: 0, cost: 0 },
+  );
+  const maxBar = Math.max(...bars.map((b) => b.tokens), 1);
+
   // A full pitch per column: the trailing gap is the right margin where the
   // today ring's stroke bleeds — a width hugging the last cell clips it.
   const width = weeks.length * PITCH_X;
@@ -109,11 +208,11 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
     setMode(VIEWS[i]);
   };
 
-  const hourRead = (h: HourCell) =>
+  const tail = (cost: number, requests: number) =>
     showMoney ? (
       <>
         {" "}
-        · {money(h.cost)} · {count(h.requests)} {t("unit.times")}
+        · {money(cost)} · {count(requests)} {t("unit.times")}
       </>
     ) : null;
 
@@ -135,12 +234,20 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
                   tabIndex={v === mode ? 0 : -1}
                   onClick={() => setMode(v)}
                 >
-                  {VIEW_LABEL[v]()}
+                  {v === "heat" ? VIEW_HEAT() : PERIOD_VIEW[period]()}
                 </button>
               ))}
             </div>
             <span className="sec-meta num">
-              {mode === "hours" ? formatDateLabel(today) : t("heat.weeks", { n: weeks.length })}
+              {mode === "heat"
+                ? t("heat.weeks", { n: weeks.length })
+                : period === "day"
+                  ? formatDateLabel(today)
+                  : period === "week"
+                    ? weekRange
+                    : period === "month"
+                      ? monthLabel(Number(today.slice(5, 7)))
+                      : today.slice(0, 4)}
             </span>
           </>
         ) : undefined
@@ -149,43 +256,97 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
       {hasHours && mode === "hours" ? (
         <div className="view view-hours">
           <div className="chart-body">
-            <div className="hours-chart" role="radiogroup" aria-label={t("hours.a11y")} onMouseLeave={() => setHoverHour(null)}>
-              {hours.map((h, i) => (
-                <div
-                  key={i}
-                  className="hb-col"
-                  role="img"
-                  aria-label={t("hour.aria", { h: pad2(i), t: compactTokens(h.total_tokens) })}
-                  data-now={i === nowHour || undefined}
-                  data-future={i > nowHour || undefined}
-                  onMouseEnter={() => setHoverHour(i)}
-                >
-                  <div className="hb-barw">
-                    <span
-                      className="hb-bar"
-                      style={{ height: h.total_tokens > 0 ? `${Math.max(4, Math.round((h.total_tokens / maxHour) * 100))}%` : 0 }}
-                    />
-                  </div>
-                  <span className="hb-lab">{i % 3 === 0 ? pad2(i) : ""}</span>
-                </div>
-              ))}
+            <div
+              className="hours-chart"
+              role="radiogroup"
+              aria-label={
+                period === "day"
+                  ? t("hours.a11y")
+                  : period === "week"
+                    ? t("bars.a11y.week")
+                    : period === "month"
+                      ? t("bars.a11y.month")
+                      : t("bars.a11y.year")
+              }
+              onMouseLeave={() => {
+                setHoverHour(null);
+                setHoverBar(null);
+              }}
+            >
+              {period === "day"
+                ? hours.map((h, i) => (
+                    <div
+                      key={i}
+                      className="hb-col"
+                      role="img"
+                      aria-label={t("hour.aria", { h: pad2(i), t: compactTokens(h.total_tokens) })}
+                      data-now={i === nowHour || undefined}
+                      data-future={i > nowHour || undefined}
+                      onMouseEnter={() => setHoverHour(i)}
+                    >
+                      <div className="hb-barw">
+                        <span
+                          className="hb-bar"
+                          style={{ height: h.total_tokens > 0 ? `${Math.max(4, Math.round((h.total_tokens / maxHour) * 100))}%` : 0 }}
+                        />
+                      </div>
+                      <span className="hb-lab">{i % 3 === 0 ? pad2(i) : ""}</span>
+                    </div>
+                  ))
+                : bars.map((b, i) => (
+                    <div
+                      key={i}
+                      className="hb-col"
+                      role="img"
+                      aria-label={`${b.hover} · ${compactTokens(b.tokens)} tokens`}
+                      data-now={b.now || undefined}
+                      data-future={b.future || undefined}
+                      onMouseEnter={() => setHoverBar(b)}
+                    >
+                      <div className="hb-barw">
+                        <span
+                          className="hb-bar"
+                          style={{ height: b.tokens > 0 ? `${Math.max(4, Math.round((b.tokens / maxBar) * 100))}%` : 0 }}
+                        />
+                      </div>
+                      <span className="hb-lab">{b.axis}</span>
+                    </div>
+                  ))}
             </div>
           </div>
           <div className="chart-foot">
             <span className="chart-read num" role="status" aria-live="off">
-              {hoverHour !== null ? (
+              {period === "day" ? (
+                hoverHour !== null ? (
+                  <>
+                    {t("read.hour", { h: pad2(hoverHour), t: compactTokens(hours[hoverHour].total_tokens) })}
+                    {hours[hoverHour].total_tokens > 0 ? tail(hours[hoverHour].cost, hours[hoverHour].requests) : null}
+                  </>
+                ) : (
+                  <>
+                    {t("read.day", { t: compactTokens(dayTotals.tokens) })}
+                    {showMoney ? <> · {money(dayTotals.cost)}</> : null}
+                  </>
+                )
+              ) : hoverBar ? (
                 <>
-                  {t("read.hour", { h: pad2(hoverHour), t: compactTokens(hours[hoverHour].total_tokens) })}
-                  {hours[hoverHour].total_tokens > 0 ? hourRead(hours[hoverHour]) : null}
+                  {hoverBar.hover} · {compactTokens(hoverBar.tokens)} tokens
+                  {hoverBar.tokens > 0 ? tail(hoverBar.cost, hoverBar.requests) : null}
                 </>
               ) : (
                 <>
-                  {t("read.day", { t: compactTokens(dayTotals.tokens) })}
-                  {showMoney ? <> · {money(dayTotals.cost)}</> : null}
+                  {period === "week"
+                    ? t("read.week", { t: compactTokens(barTotals.tokens) })
+                    : period === "month"
+                      ? t("read.month", { t: compactTokens(barTotals.tokens) })
+                      : t("read.year", { t: compactTokens(barTotals.tokens) })}
+                  {showMoney ? <> · {money(barTotals.cost)}</> : null}
                 </>
               )}
             </span>
-            <span className="chart-side hours-now num">{t("now.hour", { h: pad2(nowHour) })}</span>
+            {period === "day" ? (
+              <span className="chart-side hours-now num">{t("now.hour", { h: pad2(nowHour) })}</span>
+            ) : null}
           </div>
         </div>
       ) : (

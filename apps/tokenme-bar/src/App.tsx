@@ -36,7 +36,12 @@ export default function App() {
 
 function PanelApp() {
   const [report, setReport] = useState<Report | null>(null);
-  const [period, setPeriod] = useState<PeriodKey>("day");
+  // Dev/QA affordance: ?period=week deep-links a stats period; anything unknown
+// is today. The tray's 本周/今日 entries still override it at runtime.
+const [period, setPeriod] = useState<PeriodKey>(() => {
+  const p = new URLSearchParams(location.search).get("period");
+  return p === "week" || p === "month" || p === "year" ? p : "day";
+});
   // Dev/QA affordance: ?page=ranks deep-links a page; anything unknown is overview.
 const [page, setPage] = useState<PageKey>(() => {
   const p = new URLSearchParams(location.search).get("page");
@@ -242,7 +247,7 @@ const [page, setPage] = useState<PageKey>(() => {
             <div className="page" key={page}>
               {page === "overview" ? (
                 <>
-                  <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} />
+                  <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} period={period} />
                   <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} />
                 </>
               ) : null}

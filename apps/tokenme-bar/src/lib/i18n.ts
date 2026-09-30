@@ -86,6 +86,12 @@ const zh = {
   "read.hour": "{h} 时 · {t} tokens",
   "read.hour.tail": " · {c} · {n} 次",
   "read.day": "今日共 {t} tokens",
+  "read.week": "本周共 {t} tokens",
+  "read.month": "本月共 {t} tokens",
+  "read.year": "今年共 {t} tokens",
+  "bars.a11y.week": "本周按日消耗",
+  "bars.a11y.month": "本月按日消耗",
+  "bars.a11y.year": "今年按月消耗",
   "now.hour": "现在 {h} 时",
   "heat.aria.money": "近 {n} 周活动，共 {t} tokens，花费 {c}",
   "heat.aria.plain": "近 {n} 周活动，共 {t} tokens",
@@ -301,6 +307,12 @@ const en: Record<StrKey, string> = {
   "read.hour": "{h}:00 · {t} tokens",
   "read.hour.tail": " · {c} · {n} reqs",
   "read.day": "Today · {t} tokens",
+  "read.week": "This week · {t} tokens",
+  "read.month": "This month · {t} tokens",
+  "read.year": "This year · {t} tokens",
+  "bars.a11y.week": "This week by day",
+  "bars.a11y.month": "This month by day",
+  "bars.a11y.year": "This year by month",
   "now.hour": "Now {h}:00",
   "heat.aria.money": "{n}-week activity · {t} tokens · {c}",
   "heat.aria.plain": "{n}-week activity · {t} tokens",
@@ -458,6 +470,13 @@ export function t(key: StrKey, vars?: Record<string, string | number>): string {
 const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export function monthLabel(month: number): string {
   return lang === "en" ? MONTHS_EN[month - 1] ?? String(month) : `${month}月`;
+}
+
+/** 周一锚定的星期短名：周期联动柱状图的 7 根轴标（zh 单字 "一"，en 三字母 "Mon"）。 */
+const DAYS_EN = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DAYS_ZH = "一二三四五六日";
+export function weekdayLabel(mondayIndex: number): string {
+  return lang === "en" ? DAYS_EN[mondayIndex] ?? "" : DAYS_ZH[mondayIndex] ?? "";
 }
 
 /** 系统语言代码（Rust 侧托盘/更新文案用同一份语言判定）。 */
