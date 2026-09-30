@@ -7,6 +7,7 @@ import { RELEASE_PAGE_URL } from "./lib/about";
 import { DisplayCtx } from "./lib/display";
 import { Loading } from "./components/Loading";
 import { localDate } from "./lib/format";
+import { lang, t } from "./lib/i18n";
 import { useEscape, useTicker } from "./lib/hooks";
 import { CallTabs } from "./components/CallTabs";
 import { EmptyState } from "./components/EmptyState";
@@ -51,6 +52,9 @@ const [page, setPage] = useState<PageKey>(() => {
   const tick = useTicker(30_000);
 
   useEffect(() => {
+    // The native chrome (tray menu, tooltip, updater copy) cannot see the
+    // system locale the way the webview can — hand it the verdict once.
+    void bridge.setUiLang(lang);
     let alive = true;
     void bridge
       .fetchReport(false)
@@ -182,10 +186,10 @@ const [page, setPage] = useState<PageKey>(() => {
       <div className="panel" data-boot>
         <div className="boot">
           <Loading size={34} />
-          <span className="boot-text">{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
+          <span className="boot-text">{indexing ? t("boot.indexing") : t("boot.failed", { e: error })}</span>
           {!indexing ? (
             <button type="button" className="boot-retry" onClick={() => void refresh()}>
-              重试
+              {t("boot.retry")}
             </button>
           ) : null}
         </div>
@@ -223,8 +227,8 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
               {page === "ranks" ? (
                 <>
-                  <RankedList label="模型" items={win.breakdown.models} limit={8} unpriced={win.summary.unpriced} />
-                  <RankedList label="项目" items={win.breakdown.projects} limit={8} />
+                  <RankedList label={t("sec.models")} items={win.breakdown.models} limit={8} unpriced={win.summary.unpriced} />
+                  <RankedList label={t("sec.projects")} items={win.breakdown.projects} limit={8} />
                   <CallTabs mcps={win.breakdown.mcps} skills={win.breakdown.skills} />
                 </>
               ) : null}

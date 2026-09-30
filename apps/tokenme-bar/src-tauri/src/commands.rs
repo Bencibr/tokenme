@@ -41,6 +41,22 @@ pub async fn get_report(app: AppHandle, force: bool) -> Result<Report, String> {
         .ok_or_else(|| "indexing".to_string())
 }
 
+/// The webview's detected UI language (system locale; the `?lang=` override
+/// wins for QA). The Rust chrome — tray menu, tooltip, updater copy — follows
+/// it; the menu rebuilds here because muda items carry their labels from
+/// construction.
+#[tauri::command]
+pub async fn set_ui_lang(app: AppHandle, lang: String) -> Result<(), String> {
+    let Some(parsed) = crate::lang::parse(&lang) else {
+        return Err(format!("unknown lang: {lang}"));
+    };
+    if crate::lang::get() != parsed {
+        crate::lang::set(parsed);
+        tray::apply_lang(&app);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_tray_state(app: AppHandle) -> Result<TrayState, String> {
     tray::tray_state(&app).ok_or_else(|| "indexing".to_string())

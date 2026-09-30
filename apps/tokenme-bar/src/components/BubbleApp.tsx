@@ -5,6 +5,7 @@ import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import type { Report } from "../types";
 import { bridge, inTauri } from "../lib/bridge";
 import { ballTokens } from "../lib/format";
+import { t } from "../lib/i18n";
 
 type Dock = "left" | "right" | "top";
 
@@ -320,12 +321,12 @@ export function BubbleApp() {
       onPointerCancel={onPointerUp}
       role="button"
       tabIndex={0}
-      aria-label={`今日 ${ballTokens(tokens)} tokens`}
+      aria-label={t("bubble.aria", { t: ballTokens(tokens) })}
     >
       <span className="bubble-ripple" aria-hidden="true" />
       <span className="bubble-core">
         <span className="bubble-value">{ballTokens(tokens)}</span>
-        <span className="bubble-unit">今日 tokens</span>
+        <span className="bubble-unit">{t("bubble.today")} tokens</span>
         {/* Docked, the ball turns into a robot pet peeking over the edge; the
             pupils point at the cursor via the --gx/--gy vars set on the face. */}
         <span

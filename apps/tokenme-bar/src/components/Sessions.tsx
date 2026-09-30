@@ -5,6 +5,7 @@ import { MoreRow, Section } from "./Section";
 import { nextSortState, SortToggle, type SortState } from "./SortToggle";
 import { ToolIcon } from "./ToolIcon";
 import { useMoney } from "../lib/display";
+import { t } from "../lib/i18n";
 
 const BASENAME = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 
@@ -23,18 +24,18 @@ export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
   const shown = ordered.slice(0, all ? ordered.length : 6);
   return (
     <Section
-      label="最近会话"
-      meta={rows.length > shown.length ? `显示 ${shown.length} / ${rows.length}` : undefined}
+      label={t("sess.section")}
+      meta={rows.length > shown.length ? t("sess.meta", { a: shown.length, b: rows.length }) : undefined}
       trail={rows.length > 1 ? <SortToggle state={sort} onCycle={() => setSort((v) => nextSortState(v))} /> : undefined}
     >
       {shown.length === 0 ? (
-        <p className="empty-row">还没有会话记录</p>
+        <p className="empty-row">{t("sess.empty")}</p>
       ) : (
         <ol className="sess-list">
           {shown.map((s) => {
             const project = s.project ? BASENAME(s.project) : s.session.slice(0, 8);
             const billed =
-              s.cost > 0 ? (showMoney ? money(s.cost) : "") : s.total_tokens === 0 ? null : "无价格";
+              s.cost > 0 ? (showMoney ? money(s.cost) : "") : s.total_tokens === 0 ? null : t("sess.unpriced");
             return (
               <li className="sess" key={`${s.tool}/${s.session}`}>
                 <ToolIcon tool={s.tool} size={20} />
@@ -45,9 +46,9 @@ export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
                     </span>
                     <span
                       className="sess-cost num"
-                      data-unpriced={billed === "无价格" || undefined}
+                      data-unpriced={billed === t("sess.unpriced") || undefined}
                       data-credit={billed === null || undefined}
-                      title={billed === null ? "credits 计量，不计入美元" : undefined}
+                      title={billed === null ? t("sess.credit.tip") : undefined}
                     >
                       {billed ?? "credits"}
                     </span>
@@ -58,7 +59,7 @@ export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
                     </span>
                     <span className="dot-sep" aria-hidden="true" />
                     <span className="num">{count(s.requests)}</span>
-                    <span>次</span>
+                    <span>{t("unit.times")}</span>
                     <span className="dot-sep" aria-hidden="true" />
                     <span className="num">{compactTokens(s.total_tokens)}</span>
                     <span className="grow" />
@@ -75,8 +76,8 @@ export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
         total={rows.length}
         preview={6}
         onToggle={() => setAll((v) => !v)}
-        closedLabel={`查看全部 ${rows.length} 个会话`}
-        openLabel="只看最近 6 个会话"
+        closedLabel={t("sess.more.all", { n: rows.length })}
+        openLabel={t("sess.more.recent")}
       />
     </Section>
   );

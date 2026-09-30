@@ -3,19 +3,22 @@ import { Loading } from "./Loading";
 import type { QuotaOrder, QuotaView } from "../types";
 import { bridge } from "../lib/bridge";
 import { toolColor, toolDisplay, until } from "../lib/format";
+import { t } from "../lib/i18n";
 import { Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
 
-/** Windows are named by length unless the source gave a better bucket name. */
+/** Windows are named by length unless the source gave a better bucket name.
+ *  A source-provided label passes through verbatim — it is the vendor's text. */
 function windowName(q: QuotaView): string {
   if (q.label && q.label.length > 0) return q.label;
-  if (q.window_minutes >= 43_200) return "月窗口";
-  if (q.window_minutes >= 1_440) return `${Math.round(q.window_minutes / 1440)} 天窗口`;
-  if (q.window_minutes >= 60) return `${Math.round(q.window_minutes / 60)} 小时窗口`;
-  return q.window_minutes > 0 ? `${q.window_minutes} 分钟窗口` : "窗口未知";
+  if (q.window_minutes >= 43_200) return t("quota.win.month");
+  if (q.window_minutes >= 1_440) return t("quota.win.day", { n: Math.round(q.window_minutes / 1440) });
+  if (q.window_minutes >= 60) return t("quota.win.hour", { n: Math.round(q.window_minutes / 60) });
+  return q.window_minutes > 0 ? t("quota.win.min", { n: q.window_minutes }) : t("quota.win.unknown");
 }
 
-const ORIGIN: Record<string, string> = { probe: "实测", log: "日志", budget: "预算" };
+const ORIGIN_KEY: Record<string, Parameters<typeof t>[0]> = { probe: "quota.origin.probe", log: "quota.origin.log", budget: "quota.origin.budget" };
+const ORIGIN = (k: string): string => t(ORIGIN_KEY[k] ?? "quota.origin.probe");
 
 /** Row identity, and the one thing a saved drag order may key on. A probe with
  *  a natural window name carries an id (`zcode/mcp`); the rest derive one from
@@ -128,9 +131,9 @@ export function QuotaStrip({
       return (
         // divider={false}: 探测没跑完时下面是空白面板，底线会孤零零悬在
         // 空白里，看起来像一根多余的横线。
-        <Section label="配额" divider={false}>
+        <Section label={t("quota.section")} divider={false}>
           <div className="quota-loading">
-            <Loading size={22} label="配额探测中…" />
+            <Loading size={22} label={t("quota.pending")} />
           </div>
         </Section>
       );
@@ -251,13 +254,13 @@ export function QuotaStrip({
 
   return (
     <Section
-      label="配额"
-      meta={`${live.length} 个窗口 · ${groups.length} 个工具`}
+      label={t("quota.section")}
+      meta={t("quota.meta", { w: live.length, g: groups.length })}
       trail={
         <span className="quota-legend" aria-hidden="true">
-          <span><i data-stage="low" />安稳</span>
-          <span><i data-stage="mid" />注意</span>
-          <span><i data-stage="high" />告急</span>
+          <span><i data-stage="low" />{t("quota.legend.low")}</span>
+          <span><i data-stage="mid" />{t("quota.legend.mid")}</span>
+          <span><i data-stage="high" />{t("quota.legend.high")}</span>
         </span>
       }
     >
@@ -287,7 +290,7 @@ export function QuotaStrip({
             >
               <div
                 className="quota-head"
-                title="长按拖动可调整顺序"
+                title={t("quota.drag")}
                 onPointerDown={(e) => beginPress(e, { kind: "tool", key: g.tool })}
               >
                 <ToolIcon tool={g.tool} size={18} />
@@ -296,7 +299,7 @@ export function QuotaStrip({
                 <span className="quota-origins">
                   {logged ? (
                     <span className="quota-badge" data-origin="log">
-                      {ORIGIN.log}
+                      {ORIGIN("log")}
                     </span>
                   ) : null}
                 </span>
@@ -317,15 +320,18 @@ export function QuotaStrip({
                 // differs per row: DSH's balance replaces the percent (and its
                 // track runs dashed — no cap is measured); FunIDE's points
                 // keep the real percent and take the reset slot instead.
-                const BALANCE_HEADS: Record<string, string> = {
-                    "dsh-balance": "余额",
-                    "funide-points": "积分",
+                // Values are the ENGINE-side label prefixes (the vendor text is
+                // zh-authored) — they match, they do not display; the row head
+                // renders the translated word via the dict below.
+                const BALANCE_HEADS: Record<string, { mark: string; key: "quota.balance.dsh" | "quota.balance.funide" }> = {
+                    "dsh-balance": { mark: "余额", key: "quota.balance.dsh" },
+                    "funide-points": { mark: "积分", key: "quota.balance.funide" },
                 };
                 const balanceId = q.id ?? "";
                 const balance = balanceId in BALANCE_HEADS;
                 const figureInPct = balanceId === "dsh-balance";
                 const figure = balance
-                    ? (q.label ?? "").replace(new RegExp(`^${BALANCE_HEADS[balanceId]}\\s*`), "")
+                    ? (q.label ?? "").replace(new RegExp(`^${BALANCE_HEADS[balanceId].mark}\\s*`), "")
                     : null;
                 const mine = (q.origin ?? "probe") === "budget";
                 // The window name leads at full ink; a plan suffix the source
@@ -333,7 +339,7 @@ export function QuotaStrip({
                 // rows of the same plan stop shouting it.
                 const label = windowName(q);
                 const cut = label.indexOf(" · ");
-                const head = balance ? BALANCE_HEADS[balanceId] : cut === -1 ? label : label.slice(0, cut);
+                const head = balance ? t(BALANCE_HEADS[balanceId].key) : cut === -1 ? label : label.slice(0, cut);
                 const tail = balance ? "" : cut === -1 ? "" : label.slice(cut);
                 const rowTail = tail === ` · ${plan}` ? "" : tail;
                 return (
@@ -359,7 +365,7 @@ export function QuotaStrip({
                       ) : null}
                       {mine && (
                         <span className="quota-badge" data-origin="budget">
-                          {ORIGIN.budget}
+                          {ORIGIN("budget")}
                         </span>
                       )}
                     </span>
@@ -374,7 +380,7 @@ export function QuotaStrip({
                         aria-valuenow={Math.round(pct)}
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-label={`${toolDisplay(q.tool)} ${label} 已用 ${pct.toFixed(1)}%`}
+                        aria-label={t("quota.bar.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })}
                       >
                         <i
                           style={{
@@ -388,7 +394,7 @@ export function QuotaStrip({
                       </span>
                     )}
                     {unlimited ? (
-                      <span className="quota-pct quota-pct--na">不限</span>
+                      <span className="quota-pct quota-pct--na">{t("quota.unlimited")}</span>
                     ) : figureInPct ? (
                       <span className="quota-pct quota-pct--na num">{figure}</span>
                     ) : (

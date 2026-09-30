@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { HeatCell, HourCell } from "../types";
 import { compactTokens, count, formatDateLabel, money } from "../lib/format";
 import { useMoney } from "../lib/display";
+import { monthLabel, t } from "../lib/i18n";
 import { Section } from "./Section";
 
 /* The two pitches are decoupled on purpose: 7 rows can never fill a 96px body
@@ -17,7 +18,7 @@ const LEVELS = [1, 2, 3, 4];
 
 const VIEWS = ["hours", "heat"] as const;
 type ViewMode = (typeof VIEWS)[number];
-const VIEW_LABEL: Record<ViewMode, string> = { hours: "今日", heat: "活动" };
+const VIEW_LABEL: Record<ViewMode, () => string> = { hours: () => t("view.today"), heat: () => t("view.heat") };
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
@@ -35,7 +36,7 @@ function toWeeks(cells: HeatCell[]): HeatCell[][] {
 function levelOf(value: number, thresholds: number[]): number {
   if (value <= 0) return 0;
   let level = 1;
-  for (const t of thresholds) if (value > t) level += 1;
+  for (const th of thresholds) if (value > th) level += 1;
   return Math.min(level, 4);
 }
 
@@ -47,7 +48,7 @@ function monthMarkers(weeks: HeatCell[][]) {
     const dayOfMonth = Number(week[0].date.slice(8, 10));
     // A label needs 4 clear columns, or "10月" and "11月" collide.
     if (month !== last && dayOfMonth <= 7 && index - last >= 0 && (!out.length || index - out[out.length - 1].index >= 4)) {
-      out.push({ index, label: `${month}月` });
+      out.push({ index, label: monthLabel(month) });
       last = month;
     } else if (month !== last) {
       last = month;
@@ -108,18 +109,18 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
     showMoney ? (
       <>
         {" "}
-        · {money(h.cost)} · {count(h.requests)} 次
+        · {money(h.cost)} · {count(h.requests)} {t("unit.times")}
       </>
     ) : null;
 
   return (
     <Section
-      label="活动"
-      meta={hasHours ? undefined : `${weeks.length} 周`}
+      label={t("view.heat")}
+      meta={hasHours ? undefined : t("heat.weeks", { n: weeks.length })}
       head={
         hasHours ? (
           <>
-            <div className="seg" role="radiogroup" aria-label="活动视图" onKeyDown={onViewKey}>
+            <div className="seg" role="radiogroup" aria-label={t("view.a11y")} onKeyDown={onViewKey}>
               {VIEWS.map((v) => (
                 <button
                   key={v}
@@ -130,12 +131,12 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
                   tabIndex={v === mode ? 0 : -1}
                   onClick={() => setMode(v)}
                 >
-                  {VIEW_LABEL[v]}
+                  {VIEW_LABEL[v]()}
                 </button>
               ))}
             </div>
             <span className="sec-meta num">
-              {mode === "hours" ? formatDateLabel(today) : `${weeks.length} 周`}
+              {mode === "hours" ? formatDateLabel(today) : t("heat.weeks", { n: weeks.length })}
             </span>
           </>
         ) : undefined
@@ -144,13 +145,13 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
       {hasHours && mode === "hours" ? (
         <div className="view view-hours">
           <div className="chart-body">
-            <div className="hours-chart" role="radiogroup" aria-label="今日按小时消耗" onMouseLeave={() => setHoverHour(null)}>
+            <div className="hours-chart" role="radiogroup" aria-label={t("hours.a11y")} onMouseLeave={() => setHoverHour(null)}>
               {hours.map((h, i) => (
                 <div
                   key={i}
                   className="hb-col"
                   role="img"
-                  aria-label={`${pad2(i)} 时 ${compactTokens(h.total_tokens)} tokens`}
+                  aria-label={t("hour.aria", { h: pad2(i), t: compactTokens(h.total_tokens) })}
                   data-now={i === nowHour || undefined}
                   data-future={i > nowHour || undefined}
                   onMouseEnter={() => setHoverHour(i)}
@@ -170,17 +171,17 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
             <span className="chart-read num" role="status" aria-live="off">
               {hoverHour !== null ? (
                 <>
-                  {pad2(hoverHour)} 时 · {compactTokens(hours[hoverHour].total_tokens)} tokens
+                  {t("read.hour", { h: pad2(hoverHour), t: compactTokens(hours[hoverHour].total_tokens) })}
                   {hours[hoverHour].total_tokens > 0 ? hourRead(hours[hoverHour]) : null}
                 </>
               ) : (
                 <>
-                  今日共 {compactTokens(dayTotals.tokens)} tokens
+                  {t("read.day", { t: compactTokens(dayTotals.tokens) })}
                   {showMoney ? <> · {money(dayTotals.cost)}</> : null}
                 </>
               )}
             </span>
-            <span className="chart-side hours-now num">现在 {pad2(nowHour)} 时</span>
+            <span className="chart-side hours-now num">{t("now.hour", { h: pad2(nowHour) })}</span>
           </div>
         </div>
       ) : (
@@ -201,8 +202,8 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
               role="img"
               aria-label={
                 showMoney
-                  ? `近 ${weeks.length} 周活动，共 ${compactTokens(totals.tokens)} tokens，花费 ${money(totals.cost)}`
-                  : `近 ${weeks.length} 周活动，共 ${compactTokens(totals.tokens)} tokens`
+                  ? t("heat.aria.money", { n: weeks.length, t: compactTokens(totals.tokens), c: money(totals.cost) })
+                  : t("heat.aria.plain", { n: weeks.length, t: compactTokens(totals.tokens) })
               }
               onMouseLeave={() => setHover(null)}
             >
@@ -232,21 +233,21 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
               {hover ? (
                 <>
                   {formatDateLabel(hover.date)} · {compactTokens(hover.total_tokens)} tokens
-                  {showMoney ? <> · {money(hover.cost)}</> : null} · {count(hover.requests)} 次
+                  {showMoney ? <> · {money(hover.cost)}</> : null} · {count(hover.requests)} {t("unit.times")}
                 </>
               ) : (
                 <>
-                  共 {compactTokens(totals.tokens)} tokens
+                  {t("read.heat.total", { t: compactTokens(totals.tokens) })}
                   {showMoney ? <> · {money(totals.cost)}</> : null}
                 </>
               )}
             </span>
             <span className="chart-side heat-legend" aria-hidden="true">
-              少
+              {t("legend.less")}
               {LEVELS.map((level) => (
                 <i key={level} data-level={level} />
               ))}
-              多
+              {t("legend.more")}
             </span>
           </div>
         </div>

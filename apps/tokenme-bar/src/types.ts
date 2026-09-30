@@ -195,6 +195,8 @@ export interface Bridge {
   /** The saved drag order of the quota section (empty lists ⇒ report order). */
   quotaOrder: () => Promise<QuotaOrder>;
   setQuotaOrder: (order: QuotaOrder) => Promise<void>;
+  /** Report the webview's detected UI language to the native chrome. */
+  setUiLang: (lang: string) => Promise<void>;
   /** The settings sheet: autostart, fallback poll cadence, build version. */
   panelSettings: () => Promise<PanelSettings>;
   setAutostart: (on: boolean) => Promise<void>;

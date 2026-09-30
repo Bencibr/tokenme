@@ -1,5 +1,6 @@
 mod commands;
 mod bubble;
+mod lang;
 mod logging;
 mod engine;
 mod scan_log;
@@ -34,6 +35,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_report,
             commands::get_tray_state,
+            commands::set_ui_lang,
             commands::set_tray_mode,
             commands::get_quota_order,
             commands::set_quota_order,
