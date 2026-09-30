@@ -265,7 +265,6 @@ const [page, setPage] = useState<PageKey>(() => {
         {settingsOpen ? (
           <SettingsSheet
             onClose={() => setSettingsOpen(false)}
-            onMoney={setShowMoney}
             onEmptyTools={setShowEmptyTools}
           />
         ) : null}

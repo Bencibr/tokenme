@@ -23,7 +23,7 @@ const THEMES: { key: ThemeKey; label: () => string }[] = [
  * login-item switch, and the version. Both switches apply on click —
  * there is no dirty state to save, so there is no save button.
  */
-export function SettingsSheet({ onClose, onMoney, onEmptyTools }: { onClose: () => void; onMoney: (on: boolean) => void; onEmptyTools: (on: boolean) => void }) {
+export function SettingsSheet({ onClose, onEmptyTools }: { onClose: () => void; onEmptyTools: (on: boolean) => void }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -67,12 +67,6 @@ export function SettingsSheet({ onClose, onMoney, onEmptyTools }: { onClose: () 
   const setTheme = (theme: ThemeKey) => {
     setSettings((s) => (s ? { ...s, theme } : s));
     void bridge.setTheme(theme);
-  };
-
-  const setShowMoney = (on: boolean) => {
-    setSettings((s) => (s ? { ...s, show_money: on } : s));
-    onMoney(on);
-    void bridge.setShowMoney(on);
   };
 
   const setShowEmptyTools = (on: boolean) => {
@@ -191,21 +185,6 @@ export function SettingsSheet({ onClose, onMoney, onEmptyTools }: { onClose: () 
         ) : null}
 
         <div className="sheet-row">
-          <div>
-            <div className="sheet-label">{t("set.showempty")}</div>
-            <div className="sheet-hint">{t("set.showempty.hint")}</div>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            className="switch"
-            aria-checked={settings?.show_empty_tools ?? false}
-            aria-label={t("set.showempty")}
-            onClick={() => setShowEmptyTools(!(settings?.show_empty_tools ?? false))}
-          />
-        </div>
-
-        <div className="sheet-row">
           <div className="sheet-label">{t("set.theme")}</div>
           <div className="seg" role="radiogroup" aria-label={t("set.theme.a11y")}>
             {THEMES.map((th) => (
@@ -225,16 +204,16 @@ export function SettingsSheet({ onClose, onMoney, onEmptyTools }: { onClose: () 
 
         <div className="sheet-row">
           <div>
-            <div className="sheet-label">{t("set.money")}</div>
-            <div className="sheet-hint">{t("set.money.hint")}</div>
+            <div className="sheet-label">{t("set.showempty")}</div>
+            <div className="sheet-hint">{t("set.showempty.hint")}</div>
           </div>
           <button
             type="button"
             role="switch"
             className="switch"
-            aria-checked={settings?.show_money ?? true}
-            aria-label={t("set.money")}
-            onClick={() => setShowMoney(!(settings?.show_money ?? true))}
+            aria-checked={settings?.show_empty_tools ?? false}
+            aria-label={t("set.showempty")}
+            onClick={() => setShowEmptyTools(!(settings?.show_empty_tools ?? false))}
           />
         </div>
 
