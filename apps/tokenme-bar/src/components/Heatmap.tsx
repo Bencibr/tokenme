@@ -95,7 +95,9 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
   const maxHour = Math.max(...hours.map((h) => h.total_tokens), 1);
   const nowHour = new Date().getHours();
 
-  const width = weeks.length * PITCH_X - (PITCH_X - CELL_W);
+  // A full pitch per column: the trailing gap is the right margin where the
+  // today ring's stroke bleeds — a width hugging the last cell clips it.
+  const width = weeks.length * PITCH_X;
   const height = 6 * PITCH_Y + CELL_H;
 
   const onViewKey = (e: React.KeyboardEvent) => {

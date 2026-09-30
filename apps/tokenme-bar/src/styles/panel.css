@@ -1228,6 +1228,9 @@
 
 .heat-svg {
   display: block;
+  /* The today ring's stroke bleeds half a width past the last column — the svg
+   * now carries right padding for it, but the top row still has none. */
+  overflow: visible;
 }
 
 .heat-cell {
@@ -1248,8 +1251,11 @@
 }
 
 .heat-cell[data-today] {
-  stroke: var(--ink);
-  stroke-width: 1;
+  /* paint-order puts the stroke under the fill, so the ring reads as a clean
+   * outer halo on both themes instead of darkening the cell's own edge. */
+  stroke: var(--today);
+  stroke-width: 1.4;
+  paint-order: stroke;
 }
 
 .heat-legend {
