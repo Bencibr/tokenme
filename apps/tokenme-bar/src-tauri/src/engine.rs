@@ -4,6 +4,7 @@
 //! so a burst of watcher events can never stack two passes on top of each
 //! other — the second one is simply skipped and the next tick catches up.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, RecvTimeoutError};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
 use usage_core::pricing::PricingOptions;
-use usage_core::report::{now_ms, ReportOptions};
+use usage_core::report::{now_ms, QuotaView, ReportOptions};
 use usage_core::{DateFilter, DetectedSource, PricingMap, Report, SourceAdapter, SourceStatus, UsageEvent};
 use usage_index::{Index, Watcher, RETENTION_DAYS};
 
@@ -26,6 +27,35 @@ pub const PERIOD_EVENT: &str = "tray-period";
 /// The debounce window that absorbs a burst of write events as one re-index.
 /// The idle cadence itself is the persisted `refresh_secs` setting.
 const DEBOUNCE: Duration = Duration::from_millis(800);
+
+/// Floor between ingest passes. Every pass re-walks every adapter's tree
+/// (codex alone holds hundreds of rollouts inside the retention window), so a
+/// writer that touches its store every second — ZCode's own telemetry db —
+/// would otherwise keep the engine at a permanent percent-level duty cycle.
+/// A finished call surfaces at most this much later; the manual refresh
+/// bypasses the floor because the user asked for "now".
+const MIN_PASS_GAP: Duration = Duration::from_secs(3);
+
+/// Minimum gap between full report rebuilds on file-change wakes. A rebuild
+/// re-reads and re-prices the whole index — hundreds of thousands of events on
+/// a year-heavy machine — so drip writers (one new event per second) must not
+/// trigger one per event. Ingestion itself stays per-wake and cheap; only the
+/// numbers may lag by up to this much. The cadence timer and the manual
+/// refresh publish regardless, so quiet machines still see the time-shaped
+/// windows move.
+const PUBLISH_GAP: Duration = Duration::from_secs(10);
+
+/// How long one full quota pass (vendor probes + the host-process scan) may be
+/// reused. The pass costs HTTPS/CLI round trips per window plus a spawned
+/// process scan; file-change wakes land several times a minute on a working
+/// machine, and re-running the pass on every publish made the engine the
+/// machine's top CPU taxpayer. Vendor answers themselves barely move in a
+/// minute; the built-in probes' own cache is five minutes.
+const QUOTA_PASS_TTL: Duration = Duration::from_secs(60);
+static QUOTA_PASS: Mutex<Option<(Instant, Vec<QuotaView>)>> = Mutex::new(None);
+/// Set by the manual refresh: the button promises fresh vendor numbers, so the
+/// next pass re-probes for real regardless of the TTL.
+static QUOTA_PASS_BUST: AtomicBool = AtomicBool::new(false);
 
 pub enum Msg {
     /// A watched root changed.
@@ -140,7 +170,9 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
         }
     }
 
-    ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan");
+    let mut last_publish = Instant::now();
+    ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan", &mut last_publish);
+    let mut last_pass = Instant::now();
 
     loop {
         // Read per pass, so a cadence change from the panel applies on the next
@@ -150,7 +182,16 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
             Duration::from_secs(secs.clamp(10, 3600))
         };
         match wait_for_work(&rx, &mut pricing, fallback) {
-            Work::Ingest(reason) => ingest(&app, &mut index, &adapters, &detected, &pricing, reason),
+            Work::Ingest(reason) => {
+                if reason != "manual refresh" {
+                    let since = last_pass.elapsed();
+                    if since < MIN_PASS_GAP {
+                        std::thread::sleep(MIN_PASS_GAP - since);
+                    }
+                }
+                last_pass = Instant::now();
+                ingest(&app, &mut index, &adapters, &detected, &pricing, reason, &mut last_publish);
+            }
             Work::Resummarize => {
                 crate::logging::info("pricing refreshed — re-summarizing indexed events");
                 resummarize(&app, &index, &adapters, &detected, &pricing)
@@ -181,10 +222,10 @@ fn wait_for_work(rx: &Receiver<Msg>, pricing: &mut PricingMap, fallback: Duratio
                 return Work::Ingest("file change");
             }
             Ok(Msg::Refresh) => {
-                // A manual refresh is "everything, now": dropping the quota
-                // cache makes this pass re-probe the vendors for real — the
-                // idle cadence keeps reading their 5-minute TTL answers.
-                usage_quota::clear_cache();
+                // A manual refresh is "everything, now": busting the quota pass
+                // makes the next publish re-probe the vendors for real — the
+                // idle cadence keeps reusing the cached pass.
+                QUOTA_PASS_BUST.store(true, Ordering::Relaxed);
                 return Work::Ingest("manual refresh");
             }
             Err(RecvTimeoutError::Timeout) => return Work::Ingest("cadence timer"),
@@ -222,6 +263,7 @@ fn ingest(
     detected: &[DetectedSource],
     pricing: &PricingMap,
     reason: &'static str,
+    last_publish: &mut Instant,
 ) {
     let shared = app.state::<Shared>();
     // A second ingest while one is running adds nothing but latency.
@@ -249,35 +291,48 @@ fn ingest(
         }
     };
     let _ = index.prune(cutoff);
+    // A file wake that added nothing new would republish an identical report —
+    // on a working machine that is most wakes (editors touch files constantly).
+    // A wake that DID add events recomputes the entire report (all indexed
+    // history, priced) and that costs hundreds of milliseconds, so drip writers
+    // get at most one rebuild per PUBLISH_GAP. The cadence timer and manual
+    // refresh always publish, keeping the time-shaped numbers moving.
+    if reason == "file change" {
+        if report.as_ref().is_some_and(|r| r.new_events == 0) {
+            return;
+        }
+        if last_publish.elapsed() < PUBLISH_GAP {
+            return;
+        }
+    }
+    *last_publish = Instant::now();
     let events = index.all_events().unwrap_or_default();
     let sources = index.source_statuses(detected).unwrap_or_else(|_| fallback_sources(detected));
     if report.is_none() {
         crate::logging::error(&format!("ingest({reason}) failed pass — previous report stays on screen"));
     }
-    // When the DSH ledger moved, log what actually landed: the projection is
-    // cumulative and replaced on one key, so a misread surfaces later as a
-    // wrong day-bucket or a missing session — this line is the paper trail.
+    publish(app, &events, &sources, pricing, adapters);
+    // The audit trail runs AFTER the publish, never in front of it: the hourly
+    // heartbeat re-parses every codex rollout (tens of seconds on a heavy
+    // machine) and the panel must not sit on the boot screen for diagnostics.
     if let Some(r) = &report {
         crate::scan_log::pass(reason, detected, r, &events);
+        // The DSH paper trail: when the ledger moved, one line saying what the
+        // index now holds. (The per-session audit lives in scan.log — this used
+        // to re-log every historical row on each append, flooding panel.log.)
         if r.new_events > 0 && r.per_tool.iter().any(|(t, _)| t == "dsh") {
-            for e in events.iter().filter(|e| e.tool == "dsh") {
-                crate::logging::info(&format!(
-                    "dsh ledger: {} in={} cc={} cr={} out={} model={:?} at={}",
-                    &e.session[..e.session.len().min(12)],
-                    e.counts.input,
-                    e.counts.cache_creation,
-                    e.counts.cache_read,
-                    e.counts.output,
-                    e.model,
-                    chrono::DateTime::from_timestamp_millis(e.ts_ms)
-                        .map(|d| d.format("%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| e.ts_ms.to_string()),
-                ));
-            }
+            let dsh_count = events.iter().filter(|e| e.tool == "dsh").count();
+            let newest = events
+                .iter()
+                .filter(|e| e.tool == "dsh")
+                .map(|e| e.ts_ms)
+                .max()
+                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .map(|d| d.format("%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "none".into());
+            crate::logging::info(&format!("dsh ledger: {dsh_count} events indexed, newest at {newest}"));
         }
     }
-    let _ = report;
-    publish(app, &events, &sources, pricing, adapters);
 }
 
 /// Re-runs the aggregation over already-indexed events after a price refresh.
@@ -319,42 +374,9 @@ fn publish_with_quota(
     poll_quota: bool,
 ) {
     // Live quota (a keychain read, a vendor CLI, or an HTTPS call) is merged in
-    // here; `usage-quota` caches each answer for its TTL, so this is at worst one
-    // slow call per tool every five minutes, never per refresh.
-    let polled_quota = if poll_quota {
-        let poll_started = std::time::Instant::now();
-        let mut q = usage_core::report::poll_quota(adapters);
-        // The host-exit pause: a tool whose application has exited stops
-        // getting vendor probes (the number cannot change) but keeps its last
-        // known answer on screen. Unmapped tools always keep probing.
-        if app.state::<Shared>().settings().host_exit_pause {
-            let alive = usage_quota::host::running_process_names();
-            q.extend(usage_quota::collect_gated(usage_quota::BUDGET, move |tool| {
-                usage_quota::host::any_host_running(tool, &alive)
-            }));
-        } else {
-            q.extend(usage_quota::collect());
-        }
-        let per_tool: Vec<String> = q
-            .iter()
-            .map(|sample| {
-                format!(
-                    "{}:{}%",
-                    sample.tool,
-                    format_args!("{:.1}", sample.used_percent)
-                )
-            })
-            .collect();
-        crate::logging::info(&format!(
-            "quota poll: {} windows in {} ms [{}]",
-            q.len(),
-            poll_started.elapsed().as_millis(),
-            per_tool.join(", ")
-        ));
-        q
-    } else {
-        Vec::new()
-    };
+    // here. The pass is reused for QUOTA_PASS_TTL — probing every publish made
+    // a busy file-watcher cadence burn 30% CPU for numbers that had not moved.
+    let polled_quota = if poll_quota { quota_pass(app, adapters) } else { Vec::new() };
     let captured = now_ms();
     let opts = ReportOptions {
         pricing,
@@ -379,6 +401,51 @@ fn publish_with_quota(
     // race behind "切换有很大的延迟").
     let mode = app.state::<Shared>().settings().tray_mode;
     tray::refresh(app, &report, mode);
+}
+
+/// One full quota pass: the per-window adapter probes plus the budget views
+/// (host-exit-paused or not), reused for [`QUOTA_PASS_TTL`].
+fn quota_pass(app: &AppHandle, adapters: &[Box<dyn SourceAdapter>]) -> Vec<QuotaView> {
+    if QUOTA_PASS_BUST.swap(false, Ordering::Relaxed) {
+        usage_quota::clear_cache();
+        if let Ok(mut slot) = QUOTA_PASS.lock() {
+            *slot = None;
+        }
+    }
+    if let Ok(slot) = QUOTA_PASS.lock() {
+        if let Some((at, q)) = slot.as_ref() {
+            if at.elapsed() < QUOTA_PASS_TTL {
+                return q.clone();
+            }
+        }
+    }
+    let poll_started = Instant::now();
+    let mut q = usage_core::report::poll_quota(adapters);
+    // The host-exit pause: a tool whose application has exited stops getting
+    // vendor probes (the number cannot change) but keeps its last known answer
+    // on screen. Unmapped tools always keep probing.
+    if app.state::<Shared>().settings().host_exit_pause {
+        let alive = usage_quota::host::running_process_names();
+        q.extend(usage_quota::collect_gated(usage_quota::BUDGET, move |tool| {
+            usage_quota::host::any_host_running(tool, &alive)
+        }));
+    } else {
+        q.extend(usage_quota::collect());
+    }
+    let per_tool: Vec<String> = q
+        .iter()
+        .map(|sample| format!("{}:{}%", sample.tool, format_args!("{:.1}", sample.used_percent)))
+        .collect();
+    crate::logging::info(&format!(
+        "quota poll: {} windows in {} ms [{}]",
+        q.len(),
+        poll_started.elapsed().as_millis(),
+        per_tool.join(", ")
+    ));
+    if let Ok(mut slot) = QUOTA_PASS.lock() {
+        *slot = Some((Instant::now(), q.clone()));
+    }
+    q
 }
 
 fn fallback_sources(detected: &[DetectedSource]) -> Vec<SourceStatus> {

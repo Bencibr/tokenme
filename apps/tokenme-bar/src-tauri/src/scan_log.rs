@@ -128,8 +128,11 @@ pub fn pass(
     // The codex replay audit rides the heartbeat line only: re-parsing every
     // rollout from scratch is the one expensive fact here (hundreds of ms on a
     // heavy machine), and hourly is plenty for a remote double-count check.
+    // The initial-scan pass is exempt either way: its heartbeat is always due
+    // (the clock is in-memory), and blocking the boot publish on a full replay
+    // was the "二十多秒才启动完" the panel shipped with.
     let mut codex_audit: serde_json::Value = serde_json::Value::Null;
-    if heartbeat_due {
+    if heartbeat_due && reason != "initial scan" {
         let replay = usage_adapter_codex::replay(&usage_core::DateFilter::default());
         let mut indexed: BTreeMap<String, (f64, f64, f64, f64, usize)> = BTreeMap::new();
         for e in events.iter().filter(|e| e.tool == "codex") {
