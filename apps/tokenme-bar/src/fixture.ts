@@ -368,7 +368,7 @@ const SOURCES: SourceStatus[] = [
   {
     id: "gemini",
     display: "Gemini CLI",
-    detected: false,
+    detected: true,
     roots: ["~/.gemini/tmp"],
     hint: "未发现会话目录",
     events_ingested: 0,

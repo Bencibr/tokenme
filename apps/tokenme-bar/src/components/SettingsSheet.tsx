@@ -23,7 +23,7 @@ const THEMES: { key: ThemeKey; label: () => string }[] = [
  * login-item switch, and the version. Both switches apply on click —
  * there is no dirty state to save, so there is no save button.
  */
-export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMoney: (on: boolean) => void }) {
+export function SettingsSheet({ onClose, onMoney, onEmptyTools }: { onClose: () => void; onMoney: (on: boolean) => void; onEmptyTools: (on: boolean) => void }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -73,6 +73,12 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
     setSettings((s) => (s ? { ...s, show_money: on } : s));
     onMoney(on);
     void bridge.setShowMoney(on);
+  };
+
+  const setShowEmptyTools = (on: boolean) => {
+    setSettings((s) => (s ? { ...s, show_empty_tools: on } : s));
+    onEmptyTools(on);
+    void bridge.setShowEmptyTools(on);
   };
 
   const setBubble = (on: boolean) => {
@@ -183,6 +189,21 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             />
           </div>
         ) : null}
+
+        <div className="sheet-row">
+          <div>
+            <div className="sheet-label">{t("set.showempty")}</div>
+            <div className="sheet-hint">{t("set.showempty.hint")}</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            className="switch"
+            aria-checked={settings?.show_empty_tools ?? false}
+            aria-label={t("set.showempty")}
+            onClick={() => setShowEmptyTools(!(settings?.show_empty_tools ?? false))}
+          />
+        </div>
 
         <div className="sheet-row">
           <div className="sheet-label">{t("set.theme")}</div>

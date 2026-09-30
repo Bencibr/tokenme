@@ -98,6 +98,12 @@ pub struct Settings {
     /// some users would rather not see it.
     #[serde(default = "default_show_money")]
     pub show_money: bool,
+    /// Also list tools whose session count for the period is zero on the
+    /// tools page. Default off: a tool that did nothing this window is noise,
+    /// and the page's job is comparing what ran. The tools list still keeps
+    /// detected-but-quiet sources discoverable by turning this on.
+    #[serde(default)]
+    pub show_empty_tools: bool,
     #[serde(default = "default_bubble_enabled")]
     pub bubble_enabled: bool,
     /// Stop asking vendors for a tool's quota once its host application has
@@ -125,6 +131,7 @@ impl Default for Settings {
             theme: Theme::default(),
             refresh_secs: default_refresh_secs(),
             show_money: default_show_money(),
+            show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
             host_exit_pause: default_host_exit_pause(),
             auto_update_check: default_auto_update_check(),

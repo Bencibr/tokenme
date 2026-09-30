@@ -151,6 +151,7 @@ pub struct PanelSettings {
     pub refresh_secs: u64,
     pub theme: Theme,
     pub show_money: bool,
+    pub show_empty_tools: bool,
     pub bubble_enabled: bool,
     pub host_exit_pause: bool,
     pub version: String,
@@ -202,6 +203,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         refresh_secs: settings.refresh_secs,
         theme: settings.theme,
         show_money: settings.show_money,
+        show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
         host_exit_pause: settings.host_exit_pause,
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -245,6 +247,20 @@ pub fn open_log_dir() -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let spawned = std::process::Command::new("xdg-open").arg(&dir).spawn();
     spawned.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Whether the tools page also lists tools with zero sessions this period.
+/// Off keeps the page to what actually ran; a quiet tool reappears the day it
+/// bills again. Same shape as the other panel switches: persist, then let the
+/// webview re-render from its own state.
+#[tauri::command]
+pub async fn set_show_empty_tools(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.show_empty_tools = on;
+    settings.clone().save().map_err(|e| e.to_string())
 }
 
 /// The host-exit pause: stop probing a tool's quota once its application has

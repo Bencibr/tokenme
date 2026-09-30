@@ -48,6 +48,12 @@ const [page, setPage] = useState<PageKey>(() => {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showMoney, setShowMoney] = useState(true);
+  // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
+  // switch without touching persistence.
+  const [showEmptyTools, setShowEmptyTools] = useState(() => {
+    const pin = new URLSearchParams(location.search).get("showempty");
+    return pin === "1" || pin === "true";
+  });
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const tick = useTicker(30_000);
 
@@ -92,6 +98,9 @@ const [page, setPage] = useState<PageKey>(() => {
       applyTheme(s.theme);
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
+      if (new URLSearchParams(location.search).get("showempty") === null) {
+        setShowEmptyTools(s.show_empty_tools);
+      }
       quietCheck();
     });
     const updateTick = window.setInterval(quietCheck, 24 * 60 * 60 * 1000);
@@ -157,7 +166,8 @@ const [page, setPage] = useState<PageKey>(() => {
 
   // The tools page lists every *detected* source, not just the ones that
   // billed this window: a credits-only tool that metered nothing here, or a
-  // source whose store is unreadable, would otherwise vanish for weeks.
+  // source whose store is unreadable, would otherwise vanish for weeks. The
+  // sheet's zero-session switch hides that tail again (default off).
   // Hooks rule: this must sit above the boot screen's early return.
   const tools = useMemo(() => {
     if (!report) return [];
@@ -175,8 +185,8 @@ const [page, setPage] = useState<PageKey>(() => {
         sessions: 0,
         priced: true,
       }));
-    return [...w.breakdown.tools, ...silent];
-  }, [report, period]);
+    return [...w.breakdown.tools, ...silent].filter((t) => showEmptyTools || t.sessions > 0);
+  }, [report, period, showEmptyTools]);
 
   if (!report) {
     // "indexing" is the backend sentinel for "first scan still running"; the
@@ -256,6 +266,7 @@ const [page, setPage] = useState<PageKey>(() => {
           <SettingsSheet
             onClose={() => setSettingsOpen(false)}
             onMoney={setShowMoney}
+            onEmptyTools={setShowEmptyTools}
           />
         ) : null}
       </div>

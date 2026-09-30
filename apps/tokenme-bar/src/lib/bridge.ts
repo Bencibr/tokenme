@@ -222,6 +222,14 @@ export const bridge: Bridge = {
     };
   },
 
+  async setShowEmptyTools(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.show_empty_tools = on;
+      return;
+    }
+    await invoke<void>("set_show_empty_tools", { on });
+  },
+
   async setBubbleEnabled(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.bubble_enabled = on;
@@ -265,6 +273,7 @@ const browserSettings: PanelSettings = {
   refresh_secs: 30,
   theme: "system",
   show_money: true,
+  show_empty_tools: false,
   bubble_enabled: true,
   host_exit_pause: true,
   auto_update_check: true,
