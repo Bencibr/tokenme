@@ -41,6 +41,22 @@ pub async fn get_report(app: AppHandle, force: bool) -> Result<Report, String> {
         .ok_or_else(|| "indexing".to_string())
 }
 
+/// The webview's detected UI language (system locale; the `?lang=` override
+/// wins for QA). The Rust chrome — tray menu, tooltip, updater copy — follows
+/// it; the menu rebuilds here because muda items carry their labels from
+/// construction.
+#[tauri::command]
+pub async fn set_ui_lang(app: AppHandle, lang: String) -> Result<(), String> {
+    let Some(parsed) = crate::lang::parse(&lang) else {
+        return Err(format!("unknown lang: {lang}"));
+    };
+    if crate::lang::get() != parsed {
+        crate::lang::set(parsed);
+        tray::apply_lang(&app);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_tray_state(app: AppHandle) -> Result<TrayState, String> {
     tray::tray_state(&app).ok_or_else(|| "indexing".to_string())
@@ -135,10 +151,10 @@ pub struct PanelSettings {
     pub refresh_secs: u64,
     pub theme: Theme,
     pub show_money: bool,
+    pub show_empty_tools: bool,
     pub bubble_enabled: bool,
     pub host_exit_pause: bool,
     pub auto_update_check: bool,
-    pub show_unused_tools: bool,
     pub version: String,
 }
 
@@ -188,10 +204,10 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         refresh_secs: settings.refresh_secs,
         theme: settings.theme,
         show_money: settings.show_money,
+        show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
         host_exit_pause: settings.host_exit_pause,
         auto_update_check: settings.auto_update_check,
-        show_unused_tools: settings.show_unused_tools,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -235,6 +251,20 @@ pub fn open_log_dir() -> Result<(), String> {
     spawned.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Whether the tools page also lists tools with zero sessions this period.
+/// Off keeps the page to what actually ran; a quiet tool reappears the day it
+/// bills again. Same shape as the other panel switches: persist, then let the
+/// webview re-render from its own state.
+#[tauri::command]
+pub async fn set_show_empty_tools(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.show_empty_tools = on;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
 /// The host-exit pause: stop probing a tool's quota once its application has
 /// exited; the last known answer stays on screen until it runs again.
 #[tauri::command]
@@ -258,17 +288,6 @@ pub async fn set_show_money(app: AppHandle, on: bool) -> Result<(), String> {
     settings.clone().save().map_err(|e| e.to_string())
 }
 
-/// Whether the tools page also lists tools with zero sessions this period —
-/// the switch the settings sheet flips.
-#[tauri::command]
-pub async fn set_show_unused_tools(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.show_unused_tools = on;
-    settings.clone().save().map_err(|e| e.to_string())
-}
 
 /// Windows-only edge bubble. The command remains available on every target so
 /// the frontend bridge stays platform-neutral; non-Windows is a no-op.

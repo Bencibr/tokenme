@@ -7,6 +7,7 @@ import { RELEASE_PAGE_URL } from "./lib/about";
 import { DisplayCtx } from "./lib/display";
 import { Loading } from "./components/Loading";
 import { localDate } from "./lib/format";
+import { lang, t } from "./lib/i18n";
 import { useEscape, useTicker } from "./lib/hooks";
 import { CallTabs } from "./components/CallTabs";
 import { EmptyState } from "./components/EmptyState";
@@ -47,15 +48,19 @@ const [page, setPage] = useState<PageKey>(() => {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showMoney, setShowMoney] = useState(true);
-  // Dev/QA affordance: ?unused=1 previews the show-unused state the sheet
-  // would persist; the persisted default is off.
-  const [showUnused, setShowUnused] = useState(() => {
-    return new URLSearchParams(location.search).get("unused") === "1";
+  // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
+  // switch without touching persistence.
+  const [showEmptyTools, setShowEmptyTools] = useState(() => {
+    const pin = new URLSearchParams(location.search).get("showempty");
+    return pin === "1" || pin === "true";
   });
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const tick = useTicker(30_000);
 
   useEffect(() => {
+    // The native chrome (tray menu, tooltip, updater copy) cannot see the
+    // system locale the way the webview can — hand it the verdict once.
+    void bridge.setUiLang(lang);
     let alive = true;
     void bridge
       .fetchReport(false)
@@ -93,10 +98,9 @@ const [page, setPage] = useState<PageKey>(() => {
       applyTheme(s.theme);
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
-      // Only outside Tauri does the ?unused pin win — the sheet's persisted
-      // value is the truth in the app, same precedence as ?page.
-      if (!inTauri) setShowUnused(new URLSearchParams(location.search).get("unused") === "1");
-      else setShowUnused(s.show_unused_tools);
+      if (new URLSearchParams(location.search).get("showempty") === null) {
+        setShowEmptyTools(s.show_empty_tools);
+      }
       quietCheck();
     });
     const updateTick = window.setInterval(quietCheck, 24 * 60 * 60 * 1000);
@@ -161,11 +165,10 @@ const [page, setPage] = useState<PageKey>(() => {
   const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
 
   // The tools page lists every *detected* source, not just the ones that
-  // billed this window — unless the user keeps 显示未使用工具 off (the
-  // default): then the period's zero-session rows (the appended silent
-  // sources, and credits-only tools that metered no sessions) stay hidden
-  // until they bill again or the switch brings them back. Hooks rule: this
-  // must sit above the boot screen's early return.
+  // billed this window: a credits-only tool that metered nothing here, or a
+  // source whose store is unreadable, would otherwise vanish for weeks. The
+  // sheet's zero-session switch hides that tail again (default off).
+  // Hooks rule: this must sit above the boot screen's early return.
   const tools = useMemo(() => {
     if (!report) return [];
     const w = report[period];
@@ -182,9 +185,8 @@ const [page, setPage] = useState<PageKey>(() => {
         sessions: 0,
         priced: true,
       }));
-    const all = [...w.breakdown.tools, ...silent];
-    return showUnused ? all : all.filter((t) => t.sessions > 0);
-  }, [report, period, showUnused]);
+    return [...w.breakdown.tools, ...silent].filter((t) => showEmptyTools || t.sessions > 0);
+  }, [report, period, showEmptyTools]);
 
   if (!report) {
     // "indexing" is the backend sentinel for "first scan still running"; the
@@ -194,10 +196,10 @@ const [page, setPage] = useState<PageKey>(() => {
       <div className="panel" data-boot>
         <div className="boot">
           <Loading size={34} />
-          <span className="boot-text">{indexing ? "正在索引本机用量…" : `读取失败：${error}`}</span>
+          <span className="boot-text">{indexing ? t("boot.indexing") : t("boot.failed", { e: error })}</span>
           {!indexing ? (
             <button type="button" className="boot-retry" onClick={() => void refresh()}>
-              重试
+              {t("boot.retry")}
             </button>
           ) : null}
         </div>
@@ -235,8 +237,8 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
               {page === "ranks" ? (
                 <>
-                  <RankedList label="模型" items={win.breakdown.models} limit={8} unpriced={win.summary.unpriced} />
-                  <RankedList label="项目" items={win.breakdown.projects} limit={8} />
+                  <RankedList label={t("sec.models")} items={win.breakdown.models} limit={8} unpriced={win.summary.unpriced} />
+                  <RankedList label={t("sec.projects")} items={win.breakdown.projects} limit={8} />
                   <CallTabs mcps={win.breakdown.mcps} skills={win.breakdown.skills} />
                 </>
               ) : null}
@@ -264,7 +266,7 @@ const [page, setPage] = useState<PageKey>(() => {
           <SettingsSheet
             onClose={() => setSettingsOpen(false)}
             onMoney={setShowMoney}
-            onUnused={setShowUnused}
+            onEmptyTools={setShowEmptyTools}
           />
         ) : null}
       </div>

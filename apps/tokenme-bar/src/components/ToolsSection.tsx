@@ -14,6 +14,7 @@ import { Section } from "./Section";
 import { nextSortState, SortToggle, type SortState } from "./SortToggle";
 import { ToolIcon } from "./ToolIcon";
 import { useMoney } from "../lib/display";
+import { t as tr } from "../lib/i18n";
 
 /**
  * The product's core differentiator: one row per tool, the same three numerals
@@ -52,16 +53,16 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
 
   if (tools.length === 0) {
     return (
-      <Section label="工具">
-        <p className="empty-row">本期没有用量记录</p>
+      <Section label={tr("tools.section")}>
+        <p className="empty-row">{tr("tools.empty")}</p>
       </Section>
     );
   }
 
   return (
     <Section
-      label="工具"
-      meta={`${tools.length} 个工具`}
+      label={tr("tools.section")}
+      meta={tr("tools.meta", { n: tools.length })}
       trail={<SortToggle state={sort} onCycle={() => setSort((s) => nextSortState(s))} />}
     >
       <ol className="tool-list">
@@ -92,7 +93,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                   : showMoney
                     ? t.priced
                       ? money(t.cost)
-                      : "无价格"
+                      : tr("tools.unpriced")
                     : ""}
                 </span>
               </div>
@@ -101,19 +102,19 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                   <span className="num">{count(t.requests)}</span>
                   <span>
                     {t.cost > 0
-                      ? `次 · ${creditText(t.counts.credits)}，按方案价折算`
-                      : "次 · credits 计量，不计入美元"}
+                      ? tr("tools.credit.priced", { c: creditText(t.counts.credits) })
+                      : tr("tools.credit.free")}
                   </span>
                 </div>
               ) : (
                 <div className="tool-foot">
                   <span className="num">{count(t.requests)}</span>
-                  <span>次</span>
+                  <span>{tr("hdr.reqs")}</span>
                   <span className="dot-sep" aria-hidden="true" />
                   <span className="num">{count(t.sessions)}</span>
-                  <span>会话</span>
+                  <span>{tr("tools.sessions")}</span>
                   <span className="grow" />
-                  <span>缓存 {percent(cachedOf(t.counts), 0)}</span>
+                  <span>{tr("hdr.cache", { p: percent(cachedOf(t.counts), 0) })}</span>
                 </div>
               )}
             </li>

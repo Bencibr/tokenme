@@ -98,6 +98,12 @@ pub struct Settings {
     /// some users would rather not see it.
     #[serde(default = "default_show_money")]
     pub show_money: bool,
+    /// Also list tools whose session count for the period is zero on the
+    /// tools page. Default off: a tool that did nothing this window is noise,
+    /// and the page's job is comparing what ran. The tools list still keeps
+    /// detected-but-quiet sources discoverable by turning this on.
+    #[serde(default)]
+    pub show_empty_tools: bool,
     #[serde(default = "default_bubble_enabled")]
     pub bubble_enabled: bool,
     /// Stop asking vendors for a tool's quota once its host application has
@@ -105,11 +111,6 @@ pub struct Settings {
     /// account traffic. Default on; the last known answer stays on screen.
     #[serde(default = "default_host_exit_pause")]
     pub host_exit_pause: bool,
-    /// Whether the tools page also lists tools with zero sessions this period.
-    /// Default off: a block of zero rows reads as clutter; the switch in the
-    /// settings sheet brings the quiet tools back for people who audit them.
-    #[serde(default)]
-    pub show_unused_tools: bool,
     /// Check GitHub's latest.json on boot and offer the update when a newer
     /// release exists. A check is one anonymous GET — nothing is downloaded and
     /// no install runs unless the user clicks the offer in the settings sheet.
@@ -130,9 +131,9 @@ impl Default for Settings {
             theme: Theme::default(),
             refresh_secs: default_refresh_secs(),
             show_money: default_show_money(),
+            show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
             host_exit_pause: default_host_exit_pause(),
-            show_unused_tools: false,
             auto_update_check: default_auto_update_check(),
             budgets: BTreeMap::new(),
             quota_tools: Vec::new(),

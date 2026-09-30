@@ -9,6 +9,7 @@ use usage_core::{PricingMap, QuotaView, Report};
 
 use crate::commands::TrayState;
 use crate::engine::{EngineChannel, Msg, Shared};
+use crate::lang::{self, Lang};
 use crate::panel;
 use crate::settings::{Settings, TrayMode};
 
@@ -76,33 +77,40 @@ pub fn label_for(report: &Report, mode: TrayMode) -> (Option<String>, String) {
         TrayMode::TrayTokensCost => Some(format!("{tokens_seg} {cost_seg}")),
     };
 
+    let l = lang::get();
     let mut tooltip = format!(
-        "TokenMe · {}\n{} · {} tokens · {} 次",
-        day.label,
+        "TokenMe · {}\n{} · {} tokens · {} {}",
+        l.str("今日", "Today"),
         money(day.summary.cost),
         compact(day.summary.total_tokens),
-        day.summary.requests
+        day.summary.requests,
+        l.str("次", "requests"),
     );
     if day.summary.credits > 0.0 {
         tooltip.push_str(&format!(" · {:.2} credits", day.summary.credits));
     }
     tooltip.push_str(&format!(" · v{}", env!("CARGO_PKG_VERSION")));
     if let Some(q) = quota {
-        tooltip.push_str(&format!(
-            "\n{} 配额 {:.0}%{}",
-            q.tool,
-            q.used_percent,
-            if q.resets_at_ms > 0 {
-                format!(" · 重置 in {}", countdown(q.resets_at_ms, now_ms))
-            } else {
-                String::new()
+        let reset = if q.resets_at_ms > 0 {
+            match l {
+                Lang::Zh => format!(" · {} 后重置", countdown(q.resets_at_ms, now_ms)),
+                Lang::En => format!(" · resets in {}", countdown(q.resets_at_ms, now_ms)),
             }
+        } else {
+            String::new()
+        };
+        tooltip.push_str(&format!(
+            "\n{} {} {:.0}%{}",
+            q.tool,
+            l.str("配额", "quota"),
+            q.used_percent,
+            reset
         ));
     }
     tooltip.push_str(if report.pricing.stale {
-        "\n价格快照已过期，成本为估算"
+        l.str("\n价格快照已过期，成本为估算", "\nPrice snapshot is stale; costs are estimates")
     } else {
-        "\n价格为实时估算，非账单"
+        l.str("\n价格为实时估算，非账单", "\nPrices are live estimates, not billing")
     });
     (title, tooltip)
 }
@@ -187,9 +195,20 @@ fn paint(app: &AppHandle, report: &Report, mode: TrayMode) {
     }
 }
 
-/// Keeps the checkable autostart row in sync with the settings file.
-struct MenuItems {
-    autostart: CheckMenuItem<tauri::Wry>,
+/// Keeps the checkable autostart row in sync with the settings file. The
+/// option inside the mutex is swapped when the language changes rebuilds the
+/// menu — a second `manage` would be ignored, leaving sync pointed at a dead
+/// row.
+struct MenuItems(std::sync::Mutex<Option<CheckMenuItem<tauri::Wry>>>);
+
+impl MenuItems {
+    fn set_checked(&self, on: bool) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(item) = guard.as_ref() {
+                item.set_checked(on).ok();
+            }
+        }
+    }
 }
 
 /// The dual-ring icon, kept so 仅Token/仅花费 can hide it and the 托盘 modes
@@ -207,13 +226,14 @@ struct LastMode(std::sync::Mutex<Option<TrayMode>>);
 /// Only real changes are pushed; a same-value write is skipped.
 struct LastPaint(std::sync::Mutex<(String, String)>);
 
-pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let autostart = CheckMenuItem::with_id(app, "autostart", "开机自启", true, false, None::<&str>)?;
-    let open_data = MenuItem::with_id(app, "data", "打开数据目录", true, None::<&str>)?;
-    let week = MenuItem::with_id(app, "week", "本周", true, None::<&str>)?;
-    let today = MenuItem::with_id(app, "today", "今日花费", true, None::<&str>)?;
-    let refresh_item = MenuItem::with_id(app, "refresh", "刷新", true, None::<&str>)?;
+fn build_menu(app: &AppHandle) -> tauri::Result<(tauri::menu::Menu<tauri::Wry>, CheckMenuItem<tauri::Wry>)> {
+    let l = lang::get();
+    let quit = MenuItem::with_id(app, "quit", l.str("退出", "Quit"), true, None::<&str>)?;
+    let autostart = CheckMenuItem::with_id(app, "autostart", l.str("开机自启", "Launch at Login"), true, false, None::<&str>)?;
+    let open_data = MenuItem::with_id(app, "data", l.str("打开数据目录", "Open Data Folder"), true, None::<&str>)?;
+    let week = MenuItem::with_id(app, "week", l.str("本周", "This Week"), true, None::<&str>)?;
+    let today = MenuItem::with_id(app, "today", l.str("今日花费", "Today's Cost"), true, None::<&str>)?;
+    let refresh_item = MenuItem::with_id(app, "refresh", l.str("刷新", "Refresh"), true, None::<&str>)?;
 
     autostart
         .set_checked(app.state::<Shared>().settings().autostart)
@@ -231,9 +251,12 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .separator()
         .item(&quit)
         .build()?;
-    app.manage(MenuItems {
-        autostart: autostart.clone(),
-    });
+    Ok((menu, autostart))
+}
+
+pub fn build(app: &AppHandle) -> tauri::Result<()> {
+    let (menu, autostart) = build_menu(app)?;
+    app.manage(MenuItems(std::sync::Mutex::new(Some(autostart))));
     let icon = tauri::include_image!("icons/tray-icon.png");
     app.manage(TrayAssets(icon.clone()));
     // The builder already painted the icon for the startup mode's default;
@@ -328,7 +351,7 @@ fn apply_autostart(app: &AppHandle, on: bool) {
         plugin.disable().ok();
     }
     if let Some(items) = app.try_state::<MenuItems>() {
-        items.autostart.set_checked(on).ok();
+        items.set_checked(on);
     }
     persist(app, |s| s.autostart = on);
 }
@@ -346,8 +369,24 @@ pub fn reconcile_autostart(app: &AppHandle) {
         plugin.disable().ok();
     }
     if let Some(items) = app.try_state::<MenuItems>() {
-        items.autostart.set_checked(want).ok();
+        items.set_checked(want);
     }
+}
+
+/// Rebuild the context menu in the current UI language. muda items carry
+/// their labels from construction, so a language switch means new items;
+/// the autostart row moves into the fresh menu before the old one drops.
+pub fn apply_lang(app: &AppHandle) {
+    let handle = app.clone();
+    on_main(app, move || {
+        let Ok((menu, autostart)) = build_menu(&handle) else { return };
+        if let Some(tray) = handle.tray_by_id(TRAY_ID) {
+            let _ = tray.set_menu(Some(menu));
+        }
+        if let Some(items) = handle.try_state::<MenuItems>() {
+            *items.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(autostart);
+        }
+    });
 }
 
 fn persist(app: &AppHandle, edit: impl FnOnce(&mut Settings)) {

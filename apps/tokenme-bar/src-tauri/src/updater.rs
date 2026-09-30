@@ -208,17 +208,24 @@ pub async fn check_update(_app: AppHandle) -> Result<UpdateStatus, String> {
         // 网络不通/清单不可读是常态（离线、公司网），静默——不给用户一行无行动的错误。
         return Ok(UpdateStatus { phase: "quiet".into(), message: String::new(), version: None });
     };
+    let l = crate::lang::get();
     if !is_newer(&release.version, &current) {
         return Ok(UpdateStatus {
             phase: "uptodate".into(),
-            message: format!("已是最新版本 v{current}"),
+            message: match l {
+                crate::lang::Lang::Zh => format!("已是最新版本 v{current}"),
+                crate::lang::Lang::En => format!("Already up to date (v{current})"),
+            },
             version: None,
         });
     }
     // 底部一行已经紧挨着正在运行的版本号，这里再报一遍就是重复。
     Ok(UpdateStatus {
         phase: "available".into(),
-        message: format!("发现新版本 v{}", release.version),
+        message: match l {
+            crate::lang::Lang::Zh => format!("发现新版本 v{}", release.version),
+            crate::lang::Lang::En => format!("New version available (v{})", release.version),
+        },
         version: Some(release.version),
     })
 }
@@ -233,19 +240,23 @@ pub async fn download_update(app: AppHandle) -> Result<UpdateStatus, String> {
         let _ = app;
         return Ok(UpdateStatus {
             phase: "unsupported".into(),
-            message: "当前平台暂不支持应用内更新，请到 Releases 页面手动下载".into(),
+            message: crate::lang::get().str(
+                "当前平台暂不支持应用内更新，请到 Releases 页面手动下载",
+                "In-app updates aren't available on this platform — download from the Releases page",
+            )
+            .into(),
             version: None,
         });
     }
     #[cfg(target_os = "macos")]
     {
         let Some(release) = fetch_release() else {
-            return Err("下载失败：无法连接 GitHub".into());
+            return Err(crate::lang::get().str("下载失败：无法连接 GitHub", "Download failed: cannot reach GitHub").into());
         };
         let resp: ureq_client::http::Response<ureq_client::Body> = agent()
             .get(&release.zip_url)
             .call()
-            .map_err(|_| "下载失败：无法连接 GitHub".to_string())?;
+            .map_err(|_| crate::lang::get().str("下载失败：无法连接 GitHub", "Download failed: cannot reach GitHub").to_string())?;
         let total: u64 = resp
             .headers()
             .get("content-length")
@@ -286,9 +297,14 @@ pub async fn download_update(app: AppHandle) -> Result<UpdateStatus, String> {
         let got = sha256_hex(&bytes);
         if let Some(expected) = &expected {
             if got != *expected {
-                return Err(format!(
-                    "sha256 校验失败：期望 {expected}，实际 {got}——下载已丢弃"
-                ));
+                return Err(match crate::lang::get() {
+                    crate::lang::Lang::Zh => {
+                        format!("sha256 校验失败：期望 {expected}，实际 {got}——下载已丢弃")
+                    }
+                    crate::lang::Lang::En => {
+                        format!("sha256 mismatch: expected {expected}, got {got} — download discarded")
+                    }
+                });
             }
         }
         let dir = std::env::temp_dir().join(ARTIFACT_DIR);
@@ -297,10 +313,16 @@ pub async fn download_update(app: AppHandle) -> Result<UpdateStatus, String> {
         std::fs::write(&staged, &bytes).map_err(|e| e.to_string())?;
         Ok(UpdateStatus {
             phase: "downloaded".into(),
-            message: format!(
-                "下载完成（{} KB，sha256 已校验），可以安装",
-                bytes.len() / 1024
-            ),
+            message: match crate::lang::get() {
+                crate::lang::Lang::Zh => format!(
+                    "下载完成（{} KB，sha256 已校验），可以安装",
+                    bytes.len() / 1024
+                ),
+                crate::lang::Lang::En => format!(
+                    "Downloaded ({} KB, sha256 verified) — ready to install",
+                    bytes.len() / 1024
+                ),
+            },
             version: Some(staged.to_string_lossy().to_string()),
         })
     }
@@ -318,7 +340,11 @@ pub async fn install_update(app: AppHandle) -> Result<UpdateStatus, String> {
         let _ = app;
         return Ok(UpdateStatus {
             phase: "unsupported".into(),
-            message: "当前平台暂不支持应用内更新，请到 Releases 页面手动下载".into(),
+            message: crate::lang::get().str(
+                "当前平台暂不支持应用内更新，请到 Releases 页面手动下载",
+                "In-app updates aren't available on this platform — download from the Releases page",
+            )
+            .into(),
             version: None,
         });
     }
@@ -327,10 +353,14 @@ pub async fn install_update(app: AppHandle) -> Result<UpdateStatus, String> {
         let dir = std::env::temp_dir().join(ARTIFACT_DIR);
         let staged = dir.join(MAC_ZIP);
         if !staged.is_file() {
-            return Err("尚未下载更新包，请先下载".into());
+            return Err(crate::lang::get().str("尚未下载更新包，请先下载", "No update downloaded yet — download it first").into());
         }
         let Some(parent) = app_parent() else {
-            return Err("无法定位安装目录（开发模式直接运行时不可换包）".into());
+            return Err(crate::lang::get().str(
+                "无法定位安装目录（开发模式直接运行时不可换包）",
+                "Cannot locate the install directory (not swappable when run from the dev build)",
+            )
+            .into());
         };
         let script = swap_script(&staged, &parent, std::process::id());
         let script_path = dir.join("swap.sh");
@@ -348,7 +378,9 @@ pub async fn install_update(app: AppHandle) -> Result<UpdateStatus, String> {
         app.exit(0);
         Ok(UpdateStatus {
             phase: "installing".into(),
-            message: "正在安装，面板将自动重启".into(),
+            message: crate::lang::get()
+                .str("正在安装，面板将自动重启", "Installing — the panel will relaunch")
+                .into(),
             version: None,
         })
     }

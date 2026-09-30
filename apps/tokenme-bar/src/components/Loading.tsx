@@ -7,9 +7,11 @@
  * Drop it wherever a wait is visible: the boot screen, a tab waiting on its
  * first data, anything that would otherwise read as a blank panel.
  */
+import { t } from "../lib/i18n";
+
 export function Loading({ size = 30, label }: { size?: number; label?: string }) {
   return (
-    <span className="loading" role="status" aria-label={label ?? "加载中"}>
+    <span className="loading" role="status" aria-label={label ?? t("loading.default")}>
       <svg width={size} height={size} viewBox="0 0 48 48" fill="none" aria-hidden="true">
         {/* outer half-ring (r=20, upper 160°) and inner half-ring (r=11, lower
             160°): concentric, offset half a turn, gaps at the sides. The CSS

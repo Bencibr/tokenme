@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
+import { t } from "./i18n";
 import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
@@ -12,8 +13,12 @@ export const isWindows = inTauri && /Windows/i.test(navigator.userAgent);
 
 /** `system` hands the media query back to the OS; a pin sets `data-theme`. */
 export function applyTheme(theme: ThemeKey): void {
-  if (theme === "system") delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
+  // QA/screenshot override, same channel as ?lang= / ?page=: the URL pins the
+  // theme so a browser render can be frozen to light or dark.
+  const pin = new URLSearchParams(location.search).get("theme");
+  const effective: ThemeKey = pin === "light" || pin === "dark" ? pin : theme;
+  if (effective === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = effective;
 }
 
 /** Dollar figures off => the components read the flag from context; the
@@ -128,6 +133,11 @@ export const bridge: Bridge = {
     await invoke<void>("set_quota_order", { order });
   },
 
+  async setUiLang(lang: string): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("set_ui_lang", { lang });
+  },
+
   async panelSettings(): Promise<PanelSettings> {
     if (!inTauri) return { ...browserSettings };
     return invoke<PanelSettings>("get_panel_settings");
@@ -167,14 +177,6 @@ export const bridge: Bridge = {
     await invoke<void>("set_show_money", { on });
   },
 
-  async setShowUnusedTools(on: boolean): Promise<void> {
-    if (!inTauri) {
-      browserSettings.show_unused_tools = on;
-      return;
-    }
-    await invoke<void>("set_show_unused_tools", { on });
-  },
-
   async setHostExitPause(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.host_exit_pause = on;
@@ -192,12 +194,12 @@ export const bridge: Bridge = {
   },
 
   async checkUpdate(): Promise<UpdateStatus> {
-    if (!inTauri) return { phase: "uptodate", message: "dev 无更新", version: null };
+    if (!inTauri) return { phase: "uptodate", message: t("update.dev.none"), version: null };
     return invoke<UpdateStatus>("check_update");
   },
 
   async downloadUpdate(): Promise<UpdateStatus> {
-    if (!inTauri) return { phase: "unsupported", message: "dev 无更新", version: null };
+    if (!inTauri) return { phase: "unsupported", message: t("update.dev.none"), version: null };
     return invoke<UpdateStatus>("download_update");
   },
 
@@ -218,6 +220,14 @@ export const bridge: Bridge = {
       cancelled = true;
       unlisten?.();
     };
+  },
+
+  async setShowEmptyTools(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.show_empty_tools = on;
+      return;
+    }
+    await invoke<void>("set_show_empty_tools", { on });
   },
 
   async setBubbleEnabled(on: boolean): Promise<void> {
@@ -263,9 +273,9 @@ const browserSettings: PanelSettings = {
   refresh_secs: 30,
   theme: "system",
   show_money: true,
+  show_empty_tools: false,
   bubble_enabled: true,
   host_exit_pause: true,
   auto_update_check: true,
-  show_unused_tools: false,
   version: "dev",
 };

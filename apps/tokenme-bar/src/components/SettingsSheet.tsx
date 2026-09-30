@@ -2,19 +2,20 @@ import { useEffect, useState } from "react";
 import type { PanelSettings, ThemeKey, UpdateStatus } from "../types";
 import { bridge, isWindows } from "../lib/bridge";
 import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
+import { t } from "../lib/i18n";
 import { IconClose } from "./Icons";
 
-const INTERVALS: { secs: number; label: string }[] = [
-  { secs: 15, label: "15 秒" },
-  { secs: 30, label: "30 秒" },
-  { secs: 60, label: "1 分钟" },
-  { secs: 300, label: "5 分钟" },
+const INTERVALS: { secs: number; label: () => string }[] = [
+  { secs: 15, label: () => t("set.15s") },
+  { secs: 30, label: () => t("set.30s") },
+  { secs: 60, label: () => t("set.1m") },
+  { secs: 300, label: () => t("set.5m") },
 ];
 
-const THEMES: { key: ThemeKey; label: string }[] = [
-  { key: "system", label: "跟随系统" },
-  { key: "light", label: "浅色" },
-  { key: "dark", label: "深色" },
+const THEMES: { key: ThemeKey; label: () => string }[] = [
+  { key: "system", label: () => t("set.theme.system") },
+  { key: "light", label: () => t("set.theme.light") },
+  { key: "dark", label: () => t("set.theme.dark") },
 ];
 
 /**
@@ -22,19 +23,11 @@ const THEMES: { key: ThemeKey; label: string }[] = [
  * login-item switch, and the version. Both switches apply on click —
  * there is no dirty state to save, so there is no save button.
  */
-export function SettingsSheet({
-  onClose,
-  onMoney,
-  onUnused,
-}: {
-  onClose: () => void;
-  onMoney: (on: boolean) => void;
-  onUnused: (on: boolean) => void;
-}) {
+export function SettingsSheet({ onClose, onMoney, onEmptyTools }: { onClose: () => void; onMoney: (on: boolean) => void; onEmptyTools: (on: boolean) => void }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
-  // 0–100 while the artifact streams in; the button reads 下载中 {n}%.
+  // 0–100 while the artifact streams in; the button reads the set.dl label.
   const [progress, setProgress] = useState<number | null>(null);
 
   useEffect(() => bridge.onUpdateProgress((p) => setProgress(p.percent)), []);
@@ -82,10 +75,10 @@ export function SettingsSheet({
     void bridge.setShowMoney(on);
   };
 
-  const setShowUnusedTools = (on: boolean) => {
-    setSettings((s) => (s ? { ...s, show_unused_tools: on } : s));
-    onUnused(on);
-    void bridge.setShowUnusedTools(on);
+  const setShowEmptyTools = (on: boolean) => {
+    setSettings((s) => (s ? { ...s, show_empty_tools: on } : s));
+    onEmptyTools(on);
+    void bridge.setShowEmptyTools(on);
   };
 
   const setBubble = (on: boolean) => {
@@ -149,22 +142,22 @@ export function SettingsSheet({
         className="sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="设置"
+        aria-label={t("set.title")}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sheet-hd">
-          <h2 className="sec-label">设置</h2>
-          <button type="button" className="sheet-close" aria-label="关闭设置" onClick={onClose}>
+          <h2 className="sec-label">{t("set.title")}</h2>
+          <button type="button" className="sheet-close" aria-label={t("set.close.a11y")} onClick={onClose}>
             <IconClose size={12} />
           </button>
         </div>
 
         <div className="sheet-row">
           <div>
-            <div className="sheet-label">自动刷新</div>
-            <div className="sheet-hint">文件变化时仍会立即刷新</div>
+            <div className="sheet-label">{t("set.refresh")}</div>
+            <div className="sheet-hint">{t("set.refresh.hint")}</div>
           </div>
-          <div className="seg" role="radiogroup" aria-label="自动刷新间隔">
+          <div className="seg" role="radiogroup" aria-label={t("set.interval.a11y")}>
             {INTERVALS.map((i) => (
               <button
                 key={i.secs}
@@ -174,7 +167,7 @@ export function SettingsSheet({
                 aria-checked={settings?.refresh_secs === i.secs}
                 onClick={() => setRefresh(i.secs)}
               >
-                {i.label}
+                {i.label()}
               </button>
             ))}
           </div>
@@ -183,33 +176,48 @@ export function SettingsSheet({
         {isWindows ? (
           <div className="sheet-row">
             <div>
-              <div className="sheet-label">边缘悬浮水滴</div>
-              <div className="sheet-hint">显示今日 Token 数，靠近屏幕边缘时自动吸附</div>
+              <div className="sheet-label">{t("set.bubble")}</div>
+              <div className="sheet-hint">{t("set.bubble.hint")}</div>
             </div>
             <button
               type="button"
               role="switch"
               className="switch"
               aria-checked={settings?.bubble_enabled ?? true}
-              aria-label="边缘悬浮水滴"
+              aria-label={t("set.bubble")}
               onClick={() => setBubble(!(settings?.bubble_enabled ?? true))}
             />
           </div>
         ) : null}
 
         <div className="sheet-row">
-          <div className="sheet-label">外观</div>
-          <div className="seg" role="radiogroup" aria-label="外观主题">
-            {THEMES.map((t) => (
+          <div>
+            <div className="sheet-label">{t("set.showempty")}</div>
+            <div className="sheet-hint">{t("set.showempty.hint")}</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            className="switch"
+            aria-checked={settings?.show_empty_tools ?? false}
+            aria-label={t("set.showempty")}
+            onClick={() => setShowEmptyTools(!(settings?.show_empty_tools ?? false))}
+          />
+        </div>
+
+        <div className="sheet-row">
+          <div className="sheet-label">{t("set.theme")}</div>
+          <div className="seg" role="radiogroup" aria-label={t("set.theme.a11y")}>
+            {THEMES.map((th) => (
               <button
-                key={t.key}
+                key={th.key}
                 type="button"
                 role="radio"
                 className="seg-btn"
-                aria-checked={settings?.theme === t.key}
-                onClick={() => setTheme(t.key)}
+                aria-checked={settings?.theme === th.key}
+                onClick={() => setTheme(th.key)}
               >
-                {t.label}
+                {th.label()}
               </button>
             ))}
           </div>
@@ -217,80 +225,65 @@ export function SettingsSheet({
 
         <div className="sheet-row">
           <div>
-            <div className="sheet-label">金额折算</div>
-            <div className="sheet-hint">关闭后只显示 tokens 与 credits</div>
+            <div className="sheet-label">{t("set.money")}</div>
+            <div className="sheet-hint">{t("set.money.hint")}</div>
           </div>
           <button
             type="button"
             role="switch"
             className="switch"
             aria-checked={settings?.show_money ?? true}
-            aria-label="金额折算"
+            aria-label={t("set.money")}
             onClick={() => setShowMoney(!(settings?.show_money ?? true))}
           />
         </div>
 
         <div className="sheet-row">
           <div>
-            <div className="sheet-label">显示未使用工具</div>
-            <div className="sheet-hint">开启后工具页列出本期会话数为 0 的工具</div>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            className="switch"
-            aria-checked={settings?.show_unused_tools ?? false}
-            aria-label="显示未使用工具"
-            onClick={() => setShowUnusedTools(!(settings?.show_unused_tools ?? false))}
-          />
-        </div>
-
-        <div className="sheet-row">
-          <div>
-            <div className="sheet-label">退出后暂停配额</div>
-            <div className="sheet-hint">工具退出后停止探测其配额，保留最后数值</div>
+            <div className="sheet-label">{t("set.pause")}</div>
+            <div className="sheet-hint">{t("set.pause.hint")}</div>
           </div>
           <button
             type="button"
             role="switch"
             className="switch"
             aria-checked={settings?.host_exit_pause ?? true}
-            aria-label="退出后暂停配额"
+            aria-label={t("set.pause")}
             onClick={() => setHostExitPause(!(settings?.host_exit_pause ?? true))}
           />
         </div>
 
         <div className="sheet-row">
           <div>
-            <div className="sheet-label">自动检查更新</div>
-            <div className="sheet-hint">开启后启动时和每天各静默检查一次，发现新版本在底部提示</div>
+            <div className="sheet-label">{t("set.autoupdate")}</div>
+            <div className="sheet-hint">{t("set.autoupdate.hint")}</div>
           </div>
           <button
             type="button"
             role="switch"
             className="switch"
             aria-checked={settings?.auto_update_check ?? true}
-            aria-label="自动检查更新"
+            aria-label={t("set.autoupdate")}
             onClick={() => setAutoUpdateCheck(!(settings?.auto_update_check ?? true))}
           />
         </div>
 
         <div className="sheet-row">
-          <div className="sheet-label">开机自动启动</div>
+          <div className="sheet-label">{t("set.autostart")}</div>
           <button
             type="button"
             role="switch"
             className="switch"
             aria-checked={settings?.autostart ?? false}
-            aria-label="开机自动启动"
+            aria-label={t("set.autostart")}
             onClick={() => setAutostart(!(settings?.autostart ?? false))}
           />
         </div>
 
         <div className="sheet-row">
           <div>
-            <div className="sheet-label">联系我们</div>
-            <div className="sheet-hint">问题反馈 · 版本发布 · 交流群见 README</div>
+            <div className="sheet-label">{t("set.contact")}</div>
+            <div className="sheet-hint">{t("set.contact.hint")}</div>
           </div>
           <div className="sheet-actions">
             <button
@@ -299,7 +292,7 @@ export function SettingsSheet({
               title={CONTACT_EMAIL}
               onClick={() => void bridge.openExternal(`mailto:${CONTACT_EMAIL}`)}
             >
-              发邮件
+              {t("set.mail")}
             </button>
             <button
               type="button"
@@ -311,10 +304,10 @@ export function SettingsSheet({
             <button
               type="button"
               className="sheet-link"
-              title="崩溃与异常都记录在这里，反馈问题时附上"
+              title={t("set.logs.tip")}
               onClick={() => void bridge.openLogDir()}
             >
-              日志
+              {t("set.logs")}
             </button>
           </div>
         </div>
@@ -322,11 +315,11 @@ export function SettingsSheet({
         {bridge.live ? (
           <div className="sheet-row sheet-row-danger">
             <div>
-              <div className="sheet-label">退出程序</div>
-              <div className="sheet-hint">关闭面板并退出托盘进程</div>
+              <div className="sheet-label">{t("set.quit")}</div>
+              <div className="sheet-hint">{t("set.quit.hint")}</div>
             </div>
             <button type="button" className="quit-btn" onClick={quit}>
-              退出
+              {t("set.quit.btn")}
             </button>
           </div>
         ) : null}
@@ -345,11 +338,11 @@ export function SettingsSheet({
                 >
                   {updateBusy
                     ? progress != null
-                      ? `下载中 ${Math.round(progress)}%`
-                      : "处理中…"
+                      ? t("set.dl", { p: Math.round(progress) })
+                      : t("set.busy")
                     : update.phase === "available"
-                      ? "下载并安装"
-                      : "重启到新版本"}
+                      ? t("set.download")
+                      : t("set.reboot")}
                 </button>
               ) : null}
             </span>

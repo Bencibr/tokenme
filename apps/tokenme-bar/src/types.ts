@@ -195,13 +195,15 @@ export interface Bridge {
   /** The saved drag order of the quota section (empty lists ⇒ report order). */
   quotaOrder: () => Promise<QuotaOrder>;
   setQuotaOrder: (order: QuotaOrder) => Promise<void>;
+  /** Report the webview's detected UI language to the native chrome. */
+  setUiLang: (lang: string) => Promise<void>;
   /** The settings sheet: autostart, fallback poll cadence, build version. */
   panelSettings: () => Promise<PanelSettings>;
   setAutostart: (on: boolean) => Promise<void>;
   setRefreshSecs: (secs: number) => Promise<void>;
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
-  setShowUnusedTools: (on: boolean) => Promise<void>;
+  setShowEmptyTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setHostExitPause: (on: boolean) => Promise<void>;
   setAutoUpdateCheck: (on: boolean) => Promise<void>;
@@ -228,10 +230,10 @@ export interface PanelSettings {
   refresh_secs: number;
   theme: ThemeKey;
   show_money: boolean;
+  show_empty_tools: boolean;
   bubble_enabled: boolean;
   host_exit_pause: boolean;
   auto_update_check: boolean;
-  show_unused_tools: boolean;
   version: string;
 }
 

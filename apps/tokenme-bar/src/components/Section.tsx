@@ -1,3 +1,4 @@
+import { t } from "../lib/i18n";
 import { IconChevron } from "./Icons";
 
 interface SectionProps {
@@ -59,7 +60,7 @@ export function MoreRow({ open, total, preview, onToggle, closedLabel, openLabel
   return (
     <button type="button" className="more-row" aria-expanded={open} onClick={onToggle}>
       <IconChevron size={12} className="more-icon" />
-      <span>{open ? openLabel ?? `只看前 ${preview} 项` : closedLabel ?? `查看全部 ${total} 项`}</span>
+      <span>{open ? openLabel ?? t("more.open", { n: preview }) : closedLabel ?? t("more.close", { n: total })}</span>
       {open ? null : <span className="more-n num">+{total - preview}</span>}
     </button>
   );

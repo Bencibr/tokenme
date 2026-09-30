@@ -5,6 +5,7 @@ import { IconMissing } from "./Icons";
 import { MoreRow, Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
 import { useMoney } from "../lib/display";
+import { t } from "../lib/i18n";
 
 /**
  * Which logs were actually read. Undetected sources stay reachable rather than
@@ -25,7 +26,10 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
   const listed = showMissing ? [...detected, ...missing] : detected;
 
   return (
-    <Section label="数据源" meta={`${detected.length}/${sources.length} 已检测 · ${count(events)} 事件`}>
+    <Section
+      label={t("src.section")}
+      meta={t("src.meta", { d: detected.length, s: sources.length, e: count(events) })}
+    >
       <ol className="src-list">
         {listed.map((s, idx) => (
           <li
@@ -37,7 +41,7 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
           >
             {s.detected ? <ToolIcon tool={s.id} size={20} /> : <IconMissing size={12} className="src-icon" />}
             <span className="src-name">{s.display}</span>
-            <span className="src-events num">{s.detected ? `${count(s.events_ingested)} 条` : "未检测到"}</span>
+            <span className="src-events num">{s.detected ? t("src.rows", { n: count(s.events_ingested) }) : t("src.missing")}</span>
             <div className="src-meta">
               <span className="src-root" title={s.roots.join("\n")}>
                 {s.roots[0] ?? "—"}
@@ -66,11 +70,11 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
         total={sources.length}
         preview={detected.length}
         onToggle={() => setShowMissing((v) => !v)}
-        closedLabel={`展开 ${missing.length} 个未检测到的源`}
-        openLabel="收起未检测到的源"
+        closedLabel={t("src.more.show", { n: missing.length })}
+        openLabel={t("src.more.hide")}
       />
       <p className="src-total">
-        全部历史
+        {t("src.total")}
         <span className="num"> {compactTokens(allTime.total_tokens)}</span>
         <span> tokens</span>
         {showMoney ? (

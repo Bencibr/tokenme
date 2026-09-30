@@ -366,20 +366,9 @@ const SOURCES: SourceStatus[] = [
     events_ingested: 412,
   },
   {
-    // Detected but silent this period: no breakdown row, so the tools page
-    // only appends it as a zero row — the row 显示未使用工具 (default off)
-    // hides. Both switch states stay provable headlessly.
-    id: "dsh",
-    display: "DSH",
-    detected: true,
-    roots: ["~/.dsh"],
-    hint: "本期无会话",
-    events_ingested: 0,
-  },
-  {
     id: "gemini",
     display: "Gemini CLI",
-    detected: false,
+    detected: true,
     roots: ["~/.gemini/tmp"],
     hint: "未发现会话目录",
     events_ingested: 0,

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { Item, UnpricedModel } from "../types";
 import { compactTokens, credits as creditText, money } from "../lib/format";
 import { useMoney } from "../lib/display";
+import { t } from "../lib/i18n";
 import { MoreRow, Section } from "./Section";
 import { nextSortState, SortToggle, type SortState } from "./SortToggle";
 
@@ -89,7 +90,7 @@ export function RankRows({
                     ? creditText(i.counts.credits)
                     : i.priced
                       ? money(i.cost)
-                      : "无价格"}
+                      : t("tools.unpriced")}
               </span>
             </div>
           </li>
@@ -136,23 +137,25 @@ export function RankedList({ label, items, limit = 5, weight = "cost", unpriced,
 
   return (
     <Section
-      label={all ? `${label} · 全部` : `${label} Top ${Math.max(shown, 1)}`}
-      meta={all ? `${items.length} 项` : hidden > 0 ? `另 ${hidden} 项` : undefined}
+      label={all ? t("rank.all", { label }) : `${label} Top ${Math.max(shown, 1)}`}
+      meta={all ? t("rank.meta.all", { n: items.length }) : hidden > 0 ? t("rank.meta.more", { n: hidden }) : undefined}
       trail={items.length > 1 ? <SortToggle state={sort} onCycle={() => setSort((v) => nextSortState(v))} /> : undefined}
     >
       {items.length === 0 ? (
-        <p className="empty-row">{emptyText ?? "本期无数据"}</p>
+        <p className="empty-row">{emptyText ?? t("rank.empty")}</p>
       ) : (
         <RankRows items={ordered} limit={shown} weight={weight} />
       )}
       <MoreRow open={all} total={items.length} preview={limit} onToggle={() => setAll((v) => !v)} />
       {listed.length > 0 ? (
         <p className="foot-note">
-          {unpriced?.length ?? 0} 个模型暂无价格：
-          {listed
-            .slice(0, 2)
-            .map((u) => `${u.model} ${compactTokens(u.total_tokens)}`)
-            .join(" · ")}
+          {t("rank.unpriced.foot", {
+            n: unpriced?.length ?? 0,
+            list: listed
+              .slice(0, 2)
+              .map((u) => `${u.model} ${compactTokens(u.total_tokens)}`)
+              .join(" · "),
+          })}
         </p>
       ) : null}
     </Section>

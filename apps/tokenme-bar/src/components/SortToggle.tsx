@@ -1,11 +1,12 @@
+import { t } from "../lib/i18n";
 import { IconSortAsc, IconSortDefault, IconSortDesc } from "./Icons";
 
 export type SortState = "default" | "asc" | "desc";
 
-const META: Record<SortState, { title: string; label: string }> = {
-  default: { title: "默认排序", label: "默认" },
-  asc: { title: "按用量升序", label: "升序" },
-  desc: { title: "按用量降序", label: "降序" },
+const META: Record<SortState, { title: () => string; label: () => string }> = {
+  default: { title: () => t("sort.title.default"), label: () => t("sort.default") },
+  asc: { title: () => t("sort.title.asc"), label: () => t("sort.asc") },
+  desc: { title: () => t("sort.title.desc"), label: () => t("sort.desc") },
 };
 
 /** 用量排序三态开关:默认 ⇄ 升序 ⇄ 降序,点击循环。 */
@@ -13,7 +14,7 @@ export function SortToggle({ state, onCycle }: { state: SortState; onCycle: () =
   const Icon = state === "asc" ? IconSortAsc : state === "desc" ? IconSortDesc : IconSortDefault;
   const { title, label } = META[state];
   return (
-    <button type="button" className="sort-toggle" title={title} aria-label={`排序：${label}`} onClick={onCycle}>
+    <button type="button" className="sort-toggle" title={title()} aria-label={t("sort.a11y", { l: label() })} onClick={onCycle}>
       <Icon size={12} />
     </button>
   );

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Item } from "../types";
 import { count } from "../lib/format";
+import { t } from "../lib/i18n";
 import { RankRows } from "./RankedList";
 import { MoreRow, Section } from "./Section";
 
@@ -18,8 +19,8 @@ export function CallTabs({ mcps, skills }: { mcps: Item[]; skills: Item[] }) {
   const items = tab === "mcp" ? mcps : skills;
 
   return (
-    <Section label="调用来源" meta={`${count(mcps.length + skills.length)} 项`}>
-      <div className="tabs" role="tablist" aria-label="调用类型">
+    <Section label={t("call.section")} meta={t("call.meta", { n: count(mcps.length + skills.length) })}>
+      <div className="tabs" role="tablist" aria-label={t("call.a11y")}>
         {(
           [
             ["mcp", `MCP`, mcps.length],
@@ -45,9 +46,9 @@ export function CallTabs({ mcps, skills }: { mcps: Item[]; skills: Item[] }) {
         ))}
       </div>
       {items.length === 0 ? (
-        <p className="empty-row">本期没有{tab === "mcp" ? " MCP" : " Skill"}调用</p>
+        <p className="empty-row">{tab === "mcp" ? t("call.empty.mcp") : t("call.empty.skill")}</p>
       ) : (
-        <div role="tabpanel" aria-label={tab === "mcp" ? "MCP 调用" : "Skill 调用"}>
+        <div role="tabpanel" aria-label={tab === "mcp" ? t("call.panel.mcp") : t("call.panel.skill")}>
           <RankRows items={items} limit={all ? items.length : 5} weight="tokens" />
           <MoreRow open={all} total={items.length} preview={5} onToggle={() => setAll((v) => !v)} />
         </div>

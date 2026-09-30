@@ -1,4 +1,7 @@
 import type { PeriodKey, TokenCounts, TrayMode } from "../types";
+import { lang, t } from "./i18n";
+
+const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** Fixed 14-slot categorical ramp; index order is the order tools appear. */
 const TOOL_ORDER = [
@@ -143,20 +146,20 @@ export function deltaDirection(n: number): "up" | "down" | "flat" {
 export function relativeTime(ms: number, nowMs: number): string {
   const diff = Math.max(0, nowMs - ms);
   const min = Math.floor(diff / 60_000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
+  if (min < 1) return t("rel.now");
+  if (min < 60) return t("rel.min", { n: min });
   const hours = Math.floor(min / 60);
-  if (hours < 24) return `${hours} 小时前`;
+  if (hours < 24) return t("rel.hour", { n: hours });
   const days = Math.floor(hours / 24);
-  if (days === 1) return "昨天";
-  if (days < 7) return `${days} 天前`;
-  return `${Math.floor(days / 7)} 周前`;
+  if (days === 1) return t("rel.yesterday");
+  if (days < 7) return t("rel.day", { n: days });
+  return t("rel.week", { n: Math.floor(days / 7) });
 }
 
 /** "in 3h 12m" style countdown, dropping the unit pair that adds no information. */
 export function until(resetsAtMs: number, nowMs: number): string {
   const diff = resetsAtMs - nowMs;
-  if (diff <= 0) return "即将重置";
+  if (diff <= 0) return t("until.soon");
   const totalMin = Math.floor(diff / 60_000);
   const days = Math.floor(totalMin / 1440);
   const hours = Math.floor((totalMin % 1440) / 60);
@@ -167,24 +170,48 @@ export function until(resetsAtMs: number, nowMs: number): string {
 }
 
 export const PERIOD_LABEL: Record<PeriodKey, string> = {
-  day: "今日",
-  week: "本周",
-  month: "本月",
-  year: "今年",
+  get day() {
+    return t("period.day");
+  },
+  get week() {
+    return t("period.week");
+  },
+  get month() {
+    return t("period.month");
+  },
+  get year() {
+    return t("period.year");
+  },
 };
 
 export const PERIOD_PREV: Record<PeriodKey, string> = {
-  day: "昨日同期",
-  week: "上周同期",
-  month: "上月同期",
-  year: "去年同期",
+  get day() {
+    return t("prev.day");
+  },
+  get week() {
+    return t("prev.week");
+  },
+  get month() {
+    return t("prev.month");
+  },
+  get year() {
+    return t("prev.year");
+  },
 };
 
 export const PERIOD_SHORT: Record<PeriodKey, string> = {
-  day: "日",
-  week: "周",
-  month: "月",
-  year: "年",
+  get day() {
+    return t("period.short.day");
+  },
+  get week() {
+    return t("period.short.week");
+  },
+  get month() {
+    return t("period.short.month");
+  },
+  get year() {
+    return t("period.short.year");
+  },
 };
 
 /** `TokenCounts::total` and `cached_pct` are Rust methods; mirror them here. */
@@ -198,12 +225,24 @@ export function cachedOf(c: TokenCounts): number {
 }
 
 export const TRAY_MODE_LABEL: Record<TrayMode, string> = {
-  tray_only: "仅托盘",
-  tokens_only: "仅Token",
-  cost_only: "仅花费",
-  tray_tokens: "托盘·Token",
-  tray_cost: "托盘·花费",
-  tray_tokens_cost: "托盘·Token·花费",
+  get tray_only() {
+    return t("tray.tray_only");
+  },
+  get tokens_only() {
+    return t("tray.tokens_only");
+  },
+  get cost_only() {
+    return t("tray.cost_only");
+  },
+  get tray_tokens() {
+    return t("tray.tray_tokens");
+  },
+  get tray_cost() {
+    return t("tray.tray_cost");
+  },
+  get tray_tokens_cost() {
+    return t("tray.tray_tokens_cost");
+  },
 };
 
 /** Local `YYYY-MM-DD` for an epoch-ms value, matching how report.rs buckets days. */
@@ -215,10 +254,12 @@ export function localDate(ms: number): string {
 
 export function formatDateLabel(iso: string): string {
   const [, m, d] = iso.split("-");
-  return `${Number(m)} 月 ${Number(d)} 日`;
+  return lang === "en" ? `${MONTHS_EN[Number(m) - 1]} ${Number(d)}` : `${Number(m)} 月 ${Number(d)} 日`;
 }
 
 export function weekdayInitial(iso: string): string {
   const [y, m, d] = iso.split("-").map(Number);
-  return ["日", "一", "二", "三", "四", "五", "六"][new Date(y, m - 1, d).getDay()];
+  return (lang === "en" ? ["S", "M", "T", "W", "T", "F", "S"] : ["日", "一", "二", "三", "四", "五", "六"])[
+    new Date(y, m - 1, d).getDay()
+  ];
 }

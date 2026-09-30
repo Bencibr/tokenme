@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import type { PageKey, PeriodKey, Report } from "../types";
 import {
+  PERIOD_LABEL,
   PERIOD_PREV,
   PERIOD_SHORT,
   compactTokens,
@@ -14,15 +15,16 @@ import {
 } from "../lib/format";
 import { useTweenNumber } from "../lib/hooks";
 import { useMoney } from "../lib/display";
+import { t } from "../lib/i18n";
 import { IconArrowDown, IconArrowUp, IconClose, IconFlat } from "./Icons";
 
 const ORDER: PeriodKey[] = ["day", "week", "month", "year"];
 
-const PAGES: { key: PageKey; label: string; hint: string }[] = [
-  { key: "overview", label: "概览", hint: "活动热力与配额" },
-  { key: "tools", label: "工具", hint: "各工具的用量与花费" },
-  { key: "ranks", label: "排行", hint: "模型 / 项目 / MCP / Skill 的排序" },
-  { key: "detail", label: "明细", hint: "最近会话与数据来源" },
+const PAGES: { key: PageKey; label: () => string; hint: () => string }[] = [
+  { key: "overview", label: () => t("page.overview"), hint: () => t("page.overview.hint") },
+  { key: "tools", label: () => t("page.tools"), hint: () => t("page.tools.hint") },
+  { key: "ranks", label: () => t("page.ranks"), hint: () => t("page.ranks.hint") },
+  { key: "detail", label: () => t("page.detail"), hint: () => t("page.detail.hint") },
 ];
 
 interface Props {
@@ -43,7 +45,7 @@ function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
     <span className="chip" data-dir={dir} title={caption}>
       <Glyph size={11} />
       <span className="chip-v num">{signedPercent(pct)}</span>
-      <span className="chip-cap">较{caption}</span>
+      <span className="chip-cap">{t("hdr.vs", { p: caption })}</span>
     </span>
   );
 }
@@ -71,7 +73,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
       <div className="hdr-bar">
         <span className="brand">TokenMe</span>
         <div className="hdr-actions">
-          <div className="seg" role="radiogroup" aria-label="统计周期" onKeyDown={onKey}>
+          <div className="seg" role="radiogroup" aria-label={t("hdr.period.a11y")} onKeyDown={onKey}>
             {ORDER.map((key) => (
               <button
                 key={key}
@@ -87,7 +89,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
             ))}
           </div>
           {onClose ? (
-            <button type="button" className="panel-close" onClick={onClose} title="关闭面板" aria-label="关闭面板">
+            <button type="button" className="panel-close" onClick={onClose} title={t("hdr.close")} aria-label={t("hdr.close")}>
               <IconClose size={13} />
             </button>
           ) : null}
@@ -110,7 +112,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
             {showMoney ? (
               <span
                 className="hero-cost"
-                title={summary.credit_cost > 0 ? `含 ${money(summary.credit_cost)} 由 credits 按官方方案价折算` : undefined}
+                title={summary.credit_cost > 0 ? t("hdr.credit.title", { c: money(summary.credit_cost) }) : undefined}
               >
                 {summary.credit_cost > 0 ? "≈" : ""}
                 {money(summary.cost)}
@@ -121,34 +123,45 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
         </div>
         <span className="sr">
           {showMoney
-            ? `${win.label} ${compactTokens(summary.total_tokens)} tokens，花费 ${money(summary.cost)}，较${prevLabel} ${signedPercent(win.delta_cost_pct)}`
-            : `${win.label} ${compactTokens(summary.total_tokens)} tokens，较${prevLabel} ${signedPercent(win.delta_tokens_pct)}`}
+            ? t("hdr.sr.money", {
+                label: PERIOD_LABEL[period],
+                tokens: compactTokens(summary.total_tokens),
+                cost: money(summary.cost),
+                prev: prevLabel,
+                pct: signedPercent(win.delta_cost_pct),
+              })
+            : t("hdr.sr.tokens", {
+                label: PERIOD_LABEL[period],
+                tokens: compactTokens(summary.total_tokens),
+                prev: prevLabel,
+                pct: signedPercent(win.delta_tokens_pct),
+              })}
         </span>
       </div>
 
       <div className="hdr-stats">
-        <span>{win.label}</span>
+        <span>{PERIOD_LABEL[period]}</span>
         <span className="dot-sep" aria-hidden="true" />
         <span className="num">{count(summary.requests)}</span>
-        <span>次</span>
+        <span>{t("hdr.reqs")}</span>
         <span className="dot-sep" aria-hidden="true" />
         <span className="num">{count(summary.sessions)}</span>
-        <span>会话</span>
+        <span>{t("hdr.sessions")}</span>
         <span className="dot-sep" aria-hidden="true" />
-        <span>缓存 {percent(summary.cached_pct, 1)}</span>
+        <span>{t("hdr.cache", { p: percent(summary.cached_pct, 1) })}</span>
         {summary.credits > 0 ? (
           <>
             <span className="dot-sep" aria-hidden="true" />
             <span>{creditText(summary.credits)}</span>
             {showMoney && summary.credit_cost > 0 ? (
-              <span className="hint" title="credits 按厂商公布的方案价折算，非账单">
-                ≈{money(summary.credit_cost)} 已计入
+              <span className="hint" title={t("hdr.credit.note")}>
+                {t("hdr.credit.included", { c: money(summary.credit_cost) })}
               </span>
             ) : null}
           </>
         ) : null}
       </div>
-      <div className="page-tabs" role="tablist" aria-label="页面">
+      <div className="page-tabs" role="tablist" aria-label={t("page.overview")}>
         {PAGES.map((p, i) => (
           <button
             key={p.key}
@@ -157,7 +170,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
             className="page-tab"
             aria-selected={page === p.key}
             tabIndex={page === p.key ? 0 : -1}
-            title={p.hint}
+            title={p.hint()}
             onClick={() => onPage(p.key)}
             onKeyDown={(e) => {
               const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
@@ -166,7 +179,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
               onPage(PAGES[(i + d + PAGES.length) % PAGES.length].key);
             }}
           >
-            {p.label}
+            {p.label()}
           </button>
         ))}
       </div>
