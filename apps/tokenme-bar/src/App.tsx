@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PageKey, PeriodKey, Report, TrayMode, TrayState } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
+import { RELEASE_PAGE_URL } from "./lib/about";
 import { DisplayCtx } from "./lib/display";
 import { localDate } from "./lib/format";
 import { useEscape, useTicker } from "./lib/hooks";
@@ -62,9 +63,22 @@ const [page, setPage] = useState<PageKey>(() => {
       applyTheme(s.theme);
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
-      // One quiet version check per boot; any failure stays silent.
+      // One quiet version check per boot; any failure stays silent. With
+      // auto_update_check on, the check runs through the updater commands so
+      // the settings sheet can offer a one-click download + install.
       if (inTauri && s.version !== "dev") {
-        void checkForUpdate(s.version).then((u) => alive && setUpdate(u));
+        if (s.auto_update_check) {
+          void bridge
+            .checkUpdate()
+            .then((status) => {
+              if (status.phase === "available" && status.version) {
+                alive && setUpdate({ latest: status.version, url: RELEASE_PAGE_URL });
+              }
+            })
+            .catch(() => {});
+        } else {
+          void checkForUpdate(s.version).then((u) => alive && setUpdate(u));
+        }
       }
     });
     const un = bridge.onReport((r) => {

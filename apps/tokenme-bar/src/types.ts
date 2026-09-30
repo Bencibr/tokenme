@@ -192,6 +192,10 @@ export interface Bridge {
   setShowMoney: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setHostExitPause: (on: boolean) => Promise<void>;
+  setAutoUpdateCheck: (on: boolean) => Promise<void>;
+  checkUpdate: () => Promise<UpdateStatus>;
+  downloadUpdate: () => Promise<UpdateStatus>;
+  installUpdate: () => Promise<void>;
   showPanel: () => Promise<void>;
   /** Hands the press to the Rust drag loop; the native move loop cannot move a
    *  non-activating window. Resolves immediately; the drag runs in Rust. */
@@ -213,5 +217,12 @@ export interface PanelSettings {
   show_money: boolean;
   bubble_enabled: boolean;
   host_exit_pause: boolean;
+  auto_update_check: boolean;
   version: string;
+}
+
+export interface UpdateStatus {
+  phase: string;
+  message: string;
+  version: string | null;
 }

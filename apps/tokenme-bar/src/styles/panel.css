@@ -1518,6 +1518,28 @@
 }
 
 /* contact / releases rows: two quiet text buttons, no pill weight */
+/* 更新动作按钮：紧跟标签文字，弱化到文字级 */
+.sheet-action {
+  margin-top: 4px;
+  padding: 2px 10px;
+  font-size: var(--t-meta);
+  color: var(--accent);
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.sheet-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.sheet-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .sheet-actions {
   display: inline-flex;
   gap: var(--s2);

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
-import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState } from "../types";
+import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -175,6 +175,29 @@ export const bridge: Bridge = {
     await invoke<void>("set_host_exit_pause", { on });
   },
 
+  async setAutoUpdateCheck(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.auto_update_check = on;
+      return;
+    }
+    await invoke<void>("set_auto_update_check", { on });
+  },
+
+  async checkUpdate(): Promise<UpdateStatus> {
+    if (!inTauri) return { phase: "uptodate", message: "dev 无更新", version: null };
+    return invoke<UpdateStatus>("check_update");
+  },
+
+  async downloadUpdate(): Promise<UpdateStatus> {
+    if (!inTauri) return { phase: "unsupported", message: "dev 无更新", version: null };
+    return invoke<UpdateStatus>("download_update");
+  },
+
+  async installUpdate(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("install_update");
+  },
+
   async setBubbleEnabled(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.bubble_enabled = on;
@@ -220,5 +243,6 @@ const browserSettings: PanelSettings = {
   show_money: true,
   bubble_enabled: true,
   host_exit_pause: true,
+  auto_update_check: false,
   version: "dev",
 };

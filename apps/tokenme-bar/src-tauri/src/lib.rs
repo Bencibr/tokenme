@@ -6,6 +6,7 @@ mod scan_log;
 mod panel;
 mod settings;
 mod tray;
+mod updater;
 
 pub use settings::{Settings, TrayMode};
 
@@ -43,6 +44,11 @@ pub fn run() {
             commands::set_refresh_secs,
             commands::set_theme,
             commands::set_show_money,
+            updater::check_update,
+            updater::download_update,
+            updater::install_update,
+            updater::get_auto_update_check,
+            updater::set_auto_update_check,
             commands::set_host_exit_pause,
             commands::set_bubble_enabled,
             commands::begin_bubble_drag,

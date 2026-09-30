@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { PanelSettings, ThemeKey } from "../types";
+import type { PanelSettings, ThemeKey, UpdateStatus } from "../types";
 import { bridge, isWindows } from "../lib/bridge";
 import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
 import { IconClose } from "./Icons";
@@ -24,6 +24,8 @@ const THEMES: { key: ThemeKey; label: string }[] = [
  */
 export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMoney: (on: boolean) => void }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -33,10 +35,7 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
     };
   }, []);
 
-  const setAutostart = (on: boolean) => {
-    setSettings((s) => (s ? { ...s, autostart: on } : s));
-    void bridge.setAutostart(on);
-  };
+
 
   const setRefresh = (secs: number) => {
     setSettings((s) => (s ? { ...s, refresh_secs: secs } : s));
@@ -61,9 +60,44 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
     void bridge.setBubbleEnabled(on);
   };
 
+  const setAutostart = (on: boolean) => {
+    setSettings((s) => (s ? { ...s, autostart: on } : s));
+    void bridge.setAutostart(on);
+  };
+
   const setHostExitPause = (on: boolean) => {
     setSettings((s) => (s ? { ...s, host_exit_pause: on } : s));
     void bridge.setHostExitPause(on);
+  };
+
+  const setAutoUpdateCheck = (on: boolean) => {
+    setSettings((s) => (s ? { ...s, auto_update_check: on } : s));
+    void bridge.setAutoUpdateCheck(on);
+    // 开启的一刻就问一次：用户不必等到下次启动才知道有没有新版。
+    if (on) {
+      setUpdateBusy(true);
+      void bridge
+        .checkUpdate()
+        .then((status) => setUpdate(status))
+        .finally(() => setUpdateBusy(false));
+    } else {
+      setUpdate(null);
+    }
+  };
+
+  const runUpdate = async () => {
+    setUpdateBusy(true);
+    try {
+      const downloaded = await bridge.downloadUpdate();
+      setUpdate(downloaded);
+      if (downloaded.phase === "downloaded") {
+        await bridge.installUpdate();
+      }
+    } catch (e) {
+      setUpdate({ phase: "error", message: String(e), version: null });
+    } finally {
+      setUpdateBusy(false);
+    }
   };
 
   const quit = () => {
@@ -171,6 +205,39 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             onClick={() => setHostExitPause(!(settings?.host_exit_pause ?? true))}
           />
         </div>
+
+        <div className="sheet-row">
+          <div>
+            <div className="sheet-label">自动检查更新</div>
+            <div className="sheet-hint">开启后启动时检查 GitHub 最新版，发现新版本弹窗询问</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            className="switch"
+            aria-checked={settings?.auto_update_check ?? false}
+            aria-label="自动检查更新"
+            onClick={() => setAutoUpdateCheck(!(settings?.auto_update_check ?? false))}
+          />
+        </div>
+
+        {update ? (
+          <div className="sheet-row">
+            <div>
+              <div className="sheet-label">{update.message}</div>
+              {update.phase === "available" || update.phase === "downloaded" ? (
+                <button
+                  type="button"
+                  className="sheet-action"
+                  disabled={updateBusy}
+                  onClick={() => void runUpdate()}
+                >
+                  {updateBusy ? "处理中…" : update.phase === "available" ? "下载并安装" : "重启到新版本"}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         <div className="sheet-row">
           <div className="sheet-label">开机自动启动</div>

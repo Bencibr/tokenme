@@ -99,6 +99,11 @@ pub struct Settings {
     /// account traffic. Default on; the last known answer stays on screen.
     #[serde(default = "default_host_exit_pause")]
     pub host_exit_pause: bool,
+    /// Check GitHub's latest.json on boot and offer the update when a newer
+    /// release exists. Off by default: the auto-download touches the network
+    /// at boot, and the panel should not phone GitHub unless asked.
+    #[serde(default)]
+    pub auto_update_check: bool,
     pub budgets: BTreeMap<String, usage_core::Budget>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub quota_tools: Vec<String>,
@@ -116,6 +121,7 @@ impl Default for Settings {
             show_money: default_show_money(),
             bubble_enabled: default_bubble_enabled(),
             host_exit_pause: default_host_exit_pause(),
+            auto_update_check: false,
             budgets: BTreeMap::new(),
             quota_tools: Vec::new(),
             quota_rows: Vec::new(),
