@@ -69,8 +69,8 @@ echo "==> tauri build: $((SECONDS - t))s"
 # `tokenme-<hash>` instead of `dev.tokenme.bar`. Re-signing ad-hoc binds the
 # plist and gives the app a stable identity — which is also what a keychain ACL
 # (e.g. Qoder's `Safe Storage` item) is matched against.
-codesign --force --sign - "$APP_DIR/tokenme.app"
-codesign -v "$APP_DIR/tokenme.app"
+codesign --force --sign - "$APP_DIR/TokenMe.app"
+codesign -v "$APP_DIR/TokenMe.app"
 
 if (( ! FAST )); then
   # The drag-install image, built with hdiutil rather than Tauri's bundle_dmg.sh:
@@ -80,7 +80,7 @@ if (( ! FAST )); then
   VERSION=$(grep -m1 '^version = ' "$APP/src-tauri/Cargo.toml" | cut -d'"' -f2)
   STAGE=$(mktemp -d)
   trap 'rm -rf "$STAGE"' EXIT
-  cp -R "$APP_DIR/tokenme.app" "$STAGE/"
+  cp -R "$APP_DIR/TokenMe.app" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
   mkdir -p "$DMG_DIR"
   rm -f "$DMG_DIR"/*.dmg "$APP_DIR"/rw.*.dmg
