@@ -49,7 +49,7 @@ pub const CLAIM_TTL_MS: i64 = 120_000;
 pub(crate) const ROLLUP_UPSERT: &str = "\
 INSERT INTO event_rollup(day, tool, session, project, model, meter, \
     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
-VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14, ?14) \
+VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15) \
 ON CONFLICT(day, tool, session, project, model, meter) DO UPDATE SET \
     in_tok     = in_tok     + excluded.in_tok, \
     cc_tok     = cc_tok     + excluded.cc_tok, \
@@ -588,6 +588,21 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
     let mut inserted = 0i64;
     {
         let mut ins_event = tx.prepare(INSERT_EVENT).map_err(sql_err)?;
+        let mut sel_existing = tx
+            .prepare(
+                "SELECT id, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, ts_ms \
+                 FROM event WHERE dedupe_key = ?1",
+            )
+            .map_err(sql_err)?;
+        let mut up_event = tx
+            .prepare(
+                "UPDATE event SET \
+                     ts_ms = ?1, session = ?2, project = ?3, model = ?4, meter = ?5, \
+                     in_tok = ?6, cc_tok = ?7, cr_tok = ?8, out_tok = ?9, reason_tok = ?10, \
+                     credits = ?11, source = ?12 \
+                 WHERE id = ?13",
+            )
+            .map_err(sql_err)?;
         let mut ins_call =
             tx.prepare("INSERT INTO call(event_id, kind, name) VALUES(?1,?2,?3)").map_err(sql_err)?;
         let mut ins_quota = tx
@@ -601,6 +616,87 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
         let mut up_rollup = tx.prepare(ROLLUP_UPSERT).map_err(sql_err)?;
         for ev in &events {
             let c = &ev.counts;
+            let existing: Option<(i64, f64, f64, f64, f64, f64, f64, i64)> =
+                if let Some(dk) = ev.dedupe_key.as_deref() {
+                    sel_existing
+                        .query_row(params![dk], |r| {
+                            Ok((
+                                r.get(0)?,
+                                r.get(1)?,
+                                r.get(2)?,
+                                r.get(3)?,
+                                r.get(4)?,
+                                r.get(5)?,
+                                r.get(6)?,
+                                r.get(7)?,
+                            ))
+                        })
+                        .optional()
+                        .map_err(sql_err)?
+                } else {
+                    None
+                };
+
+            if let Some((old_id, old_in, old_cc, old_cr, old_out, old_reason, old_credits, old_ts)) = existing {
+                let old_total = old_in + old_cc + old_cr + old_out + old_credits;
+                let new_total = c.total();
+                if new_total > old_total {
+                    up_event
+                        .execute(params![
+                            ev.ts_ms,
+                            ev.session,
+                            ev.project,
+                            ev.model,
+                            meter_str(ev.meter),
+                            c.input,
+                            c.cache_creation,
+                            c.cache_read,
+                            c.output,
+                            c.reasoning,
+                            c.credits,
+                            key,
+                            old_id,
+                        ])
+                        .map_err(sql_err)?;
+                    for call in &ev.calls {
+                        ins_call.execute(params![old_id, call_kind_str(call.kind), call.name]).map_err(sql_err)?;
+                    }
+                    if let Some(q) = ev.quota.as_ref() {
+                        ins_quota
+                            .execute(params![old_id, q.used_percent, q.window_minutes, q.resets_at_ms, q.label])
+                            .map_err(sql_err)?;
+                    }
+                    let old_day = local_day_of(old_ts).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+                    let new_day = local_day_of(ev.ts_ms).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+                    if old_day == new_day {
+                        up_rollup
+                            .execute(params![
+                                new_day,
+                                tool,
+                                ev.session,
+                                ev.project.as_deref().unwrap_or(""),
+                                ev.model.as_deref().unwrap_or(""),
+                                meter_str(ev.meter),
+                                c.input - old_in,
+                                c.cache_creation - old_cc,
+                                c.cache_read - old_cr,
+                                c.output - old_out,
+                                c.reasoning - old_reason,
+                                c.credits - old_credits,
+                                0i64, // n = 0, updating existing event
+                                (old_total == 0.0 && new_total > 0.0) as i64,
+                                ev.ts_ms,
+                            ])
+                            .map_err(sql_err)?;
+                    } else {
+                        recompute_days_tx(&tx, &[old_ts, ev.ts_ms])?;
+                    }
+                } else {
+                    acc.deduped += 1;
+                }
+                continue;
+            }
+
             let changed = ins_event
                 .execute(params![
                     tool,
@@ -658,6 +754,7 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                     c.output,
                     c.reasoning,
                     c.credits,
+                    1i64, // n = 1, new event
                     (c.total() > 0.0) as i64,
                     ev.ts_ms,
                 ])

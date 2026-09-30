@@ -365,6 +365,10 @@ impl Index {
         &self.errors
     }
 
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn meta_value(&self, key: &str) -> Result<Option<String>> {
         self.conn
             .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
