@@ -46,6 +46,12 @@ pub enum Theme {
     Dark,
 }
 
+/// Checks run at boot; offering an update the user would otherwise miss is the
+/// point of shipping a latest.json at all.
+fn default_auto_update_check() -> bool {
+    true
+}
+
 /// The engine's fallback poll cadence when the file watcher is quiet.
 fn default_refresh_secs() -> u64 {
     30
@@ -100,9 +106,9 @@ pub struct Settings {
     #[serde(default = "default_host_exit_pause")]
     pub host_exit_pause: bool,
     /// Check GitHub's latest.json on boot and offer the update when a newer
-    /// release exists. Off by default: the auto-download touches the network
-    /// at boot, and the panel should not phone GitHub unless asked.
-    #[serde(default)]
+    /// release exists. A check is one anonymous GET — nothing is downloaded and
+    /// no install runs unless the user clicks the offer in the settings sheet.
+    #[serde(default = "default_auto_update_check")]
     pub auto_update_check: bool,
     pub budgets: BTreeMap<String, usage_core::Budget>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -121,7 +127,7 @@ impl Default for Settings {
             show_money: default_show_money(),
             bubble_enabled: default_bubble_enabled(),
             host_exit_pause: default_host_exit_pause(),
-            auto_update_check: false,
+            auto_update_check: default_auto_update_check(),
             budgets: BTreeMap::new(),
             quota_tools: Vec::new(),
             quota_rows: Vec::new(),

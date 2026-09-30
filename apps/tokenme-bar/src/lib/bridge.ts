@@ -257,6 +257,6 @@ const browserSettings: PanelSettings = {
   show_money: true,
   bubble_enabled: true,
   host_exit_pause: true,
-  auto_update_check: false,
+  auto_update_check: true,
   version: "dev",
 };

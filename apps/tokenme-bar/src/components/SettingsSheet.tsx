@@ -240,9 +240,9 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             type="button"
             role="switch"
             className="switch"
-            aria-checked={settings?.auto_update_check ?? false}
+            aria-checked={settings?.auto_update_check ?? true}
             aria-label="自动检查更新"
-            onClick={() => setAutoUpdateCheck(!(settings?.auto_update_check ?? false))}
+            onClick={() => setAutoUpdateCheck(!(settings?.auto_update_check ?? true))}
           />
         </div>
 
