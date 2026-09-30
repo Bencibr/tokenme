@@ -1693,7 +1693,9 @@
   z-index: 10;
   display: flex;
   align-items: flex-end;
-  background: rgba(20, 20, 24, 0.18);
+  /* --scrim: light keeps the dark veil, dark lifts the panel with a light-gray
+     one — a dark veil on a black panel erased the sheet's boundary. */
+  background: var(--scrim);
   animation: sheet-fade var(--dur-fast) var(--ease);
 }
 

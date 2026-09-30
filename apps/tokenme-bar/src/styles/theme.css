@@ -85,6 +85,9 @@
   --heat-4: #0d8f74;
   /* today marker: a warm ring against the all-teal scale */
   --today: #d98a2b;
+  /* modal scrim: dark veil on light; the dark theme flips to a light-gray
+     veil so the pure-black sheet keeps a visible edge against it */
+  --scrim: rgba(20, 20, 24, 0.18);
 
   --warn: #8a5a12;
   --warn-soft: rgba(138, 90, 18, 0.14);
@@ -296,6 +299,8 @@
   --heat-4: #30d9aa;
   /* today marker: a warm ring against the all-teal scale */
   --today: #f0b45c;
+  /* light-gray veil: lifting the dimmed panel is what draws the sheet's edge */
+  --scrim: rgba(255, 255, 255, 0.08);
 
   --warn: #e6b35a;
   --warn-soft: rgba(230, 179, 90, 0.16);
