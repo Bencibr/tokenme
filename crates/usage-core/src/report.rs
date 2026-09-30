@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::AddAssign;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 
 use crate::budget::Budget;
@@ -91,6 +91,16 @@ pub struct HeatCell {
     pub requests: u64,
 }
 
+/// One local-hour bucket of today, for the panel's 今日 chart. The hour is the
+/// vec index (0..24 always present), so the frontend never guesses which slots
+/// exist and an hour that has not happened yet is a zero, not a gap.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HourCell {
+    pub total_tokens: f64,
+    pub cost: f64,
+    pub requests: u64,
+}
+
 /// Where a quota number came from: read out of the tool's own log records, or
 /// polled live from the tool. A probe result is fresher by construction, so it
 /// replaces the log-derived one for the same window.
@@ -154,6 +164,10 @@ pub struct Report {
     pub month: Window,
     pub year: Window,
     pub heatmap: Vec<HeatCell>,
+    /// Today bucketed by local hour, 24 slots in index order. Older snapshots
+    /// without the field read as empty; the panel then keeps the heatmap view.
+    #[serde(default)]
+    pub hourly: Vec<HourCell>,
     pub quotas: Vec<QuotaView>,
     pub sources: Vec<SourceStatus>,
     pub pricing: PricingMeta,
@@ -594,6 +608,25 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         })
         .collect();
 
+    // The same rows re-bucketed by local hour of today, for the 今日 chart.
+    let mut hour_map: BTreeMap<u32, (f64, f64, u64)> = BTreeMap::new();
+    for r in &rows {
+        let Some(t) = to_local(r.ev.ts_ms) else { continue };
+        if t.date_naive() != today {
+            continue;
+        }
+        let e = hour_map.entry(t.hour()).or_insert((0.0, 0.0, 0));
+        e.0 += r.tokens();
+        e.1 += r.cost;
+        e.2 += 1;
+    }
+    let hourly = (0..24)
+        .map(|h| {
+            let (total_tokens, cost, requests) = hour_map.get(&h).copied().unwrap_or((0.0, 0.0, 0));
+            HourCell { total_tokens, cost, requests }
+        })
+        .collect();
+
     // Only the newest sample per window is meaningful, and a tool can report
     // several windows at once. The window's *name* is part of its identity: ZCode
     // has a monthly tool-call meter and a monthly MCP meter, and Antigravity has a
@@ -750,6 +783,7 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         month,
         year,
         heatmap,
+        hourly,
         quotas,
         sources: opts.sources.clone(),
         pricing: opts.pricing.meta().clone(),
@@ -814,6 +848,30 @@ mod tests {
         assert_eq!(r.all_time.requests, 2);
         assert_eq!(r.day.start_ms, ms_of(2026, 9, 23, 0));
         assert_eq!(r.day.key, "2026-09-23");
+    }
+
+    /// The 今日 chart's buckets: today's rows land in their local hour, other
+    /// days never leak in, and the vec is always the full 24 slots.
+    #[test]
+    fn hourly_buckets_hold_todays_local_hours_only() {
+        let p = pricing();
+        let now = ms_of(2026, 9, 23, 14);
+        let events = vec![
+            ev("claude", ms_of(2026, 9, 23, 9), "s1", "claude-sonnet-4-6", TokenCounts { input: 100.0, ..Default::default() }),
+            ev("claude", ms_of(2026, 9, 23, 9) + 1, "s2", "claude-sonnet-4-6", TokenCounts { input: 300.0, ..Default::default() }),
+            ev("claude", ms_of(2026, 9, 23, 13), "s3", "claude-sonnet-4-6", TokenCounts { input: 500.0, ..Default::default() }),
+            // Yesterday's 9 o'clock must not merge into today's 9 o'clock.
+            ev("claude", ms_of(2026, 9, 22, 9), "s0", "claude-sonnet-4-6", TokenCounts { input: 9_900.0, ..Default::default() }),
+        ];
+        let opts = ReportOptions::new(&p).with_now(now);
+        let r = summarize(&events, &opts);
+        assert_eq!(r.hourly.len(), 24);
+        assert_eq!(r.hourly[9].requests, 2);
+        assert_eq!(r.hourly[9].total_tokens, 400.0);
+        assert_eq!(r.hourly[13].total_tokens, 500.0);
+        assert_eq!(r.hourly[8].total_tokens, 0.0);
+        assert_eq!(r.hourly[10].total_tokens, 0.0);
+        assert!(r.hourly.iter().enumerate().all(|(h, c)| h == 9 || h == 13 || c.total_tokens == 0.0));
     }
 
     #[test]
