@@ -31,6 +31,10 @@ When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cl
 - 📊 **Token & Cost Analytics**: Input, cache read, output and cost breakdown via [models.dev](https://models.dev).
 - ⏱️ **Live Quota Probes**: Rolling 5-hour windows, weekly quotas, credit plans and reset countdowns.
 
+<p align="center">
+  <img alt="The TokenMe menu-bar panel, dark and light" src="assets/panel-dark-light.png" width="560">
+</p>
+
 ## ⚡ Preview
 
 ```text

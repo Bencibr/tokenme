@@ -31,6 +31,10 @@
 - 📊 **多维度成本与用量洞察**：输入、缓存命中、推理、输出 Token 及折算金额（对接 [models.dev](https://models.dev) 价格清单）。
 - ⏱️ **实时配额只读探针**：5 小时滚动池、周度额度、Credit 计划与重置倒计时。
 
+<p align="center">
+  <img alt="TokenMe 菜单栏面板：深色与浅色" src="assets/panel-dark-light.png" width="560">
+</p>
+
 ## ⚡ 效果预览
 
 ```text
