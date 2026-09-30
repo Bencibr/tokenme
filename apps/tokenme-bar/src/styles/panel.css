@@ -229,6 +229,19 @@
   border-radius: var(--r-md);
 }
 
+/* The activity view toggle sits dead-centre of the section header: the
+   blank label spacer on the left balances the date on the right, so the
+   two buttons read as the row's headline, not a stray control. */
+.seg-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.sec-hd {
+  position: relative;
+}
+
 .seg-btn {
   min-width: 30px;
   padding: 2px var(--s2); /* the theme seg has word labels, not 日/周/月 */

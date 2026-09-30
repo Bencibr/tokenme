@@ -119,7 +119,10 @@ export function Heatmap({ cells, today, hours }: { cells: HeatCell[]; today: str
       head={
         hasHours ? (
           <>
-            <div className="seg" role="radiogroup" aria-label="活动视图" onKeyDown={onViewKey}>
+            <span className="sec-label" aria-hidden="true">
+              活动
+            </span>
+            <div className="seg seg-center" role="radiogroup" aria-label="活动视图" onKeyDown={onViewKey}>
               {VIEWS.map((v) => (
                 <button
                   key={v}
