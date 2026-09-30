@@ -47,6 +47,11 @@ const [page, setPage] = useState<PageKey>(() => {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showMoney, setShowMoney] = useState(true);
+  // Dev/QA affordance: ?unused=1 previews the show-unused state the sheet
+  // would persist; the persisted default is off.
+  const [showUnused, setShowUnused] = useState(() => {
+    return new URLSearchParams(location.search).get("unused") === "1";
+  });
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const tick = useTicker(30_000);
 
@@ -88,6 +93,10 @@ const [page, setPage] = useState<PageKey>(() => {
       applyTheme(s.theme);
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
+      // Only outside Tauri does the ?unused pin win — the sheet's persisted
+      // value is the truth in the app, same precedence as ?page.
+      if (!inTauri) setShowUnused(new URLSearchParams(location.search).get("unused") === "1");
+      else setShowUnused(s.show_unused_tools);
       quietCheck();
     });
     const updateTick = window.setInterval(quietCheck, 24 * 60 * 60 * 1000);
@@ -152,9 +161,11 @@ const [page, setPage] = useState<PageKey>(() => {
   const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
 
   // The tools page lists every *detected* source, not just the ones that
-  // billed this window: a credits-only tool that metered nothing here, or a
-  // source whose store is unreadable, would otherwise vanish for weeks.
-  // Hooks rule: this must sit above the boot screen's early return.
+  // billed this window — unless the user keeps 显示未使用工具 off (the
+  // default): then the period's zero-session rows (the appended silent
+  // sources, and credits-only tools that metered no sessions) stay hidden
+  // until they bill again or the switch brings them back. Hooks rule: this
+  // must sit above the boot screen's early return.
   const tools = useMemo(() => {
     if (!report) return [];
     const w = report[period];
@@ -171,8 +182,9 @@ const [page, setPage] = useState<PageKey>(() => {
         sessions: 0,
         priced: true,
       }));
-    return [...w.breakdown.tools, ...silent];
-  }, [report, period]);
+    const all = [...w.breakdown.tools, ...silent];
+    return showUnused ? all : all.filter((t) => t.sessions > 0);
+  }, [report, period, showUnused]);
 
   if (!report) {
     // "indexing" is the backend sentinel for "first scan still running"; the
@@ -252,6 +264,7 @@ const [page, setPage] = useState<PageKey>(() => {
           <SettingsSheet
             onClose={() => setSettingsOpen(false)}
             onMoney={setShowMoney}
+            onUnused={setShowUnused}
           />
         ) : null}
       </div>

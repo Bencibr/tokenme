@@ -138,6 +138,7 @@ pub struct PanelSettings {
     pub bubble_enabled: bool,
     pub host_exit_pause: bool,
     pub auto_update_check: bool,
+    pub show_unused_tools: bool,
     pub version: String,
 }
 
@@ -190,6 +191,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         bubble_enabled: settings.bubble_enabled,
         host_exit_pause: settings.host_exit_pause,
         auto_update_check: settings.auto_update_check,
+        show_unused_tools: settings.show_unused_tools,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -253,6 +255,18 @@ pub async fn set_show_money(app: AppHandle, on: bool) -> Result<(), String> {
         return Err("settings busy".into());
     };
     settings.show_money = on;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// Whether the tools page also lists tools with zero sessions this period —
+/// the switch the settings sheet flips.
+#[tauri::command]
+pub async fn set_show_unused_tools(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.show_unused_tools = on;
     settings.clone().save().map_err(|e| e.to_string())
 }
 

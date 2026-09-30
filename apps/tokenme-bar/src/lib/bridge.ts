@@ -167,6 +167,14 @@ export const bridge: Bridge = {
     await invoke<void>("set_show_money", { on });
   },
 
+  async setShowUnusedTools(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.show_unused_tools = on;
+      return;
+    }
+    await invoke<void>("set_show_unused_tools", { on });
+  },
+
   async setHostExitPause(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.host_exit_pause = on;
@@ -258,5 +266,6 @@ const browserSettings: PanelSettings = {
   bubble_enabled: true,
   host_exit_pause: true,
   auto_update_check: true,
+  show_unused_tools: false,
   version: "dev",
 };

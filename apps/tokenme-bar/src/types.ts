@@ -201,6 +201,7 @@ export interface Bridge {
   setRefreshSecs: (secs: number) => Promise<void>;
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
+  setShowUnusedTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setHostExitPause: (on: boolean) => Promise<void>;
   setAutoUpdateCheck: (on: boolean) => Promise<void>;
@@ -230,6 +231,7 @@ export interface PanelSettings {
   bubble_enabled: boolean;
   host_exit_pause: boolean;
   auto_update_check: boolean;
+  show_unused_tools: boolean;
   version: string;
 }
 

@@ -44,6 +44,7 @@ pub fn run() {
             commands::set_refresh_secs,
             commands::set_theme,
             commands::set_show_money,
+            commands::set_show_unused_tools,
             updater::check_update,
             updater::download_update,
             updater::install_update,

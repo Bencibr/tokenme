@@ -22,7 +22,15 @@ const THEMES: { key: ThemeKey; label: string }[] = [
  * login-item switch, and the version. Both switches apply on click —
  * there is no dirty state to save, so there is no save button.
  */
-export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMoney: (on: boolean) => void }) {
+export function SettingsSheet({
+  onClose,
+  onMoney,
+  onUnused,
+}: {
+  onClose: () => void;
+  onMoney: (on: boolean) => void;
+  onUnused: (on: boolean) => void;
+}) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -72,6 +80,12 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
     setSettings((s) => (s ? { ...s, show_money: on } : s));
     onMoney(on);
     void bridge.setShowMoney(on);
+  };
+
+  const setShowUnusedTools = (on: boolean) => {
+    setSettings((s) => (s ? { ...s, show_unused_tools: on } : s));
+    onUnused(on);
+    void bridge.setShowUnusedTools(on);
   };
 
   const setBubble = (on: boolean) => {
@@ -213,6 +227,21 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
             aria-checked={settings?.show_money ?? true}
             aria-label="金额折算"
             onClick={() => setShowMoney(!(settings?.show_money ?? true))}
+          />
+        </div>
+
+        <div className="sheet-row">
+          <div>
+            <div className="sheet-label">显示未使用工具</div>
+            <div className="sheet-hint">开启后工具页列出本期会话数为 0 的工具</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            className="switch"
+            aria-checked={settings?.show_unused_tools ?? false}
+            aria-label="显示未使用工具"
+            onClick={() => setShowUnusedTools(!(settings?.show_unused_tools ?? false))}
           />
         </div>
 
