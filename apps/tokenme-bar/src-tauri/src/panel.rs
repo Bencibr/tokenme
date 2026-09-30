@@ -721,9 +721,10 @@ pub fn configure(app: &AppHandle) {
     // Opaque backing, not frosted glass: the under-window material let
     // whatever sat behind the panel bleed through the translucent surface —
     // a dark IDE turned the sheet's bottom edge into a mismatched black
-    // smear. The theme-coloured backing below (apply_window_background) is
-    // the single ground truth now; the page's translucent surface composites
-    // onto it into exactly --surface-solid.
+    // smear. The page surface itself is opaque since the same fix (the grey
+    // mask was always this layer and the page disagreeing), so this
+    // theme-coloured paint is only the corner seam's fallback; it still
+    // follows the theme so even that seam can never read as a wash.
     if let Ok(panel) = window.to_panel() {
         // The panel object must never deallocate: tauri-nspanel's
         // RawNSPanel::dealloc calls [NSObject dealloc] directly — skipping
@@ -803,8 +804,10 @@ pub fn apply_window_background(app: &AppHandle, theme: Option<crate::settings::T
         Some(crate::settings::Theme::Dark) => true,
         _ => os_appearance_is_dark(),
     };
-    // --surface-solid: light #f9fafc · dark #19212d
-    let (fr, fg, fb) = if dark { (0.098, 0.129, 0.176) } else { (0.976, 0.980, 0.988) };
+    // --surface: light #ffffff · dark #000000 — the page's own flat surface
+    // is opaque now, so this layer only shows through the rounded-corner
+    // anti-aliasing seam; matching colours keep that seam invisible.
+    let (fr, fg, fb) = if dark { (0.0, 0.0, 0.0) } else { (1.0, 1.0, 1.0) };
 
     // Build the CGColor through CoreGraphics itself. NSColor's -CGColor bridge
     // answers nil for calibrated colours (what colorWithCalibratedRed returns),

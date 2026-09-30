@@ -9,12 +9,16 @@
 
   /* ground (the web preview's fake desktop) */
   --ground: #eef1f6;
-  /* Glass surfaces: translucent so the native NSVisualEffectView (or the
-     preview's backdrop-filter) shows the blurred desktop through. */
-  --surface: rgba(255, 255, 255, 0.8);
-  /* opaque twin for overlays (the settings sheet, the switch knob) that sit
-     above content and would turn to mush over glass */
-  --surface-solid: #f9fafc;
+  /* One flat colour per theme, fully opaque: light is white, dark is black.
+     The old translucent glass needed a native backing of exactly the right
+     colour underneath it, and every disagreement between the two painters
+     read as a grey mask over the whole panel — opaque ends that bug class.
+     The native layer paint (panel::apply_window_background) carries the same
+     two colours so the rounded-corner seam stays invisible. */
+  --surface: #ffffff;
+  /* kept for the overlays (the settings sheet, the switch knob) that used to
+     need an opaque twin; today it is the same flat surface */
+  --surface-solid: #ffffff;
   --surface-2: rgba(30, 52, 84, 0.06);
   /* the web preview's fake desktop */
   --wallpaper:
@@ -146,8 +150,8 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --ground: #0c0f15;
-    --surface: rgba(19, 26, 38, 0.66);
-    --surface-solid: #19212d;
+    --surface: #000000;
+    --surface-solid: #000000;
     --surface-2: rgba(148, 180, 220, 0.08);
     --wallpaper:
       radial-gradient(120% 90% at 18% 0%, #3a5a8c 0%, transparent 58%),
@@ -234,8 +238,8 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
   --ground: #0c0f15;
-  --surface: rgba(19, 26, 38, 0.66);
-  --surface-solid: #19212d;
+  --surface: #000000;
+  --surface-solid: #000000;
   --surface-2: rgba(148, 180, 220, 0.08);
   --wallpaper:
     radial-gradient(120% 90% at 18% 0%, #3a5a8c 0%, transparent 58%),
@@ -313,31 +317,6 @@
   --page-accent-soft: color-mix(in srgb, var(--page-accent) 15%, transparent);
 }
 
-/* ------------------------------------------------------------------ platform
-   The glass surface depends on something blurring behind it. macOS gets the
-   under-window material (panel.rs); Windows and Linux Tauri windows have
-   nothing behind the transparent webview, so the alpha just lets the raw
-   desktop bleed through and the panel becomes unreadable. There the surface
-   pins to near-opaque — set after the theme blocks above so it wins the tie,
-   and gated on data-platform, which index.html only sets inside Tauri, so the
-   browser preview keeps its frosted fake desktop. */
-:root[data-platform="windows"],
-:root[data-platform="linux"] {
-  --surface: rgba(255, 255, 255, 0.97);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root[data-platform="windows"]:not([data-theme="light"]),
-  :root[data-platform="linux"]:not([data-theme="light"]) {
-    --surface: rgba(19, 26, 38, 0.97);
-  }
-}
-
-:root[data-platform="windows"][data-theme="dark"],
-:root[data-platform="linux"][data-theme="dark"] {
-  --surface: rgba(19, 26, 38, 0.97);
-}
-
 /* ------------------------------------------------------------------- base */
 
 * {
@@ -374,8 +353,9 @@ body {
 }
 
 /* In a browser there is no vibrancy behind the panel, so the preview sits on
-   a fake per-theme desktop and the panel frosts it with backdrop-filter,
-   which is what the native NSVisualEffectView does in the real tray window. */
+   a fake per-theme desktop. The panel itself is the same flat opaque surface
+   the real window shows — the backdrop-filter below is inert against it and
+   only mattered when the surface was translucent glass. */
 body[data-env="web"] {
   background: var(--wallpaper);
 }
