@@ -25,6 +25,7 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("catpaw", &["CatPawAI", "CatPaw"]),
     ("cline", &["Cline", "cline", "cline-app", "code-sidecar"]),
     ("codex", &["codex", "Codex"]),
+    ("opencode", &["opencode", "OpenCode"]),
     ("claude", &["claude", "Claude"]),
     ("joycode", &["JoyCode"]),
     ("agnes", &["AgnesCode", "agnesd"]),
@@ -158,6 +159,9 @@ mod tests {
         alive.insert("qoder.exe".to_string());
         assert!(any_host_running("qoder", &alive));
         assert!(!any_host_running("atomcode", &alive));
+        assert!(!any_host_running("opencode", &alive));
+        alive.insert("OpenCode".to_string());
+        assert!(any_host_running("opencode", &alive));
     }
 
     #[test]
