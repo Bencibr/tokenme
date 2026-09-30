@@ -182,6 +182,14 @@ impl std::fmt::Debug for LanguageServer {
     }
 }
 
+/// Windows: the language-server discovery leans on unix tooling (lsof, the
+/// mac-side argv walk), so attach answers nothing here and the CLI spawn —
+/// behind its breaker — remains the meter, exactly the pre-attach fallback.
+#[cfg(windows)]
+fn attach() -> Option<Vec<QuotaSample>> {
+    None
+}
+
 #[cfg(unix)]
 fn attach() -> Option<Vec<QuotaSample>> {
     let servers = find_language_servers()?;
@@ -233,7 +241,6 @@ fn find_language_servers() -> Option<Vec<LanguageServer>> {
 /// A `language_server` executable inside an Antigravity/Gemini desktop path or
 /// carrying the desktop's `--app_data_dir antigravity` flag. The path markers
 /// need their separators so unrelated names ("notantigravity/") cannot match.
-#[cfg(unix)]
 fn is_desktop_language_server(lower: &str) -> bool {
     if !["/language_server", "/language-server", "\\language_server", "\\language-server"]
         .iter()
@@ -251,7 +258,6 @@ fn is_desktop_language_server(lower: &str) -> bool {
 
 /// The CLI hosts the same server under its own name (`agy`,
 /// `antigravity-cli/`) and needs no CSRF token.
-#[cfg(unix)]
 fn is_cli_language_server(lower: &str) -> bool {
     if lower.contains("/antigravity-cli/") || lower.contains("\\antigravity-cli\\") || lower.contains("/antigravity_cli/") {
         return true;
@@ -269,7 +275,6 @@ fn is_cli_language_server(lower: &str) -> bool {
 /// The value of a `--flag value` or `--flag=value` token, scanning whole argv —
 /// `ps` command lines can carry unrelated text, so a plain substring match is
 /// not enough.
-#[cfg(unix)]
 fn flag_value(command: &str, flag: &str) -> Option<String> {
     let mut tokens = command.split_whitespace();
     while let Some(token) = tokens.next() {
@@ -785,6 +790,7 @@ mod tests {
 
     /// Talks to the real language server running on this machine.
     #[test]
+    #[cfg(unix)]
     #[ignore = "needs the Antigravity language server running locally"]
     fn the_running_server_answers_without_a_subprocess() {
         let Some(servers) = find_language_servers() else {

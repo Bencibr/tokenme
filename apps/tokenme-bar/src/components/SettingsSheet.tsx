@@ -167,23 +167,6 @@ export function SettingsSheet({ onClose, onEmptyTools }: { onClose: () => void; 
           </div>
         </div>
 
-        {isWindows ? (
-          <div className="sheet-row">
-            <div>
-              <div className="sheet-label">{t("set.bubble")}</div>
-              <div className="sheet-hint">{t("set.bubble.hint")}</div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              className="switch"
-              aria-checked={settings?.bubble_enabled ?? true}
-              aria-label={t("set.bubble")}
-              onClick={() => setBubble(!(settings?.bubble_enabled ?? true))}
-            />
-          </div>
-        ) : null}
-
         <div className="sheet-row">
           <div className="sheet-label">{t("set.theme")}</div>
           <div className="seg" role="radiogroup" aria-label={t("set.theme.a11y")}>
@@ -201,6 +184,23 @@ export function SettingsSheet({ onClose, onEmptyTools }: { onClose: () => void; 
             ))}
           </div>
         </div>
+
+        {isWindows ? (
+          <div className="sheet-row">
+            <div>
+              <div className="sheet-label">{t("set.bubble")}</div>
+              <div className="sheet-hint">{t("set.bubble.hint")}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              className="switch"
+              aria-checked={settings?.bubble_enabled ?? true}
+              aria-label={t("set.bubble")}
+              onClick={() => setBubble(!(settings?.bubble_enabled ?? true))}
+            />
+          </div>
+        ) : null}
 
         <div className="sheet-row">
           <div>
