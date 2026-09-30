@@ -23,6 +23,20 @@
 
 同时使用 Claude Code、Codex、OpenCode、Cline、ZCode 等多个 AI 编程工具时，用量是个"黑盒"：今天花了多少钱？5 小时滚动池还剩多少？跨项目缓存命中率到底高不高？TokenMe 直接读取各工具落盘的本地日志与数据库，建立秒级 SQLite 增量索引，在 CLI 和菜单栏里一次性回答这三个问题。
 
+## 📸 运行截图
+
+<p align="center">
+  <b>中文界面</b><br>
+  <img alt="TokenMe 面板 — 中文界面，浅色主题" src="docs/screenshots/panel-zh-light.png" width="49%">
+  <img alt="TokenMe 面板 — 中文界面，深色主题" src="docs/screenshots/panel-zh-dark.png" width="49%">
+</p>
+
+<p align="center">
+  <b>英文界面</b><br>
+  <img alt="TokenMe 面板 — 英文界面，浅色主题" src="docs/screenshots/panel-en-light.png" width="49%">
+  <img alt="TokenMe 面板 — 英文界面，深色主题" src="docs/screenshots/panel-en-dark.png" width="49%">
+</p>
+
 ## ✨ 核心特性
 
 - 🔒 **本地索引，只读扫描**：用量数据在本机建立索引。无自有遥测、无第三方代理；实时配额探测与价格清单是仅有的联网环节。
@@ -30,6 +44,7 @@
 - 🎯 **开箱即用支持 16 款工具**：Claude Code、Codex、OpenCode、Cline、ZCode、Qoder、Pi、Antigravity、WorkBuddy、AgnesCode、AtomCode、Crow5、Mimocode、Cola、DSH、Hermes。
 - 📊 **多维度成本与用量洞察**：输入、缓存命中、推理、输出 Token 及折算金额（对接 [models.dev](https://models.dev) 价格清单）。
 - ⏱️ **实时配额只读探针**：5 小时滚动池、周度额度、Credit 计划与重置倒计时。
+- 🌐 **双语界面**：界面语言跟随系统，中英双语，默认中文。
 
 ## ⚡ 效果预览
 

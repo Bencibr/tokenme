@@ -23,6 +23,20 @@
 
 When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cline, ZCode…), usage is a black box: *how much did today cost, how much of my 5-hour pool is left, how good is my cache hit rate?* TokenMe reads the tools' own logs and local databases into an instant SQLite index and answers all three in one dashboard — CLI and menu bar.
 
+## 📸 Screenshots
+
+<p align="center">
+  <b>English UI</b><br>
+  <img alt="TokenMe panel in English, light theme" src="docs/screenshots/panel-en-light.png" width="49%">
+  <img alt="TokenMe panel in English, dark theme" src="docs/screenshots/panel-en-dark.png" width="49%">
+</p>
+
+<p align="center">
+  <b>Chinese UI</b><br>
+  <img alt="TokenMe panel in Chinese, light theme" src="docs/screenshots/panel-zh-light.png" width="49%">
+  <img alt="TokenMe panel in Chinese, dark theme" src="docs/screenshots/panel-zh-dark.png" width="49%">
+</p>
+
 ## ✨ Features
 
 - 🔒 **Local index, read-only scanning**: Usage is indexed on your machine from the tools' own logs. No telemetry and no third-party proxies; live quota probes and the model price list are the only network calls.
@@ -30,6 +44,7 @@ When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cl
 - 🎯 **16 Tools Supported**: Claude Code, Codex, OpenCode, Cline, ZCode, Qoder, Pi, Antigravity, WorkBuddy, AgnesCode, AtomCode, Crow5, Mimocode, Cola, DSH, Hermes.
 - 📊 **Token & Cost Analytics**: Input, cache read, output and cost breakdown via [models.dev](https://models.dev).
 - ⏱️ **Live Quota Probes**: Rolling 5-hour windows, weekly quotas, credit plans and reset countdowns.
+- 🌐 **Bilingual UI**: UI language follows the system — English and Chinese, defaults to Chinese.
 
 ## ⚡ Preview
 
