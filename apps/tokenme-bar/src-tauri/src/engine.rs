@@ -4,6 +4,7 @@
 //! so a burst of watcher events can never stack two passes on top of each
 //! other — the second one is simply skipped and the next tick catches up.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, RecvTimeoutError};
 use std::path::PathBuf;
@@ -12,9 +13,9 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
 use usage_core::pricing::PricingOptions;
-use usage_core::report::{now_ms, QuotaView, ReportOptions};
-use usage_core::{DateFilter, DetectedSource, PricingMap, Report, SourceAdapter, SourceStatus, UsageEvent};
-use usage_index::{Index, Watcher, RETENTION_DAYS};
+use usage_core::report::{now_ms, AggregatePlan, QuotaView, ReportOptions};
+use usage_core::{DateFilter, DetectedSource, PricingMap, Report, SourceAdapter, SourceFile, SourceStatus};
+use usage_index::{Index, IngestOptions, Watcher, RETENTION_DAYS};
 
 use crate::settings::Settings;
 use crate::tray;
@@ -28,21 +29,21 @@ pub const PERIOD_EVENT: &str = "tray-period";
 /// The idle cadence itself is the persisted `refresh_secs` setting.
 const DEBOUNCE: Duration = Duration::from_millis(800);
 
-/// Floor between ingest passes. Every pass re-walks every adapter's tree
+/// Floor between ingest passes. A full pass re-walks every adapter's tree
 /// (codex alone holds hundreds of rollouts inside the retention window), so a
 /// writer that touches its store every second — ZCode's own telemetry db —
 /// would otherwise keep the engine at a permanent percent-level duty cycle.
-/// A finished call surfaces at most this much later; the manual refresh
-/// bypasses the floor because the user asked for "now".
+/// Scoped passes only restat the previous snapshot, but the floor keeps even
+/// those from spinning. A finished call surfaces at most this much later; the
+/// manual refresh bypasses the floor because the user asked for "now".
 const MIN_PASS_GAP: Duration = Duration::from_secs(3);
 
-/// Minimum gap between full report rebuilds on file-change wakes. A rebuild
-/// re-reads and re-prices the whole index — hundreds of thousands of events on
-/// a year-heavy machine — so drip writers (one new event per second) must not
-/// trigger one per event. Ingestion itself stays per-wake and cheap; only the
-/// numbers may lag by up to this much. The cadence timer and the manual
-/// refresh publish regardless, so quiet machines still see the time-shaped
-/// windows move.
+/// Minimum gap between report rebuilds on file-change wakes. A rebuild reads
+/// the day rollup plus a few live slices, so it is cheap — but every one still
+/// emits a report and repaints the panel, so drip writers (one new event per
+/// second) get at most one per gap. Ingestion itself stays per-wake and cheap;
+/// the cadence timer and the manual refresh publish regardless, so quiet
+/// machines still see the time-shaped windows move.
 const PUBLISH_GAP: Duration = Duration::from_secs(10);
 
 /// How long one full quota pass (vendor probes + the host-process scan) may be
@@ -57,9 +58,15 @@ static QUOTA_PASS: Mutex<Option<(Instant, Vec<QuotaView>)>> = Mutex::new(None);
 /// next pass re-probes for real regardless of the TTL.
 static QUOTA_PASS_BUST: AtomicBool = AtomicBool::new(false);
 
+/// How long one discovered-file snapshot is reused (restatted, not re-walked)
+/// before the engine pays a full `discover` again. Bounds how long a file the
+/// watcher never saw can stay invisible. Any wake naming a declared root
+/// forces a full walk for every tool, ahead of the TTL.
+const SNAPSHOT_TTL: Duration = Duration::from_secs(30);
+
 pub enum Msg {
-    /// A watched root changed.
-    Wake,
+    /// A watched root changed; the payload is the root the watcher named.
+    Wake(PathBuf),
     /// The user asked for an immediate re-index.
     Refresh,
     /// Swap in a freshly downloaded price table.
@@ -146,8 +153,8 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
         std::thread::Builder::new()
             .name("tokenme-wake".into())
             .spawn(move || {
-                while wake_rx.recv().is_ok() {
-                    if tx.send(Msg::Wake).is_err() {
+                while let Ok(root) = wake_rx.recv() {
+                    if tx.send(Msg::Wake(root)).is_err() {
                         break;
                     }
                 }
@@ -160,18 +167,26 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
     // instantly — the boot screen only shows when there is genuinely no index
     // yet (fresh install). The quota probes are skipped here on purpose; they
     // land with the post-scan publish a moment later.
-    if let Some(index) = index.as_ref() {
-        let events = index.all_events().unwrap_or_default();
-        if !events.is_empty() {
+    if let Some(index) = index.as_mut() {
+        if index.event_count().unwrap_or(0) > 0 {
             let sources =
                 index.source_statuses(&detected).unwrap_or_else(|_| fallback_sources(&detected));
-            publish_with_quota(&app, &events, &sources, &pricing, &adapters, false);
+            publish_with_quota(&app, index, &sources, &pricing, &adapters, false);
             crate::logging::info("boot: published last-known report before the scan");
         }
     }
 
+    // The last discovered file list per tool. Passes that are neither
+    // privileged nor TTL-expired restat this snapshot instead of walking every
+    // adapter tree again — the discover scoping that keeps idle passes down to
+    // a couple of stats per file.
+    let mut snapshot: HashMap<String, Vec<SourceFile>> = HashMap::new();
+    let mut snapshot_at = Instant::now();
+    let mut wake_roots: Vec<PathBuf> = Vec::new();
+
     let mut last_publish = Instant::now();
-    ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan", &mut last_publish);
+    ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan", &mut last_publish,
+        &mut snapshot, &mut snapshot_at, &mut wake_roots);
     let mut last_pass = Instant::now();
 
     loop {
@@ -181,7 +196,7 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
             let secs = app.state::<Shared>().settings().refresh_secs;
             Duration::from_secs(secs.clamp(10, 3600))
         };
-        match wait_for_work(&rx, &mut pricing, fallback) {
+        match wait_for_work(&rx, &mut pricing, fallback, &mut wake_roots) {
             Work::Ingest(reason) => {
                 if reason != "manual refresh" {
                     let since = last_pass.elapsed();
@@ -190,11 +205,12 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
                     }
                 }
                 last_pass = Instant::now();
-                ingest(&app, &mut index, &adapters, &detected, &pricing, reason, &mut last_publish);
+                ingest(&app, &mut index, &adapters, &detected, &pricing, reason, &mut last_publish,
+                    &mut snapshot, &mut snapshot_at, &mut wake_roots);
             }
             Work::Resummarize => {
                 crate::logging::info("pricing refreshed — re-summarizing indexed events");
-                resummarize(&app, &index, &adapters, &detected, &pricing)
+                resummarize(&app, &mut index, &adapters, &detected, &pricing)
             }
             Work::Quit => return,
         }
@@ -208,15 +224,21 @@ enum Work {
 }
 
 /// Idle until something happens, then debounce a burst of wake-ups into one pass.
-fn wait_for_work(rx: &Receiver<Msg>, pricing: &mut PricingMap, fallback: Duration) -> Work {
+fn wait_for_work(
+    rx: &Receiver<Msg>,
+    pricing: &mut PricingMap,
+    fallback: Duration,
+    wake_roots: &mut Vec<PathBuf>,
+) -> Work {
     loop {
         match rx.recv_timeout(fallback) {
             Ok(Msg::Pricing(map)) => {
                 *pricing = map;
                 return Work::Resummarize;
             }
-            Ok(Msg::Wake) => {
-                if !drain_debounce(rx, pricing) {
+            Ok(Msg::Wake(root)) => {
+                wake_roots.push(root);
+                if !drain_debounce(rx, pricing, wake_roots) {
                     return Work::Quit;
                 }
                 return Work::Ingest("file change");
@@ -236,12 +258,15 @@ fn wait_for_work(rx: &Receiver<Msg>, pricing: &mut PricingMap, fallback: Duratio
 
 /// Keeps pushing the deadline out while events keep arriving; returns false if
 /// a pricing swap landed mid-debounce and needs a re-summarize instead.
-fn drain_debounce(rx: &Receiver<Msg>, pricing: &mut PricingMap) -> bool {
+fn drain_debounce(rx: &Receiver<Msg>, pricing: &mut PricingMap, wake_roots: &mut Vec<PathBuf>) -> bool {
     let mut deadline = Instant::now() + DEBOUNCE;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
         match rx.recv_timeout(remaining) {
-            Ok(Msg::Wake) => deadline = Instant::now() + DEBOUNCE,
+            Ok(Msg::Wake(root)) => {
+                wake_roots.push(root);
+                deadline = Instant::now() + DEBOUNCE;
+            }
             Ok(Msg::Pricing(map)) => {
                 *pricing = map;
                 return false;
@@ -264,6 +289,9 @@ fn ingest(
     pricing: &PricingMap,
     reason: &'static str,
     last_publish: &mut Instant,
+    snapshot: &mut HashMap<String, Vec<SourceFile>>,
+    snapshot_at: &mut Instant,
+    wake_roots: &mut Vec<PathBuf>,
 ) {
     let shared = app.state::<Shared>();
     // A second ingest while one is running adds nothing but latency.
@@ -272,13 +300,42 @@ fn ingest(
 
     let cutoff = cutoff_ms();
     let filter = DateFilter::new(Some(cutoff), None);
+    // Discover scoping: privileged passes and expired snapshots walk every
+    // tree; a file-change wake walks only the tool that owns the woken root;
+    // every other tool restats its previous list — a couple of stats per file,
+    // no walk. A file the watcher missed surfaces within one SNAPSHOT_TTL.
+    let full = matches!(reason, "initial scan" | "manual refresh" | "cadence timer")
+        || snapshot_at.elapsed() >= SNAPSHOT_TTL
+        || snapshot.is_empty();
+    let woken: HashSet<&str> = detected
+        .iter()
+        .filter(|d| wake_roots.iter().any(|r| d.roots.contains(r)))
+        .map(|d| d.id.as_str())
+        .collect();
+    let prepared: HashMap<String, Vec<SourceFile>> = adapters
+        .iter()
+        .map(|a| {
+            let walk = full || woken.contains(a.id());
+            let prev =
+                if walk { None } else { Some(snapshot.get(a.id()).cloned().unwrap_or_default()) };
+            (a.id().to_string(), a.discover_cached(&filter, prev))
+        })
+        .collect();
+    *snapshot = prepared.clone();
+    *snapshot_at = Instant::now();
+    wake_roots.clear();
+    let hints = |id: &str| prepared.get(id).cloned();
     // A failed pass keeps the previous report on screen rather than blanking it.
-    let report = match index.ingest(adapters, &filter) {
+    let report = match index.ingest_with_hints(adapters, &filter, &IngestOptions::default(), &hints)
+    {
         Ok(r) => {
-            crate::logging::info(&format!(
-                "ingest({reason}): scanned {} changed {} new {} deduped {} purged {} — {} ms",
-                r.files_scanned, r.files_changed, r.new_events, r.deduped, r.purged, r.took_ms
-            ));
+            // An idle file-change pass (nothing moved) stays out of panel.log.
+            if r.files_changed > 0 || r.new_events > 0 || reason != "file change" {
+                crate::logging::info(&format!(
+                    "ingest({reason}): scanned {} changed {} new {} deduped {} purged {} — {} ms",
+                    r.files_scanned, r.files_changed, r.new_events, r.deduped, r.purged, r.took_ms
+                ));
+            }
             if r.new_events > 0 {
                 let per_tool: Vec<String> = r.per_tool.iter().map(|(t, n)| format!("{t}:{n}")).collect();
                 crate::logging::info(&format!("ingest indexed per tool: {}", per_tool.join(", ")));
@@ -291,6 +348,11 @@ fn ingest(
         }
     };
     let _ = index.prune(cutoff);
+    // Planner-statistics refresh only on the idle pass: it reads enough of the
+    // index that per-wake runs were measurable overhead for no benefit.
+    if reason == "cadence timer" {
+        index.optimize();
+    }
     // A file wake that added nothing new would republish an identical report —
     // on a working machine that is most wakes (editors touch files constantly).
     // A wake that DID add events recomputes the entire report (all indexed
@@ -306,27 +368,25 @@ fn ingest(
         }
     }
     *last_publish = Instant::now();
-    let events = index.all_events().unwrap_or_default();
     let sources = index.source_statuses(detected).unwrap_or_else(|_| fallback_sources(detected));
     if report.is_none() {
         crate::logging::error(&format!("ingest({reason}) failed pass — previous report stays on screen"));
     }
-    publish(app, &events, &sources, pricing, adapters);
+    publish(app, index, &sources, pricing, adapters);
     // The audit trail runs AFTER the publish, never in front of it: the hourly
     // heartbeat re-parses every codex rollout (tens of seconds on a heavy
     // machine) and the panel must not sit on the boot screen for diagnostics.
     if let Some(r) = &report {
-        crate::scan_log::pass(reason, detected, r, &events);
+        crate::scan_log::pass(reason, detected, r, index);
         // The DSH paper trail: when the ledger moved, one line saying what the
         // index now holds. (The per-session audit lives in scan.log — this used
         // to re-log every historical row on each append, flooding panel.log.)
         if r.new_events > 0 && r.per_tool.iter().any(|(t, _)| t == "dsh") {
-            let dsh_count = events.iter().filter(|e| e.tool == "dsh").count();
-            let newest = events
-                .iter()
-                .filter(|e| e.tool == "dsh")
-                .map(|e| e.ts_ms)
-                .max()
+            let dsh_count = r.per_tool.get("dsh").copied().unwrap_or(0);
+            let newest = index
+                .newest_ts_ms("dsh")
+                .ok()
+                .flatten()
                 .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
                 .map(|d| d.format("%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| "none".into());
@@ -338,28 +398,27 @@ fn ingest(
 /// Re-runs the aggregation over already-indexed events after a price refresh.
 fn resummarize(
     app: &AppHandle,
-    index: &Option<Index>,
+    index: &mut Option<Index>,
     adapters: &[Box<dyn SourceAdapter>],
     detected: &[DetectedSource],
     pricing: &PricingMap,
 ) {
-    let Some(index) = index else { return };
-    let events = index.all_events().unwrap_or_default();
+    let Some(index) = index.as_mut() else { return };
     let sources = index
         .source_statuses(detected)
         .unwrap_or_else(|_| fallback_sources(detected));
-    publish(app, &events, &sources, pricing, adapters);
+    publish(app, index, &sources, pricing, adapters);
 }
 
 
 fn publish(
     app: &AppHandle,
-    events: &[UsageEvent],
+    index: &mut Index,
     sources: &[SourceStatus],
     pricing: &PricingMap,
     adapters: &[Box<dyn SourceAdapter>],
 ) {
-    publish_with_quota(app, events, sources, pricing, adapters, true)
+    publish_with_quota(app, index, sources, pricing, adapters, true)
 }
 
 /// `poll_quota = false` publishes without waiting on the vendor probes — the
@@ -367,7 +426,7 @@ fn publish(
 /// land with the post-scan publish a moment later.
 fn publish_with_quota(
     app: &AppHandle,
-    events: &[UsageEvent],
+    index: &mut Index,
     sources: &[SourceStatus],
     pricing: &PricingMap,
     adapters: &[Box<dyn SourceAdapter>],
@@ -388,7 +447,25 @@ fn publish_with_quota(
         polled_quota,
         budgets: app.state::<Shared>().settings().budgets,
     };
-    let mut report = usage_core::report::summarize(events, &opts);
+    // Every period's numbers fold from the day rollup (~2k rows) plus the
+    // plan's live slices over today — never from re-reading all events.
+    let plan = AggregatePlan::build(opts.now_ms, opts.recent_session_limit);
+    let facts = match index.report_facts(&plan) {
+        Ok(facts) => facts,
+        Err(e) => {
+            crate::logging::error(&format!(
+                "publish: facts query failed — previous report stays on screen: {e}"
+            ));
+            return;
+        }
+    };
+    if facts.rebuilt {
+        crate::logging::info(
+            "publish: rebuilt the day rollup from the event table (first publish after an \
+             upgrade, or after a fail-safe invalidation)",
+        );
+    }
+    let mut report = usage_core::report::summarize_facts(&facts, &opts);
     // The boot publish deliberately skips the probes: until the post-scan
     // publish lands, the quota strip shows "探测中" instead of vanishing.
     report.quotas_pending = !poll_quota;
