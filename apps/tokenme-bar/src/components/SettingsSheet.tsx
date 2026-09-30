@@ -78,7 +78,12 @@ export function SettingsSheet({ onClose, onMoney }: { onClose: () => void; onMon
       setUpdateBusy(true);
       void bridge
         .checkUpdate()
-        .then((status) => setUpdate(status))
+        .then((status) => {
+          // quiet = 检查失败或已是最新：没有可行动的信息就不渲染任何行，
+          // 否则会留下一个空白的弹窗条（用户报修的那块）。
+          setUpdate(status.phase === "available" || status.phase === "downloaded" ? status : null);
+        })
+        .catch(() => setUpdate(null))
         .finally(() => setUpdateBusy(false));
     } else {
       setUpdate(null);
