@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { currentMonitor, cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { PhysicalPosition } from "@tauri-apps/api/dpi";
+import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import type { Report } from "../types";
 import { bridge, inTauri } from "../lib/bridge";
 import { ballTokens } from "../lib/format";
@@ -50,6 +50,9 @@ export function BubbleApp() {
     let alive = true;
     void bridge.fetchReport(false).then((value) => alive && setReport(value)).catch(() => {});
     const unlisten = bridge.onReport((value) => setReport(value));
+    // A window that came back the wrong size (DPI event, external nudge)
+    // snaps back at boot — the dock math below assumes the intended geometry.
+    void ensureWindowGeometry().catch(() => {});
     return () => {
       alive = false;
       unlisten();
@@ -70,9 +73,24 @@ export function BubbleApp() {
     return { current, size };
   };
 
+  // The window is born WINDOW×scale, but a DPI/scale event or an external
+  // nudge can shrink it afterwards — measured 73×73 on a 144-logical install,
+  // which clipped the round pet on all four sides. Re-assert the intended
+  // size whenever the geometry is consulted; a correct window costs one
+  // outerSize read, a drifted one snaps back instead of staying broken.
+  const ensureWindowGeometry = async () => {
+    const scale = await window.scaleFactor().catch(() => 1);
+    const size = await window.outerSize().catch(() => null);
+    const want = Math.round(WINDOW * scale);
+    if (size && (Math.abs(size.width - want) > 2 || Math.abs(size.height - want) > 2)) {
+      await window.setSize(new PhysicalSize(want, want));
+    }
+  };
+
   const expand = async () => {
     clearLeaveTimer();
     if (dragging.current) return;
+    await ensureWindowGeometry();
     setExpanded(true);
     // One pull per hover: claim the dock synchronously so a second trigger
     // (mouseenter + the Rust hover event racing) reads `null` and bails
@@ -122,6 +140,7 @@ export function BubbleApp() {
   };
 
   const dockToEdge = async (afterDrag = false) => {
+    await ensureWindowGeometry();
     const data = await monitor();
     if (!data) return;
     const { current, size } = data;
@@ -259,6 +278,10 @@ export function BubbleApp() {
         const dist = Math.hypot(dx, dy);
         const reach = Math.min(dist / 500, 1) * 2.4;
         setGaze(dist > 4 ? { x: (dx / dist) * reach, y: (dy / dist) * reach } : { x: 0, y: 0 });
+        // A docked pet lives at the screen edge for hours: this poll is also
+        // where a drifted window gets snapped back without waiting for a
+        // dock/expand round trip.
+        await ensureWindowGeometry().catch(() => {});
         await new Promise((resolve) => setTimeout(resolve, 150));
       }
     })();
