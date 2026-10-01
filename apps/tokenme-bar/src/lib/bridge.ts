@@ -272,7 +272,7 @@ const browserSettings: PanelSettings = {
   autostart: false,
   refresh_secs: 30,
   theme: "system",
-  show_money: true,
+  show_money: false,
   show_empty_tools: false,
   bubble_enabled: true,
   host_exit_pause: true,
