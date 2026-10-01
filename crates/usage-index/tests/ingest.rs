@@ -311,6 +311,11 @@ fn cumulative_dedupe_replaces_with_greater_total_and_updates_rollup() {
     assert_eq!(ev1.counts.output, 20.0);
 
     // Snapshot 2: session continues growing, now 250 in and 60 out
+    // Every rewrite must move the file's (size, mtime_ms) fingerprint or the
+    // pipeline skips it as unchanged: these snapshots swap equal-length digits
+    // ("250"→"200"), so the size is identical and the mtime has to cross a
+    // millisecond. Two writes can land inside one.
+    std::thread::sleep(std::time::Duration::from_millis(10));
     std::fs::write(&file, b"{\"id\":\"cum-1\",\"ts\":1789172810000,\"session\":\"s1\",\"in\":250,\"out\":60}\n").unwrap();
     let _r2 = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
     assert_eq!(idx.event_count().unwrap(), 1, "still one event row");
@@ -332,6 +337,7 @@ fn cumulative_dedupe_replaces_with_greater_total_and_updates_rollup() {
     assert_eq!(n, 1);
 
     // Snapshot 3: stale/duplicate snapshot with lower tokens
+    std::thread::sleep(std::time::Duration::from_millis(10));
     std::fs::write(&file, b"{\"id\":\"cum-1\",\"ts\":1789172810000,\"session\":\"s1\",\"in\":200,\"out\":50}\n").unwrap();
     let r3 = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
     assert_eq!(r3.deduped, 1, "stale lower total was ignored");

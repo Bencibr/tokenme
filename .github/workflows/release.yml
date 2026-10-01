@@ -69,18 +69,20 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
       - name: Install frontend deps
-        run: pnpm install --frozen-lockfile --prefer-offline
+        # The frontend lives in apps/tokenme-bar; from the repo root pnpm
+        # finds no package.json and dies before the build even starts.
+        run: pnpm --dir apps/tokenme-bar install --frozen-lockfile --prefer-offline
       - name: Build
         id: build
-        run: set -o pipefail; pnpm tauri build --target universal-apple-darwin 2>&1 | tee build-universal.log
+        run: set -o pipefail; pnpm --dir apps/tokenme-bar tauri build --target universal-apple-darwin 2>&1 | tee build-universal.log
       - name: Surface build failure
         if: failure()
         # The check annotations are the only anonymous window into a failed
         # run (logs and artifacts need auth), so the log's tail rides them —
         # the pattern grep first, then the raw last lines, whatever they are.
         run: |
-          grep -nE 'error(\[[0-9]*\])?:|FAILED|failures:|panicked at|warning: build failed|ELIFECYCLE|Command failed' build-universal.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done
-          tail -40 build-universal.log | while IFS= read -r line; do echo "::error::$line"; done
+          grep -nE 'error(\[[0-9]*\])?:|FAILED|failures:|panicked at|warning: build failed|ELIFECYCLE|Command failed' build-universal.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done || true
+          tail -40 build-universal.log | while IFS= read -r line; do echo "::error::$line"; done || true
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
