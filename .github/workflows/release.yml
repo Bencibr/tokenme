@@ -206,19 +206,20 @@ jobs:
           generate_release_notes: true
 
   homebrew:
-    # Bumps Bencibr/homebrew-tokenme (formula + cask) to the freshly published
+    # Bumps Bencibr/homebrew-tokenme (cask + formula) to the freshly published
     # release: copies packaging/homebrew over and rewrites version and the
-    # sha256s from the release's own sha256.txt. Dormant until a TAP_TOKEN
-    # secret (a fine-grained PAT with push on the tap repo) exists.
+    # sha256s from the release's own sha256.txt. The tap grants this workflow
+    # write access through a read-write deploy key stored as TAP_DEPLOY_KEY —
+    # scoped to that one repository, nothing else.
     needs: [release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Guard
         id: guard
-        env: { TAP_TOKEN: "${{ secrets.TAP_TOKEN }}" }
+        env: { TAP_DEPLOY_KEY: "${{ secrets.TAP_DEPLOY_KEY }}" }
         run: |
-          if [ -z "$TAP_TOKEN" ]; then
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -226,10 +227,15 @@ jobs:
       - name: Bump the tap
         if: steps.guard.outputs.skip == 'false'
         env:
-          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
           TAG: ${{ github.ref_name }}
         run: |
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/Bencibr/homebrew-tokenme.git" tap
+          mkdir -p ~/.ssh
+          echo "${TAP_DEPLOY_KEY}" > ~/.ssh/tap_deploy_key
+          chmod 600 ~/.ssh/tap_deploy_key
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_deploy_key -o IdentitiesOnly=yes"
+          git clone --depth 1 git@github.com:Bencibr/homebrew-tokenme.git tap
           curl -sL "https://github.com/Bencibr/tokenme/releases/download/${TAG}/sha256.txt" -o sha256.txt
           python3 packaging/homebrew/bump.py "${TAG#v}" sha256.txt tap
           cd tap

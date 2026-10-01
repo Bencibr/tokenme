@@ -1,7 +1,7 @@
-# Homebrew formula for the tokenme CLI: installs the prebuilt binary from the
+# Homebrew formula for the tokenme CLI (cask tokenme is the panel; this is the CLI).: installs the prebuilt binary from the
 # GitHub release — no compile step, the workspace's debug/test targets never
 # touch the end user. The menu-bar panel is the tokenme cask.
-class Tokenme < Formula
+class TokenmeCli < Formula
   desc "Cross-tool AI token usage and cost from the tools' own logs"
   homepage "https://github.com/Bencibr/tokenme"
   version "0.1.4"

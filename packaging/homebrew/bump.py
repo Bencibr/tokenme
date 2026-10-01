@@ -21,7 +21,7 @@ def main() -> None:
             digest, name = line.split()
             hashes[name] = digest
 
-    formula = tap / "Formula" / "tokenme.rb"
+    formula = tap / "Formula" / "tokenme-cli.rb"
     text = re.sub(r'version "[^"]+"', f'version "{version}"', formula.read_text(), count=1)
     for target in ("aarch64", "x86_64"):
         name = f"tokenme-cli-{target}-apple-darwin.tar.gz"
