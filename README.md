@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <b>Running several AI coding tools side by side? See what each one costs and<br>how much quota is left — one click from the menu bar.</b>
+  <b>One menu bar dashboard for every AI coding tool's token usage, spend, and remaining quota — so you stop checking each vendor's console.</b>
 </p>
 
 <p align="center">
