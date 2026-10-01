@@ -54,7 +54,12 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      # universal-apple-darwin is not a rust target: cargo compiles BOTH sides
+      # and tauri lipos them, so both toolchains must be installed up front —
+      # the host-only default dies the moment x86_64 is requested.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: pnpm/action-setup@v4
         with:
           version: 11
