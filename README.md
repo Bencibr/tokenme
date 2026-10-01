@@ -10,20 +10,35 @@
 </p>
 
 <p align="center">
-  <b>Cross-tool AI coding token, cost, and real-time quota monitor.</b>
-  <br>
-  Zero telemetry · No third-party proxy · Instant scanning
+  <b>Running several AI coding tools side by side? See what each one costs and<br>how much quota is left — one click from the menu bar.</b>
 </p>
 
 <p align="center">
   <b>English</b> | <a href="README_CN.md">简体中文</a>
 </p>
 
-## 💡 Why TokenMe?
+## What is TokenMe?
 
-When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cline, ZCode…), usage is a black box: *how much did today cost, how much of my 5-hour pool is left, how good is my cache hit rate?* TokenMe reads the tools' own logs and local databases into an instant SQLite index and answers all three in one dashboard — CLI and menu bar.
+TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, plus a CLI. It answers three questions that usually have no good home:
 
-## 📸 Screenshots
+- How many tokens did I burn today, and what did they cost?
+- How much is left on each subscription, and when does it reset?
+- Which tool owns this month's spend — and how much did caching actually save me?
+
+Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index.
+
+## Sound familiar?
+
+Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
+
+- You want to know what today cost, so you open three vendor consoles — and their numbers don't agree.
+- A 5-hour rolling window runs dry right when the work is hottest.
+- Points, credits, dollar windows — every subscription ships its own dashboard, and none of them talk to each other.
+- At month's end you want the per-tool breakdown, and the only way to get it is parsing logs by hand.
+
+TokenMe puts all of it in one panel, a click away.
+
+## Screenshots
 
 <p align="center">
   <img alt="TokenMe panel — Overview tab, light" src="docs/screenshots/panel-en-overview.png" width="24%">
@@ -32,16 +47,20 @@ When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cl
   <img alt="TokenMe panel — Tools tab, dark" src="docs/screenshots/panel-en-tools-dark.png" width="24%">
 </p>
 
-## ✨ Features
+## Inside the panel
 
-- 🔒 **Local index, read-only scanning**: Usage is indexed on your machine from the tools' own logs. No telemetry and no third-party proxies; live quota probes and the model price list are the only network calls.
-- ⚡ **Instant Scanning**: High-performance Rust incremental index scans hundreds of thousands of events in seconds.
-- 🎯 **20 Tools Supported**: Claude Code, Codex, OpenCode, Cline, ZCode, Qoder, Pi, Antigravity, WorkBuddy, AgnesCode, AtomCode, Crow5, Mimocode, Cola, DSH, Hermes, JoyCode, FunIDE, CatPaw, Trae.
-- 📊 **Token & Cost Analytics**: Input, cache read, output and cost breakdown via [models.dev](https://models.dev).
-- ⏱️ **Live Quota Probes**: Rolling 5-hour windows, weekly quotas, credit plans and reset countdowns.
-- 🌐 **Bilingual UI**: UI language follows the system — English and Chinese, defaults to Chinese.
+The panel opens with four pages, each one drilling deeper:
 
-## ⚡ Preview
+- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; and each vendor's quota bar with remaining share and reset countdown.
+- **Tools** — one row per tool: requests, sessions, tokens, cache rate — with each tool's share painted into the row itself.
+- **Rankings** — sessions ranked, so the expensive ones surface immediately.
+- **Details** — per-request records, filterable by model and project.
+
+The UI follows the system language: English and Chinese. Costs are converted, not billed — token counts times the [models.dev](https://models.dev) price list. It won't match a vendor invoice to the cent, but it answers where the money went and whether it was well spent. The index handles hundreds of thousands of events, builds in seconds, and each incremental scan after that takes tens of milliseconds.
+
+## The CLI
+
+When the panel stays closed, the CLI reads the same index:
 
 ```text
 $ tokenme daily --days 3
@@ -50,99 +69,101 @@ $ tokenme daily --days 3
 │ Day        │ sessions │ requests │  input │ cache read │ output │  total │    cost │ cached │
 ├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
 │ 2026-09-25 │      216 │   12,900 │  56.2M │      1.68B │   4.5M │  1.74B │  $99.15 │  96.8% │
-│ 2026-09-26 │       45 │    4,592 │  30.5M │     704.9M │   1.8M │ 737.1M │  $54.53 │  95.9% │
-│ 2026-09-27 │        6 │    2,534 │  25.1M │     377.1M │   1.1M │ 403.4M │  $46.49 │  93.8% │
+│ 2026-09-26 │       45 │    4,592 │  30.5M │      704.9M │   1.8M │ 737.1M │  $54.53 │  95.9% │
+│ 2026-09-27 │        6 │    2,534 │  25.1M │      377.1M │   1.1M │ 403.4M │  $46.49 │  93.8% │
 ├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
 │ total      │      256 │   20,026 │ 111.8M │      2.76B │   7.4M │  2.88B │ $200.18 │  96.1% │
 └────────────┴──────────┴──────────┴────────┴────────────┴────────┴────────┴─────────┴────────┘
 ```
 
-## 🚀 Quick Start
+## Install
 
-**Download** the installer from [Releases](https://github.com/sp/tokenme/releases/latest) — a macOS menu-bar app (drag to Applications) and a Windows setup. Or build from source:
+Grab an installer from [Releases](https://github.com/sp/tokenme/releases/latest) — a macOS menu bar app (drag to Applications) and a Windows setup are both there.
 
-> **First launch on macOS**: the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may block it. Besides right-click → Open, the direct way is clearing the quarantine flag and launching normally:
+> **First launch on macOS**: the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in. Right-click → Open works, or clear the quarantine flag:
 >
 > ```bash
 > sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 > ```
 
+Build from source instead:
+
 ```bash
 git clone https://github.com/sp/tokenme.git
 cd tokenme
-cargo install --path crates/usage-cli --bin tokenme   # the CLI
-./scripts/build-macos.sh                              # the macOS panel
+cargo install --path crates/usage-cli --bin tokenme   # CLI
+./scripts/build-macos.sh                              # macOS panel
 ```
 
-Then:
+Once it's in, run a detection pass and look at the last week:
 
 ```bash
-tokenme detect          # 1. discover local AI tools and logs
-tokenme daily --days 7  # 2. tokens and cost for the past week
-tokenme quota           # 3. live subscription quotas and reset timers
+tokenme detect          # find every installed tool and where its logs live
+tokenme daily --days 7  # the last week's daily usage and spend
+tokenme quota           # live quotas and reset countdowns
 ```
 
-## 🛠️ Commands
+## Common commands
 
 | Command | What it does |
 | :--- | :--- |
-| `tokenme daily --days 30` | Daily throughput, cache rate & cost |
-| `tokenme report --window week --group model` | One window, broken down, with deltas |
-| `tokenme quota` | Live quotas and reset countdowns |
-| `tokenme budget set zcode --monthly 50` | Spend caps for unlimited-plan tools |
-| `tokenme pricing explain <model>` | Audit which price listing won |
+| `tokenme daily --days 30` | Day-by-day throughput, cache rate, and cost |
+| `tokenme report --window week --group model` | One window, broken down every which way |
+| `tokenme quota` | Live quotas with reset countdowns |
+| `tokenme budget set zcode --monthly 50` | Put a monthly cap on a tool that has none |
+| `tokenme pricing explain <model>` | Audit where a price comes from |
 
-## 🧩 Supported Host Agents & Live Quota
+## Supported tools & live quota
 
-Quota bars come from each tool's own API or local credentials (read-only probes — your login state is never refreshed or replaced). When a host app quits, probing for that tool pauses automatically and the last numbers stay on screen; it resumes on relaunch. The "pause quota on host exit" toggle in Settings controls this.
+The quota bars come from each tool's own API or local credentials — read-only probes that never refresh or stand in for your login. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
 
-Every host below ships as a built-in adapter — 20 tools, indexed from the logs and local databases each one already writes:
+Every tool below ships as a built-in adapter — twenty of them, indexed straight from the logs and databases each one writes to disk:
 
-| Host agent | Live quota | Compatibility test | Platform verification |
+| Tool | Live quota | Fixtures | Verified on |
 | :--- | :--- | :--- | :--- |
-| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 5-hour / weekly windows — official backend | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 5-hour / cycle windows — official backend | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT rate windows — official backend | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Go subscription, three dollar windows | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | account window limits — Cline account API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | Account window limits — Cline account API | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour/cycle windows + session budgets — the IDE's own quota API + local cookie decryption | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | subscription windows — vendor usage API, local encrypted snapshot fallback | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | self-computed quota — runs the CLI's `/usage` | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | membership points — needs a one-time token (see below) | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | Subscription windows — vendor usage API, local encrypted snapshot fallback | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | Self-computed — runs the CLI's `/usage` | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | Membership points — needs a one-time token (see below) | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota — local daemon | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** | member credits — the desktop app's own billing API / local broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** | Member credits — the desktop app's billing API / local broker | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points — cloud points API | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | points balance — points portal API | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance — official user/balance + desktop credentials file | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | Points balance — points portal API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance — official user/balance + desktop credential file | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
 | **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | plan quota — vendor billing API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | Plan quota — vendor billing API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE points — reads the IDE's own login state | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | subscription quota — vendor v1 API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | Subscription quota — vendor v1 API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
 
-> **Compatibility test** — every adapter carries a fixture test suite that CI runs on each commit, and each integration was verified against a real machine's data before landing.
+> **Fixtures**: every adapter carries a fixture test suite, run in full on CI for each commit, and every integration was verified against a real machine's data before it landed.
 >
-> **Platform verification** — updated as each host is proven on real hardware. ⏳ means the paths are implemented for that platform but not yet verified there; flip the mark when a verification run passes.
+> **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
 >
-> Quota-only sources: **Copilot** (premium-request allowance, official backend) is probed without indexing its usage; the **Gemini CLI** probe is deliberately dark — its on-disk OAuth token expires and refreshing credentials is out of scope for a read-only probe.
+> Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token expires, and refreshing credentials is outside a read-only probe's line.
 
-> **AgnesCode token**: the login token lives only in the app's memory and cannot be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` from an authenticated request into `~/.config/tokenme/agnes.token` (or set `AGNES_TOKEN`).
+> **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `~/.config/tokenme/agnes.token` (or set `AGNES_TOKEN`).
 
-Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Scenarios & panel guide: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · Adapter reverse-engineering notes: [docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
+Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · Adapter notes: [docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
 
-## 🔒 Privacy & Data
+## Data & privacy
 
-Counts only, never content — your code and prompts are never indexed, just per-request token counts, model names and project paths. Scanning is read-only; no telemetry, no third-party proxies. The index lives under the OS data directory (`~/Library/Application Support/tokenme/` on macOS); per-tool log paths are in the [user guide](docs/USER_GUIDE.md).
+Only counts get indexed, never content — your code and prompts are not stored. What lands in the index is each request's token counts, model name, and project path. Scanning is read-only throughout; no telemetry, no third-party proxies. The index lives in your system data directory (`~/Library/Application Support/tokenme/` on macOS), and each tool's log paths are listed in the [user guide](docs/USER_GUIDE.md).
 
-## 💬 Community
+## Community
 
 | | |
 | :--- | :--- |
-| Issues | [GitHub Issues](https://github.com/sp/tokenme/issues) |
+| Bug reports | [GitHub Issues](https://github.com/sp/tokenme/issues) |
 | WeChat user group | <img src="docs/wechat-group.png" width="180" alt="TokenMe WeChat group"> |
-| Email | Panel → Settings → Contact (address in `apps/tokenme-bar/src/lib/about.ts`) |
+| Email | Panel → Settings → Contact us (address in `apps/tokenme-bar/src/lib/about.ts`) |
 
-## 📄 License
+## License
 
-Licensed under [MIT](LICENSE).
+Released under the [MIT](LICENSE) license.
