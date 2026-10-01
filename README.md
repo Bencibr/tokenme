@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sp/tokenme"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+  <a href="https://github.com/Bencibr/tokenme"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.75%2B-orange.svg" alt="Rust Version"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-green.svg" alt="Platform Support">
   <img src="https://img.shields.io/badge/index-local--only-success.svg" alt="Local Index">
@@ -78,9 +78,20 @@ $ tokenme daily --days 3
 
 ## Install
 
-Grab an installer from [Releases](https://github.com/sp/tokenme/releases/latest) — a macOS menu bar app (drag to Applications) and a Windows setup are both there.
+**Homebrew (macOS)** — tap once, then short names:
 
-> **First launch on macOS**: the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in. Right-click → Open works, or clear the quarantine flag:
+```bash
+brew tap Bencibr/tokenme https://github.com/Bencibr/homebrew-tokenme
+brew trust bencibr/tokenme        # once — brew 6 asks before trusting third-party casks
+brew install --cask tokenme       # the menu-bar panel
+brew install tokenme-cli          # the CLI
+```
+
+The tap is bumped automatically on every release, so `brew upgrade` keeps you current, and cask installs carry no quarantine flag — Gatekeeper never steps in.
+
+**Installers**: grab one from [Releases](https://github.com/Bencibr/tokenme/releases/latest) — a macOS menu bar app (drag to Applications) and a Windows setup are both there.
+
+> **First launch on macOS** (manual DMG only): the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in. Right-click → Open works, or clear the quarantine flag:
 >
 > ```bash
 > sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
@@ -89,7 +100,7 @@ Grab an installer from [Releases](https://github.com/sp/tokenme/releases/latest)
 Build from source instead:
 
 ```bash
-git clone https://github.com/sp/tokenme.git
+git clone https://github.com/Bencibr/tokenme.git
 cd tokenme
 cargo install --path crates/usage-cli --bin tokenme   # CLI
 ./scripts/build-macos.sh                              # macOS panel
@@ -160,7 +171,7 @@ Only counts get indexed, never content — your code and prompts are not stored.
 
 | | |
 | :--- | :--- |
-| Bug reports | [GitHub Issues](https://github.com/sp/tokenme/issues) |
+| Bug reports | [GitHub Issues](https://github.com/Bencibr/tokenme/issues) |
 | WeChat user group | <img src="docs/wechat-group.png" width="180" alt="TokenMe WeChat group"> |
 | Email | Panel → Settings → Contact us (address in `apps/tokenme-bar/src/lib/about.ts`) |
 

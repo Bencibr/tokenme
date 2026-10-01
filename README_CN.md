@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sp/tokenme"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+  <a href="https://github.com/Bencibr/tokenme"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.75%2B-orange.svg" alt="Rust Version"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-green.svg" alt="Platform Support">
   <img src="https://img.shields.io/badge/index-local--only-success.svg" alt="Local Index">
@@ -78,9 +78,20 @@ $ tokenme daily --days 3
 
 ## 安装
 
-到 [Releases](https://github.com/sp/tokenme/releases/latest) 下载安装包，里面有 macOS 菜单栏应用（拖入 Applications）和 Windows 安装程序。
+**Homebrew（macOS）**——tap 一次，之后用短名：
 
-> **macOS 首次打开**：安装包是 ad-hoc 签名（没有开发者证书），Gatekeeper 可能拦一下——右键打开即可，或者清掉隔离标记后正常启动：
+```bash
+brew tap Bencibr/tokenme https://github.com/Bencibr/homebrew-tokenme
+brew trust bencibr/tokenme        # 一次即可——brew 6 对第三方 cask 有信任确认
+brew install --cask tokenme       # 菜单栏面板
+brew install tokenme-cli          # CLI
+```
+
+tap 随每次发布自动更新，`brew upgrade` 即可升级；cask 安装不带隔离标记，Gatekeeper 不会拦。
+
+**安装包**：到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载，里面有 macOS 菜单栏应用（拖入 Applications）和 Windows 安装程序。
+
+> **macOS 首次打开**（仅手动装 DMG 时）：安装包是 ad-hoc 签名（没有开发者证书），Gatekeeper 可能拦一下——右键打开即可，或者清掉隔离标记后正常启动：
 >
 > ```bash
 > sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
@@ -89,7 +100,7 @@ $ tokenme daily --days 3
 想从源码构建：
 
 ```bash
-git clone https://github.com/sp/tokenme.git
+git clone https://github.com/Bencibr/tokenme.git
 cd tokenme
 cargo install --path crates/usage-cli --bin tokenme   # CLI
 ./scripts/build-macos.sh                              # macOS 面板
@@ -160,7 +171,7 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 
 | | |
 | :--- | :--- |
-| 问题反馈 | [GitHub Issues](https://github.com/sp/tokenme/issues) |
+| 问题反馈 | [GitHub Issues](https://github.com/Bencibr/tokenme/issues) |
 | 微信交流群 | <img src="docs/wechat-group.png" width="180" alt="TokenMe 微信交流群"> |
 | 邮箱 | 面板「设置 → 联系我们」直达（地址在 `apps/tokenme-bar/src/lib/about.ts`） |
 
