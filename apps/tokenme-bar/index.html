@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>tokenme</title>
+    <script>
+      // Platform-scoped styling lives on <html data-platform> (see theme.css).
+      // Only the native Tauri windows need it — the web preview keeps its
+      // fake-desktop glass — and it must be set before the first paint so the
+      // surface never flashes translucent on a platform without blur.
+      if ("__TAURI_INTERNALS__" in window) {
+        var ua = navigator.userAgent;
+        document.documentElement.dataset.platform =
+          /Win/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "macos" : "linux";
+      }
+    </script>
+    <style>
+      /* Keep the transparent window transparent before the stylesheet loads. */
+      html {
+        /* The Tauri window is transparent. An opaque html background would
+           paint a square behind the rounded panel before CSS can clip it. */
+        background: transparent;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: transparent;
+          color-scheme: dark;
+        }
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
