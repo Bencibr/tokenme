@@ -294,3 +294,49 @@ fn retention_and_default_path_look_sane() {
     }
     assert!(Index::open_in_memory().unwrap().path().is_none());
 }
+
+#[test]
+fn cumulative_dedupe_replaces_with_greater_total_and_updates_rollup() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("live.jsonl");
+    // Snapshot 1: 100 in, 20 out
+    std::fs::write(&file, b"{\"id\":\"cum-1\",\"ts\":1789172800000,\"session\":\"s1\",\"in\":100,\"out\":20}\n").unwrap();
+
+    let adapter = Mock { id: "mocka", dir: dir.path().to_path_buf(), fail_on: None, ignore_cursor: true };
+    let (mut idx, r1) = ingest(&adapter, DateFilter::default());
+    assert_eq!(r1.new_events, 1);
+    assert_eq!(idx.event_count().unwrap(), 1);
+    let ev1 = &idx.all_events().unwrap()[0];
+    assert_eq!(ev1.counts.input, 100.0);
+    assert_eq!(ev1.counts.output, 20.0);
+
+    // Snapshot 2: session continues growing, now 250 in and 60 out
+    std::fs::write(&file, b"{\"id\":\"cum-1\",\"ts\":1789172810000,\"session\":\"s1\",\"in\":250,\"out\":60}\n").unwrap();
+    let _r2 = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(idx.event_count().unwrap(), 1, "still one event row");
+    let ev2 = &idx.all_events().unwrap()[0];
+    assert_eq!(ev2.counts.input, 250.0);
+    assert_eq!(ev2.counts.output, 60.0);
+
+    // Check event_rollup parity: updated to 250 in, 60 out, n = 1
+    let (in_tok, out_tok, n): (f64, f64, i64) = idx
+        .conn()
+        .query_row(
+            "SELECT sum(in_tok), sum(out_tok), sum(n) FROM event_rollup WHERE tool = 'mocka'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(in_tok, 250.0);
+    assert_eq!(out_tok, 60.0);
+    assert_eq!(n, 1);
+
+    // Snapshot 3: stale/duplicate snapshot with lower tokens
+    std::fs::write(&file, b"{\"id\":\"cum-1\",\"ts\":1789172810000,\"session\":\"s1\",\"in\":200,\"out\":50}\n").unwrap();
+    let r3 = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(r3.deduped, 1, "stale lower total was ignored");
+    let ev3 = &idx.all_events().unwrap()[0];
+    assert_eq!(ev3.counts.input, 250.0);
+    assert_eq!(ev3.counts.output, 60.0);
+}
+

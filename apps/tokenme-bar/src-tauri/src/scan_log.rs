@@ -23,7 +23,6 @@ use std::sync::Mutex;
 
 use chrono::Local;
 use serde_json::json;
-use usage_core::UsageEvent;
 
 use crate::logging;
 
@@ -32,13 +31,15 @@ static LAST_TOTALS: Mutex<BTreeMap<String, (f64, f64, f64, f64)>> = Mutex::new(B
 const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
 const MAX_BYTES: u64 = 2 << 20;
 
-/// Append one audit line for a finished ingest pass. `events` is the index's
-/// post-pass event set (the same array the report was published from).
+/// Append one audit line for a finished ingest pass. Per-tool and per-session
+/// figures are queried straight from the index — no event array crosses this
+/// boundary, so an audit line costs a few thousand small rows, never the whole
+/// history.
 pub fn pass(
     reason: &str,
     detected: &[usage_core::DetectedSource],
     report: &usage_index::IngestReport,
-    events: &[UsageEvent],
+    index: &usage_index::Index,
 ) {
     let changed = report.files_changed > 0 || report.new_events > 0;
     let heartbeat_due = {
@@ -72,14 +73,11 @@ pub fn pass(
         }
     }
 
-    let mut tools: BTreeMap<String, u64> = BTreeMap::new();
-    for e in events {
-        *tools.entry(e.tool.clone()).or_default() += 1;
-    }
+    let tools: BTreeMap<String, u64> = index.per_tool_counts().unwrap_or_default();
     // The dsh reconciliation: what the index holds per session, what DSH's own
     // projection ledger says, and whether any total moved backwards (a
     // cumulative ledger only grows — a shrink is a re-read or double-write).
-    let dsh: Vec<&UsageEvent> = events.iter().filter(|e| e.tool == "dsh").collect();
+    let dsh_rows = index.tool_events("dsh").unwrap_or_default();
     let mut last_totals = LAST_TOTALS.lock().unwrap();
     let mut dsh_regressions: Vec<String> = Vec::new();
     let mut dsh_sessions: Vec<_> = Vec::new();
@@ -87,15 +85,15 @@ pub fn pass(
     for row in usage_adapter_dsh::ledger() {
         ledger_by_id.insert(row.session.clone(), (row.input, row.output, row.cache_read, row.cache_write));
     }
-    for e in &dsh {
-        let totals = (e.counts.input, e.counts.output, e.counts.cache_read, e.counts.cache_creation);
-        if let Some(prev) = last_totals.get(&e.session) {
+    for row in &dsh_rows {
+        let totals = (row.input, row.output, row.cache_read, row.cache_creation);
+        if let Some(prev) = last_totals.get(&row.session) {
             if totals.0 < prev.0 || totals.1 < prev.1 || totals.2 < prev.2 || totals.3 < prev.3 {
-                dsh_regressions.push(e.session.clone());
+                dsh_regressions.push(row.session.clone());
             }
         }
-        last_totals.insert(e.session.clone(), totals);
-        let id = e.session.clone();
+        last_totals.insert(row.session.clone(), totals);
+        let id = row.session.clone();
         let audit = match ledger_by_id.get(&id) {
             Some(l) => {
                 let (li, lo, lcr, lcc) = *l;
@@ -110,13 +108,13 @@ pub fn pass(
         dsh_sessions.push(json!({
             "id": id,
             "in": totals.0, "cc": totals.3, "cr": totals.2, "out": totals.1,
-            "events": 1, "model": e.model, "ts": e.ts_ms,
+            "events": 1, "model": row.model, "ts": row.ts_ms,
             "audit": audit,
         }));
     }
     // A ledger row with no index event at all (usage the panel never picked up).
     for (id, (li, lo, lcr, lcc)) in &ledger_by_id {
-        if !dsh.iter().any(|e| e.session == *id) && (li + lo + lcr + lcc) > 0.0 {
+        if !dsh_rows.iter().any(|r| r.session == *id) && (li + lo + lcr + lcc) > 0.0 {
             dsh_sessions.push(json!({
                 "id": id, "in": li, "out": lo, "cr": lcr, "cc": lcc,
                 "events": 0, "audit": { "ledger": "self", "match": false },
@@ -135,13 +133,11 @@ pub fn pass(
     if heartbeat_due && reason != "initial scan" {
         let replay = usage_adapter_codex::replay(&usage_core::DateFilter::default());
         let mut indexed: BTreeMap<String, (f64, f64, f64, f64, usize)> = BTreeMap::new();
-        for e in events.iter().filter(|e| e.tool == "codex") {
-            let slot = indexed.entry(e.session.clone()).or_insert((0.0, 0.0, 0.0, 0.0, 0));
-            slot.0 += e.counts.input;
-            slot.1 += e.counts.cache_creation;
-            slot.2 += e.counts.cache_read;
-            slot.3 += e.counts.output;
-            slot.4 += 1;
+        for row in index.tool_session_totals("codex").unwrap_or_default() {
+            indexed.insert(
+                row.session,
+                (row.input, row.cache_creation, row.cache_read, row.output, row.events as usize),
+            );
         }
         let mut mismatches: Vec<String> = Vec::new();
         let mut checked = 0u64;

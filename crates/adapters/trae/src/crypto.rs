@@ -48,11 +48,14 @@ const MAGIC: &[u8; 16] = b"SQLite format 3\x00";
 /// The derived AES-256 key. PBKDF2 over a constant runs ~0.1 s; cached so a
 /// full rescan pays it once.
 fn derived_key() -> [u8; 32] {
-    use pbkdf2::pbkdf2_hmac;
-    use sha2::Sha256;
-    let mut key = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(PASSWORD, &KDF_SALT, KDF_ITERS, &mut key);
-    key
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *KEY.get_or_init(|| {
+        use pbkdf2::pbkdf2_hmac;
+        use sha2::Sha256;
+        let mut key = [0u8; 32];
+        pbkdf2_hmac::<Sha256>(PASSWORD, &KDF_SALT, KDF_ITERS, &mut key);
+        key
+    })
 }
 
 type Aes256CbcDec = cbc::Decryptor<Aes256>;

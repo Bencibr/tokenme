@@ -63,10 +63,25 @@ impl QuotaProbe for DshQuota {
 fn api_key() -> Option<String> {
     let path = credentials_path()?;
     let text = std::fs::read_to_string(path).ok()?;
+    parse_api_key(&text)
+}
+
+fn parse_api_key(text: &str) -> Option<String> {
     for line in text.lines() {
-        if let Some(("DEEPSEEK_API_KEY", value)) = line.trim().split_once(':') {
-            let value = value.trim().trim_matches('"');
-            return (!value.is_empty()).then_some(value.to_string());
+        if let Some((k, value)) = line.trim().split_once(':') {
+            let k = k.trim();
+            if matches!(
+                k,
+                "DEEPSEEK_API_KEY"
+                    | "DEEPSSEEK_API_KEY"
+                    | "refs.DEEPSEEK_API_KEY"
+                    | "refs.DEEPSSEEK_API_KEY"
+            ) {
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
         }
     }
     None
@@ -155,5 +170,26 @@ mod tests {
 
         let unavailable: serde_json::Value = serde_json::from_str(r#"{"is_available":false,"balance_infos":[]}"#).unwrap();
         assert!(sample_from(&unavailable).is_none());
+    }
+
+    #[test]
+    fn parses_api_key_variants() {
+        assert_eq!(
+            parse_api_key("DEEPSEEK_API_KEY: \"sk-12345\""),
+            Some("sk-12345".to_string())
+        );
+        assert_eq!(
+            parse_api_key("DEEPSSEEK_API_KEY: 'sk-typo'"),
+            Some("sk-typo".to_string())
+        );
+        assert_eq!(
+            parse_api_key("refs.DEEPSEEK_API_KEY: sk-raw"),
+            Some("sk-raw".to_string())
+        );
+        assert_eq!(
+            parse_api_key("refs.DEEPSSEEK_API_KEY: \"sk-refs-typo\""),
+            Some("sk-refs-typo".to_string())
+        );
+        assert_eq!(parse_api_key("OTHER_KEY: sk-other"), None);
     }
 }

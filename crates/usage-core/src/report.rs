@@ -10,8 +10,8 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 
 use crate::budget::Budget;
-use crate::pricing::{PricingMap, PricingMeta};
-use crate::types::{CallKind, Meter, TokenCounts, UsageEvent};
+use crate::pricing::{Price, PricingMap, PricingMeta};
+use crate::types::{CallKind, Meter, QuotaSample, TokenCounts, UsageEvent};
 
 /// Cells ending today; a whole number of weeks so the grid needs no padding.
 pub const HEATMAP_DAYS: i64 = 371;
@@ -274,6 +274,13 @@ fn date_of(ms: i64) -> Option<NaiveDate> {
     to_local(ms).map(|d| d.date_naive())
 }
 
+/// The local calendar day an instant falls on, shared by the rollup writer and
+/// the report fold. Bucketing is identical by construction because both sides
+/// call this one function — the index never re-derives a day in SQL.
+pub fn local_day_of(ms: i64) -> Option<NaiveDate> {
+    date_of(ms)
+}
+
 fn start_of_day_ms(d: NaiveDate) -> i64 {
     d.and_hms_opt(0, 0, 0)
         .and_then(|naive| Local.from_local_datetime(&naive).single())
@@ -468,7 +475,16 @@ where
         })
         .collect();
     items.sort_by(|a, b| {
-        b.cost.total_cmp(&a.cost).then_with(|| b.total_tokens.total_cmp(&a.total_tokens))
+        b.cost.total_cmp(&a.cost)
+            .then_with(|| b.total_tokens.total_cmp(&a.total_tokens))
+            // P1: pin full ties to ascending key. The fold below iterates a
+            // BTreeMap (ascending key) with this stable sort, so equal-cost items
+            // already emerged in key order — the comparison only makes that
+            // explicit, and it keeps the SQL-rollup path (`summarize_facts`),
+            // whose per-group costs can differ in the last ULP from the
+            // per-event sums, in exactly the same order instead of at the
+            // mercy of a floating-point hair.
+            .then_with(|| a.key.cmp(&b.key))
     });
     items
 }
@@ -571,6 +587,138 @@ fn utc_offset(now_ms: i64) -> String {
     to_local(now_ms).map(|d| d.offset().to_string()).unwrap_or_else(|| "+00:00".into())
 }
 
+/// The whole quota-strip pipeline, shared verbatim by the event path
+/// ([`summarize`]) and the rollup path ([`summarize_facts`]) — one function so
+/// the two report paths cannot drift on which meters survive and how they sort.
+///
+/// `log_rows` must arrive in event-id order: two samples with the same
+/// `(tool, window, label)` key resolve ties by "later row wins".
+fn merge_quotas<'a>(
+    log_rows: impl Iterator<Item = (&'a str, i64, &'a QuotaSample)>,
+    polled: &[QuotaView],
+    spent_today: &BTreeMap<String, f64>,
+    spent_month: &BTreeMap<String, f64>,
+    now_ms: i64,
+    budgets: &BTreeMap<String, Budget>,
+) -> Vec<QuotaView> {
+    // Only the newest sample per window is meaningful, and a tool can report
+    // several windows at once. The window's *name* is part of its identity: ZCode
+    // has a monthly tool-call meter and a monthly MCP meter, and Antigravity has a
+    // 5-hour window per model group — keyed on length alone, the second silently
+    // replaced the first. A row with no name (Codex writes its window into the log
+    // without one) is the same window as the named probe of it, so an empty name
+    // matches anything.
+    let mut quotas: BTreeMap<(String, i64, String), QuotaView> = BTreeMap::new();
+    for (tool, ts_ms, q) in log_rows {
+        if !keep_vendor_quota(tool, q.window_minutes) {
+            continue;
+        }
+        let key = (tool.to_string(), q.window_minutes, label_key(q.label.as_deref()));
+        let better = quotas.get(&key).is_none_or(|cur| ts_ms >= cur.sampled_at_ms);
+        if better {
+            quotas.insert(
+                key,
+                QuotaView {
+                    tool: tool.to_string(),
+                    used_percent: q.used_percent,
+                    window_minutes: q.window_minutes,
+                    resets_at_ms: q.resets_at_ms,
+                    sampled_at_ms: ts_ms,
+                    label: q.label.clone(),
+                    id: q.id.clone(),
+                    origin: QuotaOrigin::Log,
+                },
+            );
+        }
+    }
+    // A live probe is fresher than whatever the last log record happened to carry.
+    for polled in polled {
+        if !keep_vendor_quota(&polled.tool, polled.window_minutes) {
+            continue;
+        }
+        let named = label_key(polled.label.as_deref());
+        let same = quotas
+            .iter()
+            .find(|(k, _)| {
+                k.0 == polled.tool
+                    && k.1 == polled.window_minutes
+                    && (named.is_empty() || k.2.is_empty() || k.2 == named)
+            })
+            .map(|(k, _)| k.clone());
+        if let Some(previous) = same {
+            quotas.remove(&previous);
+        }
+        quotas.insert((polled.tool.clone(), polled.window_minutes, named), polled.clone());
+    }
+    // A window whose reset has already passed is stale by construction: the tool
+    // has moved on to a new one and either reported it or stopped reporting.
+    // A log row that advertises no reset at all cannot be judged that way, so it
+    // is judged by age instead: a meter nobody has mentioned for a day — a probe
+    // that changed its labels, a session long closed — is not on the panel.
+    let mut quotas: Vec<QuotaView> = quotas
+        .into_values()
+        .filter(|q| match (q.resets_at_ms, q.origin) {
+            (0, QuotaOrigin::Log) => q.sampled_at_ms + LOG_ROW_LIFETIME_MS > now_ms,
+            _ => q.resets_at_ms == 0 || q.resets_at_ms >= now_ms,
+        })
+        .collect();
+    // Budgets are measured on the same local boundaries the windows above use, so
+    // "80 % of today's cap" and today's cost line can never disagree.
+    quotas.extend(crate::budget::views(
+        budgets,
+        spent_today,
+        spent_month,
+        now_ms,
+        next_local_midnight(now_ms, 1),
+        next_local_midnight(now_ms, first_of_next_month_days(now_ms)),
+    ));
+    // Rows whose label names a subject before the window — Antigravity's
+    // "Gemini · 5 小时" — are grouped by that subject, and the subjects keep the
+    // order the probes emitted them in, which is the vendor's own grouping. A
+    // subject with a single window has nothing to group: those rows keep the
+    // window-length order (ZCode's meters must not start following the vendor's
+    // limits array). Bare window labels ("5 小时") name no subject either.
+    // Nothing here moves with the numbers: a percentage or a shrinking reset
+    // gap would make the bars jump around while being read.
+    fn family_label(q: &QuotaView) -> Option<&str> {
+        q.label.as_deref().and_then(|l| l.split_once(" · ")).map(|(fam, _)| fam).filter(|fam| !fam.is_empty())
+    }
+    let mut family_rank: Vec<(String, String)> = Vec::new();
+    for q in polled {
+        let Some(fam) = family_label(q) else { continue };
+        if family_rank.iter().any(|(t, f)| t == &q.tool && f == fam) {
+            continue;
+        }
+        family_rank.push((q.tool.clone(), fam.to_string()));
+    }
+    // Owned, not borrowed: the vec feeds a closure that runs inside
+    // `quotas.sort_by`, and a borrow of `quotas` rows would fight the sort's
+    // mutable borrow.
+    let mut family_windows: Vec<(String, String, usize)> = Vec::new();
+    for q in &quotas {
+        let Some(fam) = family_label(q) else { continue };
+        match family_windows.iter_mut().find(|(t, f, _)| t == &q.tool && f == fam) {
+            Some((_, _, n)) => *n += 1,
+            None => family_windows.push((q.tool.clone(), fam.to_string(), 1)),
+        }
+    }
+    let family_rank = |q: &QuotaView| -> usize {
+        let Some(fam) = family_label(q) else { return 0 };
+        let grouped = family_windows.iter().any(|(t, f, n)| t == &q.tool && f == fam && *n > 1);
+        if !grouped {
+            return 0;
+        }
+        family_rank.iter().position(|(t, f)| t == &q.tool && f == fam).map_or(0, |i| i + 1)
+    };
+    quotas.sort_by(|a, b| {
+        a.tool.cmp(&b.tool)
+            .then_with(|| family_rank(a).cmp(&family_rank(b)))
+            .then_with(|| window_rank(a.window_minutes).cmp(&window_rank(b.window_minutes)))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    quotas
+}
+
 /// Build the whole panel/CLI payload from already-deduplicated events.
 pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
     let rows: Vec<Row> = events
@@ -635,122 +783,18 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         .collect();
 
     // Only the newest sample per window is meaningful, and a tool can report
-    // several windows at once. The window's *name* is part of its identity: ZCode
-    // has a monthly tool-call meter and a monthly MCP meter, and Antigravity has a
-    // 5-hour window per model group — keyed on length alone, the second silently
-    // replaced the first. A row with no name (Codex writes its window into the log
-    // without one) is the same window as the named probe of it, so an empty name
-    // matches anything.
-    let mut quotas: BTreeMap<(String, i64, String), QuotaView> = BTreeMap::new();
-    for r in &rows {
-        let Some(q) = r.ev.quota.as_ref() else { continue };
-        if !keep_vendor_quota(&r.ev.tool, q.window_minutes) {
-            continue;
-        }
-        let key = (r.ev.tool.clone(), q.window_minutes, label_key(q.label.as_deref()));
-        let better = quotas.get(&key).is_none_or(|cur| r.ev.ts_ms >= cur.sampled_at_ms);
-        if better {
-            quotas.insert(
-                key,
-                QuotaView {
-                    tool: r.ev.tool.clone(),
-                    used_percent: q.used_percent,
-                    window_minutes: q.window_minutes,
-                    resets_at_ms: q.resets_at_ms,
-                    sampled_at_ms: r.ev.ts_ms,
-                    label: q.label.clone(),
-                    id: q.id.clone(),
-                    origin: QuotaOrigin::Log,
-                },
-            );
-        }
-    }
-    // A live probe is fresher than whatever the last log record happened to carry.
-    for polled in &opts.polled_quota {
-        if !keep_vendor_quota(&polled.tool, polled.window_minutes) {
-            continue;
-        }
-        let named = label_key(polled.label.as_deref());
-        let same = quotas
-            .iter()
-            .find(|(k, _)| {
-                k.0 == polled.tool
-                    && k.1 == polled.window_minutes
-                    && (named.is_empty() || k.2.is_empty() || k.2 == named)
-            })
-            .map(|(k, _)| k.clone());
-        if let Some(previous) = same {
-            quotas.remove(&previous);
-        }
-        quotas.insert((polled.tool.clone(), polled.window_minutes, named), polled.clone());
-    }
-    // A window whose reset has already passed is stale by construction: the tool
-    // has moved on to a new one and either reported it or stopped reporting.
-    // A log row that advertises no reset at all cannot be judged that way, so it
-    // is judged by age instead: a meter nobody has mentioned for a day — a probe
-    // that changed its labels, a session long closed — is not on the panel.
-    let mut quotas: Vec<QuotaView> = quotas
-        .into_values()
-        .filter(|q| match (q.resets_at_ms, q.origin) {
-            (0, QuotaOrigin::Log) => q.sampled_at_ms + LOG_ROW_LIFETIME_MS > opts.now_ms,
-            _ => q.resets_at_ms == 0 || q.resets_at_ms >= opts.now_ms,
-        })
-        .collect();
-    // Budgets are measured on the same local boundaries the windows above use, so
-    // "80 % of today's cap" and today's cost line can never disagree.
-    quotas.extend(crate::budget::views(
-        &opts.budgets,
+    // several windows at once. The whole pipeline (newest-log-row-per-window,
+    // probe override, expiry filter, budget bars, family sort) lives in
+    // [`merge_quotas`], shared verbatim with the rollup fold so the two report
+    // paths cannot drift.
+    let quotas = merge_quotas(
+        rows.iter().filter_map(|r| r.ev.quota.as_ref().map(|q| (r.ev.tool.as_str(), r.ev.ts_ms, q))),
+        &opts.polled_quota,
         &cost_by_tool(&day.breakdown.tools),
         &cost_by_tool(&month.breakdown.tools),
         opts.now_ms,
-        next_local_midnight(opts.now_ms, 1),
-        next_local_midnight(opts.now_ms, first_of_next_month_days(opts.now_ms)),
-    ));
-    // Rows whose label names a subject before the window — Antigravity's
-    // "Gemini · 5 小时" — are grouped by that subject, and the subjects keep the
-    // order the probes emitted them in, which is the vendor's own grouping. A
-    // subject with a single window has nothing to group: those rows keep the
-    // window-length order (ZCode's meters must not start following the vendor's
-    // limits array). Bare window labels ("5 小时") name no subject either.
-    // Nothing here moves with the numbers: a percentage or a shrinking reset
-    // gap would make the bars jump around while being read.
-    fn family_label(q: &QuotaView) -> Option<&str> {
-        q.label.as_deref().and_then(|l| l.split_once(" · ")).map(|(fam, _)| fam).filter(|fam| !fam.is_empty())
-    }
-    let mut family_rank: Vec<(String, String)> = Vec::new();
-    for q in &opts.polled_quota {
-        let Some(fam) = family_label(q) else { continue };
-        if family_rank.iter().any(|(t, f)| t == &q.tool && f == fam) {
-            continue;
-        }
-        family_rank.push((q.tool.clone(), fam.to_string()));
-    }
-    // Owned, not borrowed: the vec feeds a closure that runs inside
-    // `quotas.sort_by`, and a borrow of `quotas` rows would fight the sort's
-    // mutable borrow.
-    let mut family_windows: Vec<(String, String, usize)> = Vec::new();
-    for q in &quotas {
-        let Some(fam) = family_label(q) else { continue };
-        match family_windows.iter_mut().find(|(t, f, _)| t == &q.tool && f == fam) {
-            Some((_, _, n)) => *n += 1,
-            None => family_windows.push((q.tool.clone(), fam.to_string(), 1)),
-        }
-    }
-    let family_rank = |q: &QuotaView| -> usize {
-        let Some(fam) = family_label(q) else { return 0 };
-        let grouped = family_windows.iter().any(|(t, f, n)| t == &q.tool && f == fam && *n > 1);
-        if !grouped {
-            return 0;
-        }
-        family_rank.iter().position(|(t, f)| t == &q.tool && f == fam).map_or(0, |i| i + 1)
-    };
-    quotas.sort_by(|a, b| {
-        a.tool.cmp(&b.tool)
-            .then_with(|| family_rank(a).cmp(&family_rank(b)))
-            .then_with(|| window_rank(a.window_minutes).cmp(&window_rank(b.window_minutes)))
-            .then_with(|| a.label.cmp(&b.label))
-    });
-
+        &opts.budgets,
+    );
 
     let mut sessions: BTreeMap<(&str, &str), SessionRow> = BTreeMap::new();
     for r in &rows {
@@ -799,6 +843,580 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         pricing: opts.pricing.meta().clone(),
         recent_sessions,
         all_time: summarize_events(&rows),
+    }
+}
+
+// ---- P1: SQL rollup facts ----------------------------------------------------
+//
+// The panel engine no longer pulls the whole event history into Rust on every
+// publish. `usage-index` maintains an `event_rollup` table — one row per local
+// (day, tool, session, project, model, meter), ~2.2k rows for a ~390k-event
+// index — and answers [`Index::report_facts`] with those rows plus a few small
+// live slices over today's events. [`summarize_facts`] folds them into the same
+// [`Report`] that [`summarize`] produces from raw events; the golden parity
+// tests in `usage-index/src/facts.rs` enforce field-by-field equality.
+
+/// Live-slice bucket ids in [`FactGroup::bucket`]. These slices run over the
+/// `event` table (not the rollup) because they cover *partial* days: today's
+/// running total and the head of each equal-elapsed prev slice.
+pub const LIVE_TODAY: u32 = 100;
+/// Prev-slice buckets, day/week/month/year: `LIVE_PREV + window ordinal`.
+pub const LIVE_PREV: u32 = 101;
+/// Today's hourly buckets: `LIVE_HOUR0 + hour`, 24 of them.
+pub const LIVE_HOUR0: u32 = 200;
+
+/// All period boundaries, computed in chrono from `now_ms`.
+///
+/// SQL never does timezone math: every bound is a local-midnight (or local-hour)
+/// millisecond instant resolved here, so the rollup keys and the live slices can
+/// never disagree with the fold about where a day starts. All ranges are
+/// half-open `[lo, hi)`; a cur window's inclusive old-style `ts <= end` is
+/// expressed as `hi = now_ms + 1` (integer ms, exact).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregatePlan {
+    pub now_ms: i64,
+    pub today: NaiveDate,
+    /// Local midnight opening each cur window: day, week, month, year (0..=3).
+    pub cur_start_ms: [i64; 4],
+    /// Start of each equal-elapsed prev slice; the window is `[prev_start, cur_start)`.
+    pub prev_start_ms: [i64; 4],
+    /// Next local midnight after each `prev_start`. The prev slice's *head* day
+    /// is partial (it starts at `prev_start`, not midnight), so it is served
+    /// live from `event`; every rollup day strictly between `date(prev_start)`
+    /// and `date(cur_start)` is a whole day inside the window. Cur starts are
+    /// midnights, so the tail of a prev window is never partial.
+    pub prev_live_end_ms: [i64; 4],
+    /// Today's local-midnight hour starts, 25 entries: `hour_start_ms[h]` opens
+    /// hour h and closes hour h-1; `[24]` is tomorrow's midnight.
+    pub hour_start_ms: [i64; 25],
+    /// First date of the [`HEATMAP_DAYS`] window ending today.
+    pub heatmap_first: NaiveDate,
+    pub recent_session_limit: usize,
+}
+
+impl AggregatePlan {
+    pub fn build(now_ms: i64, recent_session_limit: usize) -> Self {
+        let (day, week, month, year) = spans(now_ms);
+        let today = date_of(now_ms).unwrap_or_else(|| Local::now().date_naive());
+        let prev_start_ms =
+            [day.prev_start_ms, week.prev_start_ms, month.prev_start_ms, year.prev_start_ms];
+        let prev_live_end_ms = [
+            next_local_midnight(day.prev_start_ms, 1),
+            next_local_midnight(week.prev_start_ms, 1),
+            next_local_midnight(month.prev_start_ms, 1),
+            next_local_midnight(year.prev_start_ms, 1),
+        ];
+        let day_start_ms = day.start_ms;
+        let mut hour_start_ms = [0i64; 25];
+        for (h, slot) in hour_start_ms.iter_mut().enumerate() {
+            *slot = if h == 24 {
+                start_of_day_ms(today + chrono::Duration::days(1))
+            } else {
+                // Wall-clock hour, not `day_start + h*3_600_000`: on a DST day the
+                // linear offset drifts off the local hour the panel charts. Where
+                // chrono cannot resolve a single instant (spring-forward gap,
+                // fall-back repeat) it degrades to the linear offset, which keeps
+                // the buckets monotone and non-overlapping; this machine (UTC+8)
+                // never takes that branch.
+                today
+                    .and_hms_opt(h as u32, 0, 0)
+                    .and_then(|naive| Local.from_local_datetime(&naive).single())
+                    .map(|dt| dt.timestamp_millis())
+                    .unwrap_or(day_start_ms + h as i64 * 3_600_000)
+            };
+        }
+        Self {
+            now_ms,
+            today,
+            cur_start_ms: [day.start_ms, week.start_ms, month.start_ms, year.start_ms],
+            prev_start_ms,
+            prev_live_end_ms,
+            hour_start_ms,
+            heatmap_first: today - chrono::Duration::days(HEATMAP_DAYS - 1),
+            recent_session_limit: recent_session_limit.max(1),
+        }
+    }
+}
+
+/// One `event_rollup` row: every event of one local day that shares
+/// (tool, session, project, model, meter), already summed by SQLite.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RollupRow {
+    /// `%Y-%m-%d` local date. `""` means the ts had no representable local day
+    /// (corrupt source timestamp): it counts toward all_time only, exactly like
+    /// the event path, where `date_of` returning `None` skips heatmap/hourly but
+    /// keeps the row in every raw-ts aggregate.
+    pub day: String,
+    pub tool: String,
+    pub session: String,
+    /// `''` sentinel in the table folds back to `None` here.
+    pub project: Option<String>,
+    pub model: Option<String>,
+    pub meter: Meter,
+    pub counts: TokenCounts,
+    /// Events in the group.
+    pub n: u64,
+    /// Events with `counts.total() > 0` — the only ones the old path counted
+    /// into `unpriced.requests`.
+    pub nonzero: u64,
+    pub min_ts: i64,
+    pub max_ts: i64,
+}
+
+/// One group of a live slice over `event` (today, prev heads, hourly).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactGroup {
+    pub bucket: u32,
+    pub tool: String,
+    pub session: String,
+    pub project: Option<String>,
+    pub model: Option<String>,
+    pub meter: Meter,
+    pub counts: TokenCounts,
+    pub requests: u64,
+    pub nonzero: u64,
+}
+
+/// One (kind, name) group of first-calls inside a cur window. Per the event
+/// path's semantics, the *first* call of each kind in an event names the whole
+/// event, whose full counts land under that name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallFact {
+    /// Cur-window ordinal: 0 = day, 1 = week, 2 = month, 3 = year.
+    pub bucket: u32,
+    pub kind: CallKind,
+    pub name: String,
+    pub tool: String,
+    pub session: String,
+    pub project: Option<String>,
+    pub model: Option<String>,
+    pub meter: Meter,
+    pub counts: TokenCounts,
+    pub requests: u64,
+    pub nonzero: u64,
+}
+
+/// A log-derived quota sample that passed the SQL-side expiry pre-filter,
+/// ordered by event id so [`merge_quotas`] tie semantics are preserved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaFact {
+    pub tool: String,
+    pub ts_ms: i64,
+    /// `used_percent`, `window_minutes`, `resets_at_ms`, `label` — the index
+    /// never stores a stable window id, so `QuotaSample::id` is always `None`
+    /// here, exactly as the event path receives it.
+    pub sample: QuotaSample,
+}
+
+/// The (model, meter) sums of one recent session. Pricing is per group, the way
+/// the event path prices per event — mathematically identical, FP-apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionGroup {
+    pub model: Option<String>,
+    pub meter: Meter,
+    pub counts: TokenCounts,
+    pub requests: u64,
+}
+
+/// One recent session, already resolved: `model` is its last non-null model by
+/// event id, `project` its first non-null project, `first_ms`/`last_ms` the
+/// session's min/max ts, groups the per-(model, meter) sums. Ordered by
+/// `last_ms` desc, then tool, then session — the event path's stable sort over
+/// a `(tool, session)` BTreeMap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionFact {
+    pub tool: String,
+    pub session: String,
+    pub model: Option<String>,
+    pub project: Option<String>,
+    pub first_ms: i64,
+    pub last_ms: i64,
+    pub groups: Vec<SessionGroup>,
+}
+
+/// What [`Index::report_facts`](usage_index::Index) hands to [`summarize_facts`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReportFacts {
+    /// All `event_rollup` rows (whole history; ~2.2k rows at ~390k events).
+    pub rollup: Vec<RollupRow>,
+    /// Live slices over `event`: today, the four prev heads, the 24 hourly
+    /// buckets. All bounds come from [`AggregatePlan`].
+    pub live: Vec<FactGroup>,
+    /// First-call (mcp/skill) groups for the four cur windows.
+    pub calls: Vec<CallFact>,
+    /// Expiry-prefiltered log quota samples in event-id order.
+    pub quotas: Vec<QuotaFact>,
+    /// The top-N recent sessions, resolved and ordered.
+    pub sessions: Vec<SessionFact>,
+    /// True when this call had to rebuild the rollup from `event` first (first
+    /// publish after the upgrade, or after a fail-safe invalidation). The
+    /// engine logs it; it does not change the report.
+    pub rebuilt: bool,
+}
+
+/// Money resolved once per (tool, model, meter), not once per event. ~40
+/// distinct pairs on the real index; the memo also makes the priced flag cheap.
+/// The keys are owned on purpose: the fold feeds this borrows from loop-local
+/// window vectors *and* from `facts`, and a borrowed key would pin both to one
+/// region. The map holds ~40 entries, so the copies are nothing.
+struct Money<'a> {
+    pricing: &'a PricingMap,
+    cache: HashMap<(String, Option<String>), Option<Price>>,
+}
+
+impl<'a> Money<'a> {
+    fn new(pricing: &'a PricingMap) -> Self {
+        Self { pricing, cache: HashMap::new() }
+    }
+
+    /// `(cost, priced)` for one group, mirroring the event path's per-event
+    /// pricing rule: credits convert at the published plan rate (priced by
+    /// definition), tokens cost via the per-token table or nothing.
+    fn cost(&mut self, tool: &str, model: Option<&str>, counts: &TokenCounts, meter: Meter) -> (f64, bool) {
+        if meter == Meter::Credits {
+            let rate = crate::pricing::credit_rate(tool);
+            return (rate.map(|(r, _)| counts.credits * r).unwrap_or(0.0), true);
+        }
+        let key = (tool.to_string(), model.map(str::to_string));
+        let price = match self.cache.entry(key) {
+            std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let p = self.pricing.price_of(model);
+                e.insert(p);
+                p
+            }
+        };
+        (price.map(|p| p.cost_of(counts)).unwrap_or(0.0), price.is_some())
+    }
+}
+
+/// How the fold sees one aggregate — a rollup row, a live group, or a call
+/// fact — so the window math is written once. `name` is set only for call
+/// facts (the mcp/skill breakdown key).
+#[derive(Debug, Clone, Copy)]
+struct G<'a> {
+    tool: &'a str,
+    session: &'a str,
+    project: Option<&'a str>,
+    model: Option<&'a str>,
+    meter: Meter,
+    counts: &'a TokenCounts,
+    requests: u64,
+    nonzero: u64,
+    name: Option<&'a str>,
+}
+
+/// Views of one fact as a [`G`]. Plain `fn`s, not closures: a closure fixes one
+/// output region per instantiation, while a `fn` item is generic over it, which
+/// is what lets the same helper serve rollup rows and loop-local window vecs.
+fn rollup_g(r: &RollupRow) -> G<'_> {
+    G {
+        tool: &r.tool,
+        session: &r.session,
+        project: r.project.as_deref(),
+        model: r.model.as_deref(),
+        meter: r.meter,
+        counts: &r.counts,
+        requests: r.n,
+        nonzero: r.nonzero,
+        name: None,
+    }
+}
+
+fn live_g(f: &FactGroup) -> G<'_> {
+    G {
+        tool: &f.tool,
+        session: &f.session,
+        project: f.project.as_deref(),
+        model: f.model.as_deref(),
+        meter: f.meter,
+        counts: &f.counts,
+        requests: f.requests,
+        nonzero: f.nonzero,
+        name: None,
+    }
+}
+
+fn call_g(c: &CallFact) -> G<'_> {
+    G {
+        tool: &c.tool,
+        session: &c.session,
+        project: c.project.as_deref(),
+        model: c.model.as_deref(),
+        meter: c.meter,
+        counts: &c.counts,
+        requests: c.requests,
+        nonzero: c.nonzero,
+        name: Some(&c.name),
+    }
+}
+
+/// The group-wise twin of `summarize_events`. Requests are group event counts,
+/// `nonzero` feeds `unpriced.requests`, sessions set-union across groups, and
+/// unpriced filings happen per group (`!priced && total > 0`), which equals the
+/// event-path rule because a group's priced flag is uniform: price depends only
+/// on (tool, model, meter). Returns whether any constituent group was priced —
+/// the breakdown items' `priced` flag.
+fn fold_groups<'a>(groups: impl IntoIterator<Item = G<'a>>, money: &mut Money<'a>) -> (Summary, bool) {
+    let mut s = Summary::default();
+    let mut priced_any = false;
+    let mut sessions: HashSet<(&str, &str)> = HashSet::new();
+    let mut unpriced: HashMap<(&str, &str), UnpricedModel> = HashMap::new();
+    for g in groups {
+        let (cost, priced) = money.cost(g.tool, g.model, g.counts, g.meter);
+        priced_any |= priced;
+        s.counts += g.counts;
+        s.cost += cost;
+        if g.meter == Meter::Credits {
+            s.credits += g.counts.credits;
+            if cost > 0.0 || crate::pricing::credit_rate(g.tool).is_some() {
+                s.credit_cost += cost;
+            }
+        }
+        s.requests += g.requests;
+        sessions.insert((g.tool, g.session));
+        if !priced && g.counts.total() > 0.0 {
+            let key = (g.tool, g.model.unwrap_or("unknown"));
+            let e = unpriced.entry(key).or_insert_with(|| UnpricedModel {
+                tool: key.0.to_string(),
+                model: key.1.to_string(),
+                total_tokens: 0.0,
+                requests: 0,
+            });
+            e.total_tokens += g.counts.total();
+            e.requests += g.nonzero;
+        }
+    }
+    s.total_tokens = s.counts.total();
+    s.sessions = sessions.len() as u64;
+    s.cached_pct = s.counts.cached_pct();
+    let mut unpriced: Vec<_> = unpriced.into_values().collect();
+    unpriced.sort_by(|a, b| b.total_tokens.total_cmp(&a.total_tokens).then_with(|| a.model.cmp(&b.model)));
+    s.unpriced = unpriced;
+    (s, priced_any)
+}
+
+/// The group-wise twin of `group()`: fold aggregates under `key_of`, then sort
+/// by cost desc, tokens desc, key asc — the same order, tie-break included.
+fn items_from<'a>(
+    groups: &[G<'a>],
+    money: &mut Money<'a>,
+    key_of: impl Fn(&G<'a>) -> Option<(String, String)>,
+) -> Vec<Item> {
+    let mut acc: BTreeMap<String, (String, Vec<&G<'a>>)> = BTreeMap::new();
+    for g in groups {
+        let Some((key, label)) = key_of(g) else { continue };
+        if key.is_empty() {
+            continue;
+        }
+        acc.entry(key).or_insert_with(|| (label, Vec::new())).1.push(g);
+    }
+    let mut items: Vec<Item> = acc
+        .into_iter()
+        .map(|(key, (label, group))| {
+            let (s, priced) = fold_groups(group.into_iter().copied(), money);
+            Item {
+                key,
+                label,
+                counts: s.counts,
+                total_tokens: s.total_tokens,
+                cost: s.cost,
+                requests: s.requests,
+                sessions: s.sessions,
+                priced,
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        b.cost.total_cmp(&a.cost)
+            .then_with(|| b.total_tokens.total_cmp(&a.total_tokens))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    items
+}
+
+/// Build the whole panel/CLI payload from [`ReportFacts`] — the SQL-rollup twin
+/// of [`summarize`]. Produces the same `Report` for the same underlying events;
+/// the golden parity tests in `usage-index/src/facts.rs` enforce it, so any
+/// semantic change here or there must land on both sides of those tests.
+pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
+    let plan = AggregatePlan::build(opts.now_ms, opts.recent_session_limit);
+    // Typed reborrow, not `opts.pricing`: copying the `&'a PricingMap` field out
+    // would pin `Money`'s region to the *caller's* `'a`, which facts borrows can
+    // never match. As a plain `&PricingMap` its region is inferred to cover this
+    // body, and it unifies with them.
+    let pricing: &PricingMap = opts.pricing;
+    let mut money = Money::new(pricing);
+
+    // Rollup days are `%Y-%m-%d` strings: lexicographic order is date order.
+    let today_key = plan.today.format("%Y-%m-%d").to_string();
+    let day_key = |ms: i64| -> String {
+        local_day_of(ms).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default()
+    };
+    let cur_keys: Vec<String> = plan.cur_start_ms.iter().copied().map(day_key).collect();
+    let prev_keys: Vec<String> = plan.prev_start_ms.iter().copied().map(day_key).collect();
+
+    // Cur = whole rollup days from the window's local midnight through yesterday,
+    // plus today's live slice; prev = whole days strictly between the prev head
+    // day and the cur start, plus that head day's live tail. Together they
+    // reassemble `[cur_start, now]` / `[prev_start, cur_start)` exactly.
+    let mut windows = Vec::with_capacity(4);
+    let (sp0, sp1, sp2, sp3) = spans(opts.now_ms);
+    for (i, span) in [sp0, sp1, sp2, sp3].into_iter().enumerate() {
+        let i = i as u32;
+        let cur: Vec<G<'_>> = facts
+            .rollup
+            .iter()
+            .filter(|r| r.day.as_str() >= cur_keys[i as usize].as_str() && r.day.as_str() < today_key.as_str())
+            .map(rollup_g)
+            .chain(facts.live.iter().filter(|f| f.bucket == LIVE_TODAY).map(live_g))
+            .collect();
+        let prev: Vec<G<'_>> = facts
+            .rollup
+            .iter()
+            .filter(|r| {
+                r.day.as_str() > prev_keys[i as usize].as_str()
+                    && r.day.as_str() < cur_keys[i as usize].as_str()
+            })
+            .map(rollup_g)
+            .chain(facts.live.iter().filter(|f| f.bucket == LIVE_PREV + i).map(live_g))
+            .collect();
+        let (summary, _) = fold_groups(cur.iter().copied(), &mut money);
+        let (prev_summary, _) = fold_groups(prev.iter().copied(), &mut money);
+        // The first-call facts split by kind before grouping, so each breakdown
+        // list folds only its own calls.
+        let mcps: Vec<G<'_>> = facts
+            .calls
+            .iter()
+            .filter(|c| c.bucket == i && c.kind == CallKind::Mcp)
+            .map(call_g)
+            .collect();
+        let skills: Vec<G<'_>> = facts
+            .calls
+            .iter()
+            .filter(|c| c.bucket == i && c.kind == CallKind::Skill)
+            .map(call_g)
+            .collect();
+        let breakdown = Breakdown {
+            tools: items_from(&cur, &mut money, |g| Some((g.tool.to_string(), g.tool.to_string()))),
+            models: items_from(&cur, &mut money, |g| {
+                let id = g.model.unwrap_or("unknown");
+                Some((id.to_string(), model_display(id).to_string()))
+            }),
+            projects: items_from(&cur, &mut money, |g| {
+                g.project.map(|p| (p.to_string(), p.to_string()))
+            }),
+            mcps: items_from(&mcps, &mut money, |g| {
+                g.name.map(|n| (n.to_string(), n.to_string()))
+            }),
+            skills: items_from(&skills, &mut money, |g| {
+                g.name.map(|n| (n.to_string(), n.to_string()))
+            }),
+        };
+        windows.push(Window {
+            key: span.key,
+            label: span.label,
+            start_ms: span.start_ms,
+            end_ms: span.end_ms,
+            delta_cost_pct: pct_delta(summary.cost, prev_summary.cost),
+            delta_tokens_pct: pct_delta(summary.total_tokens, prev_summary.total_tokens),
+            summary,
+            prev: prev_summary,
+            breakdown,
+        });
+    }
+    let [day, week, month, year] = windows.try_into().expect("four windows");
+
+    // Heatmap: one accumulator per local day over the rollup; only the 371-day
+    // window is emitted, which is what the event path did too (it accumulated
+    // everything, emitted the window). `""`-day rows never match a real date.
+    let mut heat_acc: HashMap<&str, (f64, f64, u64)> = HashMap::new();
+    for r in &facts.rollup {
+        let (cost, _) = money.cost(&r.tool, r.model.as_deref(), &r.counts, r.meter);
+        let e = heat_acc.entry(r.day.as_str()).or_insert((0.0, 0.0, 0));
+        e.0 += r.counts.total();
+        e.1 += cost;
+        e.2 += r.n;
+    }
+    let heatmap = (0..HEATMAP_DAYS)
+        .map(|i| {
+            let d = plan.heatmap_first + chrono::Duration::days(i);
+            let (total_tokens, cost, requests) = heat_acc
+                .get(d.format("%Y-%m-%d").to_string().as_str())
+                .copied()
+                .unwrap_or((0.0, 0.0, 0));
+            HeatCell { date: d.format("%Y-%m-%d").to_string(), total_tokens, cost, requests }
+        })
+        .collect();
+
+    // Hourly: today's live hour buckets, always 24 slots in index order.
+    let mut hourly = Vec::with_capacity(24);
+    for h in 0..24u32 {
+        let (s, _) = fold_groups(
+            facts.live.iter().filter(|f| f.bucket == LIVE_HOUR0 + h).map(live_g),
+            &mut money,
+        );
+        hourly.push(HourCell { total_tokens: s.total_tokens, cost: s.cost, requests: s.requests });
+    }
+
+    let quotas = merge_quotas(
+        facts.quotas.iter().map(|q| (q.tool.as_str(), q.ts_ms, &q.sample)),
+        &opts.polled_quota,
+        &cost_by_tool(&day.breakdown.tools),
+        &cost_by_tool(&month.breakdown.tools),
+        opts.now_ms,
+        &opts.budgets,
+    );
+
+    // Recent sessions arrive resolved and ordered from the index; the fold only
+    // prices their groups and sums.
+    let recent_sessions: Vec<SessionRow> = facts
+        .sessions
+        .iter()
+        .map(|s| {
+            let mut total_tokens = 0.0;
+            let mut cost = 0.0;
+            let mut requests = 0;
+            for g in &s.groups {
+                let (c, _) = money.cost(&s.tool, g.model.as_deref(), &g.counts, g.meter);
+                cost += c;
+                total_tokens += g.counts.total();
+                requests += g.requests;
+            }
+            SessionRow {
+                tool: s.tool.clone(),
+                session: s.session.clone(),
+                project: s.project.clone(),
+                model: model_display(s.model.as_deref().unwrap_or("unknown")).to_string(),
+                first_ms: s.first_ms,
+                last_ms: s.last_ms,
+                total_tokens,
+                cost,
+                requests,
+            }
+        })
+        .take(opts.recent_session_limit.max(1))
+        .collect();
+
+    // Whole indexed history: every rollup row, including `""`-day ones — the
+    // event path's all_time never filtered by date either.
+    let (all_time, _) = fold_groups(facts.rollup.iter().map(rollup_g), &mut money);
+
+    Report {
+        generated_at_ms: opts.now_ms,
+        utc_offset: utc_offset(opts.now_ms),
+        day,
+        week,
+        month,
+        year,
+        heatmap,
+        hourly,
+        quotas,
+        quotas_pending: false,
+        sources: opts.sources.clone(),
+        pricing: opts.pricing.meta().clone(),
+        recent_sessions,
+        all_time,
     }
 }
 

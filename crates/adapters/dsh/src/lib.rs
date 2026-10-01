@@ -31,7 +31,7 @@ mod parser;
 mod proj;
 mod paths;
 
-/// The accuracy audit surface:  reads this.
+/// The accuracy audit surface: doctor::ledger reads this.
 
 use usage_core::{
     DateFilter, DetectedSource, Error, ReadCursor, ReadOutcome, Semantics, SourceAdapter, SourceFile,

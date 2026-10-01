@@ -1584,6 +1584,7 @@ dependencies = [
 name = "usage-index"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dirs",
  "notify",
  "rusqlite",

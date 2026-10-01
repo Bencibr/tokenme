@@ -235,28 +235,16 @@ fn samples_from(body: &Value) -> Vec<QuotaSample> {
 /// `2026-09-30T00:48:14` — local wall-clock, no zone. Treat it as local the
 /// same way the writer does.
 fn parse_local_ms(s: &str) -> Option<i64> {
+    use chrono::TimeZone;
     let trimmed = s.trim();
-    // Reuse the vendor-order parser for the naive-local shape by passing it
-    // through with an explicit local offset applied later in the panel? No:
-    // chrono is not a dependency here — hand-roll the civil-to-epoch math.
-    let (date, time) = trimmed.split_once('T')?;
-    let mut d = date.split('-');
-    let year: i64 = d.next()?.parse().ok()?;
-    let month: i64 = d.next()?.parse().ok()?;
-    let day: i64 = d.next()?.parse().ok()?;
-    let mut t = time.split(':');
-    let hour: i64 = t.next()?.parse().ok()?;
-    let minute: i64 = t.next()?.parse().ok()?;
-    let second: f64 = t.next().unwrap_or("0").parse().ok()?;
-    // days from civil (Howard Hinnant)
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some((days * 86_400 + hour * 3600 + minute * 60) * 1000 + (second * 1000.0) as i64)
+    let naive = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S"))
+        .ok()?;
+    chrono::Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| chrono::Local.from_local_datetime(&naive).earliest())
+        .map(|dt| dt.timestamp_millis())
 }
 
 #[cfg(test)]

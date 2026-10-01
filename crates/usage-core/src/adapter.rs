@@ -59,6 +59,25 @@ impl SourceFile {
         self.mtime_ms = self.mtime_ms.max(wal_mtime);
         self
     }
+
+    /// Fresh stat of the same path for snapshot reuse; `None` when the file vanished.
+    /// Size/mtime are re-read now — a snapshot's stale numbers must never reach
+    /// `unchanged_since`, or an appended log would be skipped as unchanged.
+    /// SQLite sources fold the `-wal` mtime exactly like a fresh discover would.
+    pub fn restat(self) -> Option<SourceFile> {
+        // Follows symlinks, like the directory walk that built the snapshot.
+        let meta = std::fs::metadata(&self.path).ok()?;
+        let mtime_ms = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as i64)
+            // A pre-epoch mtime is nonsense but real: 0 reads as "moved
+            // backwards", which re-reads the file instead of dropping it.
+            .unwrap_or(0);
+        Some(SourceFile { path: self.path, kind: self.kind, size: meta.len(), mtime_ms }
+            .with_wal_activity())
+    }
 }
 
 /// The `-wal` sidecar's mtime, or `None` when there is no sidecar to fold in.
@@ -153,6 +172,18 @@ pub trait SourceAdapter: Send + Sync {
     /// (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, …) before falling back to defaults.
     fn discover(&self, filter: &DateFilter) -> Vec<SourceFile>;
 
+    /// Discover, or refresh a previous snapshot without re-walking the tree.
+    /// `None` = full discovery (delegates to `discover`); `Some(snapshot)` = re-stat
+    /// each file (dropping vanished ones) and return the refreshed list. The engine
+    /// decides WHEN to snapshot (root scoping + TTL); adapters only need correct
+    /// fresh stats, which [`SourceFile::restat`] guarantees.
+    fn discover_cached(&self, filter: &DateFilter, snapshot: Option<Vec<SourceFile>>) -> Vec<SourceFile> {
+        match snapshot {
+            None => self.discover(filter),
+            Some(files) => files.into_iter().filter_map(SourceFile::restat).collect(),
+        }
+    }
+
     /// Read records appended after `cursor`. Returning an error for one file
     /// must not abort the rest of the ingest pass.
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error>;
@@ -207,5 +238,92 @@ mod tests {
         touch(&dir.path().join("rollout.jsonl-wal"), 1_780_000_600);
         let folded = source(log, FileKind::Jsonl, 4, 1_780_000_000_000).with_wal_activity();
         assert_eq!(folded.mtime_ms, 1_780_000_000_000);
+    }
+
+    #[test]
+    fn restat_of_an_untouched_file_matches_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("rollout.jsonl");
+        touch(&log, 1_780_000_000);
+        let snapshot = source(log.clone(), FileKind::Jsonl, 5, 1_780_000_000_000);
+        assert_eq!(snapshot.restat(), Some(source(log, FileKind::Jsonl, 5, 1_780_000_000_000)));
+    }
+
+    #[test]
+    fn restat_sees_an_append_that_happened_after_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("rollout.jsonl");
+        touch(&log, 1_780_000_000);
+        let snapshot = source(log.clone(), FileKind::Jsonl, 5, 1_780_000_000_000);
+        std::fs::write(&log, b"frame appended").unwrap();
+        let fresh = snapshot.restat().unwrap();
+        assert_eq!(fresh.size, 14, "the fresh size is what feeds unchanged_since");
+        assert!(
+            fresh.mtime_ms > 1_780_000_000_000,
+            "the fresh mtime moved with the append, not the snapshot's stale one"
+        );
+    }
+
+    #[test]
+    fn restat_of_a_sqlite_source_folds_a_newer_wal_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        touch(&db, 1_780_000_000);
+        let snapshot = source(db, FileKind::Sqlite, 4, 1_780_000_000_000);
+        // The app writes rows into the sidecar; the main file never moves.
+        touch(&dir.path().join("store.db-wal"), 1_780_000_600);
+        let fresh = snapshot.restat().unwrap();
+        assert_eq!(fresh.mtime_ms, 1_780_000_600_000, "wal activity folds in like a fresh discover");
+        // The size is the main file's own, freshly read (the 5 bytes `touch`
+        // wrote) — never the snapshot's stale 4, never the sidecar's.
+        assert_eq!(fresh.size, 5);
+    }
+
+    #[test]
+    fn a_vanished_file_drops_out_of_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("gone.jsonl");
+        touch(&log, 1_780_000_000);
+        let snapshot = source(log, FileKind::Jsonl, 5, 1_780_000_000_000);
+        std::fs::remove_file(dir.path().join("gone.jsonl")).unwrap();
+        assert_eq!(snapshot.restat(), None, "same semantics as disappearing from a fresh discover");
+    }
+
+    #[test]
+    fn discover_cached_refreshes_a_snapshot_without_rewalking() {
+        // `discover` panics to prove a snapshot refresh never reaches the walk.
+        struct One;
+        impl SourceAdapter for One {
+            fn id(&self) -> &'static str {
+                "one"
+            }
+            fn display_name(&self) -> &'static str {
+                "One"
+            }
+            fn semantics(&self) -> Semantics {
+                Semantics::TOKENS_PER_CALL_INLINE
+            }
+            fn probe(&self) -> Option<DetectedSource> {
+                None
+            }
+            fn discover(&self, _filter: &DateFilter) -> Vec<SourceFile> {
+                panic!("a snapshot refresh must not re-walk the tree");
+            }
+            fn read(
+                &self,
+                _file: &SourceFile,
+                cursor: ReadCursor,
+            ) -> Result<ReadOutcome, Error> {
+                Ok(ReadOutcome { events: Vec::new(), cursor })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("rollout.jsonl");
+        touch(&log, 1_780_000_000);
+        let snapshot = vec![source(log, FileKind::Jsonl, 999, 1_780_000_000_000)];
+        let refreshed = One.discover_cached(&DateFilter::default(), Some(snapshot));
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].size, 5, "the stale snapshot numbers were restatted fresh");
     }
 }

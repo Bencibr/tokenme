@@ -64,7 +64,7 @@ impl SourceAdapter for HermesAdapter {
         let Some((size, mtime_ms)) = paths::stat_file(&path) else { return Vec::new() };
         // One database holds every session: the date filter can only bound it
         // by the file's own last write, same rule the transcript walks use.
-        vec![SourceFile { path, kind: FileKind::Sqlite, size, mtime_ms }]
+        vec![SourceFile { path, kind: FileKind::Sqlite, size, mtime_ms }.with_wal_activity()]
     }
 
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
