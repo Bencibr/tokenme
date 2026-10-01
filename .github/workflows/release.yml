@@ -204,3 +204,37 @@ jobs:
             sha256.txt
             latest.json
           generate_release_notes: true
+
+  homebrew:
+    # Bumps Bencibr/homebrew-tokenme (formula + cask) to the freshly published
+    # release: copies packaging/homebrew over and rewrites version and the
+    # sha256s from the release's own sha256.txt. Dormant until a TAP_TOKEN
+    # secret (a fine-grained PAT with push on the tap repo) exists.
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard
+        id: guard
+        env: { TAP_TOKEN: "${{ secrets.TAP_TOKEN }}" }
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Bump the tap
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/Bencibr/homebrew-tokenme.git" tap
+          curl -sL "https://github.com/Bencibr/tokenme/releases/download/${TAG}/sha256.txt" -o sha256.txt
+          python3 packaging/homebrew/bump.py "${TAG#v}" sha256.txt tap
+          cd tap
+          git config user.email "agent@users.noreply.github.com"
+          git config user.name "tokenme-release-bot"
+          git add -A
+          git commit -m "tokenme ${GITHUB_REF_NAME}"
+          git push
