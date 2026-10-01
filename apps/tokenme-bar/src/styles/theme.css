@@ -1,0 +1,429 @@
+/* ==========================================================================
+   tokenme · design tokens
+   Editorial, dense, quiet. One accent, a fixed 6-slot categorical ramp,
+   hairlines instead of cards, and tabular numerals everywhere a number appears.
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* ground (the web preview's fake desktop) */
+  --ground: #eef1f6;
+  /* One flat colour per theme, fully opaque: light is white, dark is black.
+     The old translucent glass needed a native backing of exactly the right
+     colour underneath it, and every disagreement between the two painters
+     read as a grey mask over the whole panel — opaque ends that bug class.
+     The native layer paint (panel::apply_window_background) carries the same
+     two colours so the rounded-corner seam stays invisible. */
+  --surface: #ffffff;
+  /* kept for the overlays (the settings sheet, the switch knob) that used to
+     need an opaque twin; today it is the same flat surface */
+  --surface-solid: #ffffff;
+  --surface-2: rgba(30, 52, 84, 0.06);
+  /* the web preview's fake desktop */
+  --wallpaper:
+    radial-gradient(120% 90% at 18% 0%, #7fa4d4 0%, transparent 58%),
+    radial-gradient(130% 100% at 88% 100%, #a488cc 0%, transparent 55%),
+    linear-gradient(160deg, #b9c8dc, #98a8c0 55%, #b0a2c8);
+
+  /* text hierarchy carries meaning, colour does not — cool slate, not gray */
+  --ink: #182234;
+  --ink-2: #455468;
+  --ink-3: #66748a; /* 5:1 on the glass — safe at 11px */
+
+  /* lines & tracks (hairlines, no cards) */
+  --hair: rgba(24, 44, 72, 0.1);
+  --hair-2: rgba(24, 44, 72, 0.17);
+  --track: rgba(24, 44, 72, 0.09);
+  --fill-hover: rgba(24, 44, 72, 0.05);
+  --fill-active: rgba(24, 44, 72, 0.1);
+
+  /* single restrained graphite-teal accent, plus the cyan end of the
+     energy gradient (tabs, the refresh button): teal = calm efficiency,
+     cyan = clarity — the two hues a programmer's eye trusts. */
+  --accent: #0d8f74;
+  --accent-2: #0c82bd;
+  --accent-ink: #0a725e;
+  --accent-soft: rgba(13, 143, 116, 0.11);
+  --on-accent: #ffffff;
+  /* bars are quiet: the categorical dots carry the colour, the fills do not */
+  --bar-fill: rgba(13, 143, 116, 0.5);
+  --bar-fill-hot: rgba(138, 90, 18, 0.55);
+  /* the light-catching top edge of the glass */
+  --edge-hi: rgba(255, 255, 255, 0.85);
+
+  /* fixed categorical ramp: a tool keeps its slot regardless of ranking */
+  --cat-1: #0c7f6c;
+  --cat-2: #3d5a9e;
+  --cat-3: #8a6a15;
+  --cat-4: #8a4a78;
+  --cat-5: #4c7a3a;
+  --cat-6: #5a5f6b;
+  --cat-7: #a2542f;
+  --cat-8: #6d7a2f;
+  --cat-9: #2f6f9e;
+  --cat-10: #9e3f6f;
+  --cat-11: #6a4a9e;
+  --cat-12: #7a2f2f;
+  --cat-13: #2f7a4f;
+  --cat-14: #6f5f3f;
+  --cat-15: #155f7a;
+  --cat-16: #7a4a2f;
+  --cat-17: #4f5f2f;
+  /* dsh 的品牌蓝；cat-15 起，主题色板必须长过 TOOL_ORDER */
+  --cat-18: #4a5fb0;
+  /* dsh 的品牌蓝（槽位因 funide 插入顺移）；cat-20 = joycode */
+  --cat-19: #4a5fb0;
+  --cat-20: #8f6fd0;
+  /* trae 的品牌薄荷绿 */
+  --cat-21: #1f8f6f;
+
+  /* activity scale, quiet → saturated */
+  --heat-1: #d8e7e4;
+  --heat-2: #a7cdc9;
+  --heat-3: #4f9c94;
+  --heat-4: #0d8f74;
+  /* today marker: a warm ring against the all-teal scale */
+  --today: #d98a2b;
+  /* modal scrim: dark veil on light; the dark theme flips to a light-gray
+     veil so the pure-black sheet keeps a visible edge against it */
+  --scrim: rgba(20, 20, 24, 0.18);
+
+  --warn: #8a5a12;
+  --warn-soft: rgba(138, 90, 18, 0.14);
+  /* quota gauge scale: green = usable, red = exhausted at 100% */
+  --ok: #3e7c38;
+  --bad: #a12d2d;
+  --bad-soft: rgba(161, 45, 45, 0.14);
+}
+
+/* Per-page accent: each tab gets its own quiet hue so the four pages read
+   as distinct rooms of the same house. The soft wash must be *declared* on
+   .panel, not :root — var() in a custom property is substituted where the
+   property is declared, so a :root declaration would bake in the default
+   accent before the per-page override ever applies. */
+:root {
+  --page-accent: var(--accent);
+}
+
+.panel {
+  --page-accent-soft: color-mix(in srgb, var(--page-accent) 10%, transparent);
+}
+
+.panel[data-page="tools"] {
+  --page-accent: #3d5a9e;
+}
+
+.panel[data-page="ranks"] {
+  --page-accent: #8a6a15;
+}
+
+.panel[data-page="detail"] {
+  --page-accent: #6a4a9e;
+}
+
+:root {
+
+  /* 8px rhythm */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 28px;
+
+  --r-sm: 3px;
+  --r-md: 5px;
+
+  --stack: -apple-system, "SF Pro Text", "Inter", system-ui, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+
+  --t-hero: 34px;
+  --t-title: 13px;
+  --t-body: 13px;
+  --t-meta: 11px;
+
+  --dur-fast: 160ms;
+  --dur-slow: 240ms;
+  --ease: cubic-bezier(0.22, 0.8, 0.32, 1);
+}
+
+/* Dark tokens apply two ways: the OS media query (unless the user pinned
+   浅色), or an explicit 深色 pin. Plain CSS has no "reuse that block", so the
+   token list appears twice, mechanically identical — keep them in sync. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #0c0f15;
+    --surface: #000000;
+    --surface-solid: #000000;
+    --surface-2: rgba(148, 180, 220, 0.08);
+    --wallpaper:
+      radial-gradient(120% 90% at 18% 0%, #3a5a8c 0%, transparent 58%),
+      radial-gradient(130% 100% at 88% 100%, #6a3f96 0%, transparent 55%),
+      linear-gradient(160deg, #232e40, #151d2a 55%, #1e1730);
+
+    --ink: #e8edf5;
+    --ink-2: #b7c3d4;
+    --ink-3: #8a99ad; /* 5.2:1 on the glass */
+
+    --hair: rgba(205, 225, 250, 0.11);
+    --hair-2: rgba(205, 225, 250, 0.2);
+    --track: rgba(205, 225, 250, 0.13);
+    --fill-hover: rgba(205, 225, 250, 0.07);
+    --fill-active: rgba(205, 225, 250, 0.13);
+
+    --accent: #30d9aa;
+    --accent-2: #3fc8ec;
+    --accent-ink: #71e6c6;
+    --accent-soft: rgba(48, 217, 170, 0.15);
+    --on-accent: #072019;
+    --bar-fill: rgba(48, 217, 170, 0.5);
+    --bar-fill-hot: rgba(217, 169, 76, 0.5);
+    --edge-hi: rgba(255, 255, 255, 0.09);
+
+    --cat-1: #2fc6a4;
+    --cat-2: #8faee8;
+    --cat-3: #d9b24c;
+    --cat-4: #de9ac9;
+    --cat-5: #97cc7c;
+    --cat-6: #a2aab8;
+    --cat-7: #d98a5c;
+    --cat-8: #b5c25e;
+    --cat-9: #6fb0dd;
+    --cat-10: #e08fb5;
+    --cat-11: #a893e0;
+    --cat-12: #d97f7f;
+    --cat-13: #7fc79e;
+    --cat-14: #bfae7f;
+    --cat-15: #5cb8d9;
+    --cat-16: #d9a58f;
+    --cat-17: #a8c98f;
+    /* dsh 的品牌蓝（暗色提亮） */
+    --cat-18: #8f9ff0;
+    /* dsh 的品牌蓝（暗色提亮）；cat-20 = joycode */
+    --cat-19: #8f9ff0;
+    --cat-20: #b09ae0;
+    /* trae 的品牌薄荷绿（暗色提亮） */
+    --cat-21: #4fd9a3;
+
+    --heat-1: #1a3f36;
+    --heat-2: #215c4d;
+    --heat-3: #2b8069;
+    --heat-4: #30d9aa;
+
+    --warn: #e6b35a;
+    --warn-soft: rgba(230, 179, 90, 0.16);
+    --ok: #74d88a;
+    --bad: #f2806f;
+    --bad-soft: rgba(242, 128, 111, 0.16);
+  }
+
+  :root:not([data-theme="light"]) .panel[data-page="tools"] {
+    --page-accent: #8faee8;
+  }
+
+  :root:not([data-theme="light"]) .panel[data-page="ranks"] {
+    --page-accent: #d9b24c;
+  }
+
+  :root:not([data-theme="light"]) .panel[data-page="detail"] {
+    --page-accent: #a893e0;
+  }
+
+  /* dark needs a stronger wash than light for the same read */
+  :root:not([data-theme="light"]) .panel {
+    --page-accent-soft: color-mix(in srgb, var(--page-accent) 15%, transparent);
+  }
+}
+
+/* The explicit 深色 pin: same tokens, media query or not. CSS has no
+   "use that block" — duplication here is the price of one source of truth
+   per theme being readable side by side. Kept mechanically identical. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #0c0f15;
+  --surface: #000000;
+  --surface-solid: #000000;
+  --surface-2: rgba(148, 180, 220, 0.08);
+  --wallpaper:
+    radial-gradient(120% 90% at 18% 0%, #3a5a8c 0%, transparent 58%),
+    radial-gradient(130% 100% at 88% 100%, #6a3f96 0%, transparent 55%),
+    linear-gradient(160deg, #232e40, #151d2a 55%, #1e1730);
+
+  --ink: #e8edf5;
+  --ink-2: #b7c3d4;
+  --ink-3: #8a99ad;
+
+  --hair: rgba(205, 225, 250, 0.11);
+  --hair-2: rgba(205, 225, 250, 0.2);
+  --track: rgba(205, 225, 250, 0.13);
+  --fill-hover: rgba(205, 225, 250, 0.07);
+  --fill-active: rgba(205, 225, 250, 0.13);
+
+  --accent: #30d9aa;
+  --accent-2: #3fc8ec;
+  --accent-ink: #71e6c6;
+  --accent-soft: rgba(48, 217, 170, 0.15);
+  --on-accent: #072019;
+  --bar-fill: rgba(48, 217, 170, 0.5);
+  --bar-fill-hot: rgba(217, 169, 76, 0.5);
+  --edge-hi: rgba(255, 255, 255, 0.09);
+
+  --cat-1: #2fc6a4;
+  --cat-2: #8faee8;
+  --cat-3: #d9b24c;
+  --cat-4: #de9ac9;
+  --cat-5: #97cc7c;
+  --cat-6: #a2aab8;
+  --cat-7: #d98a5c;
+  --cat-8: #b5c25e;
+  --cat-9: #6fb0dd;
+  --cat-10: #e08fb5;
+  --cat-11: #a893e0;
+  --cat-12: #d97f7f;
+  --cat-13: #7fc79e;
+  --cat-14: #bfae7f;
+  --cat-15: #5cb8d9;
+  --cat-16: #d9a58f;
+  --cat-17: #a8c98f;
+  --cat-18: #e08fa8;
+  --cat-19: #8f9ff0;
+  --cat-20: #b09ae0;
+  /* trae 的品牌薄荷绿（暗色提亮） */
+  --cat-21: #4fd9a3;
+
+  --heat-1: #1a3f36;
+  --heat-2: #215c4d;
+  --heat-3: #2b8069;
+  --heat-4: #30d9aa;
+  /* today marker: a warm ring against the all-teal scale */
+  --today: #f0b45c;
+  /* light-gray veil: lifting the dimmed panel is what draws the sheet's edge */
+  --scrim: rgba(255, 255, 255, 0.14);
+
+  --warn: #e6b35a;
+  --warn-soft: rgba(230, 179, 90, 0.16);
+  --ok: #74d88a;
+  --bad: #f2806f;
+  --bad-soft: rgba(242, 128, 111, 0.16);
+}
+
+:root[data-theme="dark"] .panel[data-page="tools"] {
+  --page-accent: #8faee8;
+}
+
+:root[data-theme="dark"] .panel[data-page="ranks"] {
+  --page-accent: #d9b24c;
+}
+
+:root[data-theme="dark"] .panel[data-page="detail"] {
+  --page-accent: #a893e0;
+}
+
+/* dark needs a stronger wash than light for the same read */
+:root[data-theme="dark"] .panel {
+  --page-accent-soft: color-mix(in srgb, var(--page-accent) 15%, transparent);
+}
+
+/* ------------------------------------------------------------------- base */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* The real Tauri window supplies the surface through `.panel`. Keeping every
+   document layer transparent is required for the native rounded window region
+   to show the desktop at the four corners. The web preview restores its own
+   ground on `body[data-env="web"]` below. */
+html,
+#root {
+  background: transparent;
+}
+
+body {
+  margin: 0;
+  font-family: var(--stack);
+  font-size: var(--t-body);
+  line-height: 1.45;
+  color: var(--ink);
+  background: transparent;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+/* In a browser there is no vibrancy behind the panel, so the preview sits on
+   a fake per-theme desktop. The panel itself is the same flat opaque surface
+   the real window shows — the backdrop-filter below is inert against it and
+   only mattered when the surface was translucent glass. */
+body[data-env="web"] {
+  background: var(--wallpaper);
+}
+
+body[data-env="web"] .panel {
+  backdrop-filter: blur(30px) saturate(1.6);
+  -webkit-backdrop-filter: blur(30px) saturate(1.6);
+  border: 1px solid var(--hair-2);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--edge-hi);
+  height: calc(100vh - 48px);
+  margin: 24px;
+}
+
+/* Every numeral is tabular: columns must not shimper when a report arrives. */
+.num,
+.hero-value,
+.hero-cost,
+.row-val,
+.row-cost,
+.mini-val,
+.mini-cost,
+.quota-pct,
+.stat-v,
+.heat-figure,
+.badge {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

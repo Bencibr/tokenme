@@ -1,0 +1,246 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
+      - name: Build
+        id: build
+        # pipefail or the tee swallows the script's exit code: a mid-build
+        # failure would march on to Stage artifacts and die there, miles from
+        # the actual error.
+        run: set -o pipefail; ./scripts/build-macos.sh 2>&1 | tee build.log
+      - name: Surface build failure
+        if: failure()
+        run: |
+          grep -nE 'error(\[[0-9]*\])?:|FAILED|failures:|panicked at|warning: build failed|ELIFECYCLE|Command failed' build.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
+      - name: Stage artifacts
+        run: |
+          B=apps/tokenme-bar/src-tauri/target/release/bundle
+          mkdir -p dist
+          ditto -c -k --keepParent "$B/macos/TokenMe.app" dist/tokenme-macos-arm64.app.zip
+          cp "$B"/dmg/tokenme_*.dmg dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel
+          path: dist/*
+
+  macos-universal:
+    # The Intel+Apple Silicon joint bundle: one DMG runs on every Mac. The
+    # arm64 build above stays the smaller download for the common case.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      # universal-apple-darwin is not a rust target: cargo compiles BOTH sides
+      # and tauri lipos them, so both toolchains must be installed up front —
+      # the host-only default dies the moment x86_64 is requested.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
+      - name: Install frontend deps
+        # The frontend lives in apps/tokenme-bar; from the repo root pnpm
+        # finds no package.json and dies before the build even starts.
+        run: pnpm --dir apps/tokenme-bar install --frozen-lockfile --prefer-offline
+      - name: Build
+        id: build
+        run: set -o pipefail; pnpm --dir apps/tokenme-bar tauri build --target universal-apple-darwin 2>&1 | tee build-universal.log
+      - name: Surface build failure
+        if: failure()
+        # The check annotations are the only anonymous window into a failed
+        # run (logs and artifacts need auth), so the log's tail rides them —
+        # the pattern grep first, then the raw last lines, whatever they are.
+        run: |
+          grep -nE 'error(\[[0-9]*\])?:|FAILED|failures:|panicked at|warning: build failed|ELIFECYCLE|Command failed' build-universal.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done || true
+          tail -40 build-universal.log | while IFS= read -r line; do echo "::error::$line"; done || true
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-universal
+          path: build-universal.log
+          retention-days: 7
+      - name: Sign and stage
+        run: |
+          APP=apps/tokenme-bar/src-tauri/target/universal-apple-darwin/release/bundle/macos/TokenMe.app
+          codesign --force --sign - "$APP"
+          codesign -v "$APP"
+          mkdir -p dist
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          D=apps/tokenme-bar/src-tauri/target/universal-apple-darwin/release/bundle/dmg
+          mkdir -p "$D"
+          hdiutil create -quiet -volname tokenme -srcfolder "$STAGE" -ov -format UDZO "$D/tokenme_universal.dmg"
+          rm -rf "$STAGE"
+          cp "$D"/tokenme_universal.dmg dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-universal
+          path: dist/*
+
+  cli:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        run: set -o pipefail; cargo build --locked --release -p usage-cli --target ${{ matrix.target }} 2>&1 | tee build-cli.log
+      - name: Surface build failure
+        if: failure()
+        shell: bash
+        run: |
+          grep -nE 'error(\[[0-9]*\])?:|error:|warning: build failed|linking with' build-cli.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          tar -czf "dist/tokenme-cli-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" tokenme
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "target/${{ matrix.target }}/release/tokenme.exe" -DestinationPath "dist/tokenme-cli-${{ matrix.target }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/*
+
+  windows-panel:
+    # The NSIS setup exe for the Windows menu-bar panel. No cross-compile:
+    # the runner IS the platform, Tauri's Windows bundling needs WebView2
+    # tooling that only exists there.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
+      - name: Build
+        id: build
+        shell: pwsh
+        run: |
+          cd apps/tokenme-bar
+          pnpm tauri build --bundles nsis 2>&1 | Tee-Object -FilePath ..\..\build-win-panel.log
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Stage installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $exe = Get-ChildItem "apps/tokenme-bar/src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          Copy-Item $exe.FullName "dist/tokenme-windows-x64-setup.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-windows
+          path: dist/*
+
+  release:
+    needs: [macos, macos-universal, windows-panel, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Hash
+        run: |
+          cd dist
+          sha256sum tokenme_*.dmg tokenme-macos-*.app.zip tokenme-windows-*.exe tokenme-cli-* > ../sha256.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tokenme_*.dmg
+            dist/tokenme-macos-*.app.zip
+            dist/tokenme-windows-*.exe
+            dist/tokenme-cli-*
+            sha256.txt
+            latest.json
+          generate_release_notes: true
+
+  homebrew:
+    # Bumps Bencibr/homebrew-tokenme (cask + formula) to the freshly published
+    # release: copies packaging/homebrew over and rewrites version and the
+    # sha256s from the release's own sha256.txt. The tap grants this workflow
+    # write access through a read-write deploy key stored as TAP_DEPLOY_KEY —
+    # scoped to that one repository, nothing else.
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard
+        id: guard
+        env: { TAP_DEPLOY_KEY: "${{ secrets.TAP_DEPLOY_KEY }}" }
+        run: |
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Bump the tap
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${TAP_DEPLOY_KEY}" > ~/.ssh/tap_deploy_key
+          chmod 600 ~/.ssh/tap_deploy_key
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_deploy_key -o IdentitiesOnly=yes"
+          git clone --depth 1 git@github.com:Bencibr/homebrew-tokenme.git tap
+          curl -sL "https://github.com/Bencibr/tokenme/releases/download/${TAG}/sha256.txt" -o sha256.txt
+          python3 packaging/homebrew/bump.py "${TAG#v}" sha256.txt tap
+          cd tap
+          git config user.email "agent@users.noreply.github.com"
+          git config user.name "tokenme-release-bot"
+          git add -A
+          git commit -m "tokenme ${GITHUB_REF_NAME}"
+          git push

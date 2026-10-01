@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "agent": "lead",
+  "sessionId": "2_ts_b",
+  "messages": [
+    {
+      "id": "msg_dup",
+      "role": "assistant",
+      "ts": 1788497041736,
+      "version": 1,
+      "modelInfo": {
+        "id": "deepseek/deepseek-v4-flash",
+        "provider": "cline"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "metrics": {
+        "inputTokens": 100,
+        "outputTokens": 2,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}

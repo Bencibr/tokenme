@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "agent": "lead",
+  "sessionId": "3_ts_mixed",
+  "messages": [
+    {
+      "id": "user_0",
+      "role": "user",
+      "ts": 1788497041733,
+      "version": 1,
+      "modelInfo": {
+        "id": "deepseek/deepseek-v4-flash",
+        "provider": "cline"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ]
+    },
+    {
+      "id": "msg_ok",
+      "role": "assistant",
+      "ts": 1788497041736,
+      "version": 1,
+      "modelInfo": {
+        "id": "deepseek/deepseek-v4-flash",
+        "provider": "cline"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "metrics": {
+        "inputTokens": 6222,
+        "outputTokens": 122,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "totalCost": 0.031
+      }
+    },
+    {
+      "id": "msg_null_cw",
+      "role": "assistant",
+      "ts": 1788497042000,
+      "version": 1,
+      "modelInfo": {
+        "id": "deepseek/deepseek-v4-flash",
+        "provider": "cline"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "metrics": {
+        "inputTokens": 8000,
+        "outputTokens": 30,
+        "cacheReadTokens": null,
+        "cacheWriteTokens": null
+      }
+    },
+    {
+      "id": "msg_no_metrics",
+      "role": "assistant",
+      "ts": 1788497042100,
+      "content": []
+    },
+    {
+      "id": "msg_dup",
+      "role": "assistant",
+      "ts": 1788497042200,
+      "version": 1,
+      "modelInfo": {
+        "id": "deepseek/deepseek-v4-flash",
+        "provider": "cline"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "metrics": {
+        "inputTokens": 9000,
+        "outputTokens": 40,
+        "cacheReadTokens": 6000,
+        "cacheWriteTokens": 0
+      }
+    },
+    {
+      "id": "msg_dup",
+      "role": "assistant",
+      "ts": 1788497042300,
+      "version": 1,
+      "modelInfo": {
+        "id": "deepseek/deepseek-v4-flash",
+        "provider": "cline"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "metrics": {
+        "inputTokens": 9500,
+        "outputTokens": 41,
+        "cacheReadTokens": 9000,
+        "cacheWriteTokens": 0
+      }
+    },
+    {
+      "id": "msg_no_ts",
+      "role": "assistant",
+      "ts": null,
+      "version": 1,
+      "modelInfo": {
+        "id": "deepseek/deepseek-v4-flash",
+        "provider": "cline"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "metrics": {
+        "inputTokens": 1,
+        "outputTokens": 1,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      }
+    },
+    {
+      "id": "msg_str_ts",
+      "role": "assistant",
+      "ts": "1788497042400",
+      "modelId": "cline-deepseek-v4-flash",
+      "metrics": {
+        "inputTokens": 1200,
+        "outputTokens": 5,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}
