@@ -52,7 +52,7 @@ const [page, setPage] = useState<PageKey>(() => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [showMoney, setShowMoney] = useState(true);
+  const [showMoney, setShowMoney] = useState(false);
   // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
   // switch without touching persistence.
   const [showEmptyTools, setShowEmptyTools] = useState(() => {

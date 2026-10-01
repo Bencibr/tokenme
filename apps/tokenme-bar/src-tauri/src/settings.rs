@@ -57,10 +57,12 @@ fn default_refresh_secs() -> u64 {
     30
 }
 
-/// Dollar figures default on: they are the one scale that compares models
-/// across tools. Off leaves pure tokens/credits.
+/// Dollar figures default OFF on every platform: most metered tools here are
+/// points/credit-based, so the computed figure is a live estimate, not a
+/// bill, and tokens/credits read cleaner without it. settings.json keeps the
+/// user's explicit choice when the field is present.
 fn default_show_money() -> bool {
-    true
+    false
 }
 
 /// The Windows-only edge bubble is opt-out: it is deliberately absent from
