@@ -26,8 +26,8 @@
 ## 📸 运行截图
 
 <p align="center">
-  <img alt="TokenMe 面板 — 中文界面，浅色主题" src="docs/screenshots/panel-zh-light.png" width="49%">
-  <img alt="TokenMe 面板 — 中文界面，深色主题" src="docs/screenshots/panel-zh-dark.png" width="49%">
+  <img alt="TokenMe 面板 — 概览页，中文界面" src="docs/screenshots/panel-zh-overview.png" width="49%">
+  <img alt="TokenMe 面板 — 工具页，中文界面" src="docs/screenshots/panel-zh-tools.png" width="49%">
 </p>
 
 ## ✨ 核心特性

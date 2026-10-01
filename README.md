@@ -26,8 +26,8 @@ When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cl
 ## 📸 Screenshots
 
 <p align="center">
-  <img alt="TokenMe panel in English, light theme" src="docs/screenshots/panel-en-light.png" width="49%">
-  <img alt="TokenMe panel in English, dark theme" src="docs/screenshots/panel-en-dark.png" width="49%">
+  <img alt="TokenMe panel — Overview tab, English" src="docs/screenshots/panel-en-overview.png" width="49%">
+  <img alt="TokenMe panel — Tools tab, English" src="docs/screenshots/panel-en-tools.png" width="49%">
 </p>
 
 ## ✨ Features
