@@ -26,8 +26,10 @@ When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cl
 ## 📸 Screenshots
 
 <p align="center">
-  <img alt="TokenMe panel — Overview tab, English" src="docs/screenshots/panel-en-overview.png" width="49%">
-  <img alt="TokenMe panel — Tools tab, English" src="docs/screenshots/panel-en-tools.png" width="49%">
+  <img alt="TokenMe panel — Overview tab, light" src="docs/screenshots/panel-en-overview.png" width="24%">
+  <img alt="TokenMe panel — Tools tab, light" src="docs/screenshots/panel-en-tools.png" width="24%">
+  <img alt="TokenMe panel — Overview tab, dark" src="docs/screenshots/panel-en-overview-dark.png" width="24%">
+  <img alt="TokenMe panel — Tools tab, dark" src="docs/screenshots/panel-en-tools-dark.png" width="24%">
 </p>
 
 ## ✨ Features
@@ -38,10 +40,6 @@ When you develop with multiple AI coding tools (Claude Code, Codex, OpenCode, Cl
 - 📊 **Token & Cost Analytics**: Input, cache read, output and cost breakdown via [models.dev](https://models.dev).
 - ⏱️ **Live Quota Probes**: Rolling 5-hour windows, weekly quotas, credit plans and reset countdowns.
 - 🌐 **Bilingual UI**: UI language follows the system — English and Chinese, defaults to Chinese.
-
-<p align="center">
-  <img alt="The TokenMe menu-bar panel, dark and light" src="assets/panel-dark-light.png" width="560">
-</p>
 
 ## ⚡ Preview
 

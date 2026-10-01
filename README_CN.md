@@ -26,8 +26,10 @@
 ## 📸 运行截图
 
 <p align="center">
-  <img alt="TokenMe 面板 — 概览页，中文界面" src="docs/screenshots/panel-zh-overview.png" width="49%">
-  <img alt="TokenMe 面板 — 工具页，中文界面" src="docs/screenshots/panel-zh-tools.png" width="49%">
+  <img alt="TokenMe 面板 — 概览页，浅色" src="docs/screenshots/panel-zh-overview.png" width="24%">
+  <img alt="TokenMe 面板 — 工具页，浅色" src="docs/screenshots/panel-zh-tools.png" width="24%">
+  <img alt="TokenMe 面板 — 概览页，深色" src="docs/screenshots/panel-zh-overview-dark.png" width="24%">
+  <img alt="TokenMe 面板 — 工具页，深色" src="docs/screenshots/panel-zh-tools-dark.png" width="24%">
 </p>
 
 ## ✨ 核心特性
@@ -38,10 +40,6 @@
 - 📊 **多维度成本与用量洞察**：输入、缓存命中、推理、输出 Token 及折算金额（对接 [models.dev](https://models.dev) 价格清单）。
 - ⏱️ **实时配额只读探针**：5 小时滚动池、周度额度、Credit 计划与重置倒计时。
 - 🌐 **双语界面**：界面语言跟随系统，中英双语，默认中文。
-
-<p align="center">
-  <img alt="TokenMe 菜单栏面板：深色与浅色" src="assets/panel-dark-light.png" width="560">
-</p>
 
 ## ⚡ 效果预览
 
