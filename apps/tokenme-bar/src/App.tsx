@@ -6,7 +6,7 @@ import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
 import { DisplayCtx } from "./lib/display";
 import { Loading } from "./components/Loading";
-import { localDate } from "./lib/format";
+import { localDate, relativeTime } from "./lib/format";
 import { lang, t } from "./lib/i18n";
 import { useEscape, useTicker } from "./lib/hooks";
 import { CallTabs } from "./components/CallTabs";
@@ -60,6 +60,7 @@ const [page, setPage] = useState<PageKey>(() => {
     return pin === "1" || pin === "true";
   });
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [refreshSecs, setRefreshSecs] = useState(30);
   const tick = useTicker(30_000);
 
   useEffect(() => {
@@ -102,6 +103,8 @@ const [page, setPage] = useState<PageKey>(() => {
       applyTheme(s.theme);
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
+      // The idle cadence is what the "updates stopped" line measures against.
+      setRefreshSecs(s.refresh_secs);
       if (new URLSearchParams(location.search).get("showempty") === null) {
         setShowEmptyTools(s.show_empty_tools);
       }
@@ -178,8 +181,30 @@ const [page, setPage] = useState<PageKey>(() => {
   }, [settingsOpen]));
 
   const now = useMemo(() => Date.now(), [tick]);
+  // QA pin, same family as ?showempty=: pretend the last publish is `?stale=<min>`
+  // minutes old, so the frozen line can be driven in a browser without waiting
+  // out — or killing — a live engine.
+  const stalePin = useMemo(() => {
+    const mins = Number(new URLSearchParams(location.search).get("stale"));
+    return Number.isFinite(mins) && mins > 0 ? mins : null;
+  }, []);
   const events = useMemo(() => (report ? report.sources.reduce((a, s) => a + s.events_ingested, 0) : 0), [report]);
   const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
+
+  // A dead engine looks exactly like a quiet afternoon: the numbers stop moving
+  // and nothing says they stopped. That is how this panel served a frozen
+  // "today" for six hours on 2026-10-04. The engine re-publishes on every cadence
+  // tick, and a tick can cost a whole pass (ingest plus vendor probes, tens of
+  // seconds measured here), so five cadences is the point where work-in-flight
+  // cannot explain the silence any more — floored at 5 minutes, and clamped to
+  // the engine's own cadence range so the line matches the timer it watches.
+  const staleAfterMs = Math.max(5 * Math.min(Math.max(refreshSecs, 10), 3600) * 1000, 300_000);
+  const frozen = useMemo(() => {
+    if (!report || loading) return null;
+    const publishedAt = stalePin === null ? report.generated_at_ms : now - stalePin * 60_000;
+    if (now - publishedAt <= staleAfterMs) return null;
+    return { ago: relativeTime(publishedAt, now), afterSecs: Math.round(staleAfterMs / 1000) };
+  }, [report, now, loading, stalePin, staleAfterMs]);
 
   // The tools page lists every *detected* source, not just the ones that
   // billed this window: a credits-only tool that metered nothing here, or a
@@ -237,6 +262,7 @@ const [page, setPage] = useState<PageKey>(() => {
           page={page}
           onPage={goPage}
           onClose={isWindows ? closePanel : undefined}
+          frozen={frozen}
         />
 
         <main className="scroll" tabIndex={-1} ref={scroll}>
@@ -283,6 +309,7 @@ const [page, setPage] = useState<PageKey>(() => {
           <SettingsSheet
             onClose={() => setSettingsOpen(false)}
             onEmptyTools={setShowEmptyTools}
+            onRefreshSecs={setRefreshSecs}
           />
         ) : null}
       </div>

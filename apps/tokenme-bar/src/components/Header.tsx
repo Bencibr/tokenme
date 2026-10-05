@@ -16,7 +16,7 @@ import {
 import { useTweenNumber } from "../lib/hooks";
 import { useMoney } from "../lib/display";
 import { t } from "../lib/i18n";
-import { IconArrowDown, IconArrowUp, IconClose, IconFlat } from "./Icons";
+import { IconArrowDown, IconArrowUp, IconClose, IconFlat, IconWarn } from "./Icons";
 
 const ORDER: PeriodKey[] = ["day", "week", "month", "year"];
 
@@ -34,6 +34,9 @@ interface Props {
   page: PageKey;
   onPage: (page: PageKey) => void;
   onClose?: () => void;
+  /** The engine stopped publishing: set once the last report ages past the
+   *  cadence line `App.tsx` draws. Null while the numbers are still live. */
+  frozen?: { ago: string; afterSecs: number } | null;
 }
 
 function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
@@ -50,7 +53,7 @@ function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
   );
 }
 
-export function Header({ report, period, onPeriod, page, onPage, onClose }: Props) {
+export function Header({ report, period, onPeriod, page, onPage, onClose, frozen }: Props) {
   const showMoney = useMoney();
   const win = report[period];
   const { summary } = win;
@@ -140,6 +143,16 @@ export function Header({ report, period, onPeriod, page, onPage, onClose }: Prop
       </div>
 
       <div className="hdr-stats">
+        {/* First item on the line that carries the figures: a frozen snapshot has
+            to announce itself before the numbers it is standing in for. */}
+        {frozen ? (
+          <span className="frozen" title={t("hdr.frozen.tip", { s: frozen.afterSecs })}>
+            <IconWarn size={11} />
+            {t("hdr.frozen")}
+            <span className="dot-sep" aria-hidden="true" />
+            <span className="num">{frozen.ago}</span>
+          </span>
+        ) : null}
         <span>{PERIOD_LABEL[period]}</span>
         <span className="dot-sep" aria-hidden="true" />
         <span className="num">{count(summary.requests)}</span>

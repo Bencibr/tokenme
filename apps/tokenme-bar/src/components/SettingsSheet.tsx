@@ -23,7 +23,16 @@ const THEMES: { key: ThemeKey; label: () => string }[] = [
  * login-item switch, and the version. Both switches apply on click —
  * there is no dirty state to save, so there is no save button.
  */
-export function SettingsSheet({ onClose, onEmptyTools }: { onClose: () => void; onEmptyTools: (on: boolean) => void }) {
+export function SettingsSheet({
+  onClose,
+  onEmptyTools,
+  onRefreshSecs,
+}: {
+  onClose: () => void;
+  onEmptyTools: (on: boolean) => void;
+  /** The panel times its "updates stopped" line against this cadence. */
+  onRefreshSecs: (secs: number) => void;
+}) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -37,6 +46,7 @@ export function SettingsSheet({ onClose, onEmptyTools }: { onClose: () => void; 
     void bridge.panelSettings().then((s) => {
       if (!alive) return;
       setSettings(s);
+      onRefreshSecs(s.refresh_secs);
       // 打开设置就问一次（开关开着时）：底部的版本行不必等到用户切开关才有答案。
       if (s.auto_update_check && s.version !== "dev") {
         setUpdateBusy(true);
@@ -59,6 +69,7 @@ export function SettingsSheet({ onClose, onEmptyTools }: { onClose: () => void; 
 
   const setRefresh = (secs: number) => {
     setSettings((s) => (s ? { ...s, refresh_secs: secs } : s));
+    onRefreshSecs(secs);
     void bridge.setRefreshSecs(secs);
   };
 

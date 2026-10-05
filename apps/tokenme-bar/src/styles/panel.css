@@ -354,6 +354,29 @@
   flex: none;
 }
 
+/* The engine stopped publishing. Without this line a frozen snapshot is
+   indistinguishable from a quiet afternoon — which is precisely how a dead
+   engine read as "no usage today" for six hours. It sits on the figures' own
+   line, in the warning hue the status bar already uses for unpriced numbers. */
+.frozen {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+  border-radius: var(--r-sm);
+  flex: none;
+}
+
+.frozen .dot-sep {
+  background: currentColor;
+  opacity: 0.5;
+}
+
 .grow {
   flex: 1;
 }

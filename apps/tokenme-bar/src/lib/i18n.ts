@@ -65,6 +65,8 @@ const zh = {
   "hdr.reqs": "次",
   "hdr.sessions": "会话",
   "hdr.cache": "缓存 {p}",
+  "hdr.frozen": "数据已停止更新",
+  "hdr.frozen.tip": "引擎超过 {s} 秒没有发布新数据，以上是最后一次快照。点右下角“刷新”可立刻重试。",
 
   /* 页签 ------------------------------------------------------------------ */
   "page.overview": "概览",
@@ -288,6 +290,8 @@ const en: Record<StrKey, string> = {
   "hdr.reqs": "reqs",
   "hdr.sessions": "sessions",
   "hdr.cache": "Cache {p}",
+  "hdr.frozen": "Updates stopped",
+  "hdr.frozen.tip": "The engine has not published for over {s} s — these are the last known numbers. Refresh retries now.",
 
   "page.overview": "Overview",
   "page.overview.hint": "Activity heat & quotas",

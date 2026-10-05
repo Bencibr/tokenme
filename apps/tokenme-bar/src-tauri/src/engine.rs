@@ -111,29 +111,97 @@ impl Shared {
 
 /// Runs the engine on its own thread; `tx` is the same sender commands hold so
 /// the file-watcher wake-ups can be merged into one queue.
+///
+/// The loop is supervised. `run()` returning means the engine *cannot* keep
+/// working, and historically it did exactly that — silently — whenever a
+/// price-table swap landed while a watcher burst was being debounced; the panel
+/// then served frozen numbers forever with nothing in the log to say so. Nothing
+/// here can end the application (quitting is `app.exit`, which kills the
+/// process), so an unexpected exit is always a defect: log it, restart, and back
+/// off so a persistent failure cannot spin the CPU.
 pub fn start(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
-    // An engine panic must not take the whole panel down: catch it, log it,
-    // and let the thread end — the tray and the last report stay alive, the
-    // log says exactly which unwind killed the updates.
     std::thread::Builder::new()
         .name("tokenme-engine".into())
         .spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(app, rx, tx)
-            }));
-            if let Err(panic) = result {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "non-string panic payload".into());
-                crate::logging::error(&format!("engine thread panicked: {msg} — updates stop until relaunch"));
+            // `run` borrows both ends instead of owning them: a panic unwinds its
+            // frame, and a `Receiver` consumed by that frame would leave the
+            // restart with nothing to listen to (and every command's send failing
+            // for the rest of the session).
+            let mut attempt = 0u32;
+            loop {
+                // An engine panic must not take the whole panel down, and must not
+                // end the updates either: catch it, log it, restart.
+                let started = Instant::now();
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(app.clone(), &rx, &tx)));
+                if matches!(outcome, Ok(Exit::Disconnected)) {
+                    // Every sender is gone, which happens only while the app is
+                    // being torn down. There is nothing left to serve.
+                    crate::logging::info("engine loop ended with the command channel; engine thread exiting");
+                    return;
+                }
+                let reason = match &outcome {
+                    Ok(exit) => exit.reason().to_string(),
+                    Err(panic) => panic_text(panic),
+                };
+                // A run that survived the settle window proved the restart works,
+                // so the next failure starts counting again.
+                if started.elapsed() > RESTART_SETTLE {
+                    attempt = 0;
+                }
+                attempt += 1;
+                let wait = restart_delay(attempt);
+                crate::logging::error(&format!(
+                    "engine stopped ({reason}) — restarting in {}s (attempt {attempt})",
+                    wait.as_secs()
+                ));
+                std::thread::sleep(wait);
             }
         })
         .expect("failed to spawn the tokenme engine thread");
 }
 
-fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
+/// How long a restarted engine must stay alive before the failure counter resets.
+const RESTART_SETTLE: Duration = Duration::from_secs(60);
+const RESTART_BACKOFF: Duration = Duration::from_secs(2);
+const RESTART_CAP: Duration = Duration::from_secs(300);
+
+/// How long to wait before restart number `attempt` (1-based): 2 s, 4 s, 8 s …
+/// until [`RESTART_CAP`] binds, so an engine that fails the instant it starts
+/// cannot become a CPU burner — and, capped rather than abandoned, it still
+/// comes back once whatever broke it heals.
+fn restart_delay(attempt: u32) -> Duration {
+    (RESTART_BACKOFF * (1u64 << (attempt - 1).min(10)) as u32).min(RESTART_CAP)
+}
+
+/// The panic payload, as far as it can be read. A panic carries `&str` or
+/// `String` most of the time; anything else still has to say *that* the engine
+/// died, which is the whole point of logging it.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".into());
+    format!("panicked: {detail}")
+}
+
+/// How the pass loop ended. Exactly one way is left: the command channel dying,
+/// which means the app is going away. Everything that used to end it — a pricing
+/// swap mid-debounce, a wake that outranked the window — is now a pass.
+enum Exit {
+    Disconnected,
+}
+
+impl Exit {
+    fn reason(&self) -> &'static str {
+        match self {
+            Exit::Disconnected => "the command channel is gone (every sender dropped)",
+        }
+    }
+}
+
+fn run(app: AppHandle, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> Exit {
     let adapters: Vec<Box<dyn SourceAdapter>> = usage_adapter_all::builtin_adapters();
     let detected: Vec<DetectedSource> = usage_adapter_all::detect_all();
     let mut pricing = PricingMap::load(&PricingOptions {
@@ -142,7 +210,17 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
         overrides: Default::default(),
     });
 
-    let mut index = Index::open(index_path()).ok();
+    // An index that cannot be opened is not a quiet day either: every pass would
+    // return without publishing and the webview would sit on "indexing" forever.
+    let mut index = match Index::open(index_path()) {
+        Ok(index) => Some(index),
+        Err(e) => {
+            crate::logging::error(&format!(
+                "index could not be opened — no data can be published until it is: {e}"
+            ));
+            None
+        }
+    };
 
     let roots: Vec<PathBuf> = detected.iter().flat_map(|d| d.roots.clone()).collect();
     let (wake_tx, wake_rx) = mpsc::channel();
@@ -196,7 +274,7 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
             let secs = app.state::<Shared>().settings().refresh_secs;
             Duration::from_secs(secs.clamp(10, 3600))
         };
-        match wait_for_work(&rx, &mut pricing, fallback, &mut wake_roots) {
+        match wait_for_work(rx, &mut pricing, fallback, &mut wake_roots) {
             Work::Ingest(reason) => {
                 if reason != "manual refresh" {
                     let since = last_pass.elapsed();
@@ -210,9 +288,13 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
             }
             Work::Resummarize => {
                 crate::logging::info("pricing refreshed — re-summarizing indexed events");
-                resummarize(&app, &mut index, &adapters, &detected, &pricing)
+                resummarize(&app, &mut index, &adapters, &detected, &pricing);
+                // Wakes collected before the table landed are still pending:
+                // `ingest` clears `wake_roots`, this arm leaves them for the next
+                // pass, which then walks those tools' trees instead of restating
+                // a snapshot built from the old prices.
             }
-            Work::Quit => return,
+            Work::Stopped => return Exit::Disconnected,
         }
     }
 }
@@ -220,7 +302,8 @@ fn run(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
 enum Work {
     Ingest(&'static str),
     Resummarize,
-    Quit,
+    /// Every sender dropped. The only way this loop can end on its own.
+    Stopped,
 }
 
 /// Idle until something happens, then debounce a burst of wake-ups into one pass.
@@ -238,10 +321,19 @@ fn wait_for_work(
             }
             Ok(Msg::Wake(root)) => {
                 wake_roots.push(root);
-                if !drain_debounce(rx, pricing, wake_roots) {
-                    return Work::Quit;
-                }
-                return Work::Ingest("file change");
+                return match drain_debounce(rx, pricing, wake_roots) {
+                    Drained::Wakes => Work::Ingest("file change"),
+                    // The defect that froze the panel for a whole afternoon: a
+                    // price table arriving inside the debounce window was read as
+                    // "quit". The wakes stay collected, the table is applied, and
+                    // the pass that follows publishes both.
+                    Drained::Pricing => Work::Resummarize,
+                    Drained::Refresh => {
+                        QUOTA_PASS_BUST.store(true, Ordering::Relaxed);
+                        Work::Ingest("manual refresh")
+                    }
+                    Drained::Disconnected => Work::Stopped,
+                };
             }
             Ok(Msg::Refresh) => {
                 // A manual refresh is "everything, now": busting the quota pass
@@ -251,14 +343,33 @@ fn wait_for_work(
                 return Work::Ingest("manual refresh");
             }
             Err(RecvTimeoutError::Timeout) => return Work::Ingest("cadence timer"),
-            Err(RecvTimeoutError::Disconnected) => return Work::Quit,
+            Err(RecvTimeoutError::Disconnected) => return Work::Stopped,
         }
     }
 }
 
-/// Keeps pushing the deadline out while events keep arriving; returns false if
-/// a pricing swap landed mid-debounce and needs a re-summarize instead.
-fn drain_debounce(rx: &Receiver<Msg>, pricing: &mut PricingMap, wake_roots: &mut Vec<PathBuf>) -> bool {
+/// What ended a debounce window.
+enum Drained {
+    /// The window closed; every wake in it is collected.
+    Wakes,
+    /// The user pressed refresh.
+    Refresh,
+    /// A price table landed mid-window.
+    Pricing,
+    /// Every sender dropped.
+    Disconnected,
+}
+
+/// Keeps pushing the deadline out while events keep arriving. Whatever woke the
+/// engine before the interrupt stays in `wake_roots` — a file change the watcher
+/// reported is never dropped on the floor, and a refresh is never downgraded to
+/// a plain file-change pass (which can early-return without publishing, leaving
+/// the button looking like it did nothing).
+fn drain_debounce(
+    rx: &Receiver<Msg>,
+    pricing: &mut PricingMap,
+    wake_roots: &mut Vec<PathBuf>,
+) -> Drained {
     let mut deadline = Instant::now() + DEBOUNCE;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
@@ -269,14 +380,14 @@ fn drain_debounce(rx: &Receiver<Msg>, pricing: &mut PricingMap, wake_roots: &mut
             }
             Ok(Msg::Pricing(map)) => {
                 *pricing = map;
-                return false;
+                return Drained::Pricing;
             }
             Ok(Msg::Refresh) => {
                 usage_quota::clear_cache();
-                return true;
+                return Drained::Refresh;
             }
-            Err(RecvTimeoutError::Timeout) => return true,
-            Err(RecvTimeoutError::Disconnected) => return false,
+            Err(RecvTimeoutError::Timeout) => return Drained::Wakes,
+            Err(RecvTimeoutError::Disconnected) => return Drained::Disconnected,
         }
     }
 }
@@ -551,4 +662,125 @@ fn index_path() -> PathBuf {
 
 fn cutoff_ms() -> i64 {
     now_ms() - RETENTION_DAYS * 86_400_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two tables the tests can tell apart without fetching anything: `cache_dir`
+    /// is echoed into the meta, and an offline load with no dir falls back to the
+    /// bundled snapshot.
+    fn table(mark: Option<&str>) -> PricingMap {
+        PricingMap::load(&PricingOptions {
+            offline: true,
+            cache_dir: mark.map(PathBuf::from),
+            overrides: Default::default(),
+        })
+    }
+
+    fn marked(pricing: &PricingMap) -> bool {
+        pricing.meta().cache_dir.is_some()
+    }
+
+    /// The exact shape that froze the panel on 2026-10-04: the watcher wakes the
+    /// engine and a price table lands before the debounce window closes. The loop
+    /// has to survive it, apply the table, and still owe the wake a read.
+    #[test]
+    fn a_price_table_mid_debounce_never_ends_the_loop() {
+        let (tx, rx) = mpsc::channel();
+        let mut pricing = table(None);
+        let mut wakes = Vec::new();
+        tx.send(Msg::Wake(PathBuf::from("/root/codex"))).unwrap();
+        tx.send(Msg::Pricing(table(Some("/tmp/pricing-swap")))).unwrap();
+
+        let work = wait_for_work(&rx, &mut pricing, DEBOUNCE * 10, &mut wakes);
+        assert!(matches!(work, Work::Resummarize), "a pricing swap is a pass, not an exit");
+        assert!(marked(&pricing), "the table that landed must be the live one");
+        assert_eq!(wakes, vec![PathBuf::from("/root/codex")], "the wake is still owed a read");
+        // The channel must still be usable afterwards — that is the whole
+        // difference between "restarts" and "the panel goes quiet forever".
+        tx.send(Msg::Refresh).unwrap();
+        assert!(matches!(
+            wait_for_work(&rx, &mut pricing, DEBOUNCE, &mut wakes),
+            Work::Ingest("manual refresh")
+        ));
+    }
+
+    #[test]
+    fn a_burst_of_wakes_is_one_pass_and_keeps_every_root() {
+        let (tx, rx) = mpsc::channel();
+        let mut pricing = table(None);
+        let mut wakes = Vec::new();
+        for root in ["/root/a", "/root/b", "/root/c"] {
+            tx.send(Msg::Wake(PathBuf::from(root))).unwrap();
+        }
+        let started = Instant::now();
+        let work = wait_for_work(&rx, &mut pricing, DEBOUNCE * 10, &mut wakes);
+        assert!(matches!(work, Work::Ingest("file change")));
+        assert_eq!(wakes.len(), 3, "the debounce merges passes, never events");
+        assert!(started.elapsed() >= DEBOUNCE, "the window has to actually hold");
+    }
+
+    /// A refresh arriving inside the window used to be answered with a plain
+    /// `file change` pass — which is allowed to early-return without publishing,
+    /// so the button the user pressed when the numbers looked frozen could do
+    /// nothing at all.
+    #[test]
+    fn a_refresh_inside_the_debounce_window_is_still_a_manual_pass() {
+        let (tx, rx) = mpsc::channel();
+        let mut pricing = table(None);
+        let mut wakes = Vec::new();
+        tx.send(Msg::Wake(PathBuf::from("/root/a"))).unwrap();
+        tx.send(Msg::Refresh).unwrap();
+        let work = wait_for_work(&rx, &mut pricing, DEBOUNCE * 10, &mut wakes);
+        assert!(matches!(work, Work::Ingest("manual refresh")), "not a file-change pass");
+        assert_eq!(wakes.len(), 1);
+    }
+
+    #[test]
+    fn only_a_lost_channel_stops_the_loop() {
+        let (tx, rx) = mpsc::channel::<Msg>();
+        drop(tx);
+        let mut pricing = table(None);
+        let mut wakes = Vec::new();
+        assert!(matches!(
+            wait_for_work(&rx, &mut pricing, DEBOUNCE, &mut wakes),
+            Work::Stopped
+        ));
+
+        // Everything else stays a pass: a table on its own, then quiet.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Msg::Pricing(table(Some("/tmp/other")))).unwrap();
+        assert!(matches!(
+            wait_for_work(&rx, &mut pricing, DEBOUNCE, &mut wakes),
+            Work::Resummarize
+        ));
+        assert!(matches!(
+            wait_for_work(&rx, &mut pricing, Duration::from_millis(1), &mut wakes),
+            Work::Ingest("cadence timer")
+        ));
+    }
+
+    #[test]
+    fn a_panic_always_reads_as_a_reason() {
+        let text: Box<dyn std::any::Any + Send> = Box::new("index went away");
+        assert_eq!(panic_text(&*text), "panicked: index went away");
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("lock poisoned"));
+        assert_eq!(panic_text(&*owned), "panicked: lock poisoned");
+        // A payload nobody can read still has to say that the engine died.
+        let opaque: Box<dyn std::any::Any + Send> = Box::new(7u8);
+        assert_eq!(panic_text(&*opaque), "panicked: non-string panic payload");
+    }
+
+    #[test]
+    fn restart_delay_grows_and_caps() {
+        assert_eq!(restart_delay(1), Duration::from_secs(2));
+        assert_eq!(restart_delay(4), Duration::from_secs(16));
+        // The cap has to bind — a decorative `RESTART_CAP` would leave a
+        // hard-failing engine restarting every 512 s forever — and an unbounded
+        // attempt counter must not overflow the shift.
+        assert_eq!(restart_delay(9), RESTART_CAP);
+        assert_eq!(restart_delay(u32::MAX), RESTART_CAP);
+    }
 }
