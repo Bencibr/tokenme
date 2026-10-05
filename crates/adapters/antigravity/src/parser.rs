@@ -15,8 +15,12 @@
 //!   - `#9`  message   → per-generation timing: a Timestamp at `#4` on agy
 //!     ≤ 1.1.17, `#2` = `u64::MAX` ("unset") plus opaque `#10` bytes on 1.1.18+
 //!   - `#11`/`#12`     → latency histograms, unused
-//!   - `#17` message   → a *second* copy of the usage message; reading only
-//!     `#1 → #4` is what keeps it from being counted twice
+//!   - `#17` repeated  → the attempts one response burned through. Measured over
+//!     81,727 items in 57 local databases: 81,260 are a byte-for-byte copy of
+//!     `#4` under the *same* responseId, 435 carry no responseId and all-zero
+//!     usage, 15 differ from `#4` under the parent's own id, and only **17 have
+//!     an id of their own** — those are the separate calls, and a copy counted as
+//!     one would double every turn. See [`decode_retries`].
 //!   - `#19` string    → machine model id (`gemini-3.6-flash`) — the model
 //!   - `#21` string    → server-supplied display label, never a pricing key
 //! - `usage`: `#1` prefix, `#2` uncached input, `#3` total output, `#5` cache
@@ -24,7 +28,7 @@
 
 use usage_core::TokenCounts;
 
-use crate::wire::{broken_at, bytes_field, string_field, varint_field, Reader};
+use crate::wire::{broken_at, bytes_field, bytes_fields, string_field, varint_field, Reader};
 
 /// `gen_metadata.data` → the chat-model message.
 pub(crate) const F_CHAT_MODEL: u32 = 1;
@@ -32,6 +36,10 @@ pub(crate) const F_CHAT_MODEL: u32 = 1;
 pub(crate) const CM_TIMING: u32 = 9;
 pub(crate) const CM_USAGE: u32 = 4;
 pub(crate) const CM_MODEL_ID: u32 = 19;
+/// The repeated attempt box: one item per failover attempt this response burned.
+pub(crate) const CM_RETRIES: u32 = 17;
+/// Inside a [`CM_RETRIES`] item, the attempt's own usage message.
+pub(crate) const RI_USAGE: u32 = 2;
 /// Inside `usage`.
 pub(crate) const U_PREFIX: u32 = 1;
 pub(crate) const U_INPUT: u32 = 2;
@@ -114,6 +122,14 @@ impl Stages {
     }
 }
 
+/// One `gen_metadata` row, fully read: the turn the response finished as, plus
+/// the earlier attempts of it that the server billed as separate calls.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Decoded {
+    pub generation: Generation,
+    pub retries: Vec<Generation>,
+}
+
 /// One decoded generation, before timestamp recovery and dedupe.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Generation {
@@ -134,7 +150,7 @@ pub(crate) struct Generation {
 
 /// Decodes one `gen_metadata.data` blob. `lifetime` bounds the timestamp guess;
 /// `None` disables guessing rather than weakening it.
-pub(crate) fn decode_generation(idx: i64, blob: &[u8], lifetime: Option<Lifetime>) -> Result<Generation, Skip> {
+pub(crate) fn decode_generation(idx: i64, blob: &[u8], lifetime: Option<Lifetime>) -> Result<Decoded, Skip> {
     let chat_model = bytes_field(blob, F_CHAT_MODEL).ok_or(Skip::NoChatModel)?;
     // A torn envelope means the fields past the break were never reachable, so
     // nothing about the row can be trusted: say where it stopped and drop it.
@@ -148,7 +164,7 @@ pub(crate) fn decode_generation(idx: i64, blob: &[u8], lifetime: Option<Lifetime
     let stages = read_stages(usage).ok_or(Skip::OutOfRange(offset_of(usage, U_INPUT)))?;
     let counts = counts_for(&stages).ok_or(Skip::NotBillable)?;
     let timing = bytes_field(chat_model, CM_TIMING).unwrap_or_default();
-    Ok(Generation {
+    let generation = Generation {
         idx,
         // `#19` verbatim: the `#21` display label is server-supplied, renamed
         // across releases and possibly localized, so pricing it would bill a
@@ -161,7 +177,41 @@ pub(crate) fn decode_generation(idx: i64, blob: &[u8], lifetime: Option<Lifetime
         response_id: text_field(usage, U_RESPONSE_ID),
         own_timestamp: explicit_timestamp(timing),
         inferred_timestamp: inferred_timestamp_ms(timing, lifetime),
-    })
+    };
+    let retries = decode_retries(idx, chat_model, &generation);
+    Ok(Decoded { generation, retries })
+}
+
+/// The `#17` attempts that were **separate calls**: an item is a generation only
+/// when its usage carries a responseId that the parent's is not.
+///
+/// The rest of what the box holds is a restatement of `#4` — 81,260 of this
+/// machine's 81,727 items repeat the parent's id with identical stages, and the
+/// 435 that carry no id at all hold all-zero usage — so billing every item would
+/// double a turn on 99.4 % of rows to gain 17 calls. Attribution follows the
+/// response it belongs to: the attempt box writes no `#19` model and no stamp of
+/// its own, so the model and timestamp come from the generation that carries them.
+fn decode_retries(idx: i64, chat_model: &[u8], parent: &Generation) -> Vec<Generation> {
+    let mut out = Vec::new();
+    for item in bytes_fields(chat_model, CM_RETRIES) {
+        let Some(usage) = bytes_field(item, RI_USAGE) else { continue };
+        let Some(id) = text_field(usage, U_RESPONSE_ID) else { continue };
+        if parent.response_id.as_deref() == Some(id.as_str()) {
+            continue;
+        }
+        let Some(stages) = read_stages(usage) else { continue };
+        let Some(counts) = counts_for(&stages) else { continue };
+        out.push(Generation {
+            idx,
+            model: parent.model.clone(),
+            counts,
+            stages,
+            response_id: Some(id),
+            own_timestamp: parent.own_timestamp,
+            inferred_timestamp: parent.inferred_timestamp,
+        });
+    }
+    out
 }
 
 /// The six usage stages, or `None` when a billed stage decodes past
@@ -457,7 +507,25 @@ mod tests {
     }
 
     fn gen(idx: i64, chat_model: &[u8]) -> Generation {
+        decode_generation(idx, &blob(chat_model), None).expect("decodes").generation
+    }
+
+    fn decoded(idx: i64, chat_model: &[u8]) -> Decoded {
         decode_generation(idx, &blob(chat_model), None).expect("decodes")
+    }
+
+    /// One `#17` item: a RetryInfo whose `#2` is the attempt's usage message.
+    fn retry(usage: &[u8]) -> Vec<u8> {
+        tag_bytes(RI_USAGE, usage)
+    }
+
+    /// The same turn, its `#4`, and whatever `#17` boxes are attached.
+    fn chat_model_retok(cm_usage: &[u8], retries: &[Vec<u8>]) -> Vec<u8> {
+        let mut cm = chat_model(cm_usage, &[], Some("gemini-3.6-flash"));
+        for item in retries {
+            cm.extend(tag_bytes(CM_RETRIES, item));
+        }
+        cm
     }
 
     #[test]
@@ -673,5 +741,83 @@ mod tests {
         assert_eq!(big.max_each(small), merged, "order does not matter");
         // Replaying a partial that grew nothing cannot inflate a turn either.
         assert_eq!(counts_for(&merged.max_each(small)).unwrap().output, 34.0);
+    }
+
+    /// 81,260 of the 81,727 `#17` boxes on this machine restate `#4` verbatim
+    /// under the same responseId. Billing them is the double count.
+    #[test]
+    fn a_retry_box_that_repeats_the_response_is_not_a_second_call() {
+        let u = usage(5000, 16000, 162, 48, "r1");
+        let d = decoded(7, &chat_model_retok(&u, &[retry(&u)]));
+        assert_eq!(d.generation.response_id.as_deref(), Some("r1"));
+        assert_eq!(d.retries.len(), 0, "the copy is the same call, not a new one");
+    }
+
+    /// Same shape, different numbers, still the parent's id: the failed attempt
+    /// of one response, which the server's own total already stands as `#4`.
+    #[test]
+    fn a_failed_attempt_under_the_parents_id_does_not_add_a_turn() {
+        let d = decoded(
+            65,
+            &chat_model_retok(
+                &usage(7454, 186932, 400, 96, "HFd6av70O7ClmtkPoKzIQA"),
+                &[retry(&usage(3589, 93470, 50, 48, "HFd6av70O7ClmtkPoKzIQA"))],
+            ),
+        );
+        assert_eq!(d.retries.len(), 0, "one responseId means one call");
+    }
+
+    /// A box with no responseId is an id-less zero on every local row (435 of
+    /// them), and without an identity there is no way to tell it from a copy —
+    /// so it is not billed.
+    #[test]
+    fn an_id_less_retry_box_is_not_billed_as_a_call() {
+        let mut u = tag_varint(U_INPUT, 900);
+        u.extend(tag_varint(U_OUTPUT_TOTAL, 90));
+        let d = decoded(3, &chat_model_retok(&usage(5000, 16000, 162, 48, "r1"), &[retry(&u)]));
+        assert_eq!(d.retries.len(), 0);
+    }
+
+    /// The 17 rows this fix is for: an attempt that carries its own responseId is
+    /// a separate API call and must be billed, wearing the parent's model and
+    /// stamp because the attempt box writes neither.
+    #[test]
+    fn a_retry_with_its_own_response_id_is_billed_as_its_own_call() {
+        let timing = {
+            let mut t = tag_varint(T_UNSET, u64::MAX);
+            t.extend(tag_bytes(T_TIMESTAMP, &tag_varint(1, 1_786_402_450)));
+            t
+        };
+        let mut cm = chat_model(&usage(7454, 186932, 400, 96, "r-main"), &timing, Some("gemini-3.6-flash"));
+        cm.extend(tag_bytes(CM_RETRIES, &retry(&usage(3865, 93462, 350, 48, "r-retry"))));
+        let d = decode_generation(65, &blob(&cm), None).expect("decodes");
+        assert_eq!(d.retries.len(), 1, "the distinct id is a distinct call");
+        let r = &d.retries[0];
+        assert_eq!(r.response_id.as_deref(), Some("r-retry"));
+        assert_eq!((r.counts.input, r.counts.cache_read, r.counts.output), (3865.0, 93462.0, 398.0));
+        assert_eq!(r.model.as_deref(), Some("gemini-3.6-flash"), "attributed to the response it belongs to");
+        assert_eq!(r.idx, 65, "the same row");
+        assert_eq!(r.own_timestamp, d.generation.own_timestamp);
+    }
+
+    /// Two attempts of their own on one row: both billed, none collapsed into the
+    /// parent — which is what makes the window key, not the row, the identity.
+    #[test]
+    fn several_distinct_attempts_are_several_calls() {
+        let u = usage(1000, 8000, 100, 20, "r-main");
+        let d = decoded(
+            9,
+            &chat_model_retok(
+                &u,
+                &[retry(&usage(200, 1000, 20, 5, "r-a")), retry(&usage(300, 2000, 30, 7, "r-b"))],
+            ),
+        );
+        assert_eq!(d.retries.len(), 2);
+        assert_eq!(d.generation.counts.total(), 1000.0 + 8000.0 + 120.0);
+        assert_eq!(
+            d.retries.iter().map(|r| r.counts.total()).collect::<Vec<_>>(),
+            vec![1225.0, 2337.0],
+            "each attempt is counted once, at its own size"
+        );
     }
 }

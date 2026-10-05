@@ -52,6 +52,9 @@ pub struct Audit {
     pub decoded: usize,
     /// Rows folded into an already-seen responseId.
     pub merged: usize,
+    /// `#17` attempt boxes billed as a call of their own — the ones whose
+    /// responseId differs from the response they belong to.
+    pub retries: usize,
     pub skipped: Vec<SkippedRow>,
     pub models: BTreeSet<String>,
     /// Sum of each raw stage over every decoded row, i.e. what the blobs say.
@@ -188,8 +191,8 @@ pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit) -> ReadOutcome {
                 let Ok(row) = row else { break };
                 let Some((idx, blob)) = row else { continue };
                 audit.rows += 1;
-                let gen = match decode_generation(idx, &blob, lifetime) {
-                    Ok(gen) => gen,
+                let decoded = match decode_generation(idx, &blob, lifetime) {
+                    Ok(decoded) => decoded,
                     Err(skip) => {
                         let (reason, offset) = describe(&skip);
                         audit.skipped.push(SkippedRow { source: session.clone(), idx, reason, offset });
@@ -197,16 +200,19 @@ pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit) -> ReadOutcome {
                     }
                 };
                 audit.decoded += 1;
-                audit.observe(&gen);
-                // The responseId is the identity the source gives one API call, so
-                // it survives a rewrite of the row. Every billable local row
-                // carries one; a row without it still gets a *stable* key, because
-                // `idx` is the integer primary key, so re-reading cannot mint a
-                // second copy of the same turn.
-                let key = gen.response_id.clone().unwrap_or_else(|| format!("gen{}", gen.idx));
-                let ts_ms = timestamp_for(&gen, &stamps, &conv, file);
-                if window.consume(&gen, key, ts_ms) {
-                    audit.merged += 1;
+                audit.retries += decoded.retries.len();
+                for gen in std::iter::once(&decoded.generation).chain(&decoded.retries) {
+                    audit.observe(gen);
+                    // The responseId is the identity the source gives one API call, so
+                    // it survives a rewrite of the row. Every billable local row
+                    // carries one; a row without it still gets a *stable* key, because
+                    // `idx` is the integer primary key, so re-reading cannot mint a
+                    // second copy of the same turn.
+                    let key = gen.response_id.clone().unwrap_or_else(|| format!("gen{}", gen.idx));
+                    let ts_ms = timestamp_for(gen, &stamps, &conv, file);
+                    if window.consume(gen, key, ts_ms) {
+                        audit.merged += 1;
+                    }
                 }
             }
         }
