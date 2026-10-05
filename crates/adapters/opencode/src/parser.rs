@@ -64,12 +64,20 @@ fn some_if(text: String) -> Option<String> {
 }
 
 /// `None` for anything that is not a billable assistant record.
-pub(crate) fn parse_message(raw: &str) -> Option<Parsed> {
+///
+/// `role_from_column` marks the v2 table, where the role lives in a `type` column
+/// that the query already filtered on and `data` carries no `role` key at all. A
+/// record that *does* name a role is still checked, so a column and a payload
+/// that disagree can only ever lose a row, never bill the wrong one.
+pub(crate) fn parse_message(raw: &str, role_from_column: bool) -> Option<Parsed> {
     // Trap: `role` is inside the JSON, which the SQL already filters on; re-check
     // it here rather than trusting the query, because a user message carries a
     // `tokens` object of its own and would double the count.
     let d: MessageData = serde_json::from_str(raw).ok()?;
-    if d.role != "assistant" {
+    if !d.role.is_empty() && d.role != "assistant" {
+        return None;
+    }
+    if !role_from_column && d.role != "assistant" {
         return None;
     }
     let t = &d.tokens;
@@ -103,11 +111,16 @@ pub(crate) fn parse_message(raw: &str) -> Option<Parsed> {
 mod tests {
     use super::*;
 
+    /// The v1 shape: the role is inside `data`.
+    fn parse(raw: &str) -> Option<Parsed> {
+        parse_message(raw, false)
+    }
+
     const SAMPLE: &str = r#"{"parentID":"msg_0ce07f070001nCMOF4ihn9bPVs","role":"assistant","mode":"build","agent":"build","variant":"xhigh","path":{"cwd":"/Users/dev/workspace/test","root":"/"},"cost":1.234,"tokens":{"total":55598,"input":55073,"output":70,"reasoning":214,"cache":{"write":0,"read":241}},"modelID":"muse-spark-1.2-contributor-free","providerID":"opencode","time":{"created":1787799862846,"completed":1787799869012},"finish":"stop"}"#;
 
     #[test]
     fn reasoning_folds_into_output_so_total_matches_the_source() {
-        let p = parse_message(SAMPLE).expect("assistant record");
+        let p = parse(SAMPLE).expect("assistant record");
         assert_eq!(p.counts.input, 55073.0);
         assert_eq!(p.counts.cache_read, 241.0);
         assert_eq!(p.counts.cache_creation, 0.0);
@@ -121,19 +134,32 @@ mod tests {
 
     #[test]
     fn the_sources_own_cost_never_becomes_a_credit_or_a_price() {
-        let p = parse_message(SAMPLE).unwrap();
+        let p = parse(SAMPLE).unwrap();
         assert_eq!(p.counts.credits, 0.0);
     }
 
     #[test]
     fn non_billable_and_broken_records_are_dropped_not_guessed() {
-        assert!(parse_message(r#"{"role":"user","tokens":{"total":100,"input":100}}"#).is_none());
-        assert!(parse_message(r#"{"role":"assistant","tokens":{"total":0,"input":0,"output":0}}"#).is_none());
-        assert!(parse_message(r#"{"role":"assistant"}"#).is_none());
-        assert!(parse_message("{oops").is_none());
+        assert!(parse(r#"{"role":"user","tokens":{"total":100,"input":100}}"#).is_none());
+        assert!(parse(r#"{"role":"assistant","tokens":{"total":0,"input":0,"output":0}}"#).is_none());
+        assert!(parse(r#"{"role":"assistant"}"#).is_none());
+        assert!(parse("{oops").is_none());
         // Cache write belongs on its own stage and must not be dropped.
-        let p = parse_message(r#"{"role":"assistant","modelID":"m","tokens":{"total":10,"input":1,"output":1,"reasoning":0,"cache":{"write":8,"read":0}}}"#).unwrap();
+        let p = parse(r#"{"role":"assistant","modelID":"m","tokens":{"total":10,"input":1,"output":1,"reasoning":0,"cache":{"write":8,"read":0}}}"#).unwrap();
         assert_eq!((p.counts.cache_creation, p.counts.total()), (8.0, 10.0));
         assert_eq!(p.counts.total(), p.reported_total);
+    }
+
+    /// The v2 shape: `type` settled the role, so `data` has no `role` key — and a
+    /// payload that *does* name a different role is still refused.
+    #[test]
+    fn a_column_settled_role_needs_no_role_in_the_payload() {
+        let row = r#"{"modelID":"m","tokens":{"total":130,"input":100,"output":20,"reasoning":10,"cache":{"write":0,"read":0}}}"#;
+        assert!(parse_message(row, false).is_none(), "no role evidence at all is not assistant");
+        let p = parse_message(row, true).expect("the type column said assistant");
+        assert_eq!((p.counts.input, p.counts.output, p.counts.total()), (100.0, 30.0, 130.0));
+        assert_eq!(p.model.as_deref(), Some("m"));
+        let contradicting = format!(r#"{{"role":"user",{}"#, &row[1..]);
+        assert!(parse_message(&contradicting, true).is_none(), "a payload naming a user is never billed");
     }
 }

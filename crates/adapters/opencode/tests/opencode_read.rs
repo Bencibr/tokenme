@@ -25,6 +25,10 @@ fn read(db_path: &std::path::Path, cursor: ReadCursor) -> usage_core::ReadOutcom
     OpenCodeAdapter.read(&file, cursor).expect("a locked or missing db is never Err")
 }
 
+fn keys(out: &usage_core::ReadOutcome) -> Vec<String> {
+    out.events.iter().filter_map(|e| e.dedupe_key.clone()).collect()
+}
+
 /// The whole point of the mapping: our total equals the source's own billable
 /// total, with reasoning folded into output rather than added on top.
 #[test]
@@ -98,6 +102,10 @@ fn project_label_falls_back_through_project_name_and_message_cwd() {
     assert_eq!(out.events[1].project.as_deref(), Some("/other/cwd"), "no session row -> the message cwd");
 }
 
+/// The walk bills what is new and re-reads a bounded tail behind the cursor —
+/// because a row that gets filled in place keeps its rowid. What the replay must
+/// never do is mint a second identity for a row, since the index dedupes on the
+/// message id and a changed key would bill the call twice.
 #[test]
 fn rowid_cursor_resumes_and_only_sees_new_rows() {
     let d = db(true);
@@ -114,8 +122,12 @@ fn rowid_cursor_resumes_and_only_sees_new_rows() {
     assert_eq!(cursor, ReadCursor(first_two as u64 + 1));
 
     let again = read(&d.path, cursor);
-    assert!(again.events.is_empty(), "nothing new means nothing replayed");
-    assert_eq!(again.cursor, cursor, "and the cursor does not move");
+    assert_eq!(again.cursor, cursor, "nothing new means the cursor does not move");
+    assert_eq!(
+        keys(&again),
+        vec!["a1", "a2"],
+        "the tail is replayed, and the index absorbs it by message id"
+    );
 
     let conn = d.conn();
     message(&conn, "a3", "ses_1", 1787799863000, &assistant_data("m", 100, 90, 10, 0, 0, "/w/a"));
@@ -123,12 +135,10 @@ fn rowid_cursor_resumes_and_only_sees_new_rows() {
     drop(conn);
 
     let later = read(&d.path, cursor);
-    assert_eq!(later.events.len(), 2, "only the rows appended after the cursor");
-    assert_eq!(
-        later.events.iter().map(|e| e.dedupe_key.clone().unwrap()).collect::<Vec<_>>(),
-        vec!["a3", "a4"]
-    );
-    assert_eq!(later.cursor, ReadCursor(last as u64));
+    assert_eq!(later.cursor, ReadCursor(last as u64), "the walk reaches the new high-water mark");
+    let seen = keys(&later);
+    assert!(seen.iter().any(|k| k == "a3") && seen.iter().any(|k| k == "a4"), "the rows appended after the cursor: {seen:?}");
+    assert_eq!(seen.len(), seen.iter().collect::<std::collections::HashSet<_>>().len(), "no id twice in one pass");
 }
 
 /// The app owns this database; a read must never take, or wait for, a write lock.
@@ -161,8 +171,11 @@ fn reading_while_a_live_writer_holds_the_database_still_works() {
     drop(writer);
 
     let after = read(&d.path, out.cursor);
-    assert_eq!(after.events.len(), 1);
-    assert_eq!(after.events[0].dedupe_key.as_deref(), Some("a2"));
+    assert!(keys(&after).contains(&"a2".to_string()), "the committed row is billed: {:?}", keys(&after));
+    assert_eq!(
+        after.events.iter().find(|e| e.dedupe_key.as_deref() == Some("a2")).unwrap().counts.total(),
+        999.0
+    );
 }
 
 #[test]
@@ -309,4 +322,76 @@ fn mimocode_stages_map_exactly_like_opencodes() {
     assert_eq!(c.total(), 33_785.0, "== the row's own tokens.total");
     assert_eq!(e.project.as_deref(), Some("/w/mimocode"));
     assert_eq!(e.model.as_deref(), Some("mimo-auto"));
+}
+
+/// The shape this machine actually holds today: `message` written, `session_message`
+/// present and empty. Choosing must not wobble — an empty sibling table is not a
+/// migration, and reading it instead would lose every row.
+#[test]
+fn an_empty_v2_table_beside_message_bills_message() {
+    let d = db(true);
+    let conn = d.conn();
+    project(&conn, "prj_1", None);
+    session(&conn, "ses_1", "prj_1", "/w/a");
+    message(&conn, "a1", "ses_1", 1787799862846, &assistant_data("m", 130, 100, 20, 10, 0, "/w/a"));
+    let v2 = v2_message(&conn, "u1", "ses_1", "user", 1, 1787799862846, &v2_assistant_data("m", 999, 999, 0, 0, 0));
+    drop(conn);
+    assert!(v2 > 0, "the sibling table exists and has a row, just not an assistant one");
+
+    let out = read(&d.path, ReadCursor(0));
+    assert_eq!(keys(&out), vec!["a1"], "the populated table wins, and a non-assistant row is never billed");
+    assert_eq!(out.events[0].counts.total(), 130.0);
+}
+
+/// A store that has finished moving to the v2 shape is billed from it: the role
+/// comes from the `type` column, and `data` carries none.
+#[test]
+fn a_store_writing_only_the_v2_table_is_billed() {
+    let d = db(true);
+    let conn = d.conn();
+    project(&conn, "prj_1", None);
+    session(&conn, "ses_1", "prj_1", "/w/v2");
+    v2_message(&conn, "v2-1", "ses_1", "assistant", 1, 1787799862846, &v2_assistant_data("muse", 371, 100, 20, 10, 241));
+    let last = v2_message(&conn, "v2-2", "ses_1", "assistant", 2, 1787799862900, &v2_assistant_data("muse", 60, 50, 10, 0, 0));
+    drop(conn);
+
+    let out = read(&d.path, ReadCursor(0));
+    assert_eq!(keys(&out), vec!["v2-1", "v2-2"]);
+    assert_eq!(out.cursor, ReadCursor(last as u64));
+    let c = &out.events[0].counts;
+    assert_eq!((c.input, c.cache_read, c.output, c.total()), (100.0, 241.0, 30.0, 371.0));
+    assert_eq!(out.events[0].tool, "opencode", "the v2 shape is the same product");
+    assert_eq!(out.events[0].project.as_deref(), Some("/w/v2"), "the session label still joins");
+}
+
+/// The transition both tables populated: a cursor left behind by the old table is
+/// not a position in the new one, so the flip replays the young table whole.
+#[test]
+fn a_write_target_that_flips_is_replayed_from_the_start() {
+    let d = db(true);
+    let conn = d.conn();
+    project(&conn, "prj_1", None);
+    session(&conn, "ses_1", "prj_1", "/w/a");
+    for i in 1..=3 {
+        message(&conn, &format!("v1-{i}"), "ses_1", 1787799862846 + i, &assistant_data("m", 40, 30, 10, 0, 0, "/w/a"));
+    }
+    drop(conn);
+
+    let before = read(&d.path, ReadCursor(0));
+    assert_eq!(keys(&before), vec!["v1-1", "v1-2", "v1-3"]);
+    let cursor = before.cursor;
+
+    // The product starts writing v2, and v2 passes v1's high-water mark.
+    let conn = d.conn();
+    for i in 1..=5 {
+        v2_message(&conn, &format!("v2-{i}"), "ses_1", "assistant", i, 1787799863000 + i, &v2_assistant_data("m", 40, 30, 10, 0, 0));
+    }
+    drop(conn);
+
+    let after = read(&d.path, cursor);
+    let seen = keys(&after);
+    for i in 1..=5 {
+        assert!(seen.contains(&format!("v2-{i}")), "every v2 row is billed, none below the old mark: {seen:?}");
+    }
+    assert!(after.cursor > cursor, "and the walk resumes ahead of the mark it inherited");
 }
