@@ -22,6 +22,8 @@ usage-adapter-hermes.workspace = true
 usage-adapter-funide.workspace = true
 usage-adapter-joycode.workspace = true
 usage-adapter-trae.workspace = true
+usage-adapter-kimicode.workspace = true
+usage-adapter-minimaxcode.workspace = true
 usage-adapter-catpaw = { path = "../catpaw" }
 usage-adapter-dsh = { path = "../dsh" }
 serde.workspace = true

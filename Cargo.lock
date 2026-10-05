@@ -1322,6 +1322,8 @@ dependencies = [
  "usage-adapter-funide",
  "usage-adapter-hermes",
  "usage-adapter-joycode",
+ "usage-adapter-kimicode",
+ "usage-adapter-minimaxcode",
  "usage-adapter-opencode",
  "usage-adapter-pi",
  "usage-adapter-qoder",
@@ -1462,6 +1464,30 @@ dependencies = [
  "tempfile",
  "usage-core",
  "walkdir",
+]
+
+[[package]]
+name = "usage-adapter-kimicode"
+version = "0.1.4"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "usage-core",
+]
+
+[[package]]
+name = "usage-adapter-minimaxcode"
+version = "0.1.4"
+dependencies = [
+ "chrono",
+ "dirs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "usage-core",
 ]
 
 [[package]]

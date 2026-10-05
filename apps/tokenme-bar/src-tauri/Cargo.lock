@@ -4713,7 +4713,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-all"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "serde",
  "usage-adapter-agnes",
@@ -4727,6 +4727,8 @@ dependencies = [
  "usage-adapter-funide",
  "usage-adapter-hermes",
  "usage-adapter-joycode",
+ "usage-adapter-kimicode",
+ "usage-adapter-minimaxcode",
  "usage-adapter-opencode",
  "usage-adapter-pi",
  "usage-adapter-qoder",
@@ -4738,7 +4740,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-antigravity"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4764,7 +4766,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-catpaw"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4776,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-claude"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4789,7 +4791,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-cline"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4802,7 +4804,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-codex"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4815,7 +4817,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-dsh"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4828,7 +4830,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-funide"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -4838,7 +4840,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-hermes"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "dirs 6.0.0",
  "rusqlite",
@@ -4849,7 +4851,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-joycode"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4860,8 +4862,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "usage-adapter-kimicode"
+version = "0.1.4"
+dependencies = [
+ "dirs 6.0.0",
+ "serde",
+ "serde_json",
+ "usage-core",
+]
+
+[[package]]
+name = "usage-adapter-minimaxcode"
+version = "0.1.4"
+dependencies = [
+ "chrono",
+ "dirs 6.0.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "usage-core",
+]
+
+[[package]]
 name = "usage-adapter-opencode"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4874,7 +4898,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-pi"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4887,7 +4911,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-qoder"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4900,7 +4924,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-trae"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "aes",
  "cbc",
@@ -4914,7 +4938,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-workbuddy"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4927,7 +4951,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-zcode"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4940,7 +4964,7 @@ dependencies = [
 
 [[package]]
 name = "usage-core"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4953,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "usage-index"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4965,7 +4989,7 @@ dependencies = [
 
 [[package]]
 name = "usage-quota"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "aes",
  "aes-gcm",

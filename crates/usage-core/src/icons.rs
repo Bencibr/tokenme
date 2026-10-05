@@ -44,6 +44,10 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("mimocode", &[]),
     ("cola", &["Cola"]),
     ("trae", &["Trae"]),
+    // Kimi Code: the desktop client (Kimi.app) provisions the runtime its
+    // usage flows through; the bare CLI on its own has no bundle.
+    ("kimicode", &["Kimi"]),
+    ("minimaxcode", &["MiniMax Code"]),
 ];
 
 /// PNGs shipped with the panel, consulted only when the bundle lookup above
@@ -78,6 +82,12 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("hermes", include_bytes!("../assets/hermes.png")),
     // Trae: the 128-px layer of the installed Trae.icns.
     ("trae", include_bytes!("../assets/trae.png")),
+    // MiniMax Code: the 64-px layer of the installed app's own icon.icns, which is
+    // also what the live bundle lookup picks (smallest tile ≥ 48 px).
+    ("minimaxcode", include_bytes!("../assets/minimaxcode.png")),
+    // Kimi Code: the 128-px layer of the installed desktop client's icon.icns,
+    // the same layer the live bundle lookup picks.
+    ("kimicode", include_bytes!("../assets/kimicode.png")),
 ];
 
 /// Where a user-installed app lives. `~/Applications` first: a per-user install
@@ -331,6 +341,12 @@ mod tests {
         assert_eq!(png_width(png), Some(128), "{:?}", &png[..16]);
     }
 
+    #[test]
+    fn the_shipped_kimi_icon_is_a_real_png() {
+        let (_, png) = BUNDLED_ICONS.iter().find(|(tool, _)| *tool == "kimicode").expect("kimicode ships an icon");
+        assert_eq!(png_width(png), Some(128), "{:?}", &png[..16]);
+    }
+
     /// Live proof on the machine that has the apps; run with
     /// `cargo test -p usage-core icons -- --ignored --nocapture`.
     #[test]
@@ -344,5 +360,9 @@ mod tests {
         assert!(map.contains_key("codex"), "ChatGPT.app is installed here");
         assert!(map.contains_key("cline"), "cline ships a bundled icon");
         assert!(map.contains_key("opencode"), "opencode ships a bundled icon");
+        assert!(
+            icons_from(&bundle_dirs(), &[("kimicode", &["Kimi"])]).contains_key("kimicode"),
+            "Kimi.app is installed here and its bundle name resolves"
+        );
     }
 }

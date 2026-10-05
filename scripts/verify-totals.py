@@ -68,9 +68,33 @@ def files(pattern, recursive=True):
     return sorted(glob.glob(os.path.expanduser(pattern), recursive=recursive))
 
 
-def sqlite_readonly_uri(path: str) -> str:
-    """Build a SQLite URI that also accepts Windows drive letters."""
-    return f"{Path(path).resolve().as_uri()}?mode=ro"
+def open_ro(path: str):
+    """Open a database for reading however it will be read.
+
+    A WAL database whose writer has exited cleanly keeps its `-shm` deleted, and
+    SQLite refuses a read-only handle that cannot rebuild it — the same failure
+    the Rust adapters walk a ladder around. `immutable` is only ever tried when no
+    `-wal` sidecar exists, so there are never uncheckpointed rows to silently miss.
+    """
+    base = Path(path).resolve().as_uri()
+    sidecar = Path(str(path) + "-wal")
+    uris = [f"{base}?mode=ro", f"{base}?mode=ro&nolock=1"]
+    if not sidecar.exists():
+        uris.append(f"{base}?immutable=1")
+    last = None
+    for uri in uris:
+        conn = None
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            # `connect` is lazy: the open that fails is the first statement, so
+            # probe here or the rung below would never be reached.
+            conn.execute("select count(*) from pragma_database_list").fetchone()
+            return conn
+        except sqlite3.Error as exc:  # try the next rung
+            last = exc
+            if conn is not None:
+                conn.close()
+    raise last
 
 
 # ------------------------------------------------------------------ sources
@@ -232,7 +256,13 @@ def opencode_family():
     """
     products = {
         "opencode": ["~/.local/share/opencode/opencode.db"],
-        "crow5": ["~/.local/share/crow5/*.db"],
+        # Crow5 ships a desktop build that keeps its own store in the Electron
+        # userData root while the CLI's directory goes quiet — the adapter reads
+        # both, so this reader has to as well or the two can never agree.
+        "crow5": [
+            "~/.local/share/crow5/*.db",
+            "~/Library/Application Support/com.crow5.desktop/crow5/*.db",
+        ],
         "mimocode": ["~/.local/share/mimocode/mimocode.db"],
     }
     result = {}
@@ -242,11 +272,29 @@ def opencode_family():
         for pattern in patterns:
             for path in files(pattern):
                 try:
-                    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+                    conn = open_ro(path)
                 except sqlite3.Error:
                     continue
+                # Which record table this store writes: the candidate with the most
+                # rows, ties to `message` — the same rule the Rust adapter runs,
+                # reimplemented here from the wire up so a disagreement is a finding.
+                candidates = []
+                for rank, name in enumerate(("message", "session_message")):
+                    try:
+                        high = conn.execute(f"select coalesce(max(rowid), 0) from {name}").fetchone()[0]
+                    except sqlite3.Error:
+                        continue
+                    candidates.append((-high, rank, name))
+                if not candidates:
+                    conn.close()
+                    continue
+                table = min(candidates)[2]
+                role_in_data = table == "message"
                 try:
-                    got = conn.execute("select data from message").fetchall()
+                    got = conn.execute(
+                        f"select data from {table}"
+                        + ("" if role_in_data else " where type = 'assistant'")
+                    ).fetchall()
                 except sqlite3.Error:
                     conn.close()
                     continue
@@ -259,7 +307,9 @@ def opencode_family():
                     t = d.get("tokens")
                     if not isinstance(t, dict):
                         continue
-                    if d.get("role") != "assistant":
+                    if d.get("role") not in (None, "", "assistant"):
+                        continue
+                    if role_in_data and d.get("role") != "assistant":
                         continue
                     cache = t.get("cache") or {}
                     if d.get("tokens") and not any(
@@ -290,7 +340,7 @@ def opencode_family():
             "cr": agg["cr"],
             "out": agg["out"],
             "reason": agg["reason"],
-            "notes": f"message rows={rows_total}, identity breaks={broken} (must be 0), "
+            "notes": f"{table} rows={rows_total}, identity breaks={broken} (must be 0), "
                      f"all-zero rows excluded={zero}",
         }
     return result
@@ -342,32 +392,80 @@ def pi_family():
     return result
 
 
+def _ts_ms(raw):
+    """`usage_core::parse_ts_ms`'s ladder: RFC3339, naive ISO read as local, then
+    an integer with 10 digits read as seconds (13 as milliseconds). Only used to
+    decide whether a row is old enough that the index must already hold it."""
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        n = int(raw)
+        return n * 1000 if n < 10_000_000_000 else n
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return int(parsed.timestamp() * 1000)
+    except ValueError:
+        pass
+    try:
+        n = int(s)
+    except ValueError:
+        return None
+    return n * 1000 if n < 10_000_000_000 else n
+
+
 def cline():
     """Cline rewrites one JSON array per session; `metrics.inputTokens` already
     contains the cache (its own source says not to add it back), so the net input
-    is `inputTokens - cacheReadTokens`."""
+    is `inputTokens - cacheReadTokens`.
+
+    The rewrite can *prune* rows the index already imported: measured 2026-10-05,
+    session_1790752678127_io4gd came back with 8 fewer billable assistant rows
+    (1,662,464 cache-read tokens) than the index holds, file otherwise identical.
+    Like zcode, the aggregate is compared against the index *minus* the
+    quantified deletions, and the per-row identity below proves the survivors.
+    The caliber mirrors the adapter exactly: role=assistant, `metrics` present as
+    an object, a parseable `ts`/`timestamp`/`created_at`."""
     agg = defaultdict(float)
     n = sessions = negative = 0
+    keyed = {}
     for path in files("~/.cline/data/sessions/*/*.messages.json"):
         try:
             records = json.load(open(path, encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        sid = None
         if isinstance(records, dict):  # {version, updated_at, agent, messages: [...]}
+            sid = records.get("sessionId")
             records = records.get("messages")
         if not isinstance(records, list):
             continue
         sessions += 1
-        for rec in records:
-            if not isinstance(rec, dict):
+        session = sid if isinstance(sid, str) and sid else os.path.basename(path)[: -len(".messages.json")]
+        for idx, rec in enumerate(records):
+            if not isinstance(rec, dict) or rec.get("role") != "assistant":
                 continue
             m = rec.get("metrics") if isinstance(rec.get("metrics"), dict) else None
-            if not m:
+            if m is None:
                 continue
             gross, cr = num(m.get("inputTokens")), num(m.get("cacheReadTokens"))
             cw, out = num(m.get("cacheWriteTokens")), num(m.get("outputTokens"))
             if gross - cr < 0:
                 negative += 1
+            ts = None
+            for k in ("ts", "timestamp", "created_at"):
+                ts = _ts_ms(rec.get(k))
+                if ts is not None:
+                    break
+            if ts is None:
+                continue
+            mid = rec.get("id")
+            key = f"{session}#{mid}" if isinstance(mid, str) and mid else f"{session}#idx{idx}"
+            keyed[key] = (max(0.0, gross - cr), cw, cr, out, 0.0, ts)
             agg["in"] += max(0.0, gross - cr)
             agg["cr"] += cr
             agg["cc"] += cw
@@ -379,6 +477,7 @@ def cline():
         "cc": agg["cc"],
         "cr": agg["cr"],
         "out": agg["out"],
+        "_keyed": keyed,
         "notes": f"sessions={sessions}, rows where cache>input={negative} (clamped)",
     }
 
@@ -399,7 +498,7 @@ def zcode():
     path = os.path.expanduser("~/.zcode/cli/db/db.sqlite")
     if not os.path.exists(path):
         return {"n": 0, "notes": "no zcode model_usage database here"}
-    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+    conn = open_ro(path)
     got = conn.execute(
         "select input_tokens, cache_read_input_tokens, cache_creation_input_tokens,"
         " output_tokens, reasoning_tokens, computed_total_tokens, session_id,"
@@ -458,7 +557,7 @@ def agnes():
     path = os.path.expanduser("~/.agnes/data/sessions/sessions.db")
     if not os.path.exists(path):
         return {"n": 0, "notes": "no agnes sessions database here"}
-    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+    conn = open_ro(path)
     got = conn.execute(
         "select input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens"
         " from usage_ledger"
@@ -534,7 +633,7 @@ def ccswitch():
     path = os.path.expanduser("~/.cc-switch/cc-switch.db")
     if not os.path.exists(path):
         return {"n": 0, "notes": "no cc-switch.db here"}
-    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+    conn = open_ro(path)
     got = conn.execute(
         "select coalesce(nullif(data_source, ''), 'proxy'), app_type, input_token_semantics,"
         " input_tokens, cache_read_tokens, cache_creation_tokens, output_tokens, created_at"
@@ -674,15 +773,26 @@ def pb_walk(buf):
             return
 
 
+def pb_stages(buf):
+    """The varint stages of one usage message, plus its `#11` responseId string."""
+    stages = {}
+    for sub, sw, sval in pb_walk(buf):
+        if sw == 0:
+            stages[sub] = sval
+        elif sub == 11 and sw == 2:
+            stages[11] = bytes(sval).decode("utf-8", "replace")
+    return stages
+
+
 def antigravity():
     agg = defaultdict(float)
     calls = {}
-    broken_identity = blobs = bad_parse = 0
+    broken_identity = blobs = bad_parse = retries = 0
     roots = ["antigravity-cli", "antigravity", "antigravity-ide", "antigravity-backup"]
     paths = [p for r in roots for p in files(f"~/.gemini/{r}/conversations/*.db")]
     for path in paths:
         try:
-            conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+            conn = open_ro(path)
             got = conn.execute("select data from gen_metadata").fetchall()
             conn.close()
         except sqlite3.Error:
@@ -691,42 +801,57 @@ def antigravity():
             if not isinstance(blob, (bytes, bytearray)):
                 continue
             blobs += 1
-            usage = None
+            usage, attempts = None, []
             for field, wire, val in pb_walk(blob):
                 if field == 1 and wire == 2:
                     for sub, sw, sval in pb_walk(val):
-                        if sub == 4 and sw == 2:
+                        if sub == 4 and sw == 2 and usage is None:
                             usage = sval
-                            break
+                        elif sub == 17 and sw == 2:
+                            # The attempt box: its own `#2` is that attempt's usage.
+                            for f2, w2, v2 in pb_walk(sval):
+                                if f2 == 2 and w2 == 2:
+                                    attempts.append(v2)
                 if usage is not None:
                     break
             if usage is None:
                 continue
-            stages = {}
             try:
-                for sub, sw, sval in pb_walk(usage):
-                    if sw == 0:
-                        stages[sub] = sval
-                    elif sub == 11 and sw == 2:
-                        stages[11] = bytes(sval).decode("utf-8", "replace")
+                entries = [pb_stages(usage)]
             except Exception:
                 bad_parse += 1
                 continue
-            inp = num(stages.get(2, 0))
-            cr = num(stages.get(5, 0))
-            out = num(stages.get(3, 0))
-            text = num(stages.get(9, 0))
-            reason = num(stages.get(10, 0))
-            if out and text + reason and abs(out - (text + reason)) > 1:
-                broken_identity += 1
-            rid = stages.get(11) or f"{path}#{blobs}#{inp:.0f}{out:.0f}"
-            key = (path, rid)
-            prev = calls.get(key)
-            reason = num(stages.get(10, 0))
-            if prev is None:
-                calls[key] = (inp, cr, out, reason)
-            else:  # a streamed repeat of one call keeps the largest snapshot
-                calls[key] = tuple(max(p, v) for p, v in zip(prev, (inp, cr, out, reason)))
+            parent_id = entries[0].get(11)
+            for attempt in attempts:
+                try:
+                    st = pb_stages(attempt)
+                except Exception:
+                    bad_parse += 1
+                    continue
+                # An attempt is a separate call only when it carries a responseId
+                # of its own. Measured here: 81,260 of 81,727 boxes repeat `#4`
+                # under the parent's id and 435 carry no id at all (all of them
+                # zero-token); only 17 have an id that differs, and those are the
+                # calls the vendor actually served.
+                if st.get(11) and st[11] != parent_id:
+                    entries.append(st)
+                    retries += 1
+            for stages in entries:
+                inp = num(stages.get(2, 0))
+                cr = num(stages.get(5, 0))
+                out = num(stages.get(3, 0))
+                text = num(stages.get(9, 0))
+                reason = num(stages.get(10, 0))
+                if out and text + reason and abs(out - (text + reason)) > 1:
+                    broken_identity += 1
+                rid = stages.get(11) or f"{path}#{blobs}#{inp:.0f}{out:.0f}"
+                key = (path, rid)
+                snap = (inp, cr, out, reason)
+                prev = calls.get(key)
+                if prev is None:
+                    calls[key] = snap
+                else:  # a streamed repeat of one call keeps the largest snapshot
+                    calls[key] = tuple(max(p, v) for p, v in zip(prev, snap))
     for entry in calls.values():
         inp, cr, out, reason = entry
         agg["in"] += inp
@@ -740,7 +865,8 @@ def antigravity():
         "out": agg["out"],
         "reason": agg["reason"],
         "notes": f"blobs={blobs} in {len(paths)} dbs, output!=text+reasoning on "
-                 f"{broken_identity}, unparsable={bad_parse} (must be 0)",
+                 f"{broken_identity}, unparsable={bad_parse} (must be 0), "
+                 f"retry calls={retries}",
     }
 
 
@@ -814,7 +940,7 @@ def workbuddy():
 
 
 def index_totals(db):
-    conn = sqlite3.connect(sqlite_readonly_uri(db), uri=True)
+    conn = open_ro(db)
     try:
         got = conn.execute(
             "select tool, count(*), coalesce(sum(in_tok),0), coalesce(sum(cc_tok),0),"
@@ -826,6 +952,234 @@ def index_totals(db):
     return {
         r[0]: {"n": r[1], "in": r[2], "cc": r[3], "cr": r[4], "out": r[5], "reason": r[6], "credits": r[7]}
         for r in got
+    }
+
+
+# -------------------------------------------------------------- kimi code
+#
+# Kimi Code keeps one durable event log per agent -- `sessions/**/wire.jsonl` --
+# and a `usage.record` line is exactly one LLM call. The vendor writes it at
+# `llmRequesterService.ts:477` with that call's own stages, and `usageScope` names
+# the request *source* ('turn' for a user turn, 'session' for compaction, plan and
+# title requests), not a running total: `usageAgentModel.ts` adds every record into
+# the state `/status` prints as `Session total`. So both scopes are billed here, as
+# they are in the adapter, and a reader that filters to 'turn' is the one that is
+# wrong.
+#
+# The stages are mutually exclusive by the vendor's own helper
+# (`human/llm/usage.ts`: inputTotal = inputOther + inputCacheRead +
+# inputCacheCreation, grandTotal adds output), and the wire carries no reasoning
+# split at all, so `reason` stays empty rather than being invented.
+#
+# Identity follows the adapter's rule so a disagreement points at the keying: the
+# legacy payload's `message_id`, else the writing agent, the stamp, the model and
+# all four stages --
+# deliberately WITHOUT the session directory, because `migration-legacy` copies a
+# v1 session into a v2 directory under a new id and both roots are read.
+
+
+def kimicode():
+    roots = []
+    for var in ("KIMI_CODE_HOME", "KIMI_DATA_DIR"):
+        value = (os.environ.get(var) or "").strip()
+        if value:
+            roots = [part.strip() for part in value.split(",") if part.strip()]
+            break
+    if not roots:
+        roots = [os.path.join(HOME, ".kimi-code"), os.path.join(HOME, ".kimi")]
+        # The desktop client (Kimi.app) provisions a whole kimi-code home for its
+        # embedded runtime; its wire logs are this product's usage too, and the
+        # adapter reads them (paths::desktop_home).
+        if sys.platform == "darwin":
+            roots.append(
+                os.path.join(
+                    data_dir(), "kimi-desktop", "daimon-share", "daimon", "runtime", "kimi-code", "home"
+                )
+            )
+
+    agg = defaultdict(float)
+    seen = set()
+    n = logs = zero = repeats = unstamped = 0
+    for root in roots:
+        for path in files(os.path.join(root, "sessions", "**", "wire.jsonl")):
+            logs += 1
+            for ordinal, rec in enumerate(rows(path)):
+                model = message_id = None
+                agent = ""
+                if rec.get("type") == "usage.record":
+                    usage = rec.get("usage")
+                    ms = millis(rec.get("time"))
+                    model = rec.get("model")
+                    agent = rec.get("agentId") or ""
+                    if isinstance(model, str) and model.startswith("kimi-code/"):
+                        model = model[len("kimi-code/"):]
+                else:
+                    message = rec.get("message") or {}
+                    if message.get("type") != "StatusUpdate":
+                        continue
+                    payload = message.get("payload") or {}
+                    usage = payload.get("token_usage")
+                    ms = millis(rec.get("timestamp"))
+                    model = payload.get("model")
+                    message_id = payload.get("message_id")
+                    agent = payload.get("agent_id") or ""
+                if not isinstance(usage, dict):
+                    continue
+                inp = num(usage.get("input_other", usage.get("inputOther")))
+                out = num(usage.get("output"))
+                cr = num(usage.get("input_cache_read", usage.get("inputCacheRead")))
+                cc = num(usage.get("input_cache_creation", usage.get("inputCacheCreation")))
+                if inp + out + cr + cc <= 0:
+                    zero += 1
+                    continue
+                if message_id:
+                    ident = f"id:{message_id}"
+                elif ms > 0:
+                    ident = f"t:{agent}:{ms:.0f}:{model}:{inp:.0f}:{cc:.0f}:{cr:.0f}:{out:.0f}"
+                else:
+                    ident = f"p:{path}:{ordinal}"
+                    unstamped += 1
+                if ident in seen:
+                    repeats += 1
+                    continue
+                seen.add(ident)
+                n += 1
+                agg["in"] += inp
+                agg["cc"] += cc
+                agg["cr"] += cr
+                agg["out"] += out
+    return {
+        "n": n,
+        "in": agg["in"],
+        "cc": agg["cc"],
+        "cr": agg["cr"],
+        "out": agg["out"],
+        "reason": 0.0,
+        "credits": 0.0,
+        "notes": f"{logs} wire logs, zero-usage rows={zero}, repeats collapsed={repeats} "
+                 f"(a migrated copy or a retraction), unstamped rows={unstamped}",
+    }
+
+
+def minimaxcode():
+    """`v2/sessions/**/messages.jsonl` — one assistant record per billed call.
+
+    MiniMax Code is the vendored pi-mono coding agent behind its own envelope:
+    `{message_id, turn_id, message:{role, model, usage{input, output, cacheRead,
+    cacheWrite, totalTokens, cost}, timestamp}}`. `usage.input` is the fresh input
+    *after* the last cache breakpoint (the vendor's own
+    `packages/local-runtime/src/usage/api.ts` says so), so the four stages are
+    peers and `totalTokens` is their sum — asserted per record below, and the only
+    reason `cacheRead` is not subtracted from `input` here either.
+
+    The store beside it, `local_runtime_token_usage`, is the vendor's OWN projection
+    of these very records (`recordLocalTokenUsageFromPiMessages`). Its numbers are
+    returned as `_vendor` and compared against ours in `main()`: two readers of one
+    file can agree by construction, but a reader and the product's own accounting
+    agreeing is a fact.
+    """
+    roots = []
+    for var in ("MINIMAX_DATA_DIR", "MAVIS_DATA_DIR"):
+        value = (os.environ.get(var) or "").strip()
+        if value:
+            roots = [value]
+            break
+    if not roots:
+        profile = (os.environ.get("MAVIS_PROFILE") or "").strip()
+        tail = f"-{profile}" if profile else ""
+        seen = set()
+        for base in (".minimax", ".mavis"):
+            path = os.path.join(HOME, base + tail)
+            if not os.path.isdir(path):
+                continue
+            # The migration leaves `~/.mavis` as a symlink to `~/.minimax`: one
+            # directory behind two names is one install, not two.
+            real = os.path.realpath(path)
+            if real in seen:
+                continue
+            seen.add(real)
+            roots.append(path)
+
+    agg = defaultdict(float)
+    seen = set()
+    n = logs = zero = repeats = unstamped = broken = idless = 0
+    for root in roots:
+        for path in files(os.path.join(root, "v2", "sessions", "**", "messages.jsonl")):
+            logs += 1
+            for ordinal, rec in enumerate(rows(path)):
+                message = rec.get("message") or {}
+                if message.get("role") != "assistant":
+                    continue
+                usage = message.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                inp, out = num(usage.get("input")), num(usage.get("output"))
+                cr, cc = num(usage.get("cacheRead")), num(usage.get("cacheWrite"))
+                reason = num(usage.get("reasoning"))
+                total = num(usage.get("totalTokens"))
+                if total > 0 and abs(total - (inp + out + cr + cc)) > 0.5:
+                    broken += 1
+                if inp + out + cr + cc <= 0:
+                    zero += 1
+                    continue
+                ms = millis(message.get("timestamp"))
+                mid = rec.get("message_id")
+                if isinstance(mid, str) and mid:
+                    ident = f"id:{mid}"
+                elif ms > 0:
+                    ident = (
+                        f"t:{rec.get('turn_id')}:{ms:.0f}:{message.get('model')}"
+                        f":{inp:.0f}:{cc:.0f}:{cr:.0f}:{out:.0f}"
+                    )
+                else:
+                    ident = f"p:{path}:{ordinal}"
+                    unstamped += 1
+                if not isinstance(mid, str) or not mid:
+                    idless += 1
+                if ident in seen:
+                    repeats += 1
+                    continue
+                seen.add(ident)
+                n += 1
+                agg["in"] += inp
+                agg["cc"] += cc
+                agg["cr"] += cr
+                agg["out"] += out
+                agg["reason"] += reason
+
+    vendor = {}
+    vendor_note = ""
+    for root in roots:
+        db = os.path.join(root, "v2", "sqlite", "runtime-state.sqlite")
+        if not os.path.isfile(db):
+            continue
+        try:
+            conn = open_ro(db)
+            got = conn.execute(
+                "select count(*), coalesce(sum(input_tokens), 0), coalesce(sum(cache_write_tokens), 0),"
+                " coalesce(sum(cache_read_tokens), 0), coalesce(sum(output_tokens), 0),"
+                " coalesce(sum(reasoning_tokens), 0) from local_runtime_token_usage"
+            ).fetchone()
+            conn.close()
+        except sqlite3.Error as exc:
+            vendor_note = f" · runtime store unreadable ({exc})"
+            break
+        vendor = dict(zip(("n", "in", "cc", "cr", "out", "reason"), (float(x) for x in got)))
+        break
+
+    return {
+        "n": n,
+        "in": agg["in"],
+        "cc": agg["cc"],
+        "cr": agg["cr"],
+        "out": agg["out"],
+        "reason": agg["reason"],
+        "credits": 0.0,
+        "_vendor": vendor,
+        "notes": f"{logs} transcripts, totalTokens identity breaks={broken} (must be 0), "
+                 f"zero-usage rows={zero}, repeats collapsed={repeats} "
+                 f"(a rewritten history is re-read whole), records without a message id={idless}, "
+                 f"unstamped={unstamped}" + vendor_note,
     }
 
 
@@ -844,31 +1198,35 @@ def compute_all():
         "workbuddy": workbuddy(),
         "antigravity": antigravity(),
         "ccswitch": ccswitch(),
+        "kimicode": kimicode(),
+        "minimaxcode": minimaxcode(),
     }
 
 
 FIELDS = ["n", "in", "cc", "cr", "out", "reason", "credits"]
 
 
-def zcode_row_identity(index_db, keyed, tolerance):
-    """Per-row identity for the source whose vendor deletes history.
+def row_identity(index_db, tool, keyed, tolerance):
+    """Per-row identity for a source whose vendor prunes history (zcode's table
+    rebuilds, Cline's transcripts rewrite in place).
 
-    Every surviving `model_usage` row must appear in the index once with the
+    Every row the source still holds must appear in the index once with the
     same net numbers (a row newer than the index's newest event may simply not
     be imported yet — the live-lag `--bracket` handles everywhere else). Events
     only the index has are the vendor's deletions: quantified and handed back
     so the aggregate comparison can subtract them, never trusted as numbers.
     Returns `(failures, deleted_field_sums, note)`."""
-    conn = sqlite3.connect(sqlite_readonly_uri(index_db), uri=True)
+    conn = open_ro(index_db)
     try:
         ev = conn.execute(
             "select dedupe_key, ts_ms, in_tok, cc_tok, cr_tok, out_tok, reason_tok"
-            " from event where tool='zcode' and dedupe_key is not null"
+            " from event where tool = ?1 and dedupe_key is not null",
+            (tool,),
         ).fetchall()
     finally:
         conn.close()
     if not ev:
-        return (["zcode: no keyed events in the index"], {}, "identity not checkable")
+        return ([f"{tool}: no keyed events in the index"], {}, "identity not checkable")
     newest = max(e[1] for e in ev)
     idx = {e[0]: (e[2], e[3], e[4], e[5], e[6]) for e in ev}
     FIELDS5 = ["in", "cc", "cr", "out", "reason"]
@@ -880,12 +1238,13 @@ def zcode_row_identity(index_db, keyed, tolerance):
     sums["n"] = float(len(deleted))
     failures = []
     if missing:
-        failures.append(f"zcode: {len(missing)} row(s) the table has but the index never saw, e.g. {missing[0]}")
+        failures.append(f"{tool}: {len(missing)} row(s) the source has but the index never saw, e.g. {missing[0]}")
     if wrong:
-        failures.append(f"zcode: {len(wrong)} row(s) whose numbers differ, e.g. {wrong[0]}: {idx[wrong[0]]} != {must[wrong[0]]}")
+        failures.append(f"{tool}: {len(wrong)} row(s) whose numbers differ, e.g. {wrong[0]}: {idx[wrong[0]]} != {must[wrong[0]]}")
+    tokens = sum(v for f, v in sums.items() if f != "n")
     note = (
-        f"per-row identity: {len(must)} checked, {len(idx) - len(must) + len(missing)} vendor-deleted "
-        f"({sum(sums.values()):,.0f} tok) kept as history"
+        f"per-row identity: {len(must)} checked, {len(deleted)} vendor-deleted "
+        f"({tokens:,.0f} tok) kept as history"
     )
     return failures, sums, note
 
@@ -941,11 +1300,31 @@ def main():
         print(f"[bracket] pass 2 done in {time.time() - START:.0f}s", flush=True)
 
     failures = []
-    zcode_note = ""
-    zcode_deleted = {}
-    if "_keyed" in low.get("zcode", {}):
-        id_failures, zcode_deleted, zcode_note = zcode_row_identity(args.db, low["zcode"]["_keyed"], args.tolerance)
-        failures.extend(id_failures)
+    # Sources whose vendor prunes history out from under an append-only index:
+    # the per-row identity proves the survivors and quantifies the deletions.
+    deleted_by_tool = {}
+    identity_notes = {}
+    for tool in ("zcode", "cline"):
+        if "_keyed" in low.get(tool, {}):
+            id_failures, sums, note = row_identity(args.db, tool, low[tool]["_keyed"], args.tolerance)
+            failures.extend(id_failures)
+            deleted_by_tool[tool] = sums
+            identity_notes[tool] = note
+    # MiniMax Code keeps its own tally of these same records. Two readings of one
+    # transcript can agree by construction; agreeing with the product's accounting
+    # is the check that the *mapping* of the stages is right.
+    mmx = low.get("minimaxcode", {})
+    if isinstance(mmx.get("_vendor"), dict) and mmx["_vendor"]:
+        for f in ("n", "in", "cc", "cr", "out", "reason"):
+            mine, theirs = mmx.get(f, 0.0), mmx["_vendor"].get(f, 0.0)
+            if mine == theirs:
+                continue
+            rel = abs(mine - theirs) / max(abs(theirs), 1.0)
+            if rel > args.tolerance:
+                failures.append(
+                    f"minimaxcode.{f}: the vendor's own usage table says {theirs:,.0f}, "
+                    f"the transcripts say {mine:,.0f}"
+                )
     print(f"{'tool':<12}{'field':<8}{'independent':>17}{'index':>17}{'delta':>13}  verdict")
     print("-" * 88)
     for tool in sorted(low):
@@ -963,10 +1342,11 @@ def main():
             a, b = low[tool].get(f, 0.0), idx.get(f, 0.0)
             if a == 0.0 and b == 0.0:
                 continue
-            # The vendor deletes zcode rows the index already keeps as history;
-            # the per-row identity proved the survivors, so the aggregate is
+            # The vendor prunes rows the index already keeps as history
+            # (zcode's rebuilding table, Cline's rewriting transcripts); the
+            # per-row identity proved the survivors, so the aggregate is
             # compared against the index *minus* the quantified deletions.
-            gone = zcode_deleted.get(f, 0.0) if tool == "zcode" else 0.0
+            gone = deleted_by_tool.get(tool, {}).get(f, 0.0)
             rel = abs(a - (b - gone)) / max(abs(b - gone), 1.0)
             flag = "ok" if rel <= args.tolerance else f"MISMATCH {rel * 100:.2f}%"
             if gone and rel <= args.tolerance:
@@ -981,8 +1361,8 @@ def main():
             print(f"{tool:<12}{f:<8}{a:>17,.0f}{b:>17,.0f}{a - b:>+13,.0f}  {flag}")
         if low[tool].get("notes"):
             print(f"{'':<12}  note: {low[tool]['notes']}")
-        if tool == "zcode" and zcode_note:
-            print(f"{'':<12}  note: {zcode_note}")
+        if tool in identity_notes:
+            print(f"{'':<12}  note: {identity_notes[tool]}")
     print("-" * 88)
     print(f"{len(failures)} mismatched field(s) at tolerance {args.tolerance * 100:.2f}%")
     for f in failures:

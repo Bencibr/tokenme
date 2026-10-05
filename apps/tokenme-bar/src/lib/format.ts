@@ -25,6 +25,8 @@ const TOOL_ORDER = [
   "dsh",
   "joycode",
   "trae",
+  "kimicode",
+  "minimaxcode",
 ];
 
 const DISPLAY: Record<string, string> = {
@@ -47,6 +49,8 @@ const DISPLAY: Record<string, string> = {
   dsh: "DSH",
   cola: "Cola",
   trae: "Trae",
+  kimicode: "Kimi Code",
+  minimaxcode: "MiniMax Code",
   gemini: "Gemini CLI",
   cursor: "Cursor",
 };
