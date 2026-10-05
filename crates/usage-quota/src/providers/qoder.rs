@@ -20,15 +20,19 @@
 //! account with a resource pack reads as "no quota at all" from the snapshot:
 //! this is why the live call comes first.
 //!
-//! The bearer is `secret://aicoding.auth.userInfo`'s `token`. macOS keeps that
-//! record in Electron's `safeStorage` envelope (`v10` + AES-128-CBC, PBKDF2
-//! over the `Qoder Safe Storage` / `Qoder Key` login item). Windows keeps the
-//! equivalent record in `auth.v1.dat`, with an AES-256-GCM key protected by the
-//! user's DPAPI key in `Local State`. `expireTime` (epoch milliseconds, stored
-//! as a JSON string) gates it, and **nothing here ever refreshes**: a refresh
-//! grant may rotate `refreshToken`, and a tool that consumes the rotation
-//! without writing it back logs the user out of their own IDE. An expired token
-//! is simply "no live sample".
+//! The bearer is the account's own login record. The older VS Code-fork IDE
+//! keeps it under `secret://aicoding.auth.userInfo` in its `state.vscdb`; the
+//! 0.4 desktop app (which replaced it — this machine's `Qoder.app` writes
+//! `com.qoder.app.stable`) keeps it in `auth.v1.dat` beside its Chromium
+//! profile. Both records are Electron `safeStorage` envelopes: `v10` +
+//! AES-128-CBC under a keychain passphrase on macOS (`Qoder Safe Storage` /
+//! `Qoder Key` for the IDE, `Qoder App Safe Storage` / `Qoder App Key` for the
+//! app), AES-256-GCM under a DPAPI key in `Local State` on Windows. Expiry
+//! gates the call: the old record names it `expireTime` (epoch milliseconds,
+//! stored as a JSON string), the 0.4 record `expiresAt` (RFC 3339), and
+//! **nothing here ever refreshes**: a refresh grant may rotate `refreshToken`,
+//! and a tool that consumes the rotation without writing it back logs the user
+//! out of their own client. An expired token is simply "no live sample".
 //!
 //! Reading the envelope costs one `security` subprocess per cache miss (TTL in
 //! [`crate::TTL`]); the keychain may ask the user for permission the first time
@@ -55,10 +59,15 @@ const NO_EXPIRY_MS: i64 = 253_402_214_400_000;
 
 /// Both editions keep their global state under their own support directory.
 const SUPPORT_DIRS: [&str; 3] = ["Qoder", "Qoder CN", "QoderCN"];
-/// `(service, account)` as the two Electron keychain entries of one install.
+/// The 0.4 desktop app's login record, beside its Chromium profile.
+const AUTH_FILE: &str = "auth.v1.dat";
+/// `(service, account)` as the Electron keychain entries: the desktop app's
+/// own pair first (it is the install that is actually being used), then the
+/// older VS Code-fork IDE's. A passphrase only opens the records of its own
+/// generation, so trying both is the discovery.
 const KEYCHAIN_IDS: [(&str, &str); 2] = [
-    ("Qoder Safe Storage", "Qoder Key"),
     ("Qoder App Safe Storage", "Qoder App Key"),
+    ("Qoder Safe Storage", "Qoder Key"),
 ];
 
 impl QuotaProbe for QoderQuota {
@@ -67,13 +76,25 @@ impl QuotaProbe for QoderQuota {
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
-        #[cfg(windows)]
-        for dir in windows_app_dirs() {
-            let Some(info) = read_windows_user_info(&dir) else {
+        // The desktop app's own Chromium profile (`com.qoder.app.*`) is the
+        // live install; its `auth.v1.dat` is read through each platform's
+        // safeStorage keeper.
+        for dir in app_dirs() {
+            if !dir.join(AUTH_FILE).is_file() {
                 continue;
-            };
-            if let Some(samples) = live_usage(&info).filter(|s| !s.is_empty()) {
-                return samples;
+            }
+            #[cfg(windows)]
+            let info = read_windows_user_info(&dir);
+            #[cfg(target_os = "macos")]
+            let info = KEYCHAIN_IDS
+                .iter()
+                .find_map(|(service, account)| keychain_pass(service, account).and_then(|p| app_user_info(&dir, &p)));
+            #[cfg(not(any(windows, target_os = "macos")))]
+            let info: Option<Value> = None;
+            if let Some(info) = info {
+                if let Some(samples) = live_usage(&info).filter(|s| !s.is_empty()) {
+                    return samples;
+                }
             }
         }
 
@@ -106,19 +127,21 @@ impl QuotaProbe for QoderQuota {
     }
 }
 
-/// Qoder's Windows build uses Electron's Chromium profile layout rather than
-/// the VS Code `state.vscdb` layout. Keep the directory discovery tolerant of
-/// beta/dev channels and of an explicit `APPDATA` fallback, because `dirs` can
-/// be unavailable in a restricted service environment.
-#[cfg(windows)]
-fn windows_app_dirs() -> Vec<std::path::PathBuf> {
+/// The desktop app's Chromium profile directory, which it named after its
+/// bundle id (`com.qoder.app.stable`) rather than the product. Kept tolerant
+/// of beta/dev channels, and of an explicit `APPDATA` fallback on Windows,
+/// because `dirs` can be unavailable in a restricted service environment.
+fn app_dirs() -> Vec<std::path::PathBuf> {
     let mut bases = Vec::new();
     if let Some(base) = dirs::data_dir() {
         bases.push(base);
     }
-    if let Some(base) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) {
-        if !bases.iter().any(|p| p == &base) {
-            bases.push(base);
+    #[cfg(windows)]
+    {
+        if let Some(base) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) {
+            if !bases.iter().any(|p| p == &base) {
+                bases.push(base);
+            }
         }
     }
 
@@ -170,13 +193,21 @@ fn read_windows_user_info(dir: &Path) -> Option<Value> {
         return None;
     }
 
-    let encrypted_auth = std::fs::read(dir.join("auth.v1.dat")).ok()?;
+    let encrypted_auth = std::fs::read(dir.join(AUTH_FILE)).ok()?;
     let plaintext = decrypt_windows_v10(&key, &encrypted_auth)?;
     let info: Value = serde_json::from_slice(&plaintext).ok()?;
     info.get("token")
         .and_then(Value::as_str)
         .filter(|t| !t.is_empty())?;
     Some(info)
+}
+
+/// The desktop app's record under its own keychain passphrase: the same
+/// Chromium `v10` envelope, read-only like everything else here.
+#[cfg(target_os = "macos")]
+fn app_user_info(dir: &Path, pass: &str) -> Option<Value> {
+    let blob = std::fs::read(dir.join(AUTH_FILE)).ok()?;
+    decrypt(pass, &blob).and_then(|p| parse(&p))
 }
 
 /// Chromium's Windows `safeStorage` key is a DPAPI blob prefixed by ASCII
@@ -342,13 +373,14 @@ fn live_usage(info: &Value) -> Option<Vec<QuotaSample>> {
     Some(samples_from_usage(usage))
 }
 
-/// `expireTime` is stored as a JSON *string* of epoch milliseconds; a missing
-/// or unparsable one is treated as unknown-but-tryable, a past one as spent.
+/// `expireTime` (old IDE: a JSON string of epoch milliseconds) or `expiresAt`
+/// (0.4 app: RFC 3339). A missing or unparsable one is treated as
+/// unknown-but-tryable, a past one as spent.
 pub(crate) fn token_is_fresh(info: &Value, now_ms: i64) -> bool {
-    let exp = info
-        .get("expireTime")
-        .map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-        .unwrap_or(None);
+    let exp = ["expireTime", "expiresAt"]
+        .iter()
+        .find_map(|k| info.get(*k))
+        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(usage_core::parse_ts_ms)));
     exp.is_none_or(|ms| ms > now_ms)
 }
 
@@ -577,6 +609,38 @@ mod tests {
         // Missing or unparsable expiry: unknown, so the live call may proceed.
         assert!(token_is_fresh(&json!({"token": "t"}), 1_791_071_360_000));
         assert!(token_is_fresh(&json!({"token": "t", "expireTime": "not-a-number"}), 0));
+        // The 0.4 app's record names its expiry `expiresAt` as RFC 3339.
+        let new = json!({"token": "t", "expiresAt": "2026-10-20T00:29:25Z"});
+        let ms = chrono::DateTime::parse_from_rfc3339("2026-10-20T00:29:25Z").unwrap().timestamp_millis();
+        assert!(token_is_fresh(&new, ms - 1));
+        assert!(!token_is_fresh(&new, ms), "at the instant of expiry the token is spent");
+    }
+
+    /// The 0.4 app's record lives in `auth.v1.dat` beside its own profile dir
+    /// and is opened by its own keychain passphrase — round-trip that shape.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_desktop_app_record_round_trips_through_its_own_file() {
+        use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+        let pass = "tokenme-test-passphrase";
+        let body = r#"{"schemaVersion":1,"token":"fixture","expiresAt":"2026-10-20T00:29:25Z"}"#;
+        let mut key = [0u8; 16];
+        pbkdf2::pbkdf2_hmac::<sha1::Sha1>(pass.as_bytes(), b"saltysalt", 1003, &mut key);
+        let iv = [0x20u8; 16];
+        let ct = cbc::Encryptor::<aes::Aes128>::new(&key.into(), &iv.into())
+            .encrypt_padded_vec_mut::<Pkcs7>(body.as_bytes());
+        let mut blob = b"v10".to_vec();
+        blob.extend_from_slice(&ct);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(AUTH_FILE), &blob).unwrap();
+        let info = app_user_info(dir.path(), pass).expect("the app record opens");
+        assert_eq!(info.get("token").and_then(Value::as_str), Some("fixture"));
+        assert!(token_is_fresh(&info, 0));
+        assert!(
+            app_user_info(dir.path(), "wrong-pass").is_none_or(|v| v.get("token").is_none()),
+            "another generation's passphrase must not open this record"
+        );
+        assert!(app_user_info(&dir.path().join("missing"), pass).is_none());
     }
 
     /// Round-trips the envelope: encrypt with the same scheme, read it back.
@@ -647,9 +711,9 @@ mod tests {
     #[test]
     #[ignore = "reads the installed Qoder profile but never prints its token"]
     fn the_installed_windows_qoder_profile_is_readable() {
-        let Some(dir) = windows_app_dirs()
+        let Some(dir) = app_dirs()
             .into_iter()
-            .find(|dir| dir.join("auth.v1.dat").is_file())
+            .find(|dir| dir.join(AUTH_FILE).is_file())
         else {
             println!("[qoder] no Windows auth.v1.dat found");
             return;
@@ -697,6 +761,32 @@ mod tests {
     #[test]
     #[ignore = "reads the real Qoder install, may prompt for keychain access, and calls the vendor"]
     fn the_live_meters_this_account_actually_has() {
+        #[cfg(target_os = "macos")]
+        for dir in app_dirs() {
+            if !dir.join(AUTH_FILE).is_file() {
+                continue;
+            }
+            println!("[qoder] desktop app profile: {dir:?}");
+            for (service, account) in KEYCHAIN_IDS {
+                let Some(pass) = keychain_pass(service, account) else {
+                    println!("[qoder] no keychain item {service}/{account}");
+                    continue;
+                };
+                let Some(info) = app_user_info(&dir, &pass) else {
+                    println!("[qoder] {service}/{account} did not open the app record");
+                    continue;
+                };
+                println!(
+                    "[qoder] token {} bytes, fresh: {}",
+                    info.get("token").and_then(Value::as_str).map(str::len).unwrap_or(0),
+                    token_is_fresh(&info, chrono::Utc::now().timestamp_millis())
+                );
+                for s in live_usage(&info).unwrap_or_default() {
+                    println!("[qoder] {:>6.2}%  reset={:>13}  {}", s.used_percent, s.resets_at_ms, s.label.as_deref().unwrap_or_default());
+                }
+            }
+        }
+
         let dbs = state_dbs();
         println!("[qoder] state.vscdb candidates: {dbs:?}");
         let Some(db) = dbs.first() else {
