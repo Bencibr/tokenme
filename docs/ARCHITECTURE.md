@@ -32,6 +32,8 @@ flowchart LR
 
 The engine thread in the panel owns the index; the webview never touches it directly — the engine publishes a serialised `Report` over a Tauri event after every pass.
 
+That loop is supervised: a panic or an unexpected return is logged to `panel.log` with its reason and restarted with capped backoff, because a menu-bar app that stops publishing keeps rendering numbers and gives no other sign. The panel itself states the age — a report older than five cadences shows "Updates stopped" in the header.
+
 ## Key invariants
 
 - **Incremental, never re-read**: adapters return a byte/row cursor; the index resumes exactly where the last pass stopped. A shrunken file purges its own stale rows first.
