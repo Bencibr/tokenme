@@ -603,6 +603,29 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     pricing: { ...PRICING, fetched_at_ms: nowMs2 - 42 * 60_000 },
     recent_sessions: sessionsOf(nowMs2),
     all_time: allTime,
+    // Two machines mid-sync: the badge shows the newest; the older origin only
+    // surfaces in the tooltip. `?sync=30` pins the newest import 30h old to
+    // drive the stale state.
+    syncs: [
+      {
+        origin: "build-01",
+        imported_at_ms: nowMs2 - 6 * 60_000,
+        window_lo_ms: nowMs2 - 30 * 86_400_000,
+        window_hi_ms: nowMs2 + 1,
+        rows: 12_431,
+        file: "tokenme-build-01.jsonl.gz",
+        sha256: "0d6f2c9a4e8b17d3542f0c6a98b3e712fa45cd90be2211447356a1b0c9d8e2f4",
+      },
+      {
+        origin: "gpu-02",
+        imported_at_ms: nowMs2 - 2 * 86_400_000,
+        window_lo_ms: nowMs2 - 32 * 86_400_000,
+        window_hi_ms: nowMs2 + 1,
+        rows: 3_208,
+        file: "tokenme-gpu-02.jsonl.gz",
+        sha256: "b7e1a0d35c94f2816a7e2d4b08c3f95741de8806fe2c31902b4d7a6c5e0f1843",
+      },
+    ],
   };
 }
 

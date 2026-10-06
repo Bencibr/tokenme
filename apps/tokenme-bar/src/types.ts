@@ -141,6 +141,18 @@ export interface SessionRow {
   requests: number;
 }
 
+/** `usage_core::SyncRecord` — one bundle from another machine, merged into
+    this index. The newest import per origin wins in the badge; anything older
+    than 24h per origin makes the badge warn. */
+export interface SyncRecord {
+  origin: string;
+  imported_at_ms: number;
+  window_lo_ms: number;
+  window_hi_ms: number;
+  rows: number;
+  file: string;
+  sha256?: string;
+}
 export interface Report {
   generated_at_ms: number;
   utc_offset: string;
@@ -158,6 +170,9 @@ export interface Report {
   pricing: PricingMeta;
   recent_sessions: SessionRow[];
   all_time: Summary;
+  /** Machine-sync imports, newest first. Absent on snapshots taken before
+      this field existed (older engines), hence optional. */
+  syncs?: SyncRecord[];
 }
 
 export type PeriodKey = "day" | "week" | "month" | "year";

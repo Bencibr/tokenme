@@ -147,6 +147,48 @@ jobs:
           name: cli-${{ matrix.target }}
           path: dist/*
 
+  cli-linux:
+    # Fully static musl builds for Linux collectors, cross-compiled with zig so
+    # no distro toolchain enters the picture. Same recipe as
+    # scripts/build-linux.sh; the tarball carries install-linux.sh next to the
+    # binary — that pair is the whole Linux install story.
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64 }
+          - { arch: aarch64 }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+      - name: Build
+        shell: bash
+        run: set -o pipefail; cargo zigbuild --release -p usage-cli --target ${{ matrix.arch }}-unknown-linux-musl 2>&1 | tee build-cli-linux.log
+      - name: Surface build failure
+        if: failure()
+        shell: bash
+        run: |
+          grep -nE 'error(\[[0-9]*\])?:|error:|warning: build failed|linking with' build-cli-linux.log | tail -50 | while IFS= read -r line; do echo "::error::$line"; done
+      - name: Package
+        run: |
+          V=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          PKG=tokenme-cli-$V-${{ matrix.arch }}-linux-musl
+          mkdir -p "dist/$PKG"
+          cp "target/${{ matrix.arch }}-unknown-linux-musl/release/tokenme" "dist/$PKG/tokenme"
+          cp scripts/install-linux.sh "dist/$PKG/install-linux.sh"
+          chmod +x "dist/$PKG/tokenme" "dist/$PKG/install-linux.sh"
+          tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
+          rm -rf "dist/$PKG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-linux-${{ matrix.arch }}
+          path: dist/*
+
   windows-panel:
     # The NSIS setup exe for the Windows menu-bar panel. No cross-compile:
     # the runner IS the platform, Tauri's Windows bundling needs WebView2
@@ -182,7 +224,7 @@ jobs:
           path: dist/*
 
   release:
-    needs: [macos, macos-universal, windows-panel, cli]
+    needs: [macos, macos-universal, windows-panel, cli, cli-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

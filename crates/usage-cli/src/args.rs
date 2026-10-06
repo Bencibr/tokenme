@@ -154,6 +154,36 @@ pub enum Cmd {
         #[arg(long)]
         force: bool,
     },
+
+    /// Export a window of this machine's events as a sync bundle (JSONL.gz +
+    /// manifest) for another machine to import. Ingests first, then writes to
+    /// `~/tokenme-sync` by default, which is where the menu-bar engine picks
+    /// bundles up. A quiet or logless machine still ships a valid (empty)
+    /// bundle — a collector's timer must never fail on a slow day.
+    Export {
+        /// Window length in days, ending now
+        #[arg(long, value_name = "N", default_value_t = 30)]
+        days: i64,
+
+        /// Directory the bundle lands in (default: ~/tokenme-sync)
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+
+        /// Origin name recorded in the manifest and used for row identity
+        /// (default: this machine's hostname)
+        #[arg(long, value_name = "NAME")]
+        origin: Option<String>,
+    },
+
+    /// Merge one sync bundle exported by another machine into the local index
+    Import {
+        /// The tokenme-*.jsonl.gz to merge; its manifest must sit next to it
+        file: PathBuf,
+
+        /// Parse, merge and reconcile, then roll back without committing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

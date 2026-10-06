@@ -464,17 +464,24 @@ fn ingest(
     if reason == "cadence timer" {
         index.optimize();
     }
+    // Sync bundles from other machines land before the publish decision below,
+    // so a fresh merge publishes on this same pass. A missing directory is the
+    // normal no-sync case; a bad bundle is logged and left for the next round.
+    let sync_merged = import_sync_dir(index);
     // A file wake that added nothing new would republish an identical report —
     // on a working machine that is most wakes (editors touch files constantly).
     // A wake that DID add events recomputes the entire report (all indexed
     // history, priced) and that costs hundreds of milliseconds, so drip writers
     // get at most one rebuild per PUBLISH_GAP. The cadence timer and manual
-    // refresh always publish, keeping the time-shaped numbers moving.
+    // refresh always publish, keeping the time-shaped numbers moving. A merged
+    // bundle publishes immediately: merges are rare, and the badge's freshness
+    // must not wait out a drip writer's gap.
     if reason == "file change" {
-        if report.as_ref().is_some_and(|r| r.new_events == 0) {
+        let quiet = report.as_ref().is_some_and(|r| r.new_events == 0);
+        if quiet && !sync_merged {
             return;
         }
-        if last_publish.elapsed() < PUBLISH_GAP {
+        if !sync_merged && last_publish.elapsed() < PUBLISH_GAP {
             return;
         }
     }
@@ -504,6 +511,64 @@ fn ingest(
             crate::logging::info(&format!("dsh ledger: {dsh_count} events indexed, newest at {newest}"));
         }
     }
+}
+
+/// Merges every bundle sitting in `~/tokenme-sync` that this index has not
+/// seen at its current content hash yet. Same function `tokenme import` uses —
+/// hash check, key-based reconciliation, one transaction — so a bundle that
+/// fails validation is rejected whole and stays on disk for the next pass,
+/// while the panel keeps serving the previous numbers. Returns whether any
+/// bundle merged, so the caller knows to publish.
+fn import_sync_dir(index: &mut Index) -> bool {
+    let Some(dir) = usage_index::default_sync_dir() else { return false };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return false };
+    let mut merged = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        // Manifests, `.tmp` artifacts and anything else are not payloads.
+        if !name.ends_with(".jsonl.gz") {
+            continue;
+        }
+        let sha = match usage_index::sha256_file(&path) {
+            Ok(sha) => sha,
+            Err(e) => {
+                crate::logging::error(&format!("sync: cannot hash {name}: {e}"));
+                continue;
+            }
+        };
+        match index.sync_file_memo(&name) {
+            Ok(Some(known)) if known.eq_ignore_ascii_case(&sha) => continue,
+            Ok(_) => {}
+            Err(e) => {
+                crate::logging::error(&format!("sync: cannot read the memo for {name}: {e}"));
+                continue;
+            }
+        }
+        match index.import_sync(&usage_index::ImportOptions { file: path.clone(), dry_run: false })
+        {
+            Ok(rep) => {
+                crate::logging::info(&format!(
+                    "sync: merged {name} from {} — {} rows ({} new, {} updated, {} deduped), calls +{}{}",
+                    rep.origin, rep.rows, rep.inserted, rep.updated, rep.deduped, rep.calls_added,
+                    if rep.self_import { " — origin equals this machine's hostname" } else { "" }
+                ));
+                if rep.stale_rows > 0 {
+                    crate::logging::info(&format!(
+                        "sync: {} older row(s) of {} are outside the bundle window (purged upstream); kept",
+                        rep.stale_rows, rep.origin
+                    ));
+                }
+                merged = true;
+            }
+            Err(e) => {
+                crate::logging::error(&format!("sync: {name} rejected (kept for retry): {e}"));
+            }
+        }
+    }
+    merged
 }
 
 /// Re-runs the aggregation over already-indexed events after a price refresh.

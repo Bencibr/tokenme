@@ -64,9 +64,15 @@ fn main() {
         Err(context::Fail(msg)) => fail(&msg),
     };
 
-    // Every reporting command refreshes the index first; `detect`, `index` and
-    // `icons` drive it explicitly or not at all.
-    if !matches!(command, Cmd::Detect | Cmd::Index { .. } | Cmd::Icons) {
+    // Every reporting command refreshes the index first; `detect`, `index`,
+    // `icons` and `import` drive it explicitly or not at all (an import on a
+    // fresh display machine must not fail on "no local logs found"). `export`
+    // ingests on its own inside the command — a collector with a quiet window
+    // must still be able to ship an (empty) bundle.
+    if !matches!(
+        command,
+        Cmd::Detect | Cmd::Index { .. } | Cmd::Icons | Cmd::Import { .. } | Cmd::Export { .. }
+    ) {
         if let Err(msg) = ctx.prepare() {
             fail(&msg);
         }
@@ -91,6 +97,8 @@ fn main() {
         Cmd::Index { rebuild, prune, status, force } => {
             commands::index(&mut ctx, rebuild, prune, status, force)
         }
+        Cmd::Export { days, out, origin } => commands::export_sync(&mut ctx, days, out, origin),
+        Cmd::Import { file, dry_run } => commands::import_sync(&mut ctx, &file, dry_run),
     };
 
     if let Err(msg) = result {

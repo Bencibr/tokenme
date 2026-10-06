@@ -1,6 +1,6 @@
 # TokenMe CLI Reference
 
-> Version: 0.1.0 · Updated: 2026-09-29 · Audience: CLI users · Source of truth: `crates/usage-cli/src/args.rs` (verified against `tokenme --help`)
+> Version: 0.1.5 · Updated: 2026-10-05 · Audience: CLI users · Source of truth: `crates/usage-cli/src/args.rs` (verified against `tokenme --help`)
 
 All commands share these global options (place them anywhere on the line):
 
@@ -103,6 +103,32 @@ tokenme index --force               # steal the ingest lease from a dead process
 ## icons
 
 The macOS application icon each tool row would show, as data URLs (what the panel requests over IPC). Written to `icons.json` for review.
+
+## export
+
+Export a window of this machine's events as a sync bundle (gzipped JSONL + a manifest carrying the sha256 and per-tool sums) for another machine to import. Lands in `~/tokenme-sync` by default — the directory the menu-bar engine merges automatically — so a Linux collector's whole writer is one timer line. Recent events are ingested first (same as every reporting command; `--no-ingest` skips that). A quiet or logless machine still gets a valid bundle with `rows 0` — the collector's timer never fails on a slow day.
+
+```bash
+tokenme export                          # last 30 days → ~/tokenme-sync/tokenme-<host>.jsonl.gz
+tokenme export --days 400               # first backfill: the whole retention window
+tokenme export --out /tmp/share         # somewhere else (a Syncthing folder, a USB stick)
+tokenme export --origin workstation-01  # pin the identity (default: hostname)
+```
+
+The `.gz` is written via `*.tmp` + rename and the manifest last, so a transport never sees a half-written bundle. Re-exporting the same window is safe: imports are idempotent. Both files land `0600` on unix — a bundle names sessions, projects and local log paths, so it is private by default.
+
+## import
+
+Merge one bundle exported by another machine into the local index. Validates the sha256 and every batch's totals against the manifest first; any failure rolls the whole merge back and the previous numbers stay. Re-importing the same file changes nothing.
+
+```bash
+tokenme import ~/tokenme-sync/tokenme-build-01.jsonl.gz
+tokenme import bundle.jsonl.gz --dry-run   # parse + reconcile, then roll back
+```
+
+On the menu-bar side you rarely need this: the panel engine auto-imports `~/tokenme-sync` every pass and shows a **Linux 同步 / Linux sync** badge with the newest merge per machine (warning-hued past 24 h).
+
+Limits and trust: payload rows are capped (the manifest's count plus slack) so a corrupt file can't exhaust memory; a bundle can only move a row forward — the growth predicate refuses lower counts — and it never deletes (rows the collector purged later are reported as stale). A bundle is validated, not signed: anyone who can write into the sync folder can add rows, so treat it like the index itself. Task guide: [USER_GUIDE.md](USER_GUIDE.md) §4.
 
 ## Storage locations
 

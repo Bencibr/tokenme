@@ -20,10 +20,11 @@ pub use report::{
     local_day_of, poll_quota, summarize, summarize_facts, AggregatePlan, Breakdown, CallFact,
     FactGroup, HeatCell, Item, QuotaFact, QuotaOrigin, QuotaView, Report, ReportFacts,
     ReportOptions, RollupRow, SessionFact, SessionGroup, SessionRow, SourceStatus, Summary,
-    UnpricedModel, Window, LIVE_HOUR0, LIVE_PREV, LIVE_TODAY,
+    SyncRecord, UnpricedModel, Window, LIVE_HOUR0, LIVE_PREV, LIVE_TODAY,
 };
 pub use types::{
-    parse_ts_ms, Call, CallKind, Meter, ModelAttr, QuotaSample, TokenCounts, UsageEvent, UsageForm,
+    origin_of, origin_ok, parse_ts_ms, Call, CallKind, Meter, ModelAttr, QuotaSample, TokenCounts,
+    UsageEvent, UsageForm,
 };
 
 use std::path::{Path, PathBuf};
@@ -80,6 +81,8 @@ pub enum Error {
     Pricing(String),
     #[error("adapter {id}: {message}")]
     Adapter { id: String, message: String },
+    #[error("sync: {0}")]
+    Sync(String),
 }
 
 impl Error {

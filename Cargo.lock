@@ -1612,10 +1612,14 @@ version = "0.1.5"
 dependencies = [
  "chrono",
  "dirs",
+ "flate2",
+ "libc",
  "notify",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2",
  "tempfile",
  "usage-core",
 ]

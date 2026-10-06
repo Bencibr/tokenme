@@ -19,6 +19,7 @@
 
 mod facts;
 mod ingest;
+mod sync;
 mod watcher;
 
 use std::collections::{BTreeMap, HashSet};
@@ -34,6 +35,10 @@ use usage_core::{
 
 pub use ingest::{
     retention_cutoff, IngestOptions, IngestReport, CLAIM_TTL_MS, RETENTION_DAYS,
+};
+pub use sync::{
+    default_sync_dir, hostname, sha256_file, ExportOptions, ExportReport, ImportOptions,
+    ImportReport, SyncManifest, SyncSums, SYNC_FORMAT,
 };
 pub use watcher::Watcher;
 

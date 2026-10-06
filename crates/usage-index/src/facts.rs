@@ -75,7 +75,33 @@ impl Index {
         facts.calls = self.fetch_calls(plan)?;
         facts.quotas = self.fetch_quotas(plan.now_ms)?;
         facts.sessions = self.fetch_sessions(plan.recent_session_limit)?;
+        facts.syncs = self.fetch_syncs()?;
         Ok(facts)
+    }
+
+    /// The `sync:linux:<origin>` records `tokenme import` leaves in `meta`,
+    /// newest first. A malformed record is skipped (one bad row must not kill
+    /// the badge) — the write side owns the shape and writes in-transaction,
+    /// so this is defense against a hand-edited index, not against ourselves.
+    fn fetch_syncs(&self) -> Result<Vec<usage_core::SyncRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM meta WHERE key LIKE 'sync:linux:%'")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let mut out: Vec<usage_core::SyncRecord> = Vec::new();
+        for row in rows {
+            let Ok(value) = row else { continue };
+            if let Ok(record) = serde_json::from_str::<usage_core::SyncRecord>(&value) {
+                if !record.origin.trim().is_empty() {
+                    out.push(record);
+                }
+            }
+        }
+        out.sort_by_key(|r| -r.imported_at_ms);
+        Ok(out)
     }
 
     /// Rebuilds `event_rollup` from `event` in one transaction. Returns whether

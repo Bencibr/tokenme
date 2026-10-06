@@ -206,6 +206,37 @@ const [page, setPage] = useState<PageKey>(() => {
     return { ago: relativeTime(publishedAt, now), afterSecs: Math.round(staleAfterMs / 1000) };
   }, [report, now, loading, stalePin, staleAfterMs]);
 
+  // Machine sync (a Linux collector's bundles merged in by the engine): a
+  // broken sync otherwise reads exactly like a quiet collector — the same
+  // lesson as the frozen badge. Newest import wins the line; anything past
+  // the threshold turns warning-hued. `?sync=<hours>` ages the newest import,
+  // same QA-pin family as `?stale=`, so the warn state is drivable in a
+  // browser without breaking a real sync.
+  const syncPin = useMemo(() => {
+    const hours = Number(new URLSearchParams(location.search).get("sync"));
+    return Number.isFinite(hours) && hours > 0 ? hours : null;
+  }, []);
+  const sync = useMemo(() => {
+    const records = [...(report?.syncs ?? [])].sort((a, b) => b.imported_at_ms - a.imported_at_ms);
+    if (records.length === 0) return null;
+    const importedAt = syncPin === null ? records[0].imported_at_ms : now - syncPin * 3_600_000;
+    return {
+      latest: records[0],
+      importedAt,
+      age: relativeTime(importedAt, now),
+      more: records.length - 1,
+      stale: now - importedAt > 24 * 3_600_000,
+      rows: records.map((r, i) => ({
+        origin: r.origin,
+        file: r.file,
+        rows: r.rows,
+        // The manifest window is [lo, hi); the inclusive last day reads better.
+        window: `${localDate(r.window_lo_ms)} → ${localDate(r.window_hi_ms - 1)}`,
+        age: i === 0 ? relativeTime(importedAt, now) : relativeTime(r.imported_at_ms, now),
+      })),
+    };
+  }, [report, now, syncPin]);
+
   // The tools page lists every *detected* source, not just the ones that
   // billed this window: a credits-only tool that metered nothing here, or a
   // source whose store is unreadable, would otherwise vanish for weeks. The
@@ -263,6 +294,7 @@ const [page, setPage] = useState<PageKey>(() => {
           onPage={goPage}
           onClose={isWindows ? closePanel : undefined}
           frozen={frozen}
+          sync={sync}
         />
 
         <main className="scroll" tabIndex={-1} ref={scroll}>

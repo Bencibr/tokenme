@@ -16,7 +16,7 @@ import {
 import { useTweenNumber } from "../lib/hooks";
 import { useMoney } from "../lib/display";
 import { t } from "../lib/i18n";
-import { IconArrowDown, IconArrowUp, IconClose, IconFlat, IconWarn } from "./Icons";
+import { IconArrowDown, IconArrowUp, IconClose, IconFlat, IconRefresh, IconWarn } from "./Icons";
 
 const ORDER: PeriodKey[] = ["day", "week", "month", "year"];
 
@@ -37,6 +37,15 @@ interface Props {
   /** The engine stopped publishing: set once the last report ages past the
    *  cadence line `App.tsx` draws. Null while the numbers are still live. */
   frozen?: { ago: string; afterSecs: number } | null;
+  /** Machine-sync health: the newest bundle merged from each origin machine.
+   *  Null when no bundle was ever imported (most users). */
+  sync?: {
+    latest: { origin: string; rows: number };
+    age: string;
+    more: number;
+    stale: boolean;
+    rows: { origin: string; file: string; rows: number; window: string; age: string }[];
+  } | null;
 }
 
 function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
@@ -53,7 +62,19 @@ function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
   );
 }
 
-export function Header({ report, period, onPeriod, page, onPage, onClose, frozen }: Props) {
+/** One line per origin for the badge tooltip: window and file included so a
+ *  wrong or half-transported bundle is identifiable without opening the folder. */
+function syncTip(sync: NonNullable<Props["sync"]>): string {
+  const lines = [t("hdr.sync.tip")];
+  for (const r of sync.rows) {
+    lines.push(
+      `${r.origin} · ${r.age} · ${t("hdr.sync.rows", { n: count(r.rows) })} · ${r.window} · ${r.file}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export function Header({ report, period, onPeriod, page, onPage, onClose, frozen, sync }: Props) {
   const showMoney = useMoney();
   const win = report[period];
   const { summary } = win;
@@ -151,6 +172,21 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, frozen
             {t("hdr.frozen")}
             <span className="dot-sep" aria-hidden="true" />
             <span className="num">{frozen.ago}</span>
+          </span>
+        ) : null}
+        {/* Right after the frozen badge: whose numbers these are and how fresh
+            that merge is. Silent when no bundle was ever imported. */}
+        {sync ? (
+          <span className="sync" data-stale={sync.stale || undefined} title={syncTip(sync)}>
+            <IconRefresh size={11} />
+            {t("hdr.sync")}
+            <span className="dot-sep" aria-hidden="true" />
+            <span>{sync.latest.origin}</span>
+            <span className="dot-sep" aria-hidden="true" />
+            <span>{sync.age}</span>
+            <span className="dot-sep" aria-hidden="true" />
+            <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
+            {sync.more > 0 ? <span className="sync-more">{t("hdr.sync.more", { n: sync.more })}</span> : null}
           </span>
         ) : null}
         <span>{PERIOD_LABEL[period]}</span>

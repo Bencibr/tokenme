@@ -1267,6 +1267,131 @@ fn db_size(path: &std::path::Path) -> u64 {
         .sum()
 }
 
+// ---------------------------------------------------------------- sync
+
+fn fmt_day(ms: i64) -> String {
+    local_date(ms).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "?".into())
+}
+
+/// The manifest window is `[lo, hi)`; showing the inclusive day reads better.
+fn window_label(lo_ms: i64, hi_ms: i64) -> String {
+    format!("{} → {}", fmt_day(lo_ms), fmt_day(hi_ms.saturating_sub(1)))
+}
+
+/// The write half of machine-to-machine sync: dump a window of this machine's
+/// events as a JSONL.gz bundle next to its manifest. The default directory is
+/// the one the menu-bar engine watches, so on a Linux collector the whole
+/// writer is `tokenme export --days 30` from a systemd timer.
+pub fn export_sync(
+    ctx: &mut Ctx,
+    days: i64,
+    out: Option<PathBuf>,
+    origin: Option<String>,
+) -> Result<(), String> {
+    // Unlike a report, an export must not refuse an empty window: a collector
+    // between bursts (or fresh out of the box) still ships a valid bundle.
+    // Ingest failures degrade like everywhere else — export the index as-is
+    // and let the next timer tick catch up.
+    let _ = ctx.ingest();
+    let out_dir = match out {
+        Some(dir) => dir,
+        None => usage_index::default_sync_dir()
+            .ok_or_else(|| "no home directory; pass --out <dir>".to_string())?,
+    };
+    let origin = origin
+        .map(|o| o.trim().to_string())
+        .filter(|o| !o.is_empty())
+        .unwrap_or_else(usage_index::hostname);
+    let rep = ctx
+        .index
+        .export_sync(&usage_index::ExportOptions { days, out_dir, origin })
+        .map_err(|e| e.to_string())?;
+
+    if ctx.g.json {
+        print_json(&rep);
+        return Ok(());
+    }
+    println!(
+        "{}",
+        Table::new(&["origin", "rows", "window", "took"])
+            .right(&[1, 3])
+            .row(vec![
+                rep.origin.clone(),
+                render::count(rep.rows),
+                window_label(rep.window_lo_ms, rep.window_hi_ms),
+                format!("{}ms", rep.took_ms),
+            ])
+            .render(ctx.color)
+    );
+    println!(
+        "{}",
+        render::dim(
+            &format!(
+                "bundle   {}\nmanifest {}\nsha256   {}",
+                render::shorten_path(&rep.gz_path.display().to_string()),
+                render::shorten_path(&rep.manifest_path.display().to_string()),
+                rep.sha256
+            ),
+            ctx.color
+        )
+    );
+    Ok(())
+}
+
+/// The read half: merge one bundle exported by another machine. Idempotent —
+/// re-importing the same file changes nothing — and atomic: any failure (bad
+/// hash, format mismatch, a batch that does not reconcile) rolls the whole
+/// merge back, so the index is never half-merged.
+pub fn import_sync(ctx: &mut Ctx, file: &std::path::Path, dry_run: bool) -> Result<(), String> {
+    let rep = ctx
+        .index
+        .import_sync(&usage_index::ImportOptions { file: file.to_path_buf(), dry_run })
+        .map_err(|e| e.to_string())?;
+    if rep.self_import && !ctx.quiet() {
+        eprintln!(
+            "tokenme: bundle origin {:?} equals this machine's hostname — merging a copy of this \
+             machine's own export; rows stay keyed as foreign",
+            rep.origin
+        );
+    }
+    if ctx.g.json {
+        print_json(&rep);
+        return Ok(());
+    }
+    println!(
+        "{}",
+        Table::new(&["origin", "rows", "new", "updated", "deduped", "calls+", "stale", "took"])
+            .right(&[1, 2, 3, 4, 5, 6, 7])
+            .row(vec![
+                rep.origin.clone(),
+                render::count(rep.rows),
+                render::count(rep.inserted),
+                render::count(rep.updated),
+                render::count(rep.deduped),
+                render::count(rep.calls_added),
+                render::count(rep.stale_rows),
+                format!("{}ms", rep.took_ms),
+            ])
+            .render(ctx.color)
+    );
+    println!(
+        "{}",
+        render::dim(
+            &format!(
+                "bundle   {}\nwindow   {}\nsha256   {}",
+                render::shorten_path(&rep.file),
+                window_label(rep.window_lo_ms, rep.window_hi_ms),
+                rep.sha256
+            ),
+            ctx.color
+        )
+    );
+    if rep.dry_run {
+        println!("{}", render::dim("dry run — everything parsed, merged and reconciled; nothing was committed", ctx.color));
+    }
+    Ok(())
+}
+
 /// DSH accuracy audit: the projection ledger the desktop app keeps, printed
 /// next to what the index actually holds, per session — plus the structural
 /// facts that explain honest drift (inherited pre-v4 events, subagent spend

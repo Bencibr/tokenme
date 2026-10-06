@@ -177,10 +177,32 @@ pub struct Report {
     #[serde(default)]
     pub quotas_pending: bool,
     pub sources: Vec<SourceStatus>,
+    /// One record per origin whose Linux bundle was successfully merged into
+    /// this index, newest first — the panel's sync-health badge reads this.
+    /// Defaults empty for reports that predate the field.
+    #[serde(default)]
+    pub syncs: Vec<SyncRecord>,
     pub pricing: PricingMeta,
     pub recent_sessions: Vec<SessionRow>,
     /// Whole indexed history, for the "总计" line.
     pub all_time: Summary,
+}
+
+/// What one `tokenme import` merged from one origin, as written to the index's
+/// `meta` table (`sync:linux:<origin>`) in the same transaction as the merge —
+/// so a record can never describe a batch that was rolled back. The panel
+/// renders it as the "Linux 同步" badge; `imported_at_ms` is what tells a
+/// stalled sync apart from a quiet afternoon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncRecord {
+    pub origin: String,
+    pub imported_at_ms: i64,
+    pub window_lo_ms: i64,
+    pub window_hi_ms: i64,
+    pub rows: u64,
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -840,6 +862,7 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         // skipped the probes; summarize itself has no opinion.
         quotas_pending: false,
         sources: opts.sources.clone(),
+        syncs: Vec::new(),
         pricing: opts.pricing.meta().clone(),
         recent_sessions,
         all_time: summarize_events(&rows),
@@ -1048,6 +1071,8 @@ pub struct ReportFacts {
     pub quotas: Vec<QuotaFact>,
     /// The top-N recent sessions, resolved and ordered.
     pub sessions: Vec<SessionFact>,
+    /// `meta`-derived sync records (one per imported origin), newest first.
+    pub syncs: Vec<SyncRecord>,
     /// True when this call had to rebuild the rollup from `event` first (first
     /// publish after the upgrade, or after a fail-safe invalidation). The
     /// engine logs it; it does not change the report.
@@ -1414,6 +1439,7 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
         quotas,
         quotas_pending: false,
         sources: opts.sources.clone(),
+        syncs: facts.syncs.clone(),
         pricing: opts.pricing.meta().clone(),
         recent_sessions,
         all_time,

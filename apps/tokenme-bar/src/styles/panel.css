@@ -377,6 +377,41 @@
   opacity: 0.5;
 }
 
+/* A machine sync that silently stopped reads exactly like a quiet machine —
+   the frozen-badge lesson again, one layer down. Fresh merges sit in the
+   accent hue; past the staleness threshold the badge turns warning-hued. */
+.sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--r-sm);
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.sync[data-stale] {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
+}
+
+.sync .dot-sep {
+  background: currentColor;
+  opacity: 0.5;
+}
+
+.sync-more {
+  font-weight: 400;
+  opacity: 0.75;
+}
+
 .grow {
   flex: 1;
 }

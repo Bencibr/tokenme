@@ -122,6 +122,7 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 | `tokenme report --window week --group model` | 单窗口多维拆分与环比 |
 | `tokenme quota` | 实时配额与重置倒计时 |
 | `tokenme budget set zcode --monthly 50` | 为无限额工具设定成本上限 |
+| `tokenme export` / `tokenme import` | 把本机一段窗口导出给另一台机器合并——纯文件、幂等、无账号 |
 | `tokenme pricing explain <model>` | 审计定价来源 |
 
 ## 支持的工具与实时配额
@@ -168,6 +169,8 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 ## 数据与隐私
 
 只索引计数，不碰内容——你的代码和 Prompt 不会被存储，入库的只有每次请求的 token 计数、模型名与项目路径。扫描全程只读，无遥测、无第三方代理。索引库位于系统数据目录（macOS 为 `~/Library/Application Support/tokenme/`）；各工具日志路径见[用户指南](docs/USER_GUIDE.md)。
+
+多机之间也可以同步各自的索引——基于文件的 `tokenme export` / `tokenme import`，走你自己的通道（ssh/scp、Syncthing），无账号、无云端。每次合并前先过 sha256 与清单校验、单事务要么全落要么全不动；unix 下 bundle 一律 `0600`。
 
 ## 社区
 

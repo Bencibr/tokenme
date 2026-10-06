@@ -67,6 +67,10 @@ const zh = {
   "hdr.cache": "缓存 {p}",
   "hdr.frozen": "数据已停止更新",
   "hdr.frozen.tip": "引擎超过 {s} 秒没有发布新数据，以上是最后一次快照。点右下角“刷新”可立刻重试。",
+  "hdr.sync": "Linux 同步",
+  "hdr.sync.tip": "每台机器最后一次成功合并（哈希校验与对账全部通过才会记录）",
+  "hdr.sync.rows": "{n} 行",
+  "hdr.sync.more": "+{n} 台",
 
   /* 页签 ------------------------------------------------------------------ */
   "page.overview": "概览",
@@ -292,6 +296,10 @@ const en: Record<StrKey, string> = {
   "hdr.cache": "Cache {p}",
   "hdr.frozen": "Updates stopped",
   "hdr.frozen.tip": "The engine has not published for over {s} s — these are the last known numbers. Refresh retries now.",
+  "hdr.sync": "Linux sync",
+  "hdr.sync.tip": "Newest successful merge from each machine (recorded only after the hash check and reconciliation pass)",
+  "hdr.sync.rows": "{n} rows",
+  "hdr.sync.more": "+{n} more",
 
   "page.overview": "Overview",
   "page.overview.hint": "Activity heat & quotas",
