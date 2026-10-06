@@ -18,9 +18,9 @@ pub use adapter::{
 pub use pricing::{Price, PricingMap, PricingMeta, PricingSource};
 pub use report::{
     local_day_of, poll_quota, summarize, summarize_facts, AggregatePlan, Breakdown, CallFact,
-    FactGroup, HeatCell, Item, QuotaFact, QuotaOrigin, QuotaView, Report, ReportFacts,
-    ReportOptions, RollupRow, SessionFact, SessionGroup, SessionRow, SourceStatus, Summary,
-    SyncRecord, UnpricedModel, Window, LIVE_HOUR0, LIVE_PREV, LIVE_TODAY,
+    FactGroup, HeatCell, Item, MachineScope, MachineView, QuotaFact, QuotaOrigin, QuotaView,
+    Report, ReportFacts, ReportOptions, RollupRow, SessionFact, SessionGroup, SessionRow,
+    SourceStatus, Summary, SyncRecord, UnpricedModel, Window, LIVE_HOUR0, LIVE_PREV, LIVE_TODAY,
 };
 pub use types::{
     origin_of, origin_ok, parse_ts_ms, Call, CallKind, Meter, ModelAttr, QuotaSample, TokenCounts,

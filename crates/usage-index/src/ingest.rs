@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDate, TimeZone};
 use rusqlite::{params, OptionalExtension, Transaction};
-use usage_core::{local_day_of, DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent};
+use usage_core::{
+    local_day_of, origin_of, DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent,
+};
 
-use crate::{call_kind_str, meter_str, now_ms, sql_err, Index, INSERT_EVENT};
+use crate::{call_kind_str, meter_str, now_ms, sql_err, Index, INSERT_EVENT, ORIGIN_SQL};
 
 /// Nothing older than this stays in the index, which is also how far `rebuild`
 /// re-reads. `report`'s heatmap spans 371 days, so 400 keeps it full.
@@ -43,14 +45,15 @@ pub const CLAIM_TTL_MS: i64 = 120_000;
 // cache empty (first publish after the upgrade, a fail-safe wipe) rebuild it
 // from `event` and go on — see `facts.rs`.
 
-/// Per-event upsert: sums the new event into its (day, tool, session, project,
-/// model, meter) group. `project`/`model` arrive as the `''` NULL sentinel and
-/// `n` is the literal 1 — one row per event before conflict resolution.
+/// Per-event upsert: sums the new event into its (day, origin, tool, session,
+/// project, model, meter) group. `project`/`model` arrive as the `''` NULL
+/// sentinel, `origin` comes from [`origin_of`] over the file key, and `n` is
+/// the literal 1 — one row per event before conflict resolution.
 pub(crate) const ROLLUP_UPSERT: &str = "\
-INSERT INTO event_rollup(day, tool, session, project, model, meter, \
+INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
-VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15) \
-ON CONFLICT(day, tool, session, project, model, meter) DO UPDATE SET \
+VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16) \
+ON CONFLICT(day, origin, tool, session, project, model, meter) DO UPDATE SET \
     in_tok     = in_tok     + excluded.in_tok, \
     cc_tok     = cc_tok     + excluded.cc_tok, \
     cr_tok     = cr_tok     + excluded.cr_tok, \
@@ -69,18 +72,20 @@ ON CONFLICT(day, tool, session, project, model, meter) DO UPDATE SET \
 pub(crate) fn recompute_day_tx(tx: &Transaction<'_>, day_key: &str, lo: i64, hi: i64) -> Result<()> {
     tx.execute("DELETE FROM event_rollup WHERE day = ?1", params![day_key]).map_err(sql_err)?;
     tx.execute(
-        "INSERT INTO event_rollup(day, tool, session, project, model, meter, \
-             in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
-         SELECT ?1, tool, session, IFNULL(project, ''), IFNULL(model, ''), meter, \
-             IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
-             IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
-             count(*), \
-             sum(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) \
-                 + COALESCE(out_tok, 0) + COALESCE(credits, 0) > 0), \
-             min(ts_ms), max(ts_ms) \
-         FROM event \
-         WHERE ts_ms >= ?2 AND ts_ms < ?3 \
-         GROUP BY tool, session, project, model, meter",
+        &format!(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                 in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+             SELECT ?1, {ORIGIN_SQL}, tool, session, IFNULL(project, ''), IFNULL(model, ''), meter, \
+                 IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
+                 IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
+                 count(*), \
+                 sum(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) \
+                     + COALESCE(out_tok, 0) + COALESCE(credits, 0) > 0), \
+                 min(ts_ms), max(ts_ms) \
+             FROM event \
+             WHERE ts_ms >= ?2 AND ts_ms < ?3 \
+             GROUP BY {ORIGIN_SQL}, tool, session, project, model, meter"
+        ),
         params![day_key, lo, hi],
     )
     .map_err(sql_err)?;
@@ -672,6 +677,7 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                         up_rollup
                             .execute(params![
                                 new_day,
+                                origin_of(&key),
                                 tool,
                                 ev.session,
                                 ev.project.as_deref().unwrap_or(""),
@@ -743,6 +749,7 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
             up_rollup
                 .execute(params![
                     day,
+                    origin_of(&key),
                     tool,
                     ev.session,
                     ev.project.as_deref().unwrap_or(""),

@@ -326,6 +326,10 @@ impl Ctx {
             // sample win for the same (tool, window).
             polled_quota,
             budgets: usage_core::budget::load_budgets(),
+            // The CLI keeps its historical behavior: whatever the index holds,
+            // including rows merged from other machines' bundles (the panel
+            // narrows the scope interactively; the CLI has no such switch).
+            scope: usage_core::MachineScope::All,
         }
     }
 

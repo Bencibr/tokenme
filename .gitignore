@@ -16,5 +16,8 @@ apps/tokenme-bar/icons.json
 # build-macos.sh: hash of everything the test gate compiles; unchanged-since-green skip marker
 .cargo-test-stamp
 
+# static musl collector binaries, staged by scripts/bundle-collector.sh
+apps/tokenme-bar/src-tauri/resources/collector/
+
 # global gitignore excludes apps/; the panel is product code, keep it here
 !apps/

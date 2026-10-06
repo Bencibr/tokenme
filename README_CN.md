@@ -170,7 +170,7 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 
 只索引计数，不碰内容——你的代码和 Prompt 不会被存储，入库的只有每次请求的 token 计数、模型名与项目路径。扫描全程只读，无遥测、无第三方代理。索引库位于系统数据目录（macOS 为 `~/Library/Application Support/tokenme/`）；各工具日志路径见[用户指南](docs/USER_GUIDE.md)。
 
-多机之间也可以同步各自的索引——基于文件的 `tokenme export` / `tokenme import`，走你自己的通道（ssh/scp、Syncthing），无账号、无云端。每次合并前先过 sha256 与清单校验、单事务要么全落要么全不动；unix 下 bundle 一律 `0600`。
+多机之间也可以同步各自的索引——基于文件的 `tokenme export` / `tokenme import`，走你自己的通道（ssh/scp、Syncthing），无账号、无云端。每次合并前先过 sha256 与清单校验、单事务要么全落要么全不动；unix 下 bundle 一律 `0600`。面板底栏的服务器按钮也能把这条通道一键拉起：SSH 向导用一次密码连接（或指定私钥），装上专用密钥、投放静态采集器，之后按周期自动拉取合并；密码不落盘。详见[用户指南](docs/USER_GUIDE.md) §4。
 
 ## 社区
 

@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use usage_core::pricing::PricingOptions;
 use usage_core::report::{now_ms, AggregatePlan, QuotaView, ReportOptions};
-use usage_core::{DateFilter, DetectedSource, PricingMap, Report, SourceAdapter, SourceFile, SourceStatus};
+use usage_core::{DateFilter, DetectedSource, MachineScope, PricingMap, Report, SourceAdapter, SourceFile, SourceStatus};
 use usage_index::{Index, IngestOptions, Watcher, RETENTION_DAYS};
 
 use crate::settings::Settings;
@@ -71,6 +71,9 @@ pub enum Msg {
     Refresh,
     /// Swap in a freshly downloaded price table.
     Pricing(PricingMap),
+    /// The panel switched the machine scope (全部/本机/远程). Cheap by design:
+    /// the fold over the rollup is re-run, no ingest, no vendor probes.
+    Scope(MachineScope),
 }
 
 /// Cloned into managed state so commands can poke the engine thread.
@@ -81,6 +84,10 @@ pub struct Shared {
     pub report: Mutex<Option<Report>>,
     pub settings: Mutex<Settings>,
     ingesting: Mutex<()>,
+    /// The machine scope every publish folds with. Read at publish time (never
+    /// cached in the engine), so a switch applies to the very next report even
+    /// if it lands while a slow pass is mid-flight.
+    scope: Mutex<MachineScope>,
 }
 
 impl Shared {
@@ -89,6 +96,7 @@ impl Shared {
             report: Mutex::new(None),
             settings: Mutex::new(settings),
             ingesting: Mutex::new(()),
+            scope: Mutex::new(MachineScope::All),
         }
     }
 
@@ -102,6 +110,18 @@ impl Shared {
 
     pub fn settings(&self) -> Settings {
         self.settings.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// The current scope, falling back to `All` on a poisoned lock: showing
+    /// every machine is the report the user can least be surprised by.
+    pub fn scope(&self) -> MachineScope {
+        self.scope.lock().map(|s| s.clone()).unwrap_or(MachineScope::All)
+    }
+
+    pub fn set_scope(&self, scope: MachineScope) -> Result<(), String> {
+        let mut slot = self.scope.lock().map_err(|_| "scope busy".to_string())?;
+        *slot = scope;
+        Ok(())
     }
 
     pub fn report(&self) -> Option<Report> {
@@ -119,7 +139,7 @@ impl Shared {
 /// here can end the application (quitting is `app.exit`, which kills the
 /// process), so an unexpected exit is always a defect: log it, restart, and back
 /// off so a persistent failure cannot spin the CPU.
-pub fn start(app: AppHandle, rx: Receiver<Msg>, tx: Sender<Msg>) {
+pub fn start<R: Runtime>(app: AppHandle<R>, rx: Receiver<Msg>, tx: Sender<Msg>) {
     std::thread::Builder::new()
         .name("tokenme-engine".into())
         .spawn(move || {
@@ -201,7 +221,7 @@ impl Exit {
     }
 }
 
-fn run(app: AppHandle, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> Exit {
+fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> Exit {
     let adapters: Vec<Box<dyn SourceAdapter>> = usage_adapter_all::builtin_adapters();
     let detected: Vec<DetectedSource> = usage_adapter_all::detect_all();
     let mut pricing = PricingMap::load(&PricingOptions {
@@ -294,6 +314,17 @@ fn run(app: AppHandle, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> Exit {
                 // pass, which then walks those tools' trees instead of restating
                 // a snapshot built from the old prices.
             }
+            Work::Scope(scope) => {
+                // Store first, fold second: the publish reads the scope from
+                // `Shared`, so the report the panel receives already reflects
+                // the choice — and a later pass cannot fold with a stale one.
+                if let Err(e) = app.state::<Shared>().set_scope(scope) {
+                    crate::logging::error(&format!("scope switch dropped: {e}"));
+                    continue;
+                }
+                crate::logging::info("machine scope switched — re-summarizing indexed events");
+                resummarize(&app, &mut index, &adapters, &detected, &pricing);
+            }
             Work::Stopped => return Exit::Disconnected,
         }
     }
@@ -302,6 +333,8 @@ fn run(app: AppHandle, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> Exit {
 enum Work {
     Ingest(&'static str),
     Resummarize,
+    /// The panel picked another machine scope; fold and republish.
+    Scope(MachineScope),
     /// Every sender dropped. The only way this loop can end on its own.
     Stopped,
 }
@@ -328,6 +361,7 @@ fn wait_for_work(
                     // "quit". The wakes stay collected, the table is applied, and
                     // the pass that follows publishes both.
                     Drained::Pricing => Work::Resummarize,
+                    Drained::Scope(scope) => Work::Scope(scope),
                     Drained::Refresh => {
                         QUOTA_PASS_BUST.store(true, Ordering::Relaxed);
                         Work::Ingest("manual refresh")
@@ -342,6 +376,7 @@ fn wait_for_work(
                 QUOTA_PASS_BUST.store(true, Ordering::Relaxed);
                 return Work::Ingest("manual refresh");
             }
+            Ok(Msg::Scope(scope)) => return Work::Scope(scope),
             Err(RecvTimeoutError::Timeout) => return Work::Ingest("cadence timer"),
             Err(RecvTimeoutError::Disconnected) => return Work::Stopped,
         }
@@ -356,6 +391,8 @@ enum Drained {
     Refresh,
     /// A price table landed mid-window.
     Pricing,
+    /// The panel switched machine scope mid-window.
+    Scope(MachineScope),
     /// Every sender dropped.
     Disconnected,
 }
@@ -382,6 +419,7 @@ fn drain_debounce(
                 *pricing = map;
                 return Drained::Pricing;
             }
+            Ok(Msg::Scope(scope)) => return Drained::Scope(scope),
             Ok(Msg::Refresh) => {
                 usage_quota::clear_cache();
                 return Drained::Refresh;
@@ -392,8 +430,8 @@ fn drain_debounce(
     }
 }
 
-fn ingest(
-    app: &AppHandle,
+fn ingest<R: Runtime>(
+    app: &AppHandle<R>,
     index: &mut Option<Index>,
     adapters: &[Box<dyn SourceAdapter>],
     detected: &[DetectedSource],
@@ -572,8 +610,8 @@ fn import_sync_dir(index: &mut Index) -> bool {
 }
 
 /// Re-runs the aggregation over already-indexed events after a price refresh.
-fn resummarize(
-    app: &AppHandle,
+fn resummarize<R: Runtime>(
+    app: &AppHandle<R>,
     index: &mut Option<Index>,
     adapters: &[Box<dyn SourceAdapter>],
     detected: &[DetectedSource],
@@ -587,8 +625,8 @@ fn resummarize(
 }
 
 
-fn publish(
-    app: &AppHandle,
+fn publish<R: Runtime>(
+    app: &AppHandle<R>,
     index: &mut Index,
     sources: &[SourceStatus],
     pricing: &PricingMap,
@@ -600,8 +638,8 @@ fn publish(
 /// `poll_quota = false` publishes without waiting on the vendor probes — the
 /// boot path uses it to put last-known numbers on screen instantly; the probes
 /// land with the post-scan publish a moment later.
-fn publish_with_quota(
-    app: &AppHandle,
+fn publish_with_quota<R: Runtime>(
+    app: &AppHandle<R>,
     index: &mut Index,
     sources: &[SourceStatus],
     pricing: &PricingMap,
@@ -613,6 +651,7 @@ fn publish_with_quota(
     // a busy file-watcher cadence burn 30% CPU for numbers that had not moved.
     let polled_quota = if poll_quota { quota_pass(app, adapters) } else { Vec::new() };
     let captured = now_ms();
+    let scope = app.state::<Shared>().scope();
     let opts = ReportOptions {
         pricing,
         // After the probes, not before them: a vendor CLI that answers late must
@@ -622,11 +661,14 @@ fn publish_with_quota(
         recent_session_limit: 12,
         polled_quota,
         budgets: app.state::<Shared>().settings().budgets,
+        scope: scope.clone(),
     };
     // Every period's numbers fold from the day rollup (~2k rows) plus the
-    // plan's live slices over today — never from re-reading all events.
+    // plan's live slices over today — never from re-reading all events. The
+    // scope travels into the fetch as well: the sessions' top-N is applied in
+    // SQL, so it must already be the top-N of the chosen scope.
     let plan = AggregatePlan::build(opts.now_ms, opts.recent_session_limit);
-    let facts = match index.report_facts(&plan) {
+    let facts = match index.report_facts(&plan, &scope) {
         Ok(facts) => facts,
         Err(e) => {
             crate::logging::error(&format!(
@@ -658,7 +700,7 @@ fn publish_with_quota(
 
 /// One full quota pass: the per-window adapter probes plus the budget views
 /// (host-exit-paused or not), reused for [`QUOTA_PASS_TTL`].
-fn quota_pass(app: &AppHandle, adapters: &[Box<dyn SourceAdapter>]) -> Vec<QuotaView> {
+fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>]) -> Vec<QuotaView> {
     if QUOTA_PASS_BUST.swap(false, Ordering::Relaxed) {
         usage_quota::clear_cache();
         if let Ok(mut slot) = QUOTA_PASS.lock() {

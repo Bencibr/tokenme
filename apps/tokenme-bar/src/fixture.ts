@@ -603,6 +603,17 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     pricing: { ...PRICING, fetched_at_ms: nowMs2 - 42 * 60_000 },
     recent_sessions: sessionsOf(nowMs2),
     all_time: allTime,
+    // The whole panel is folded on one machine scope; a hand-authored report
+    // can only be the 全部 view (the engine owns re-folding).
+    scope: { kind: "all" },
+    // Today's tokens per machine; they sum to the day window's total, which is
+    // the identity the switcher promises (全部 = 各机器之和). The remote origins
+    // match `syncs` below — one fresh, one past the amber line.
+    machines: [
+      { origin: "", today_tokens: 7_428_000 },
+      { origin: "build-01", today_tokens: 3_095_000 },
+      { origin: "gpu-02", today_tokens: 1_857_000 },
+    ],
     // Two machines mid-sync: the badge shows the newest; the older origin only
     // surfaces in the tooltip. `?sync=30` pins the newest import 30h old to
     // drive the stale state.

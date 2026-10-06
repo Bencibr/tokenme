@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use usage_core::pricing::PricingOptions;
-use usage_core::{PricingMap, PricingMeta, Report};
+use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
@@ -333,6 +333,28 @@ pub async fn set_refresh_secs(app: AppHandle, secs: u64) -> Result<(), String> {
     }
     if let Some(channel) = app.try_state::<EngineChannel>() {
         let _ = channel.0.send(Msg::Refresh);
+    }
+    Ok(())
+}
+
+/// Switches the machine scope the panel folds with. The command returns as
+/// soon as the engine has the message — the new report arrives through the
+/// ordinary `report-updated` event, so the UI never blocks on a refold.
+#[tauri::command]
+pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), String> {
+    // The scope normally comes from a menu built out of the report itself, but
+    // this is a boundary: an origin name that `origin_of` cannot parse back
+    // would silently select nothing, so reject it loudly instead.
+    if let MachineScope::Origin { name } = &scope {
+        if !origin_ok(name) {
+            return Err(format!(
+                "origin {name:?} contains ':', '/' or '\\' or a control character"
+            ));
+        }
+    }
+    app.state::<Shared>().set_scope(scope.clone())?;
+    if let Some(channel) = app.try_state::<EngineChannel>() {
+        let _ = channel.0.send(Msg::Scope(scope));
     }
     Ok(())
 }

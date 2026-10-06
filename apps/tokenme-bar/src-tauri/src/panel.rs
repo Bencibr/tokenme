@@ -12,16 +12,21 @@
 #![allow(deprecated)]
 #![allow(unexpected_cfgs)]
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Rect, Size,
+    AppHandle, Emitter, Manager, PhysicalPosition, Position, Rect, Size,
     WebviewWindow, Window, WindowEvent,
 };
+#[cfg(target_os = "windows")]
+use tauri::PhysicalSize;
 
 use crate::engine::PERIOD_EVENT;
 use crate::tray;
+#[cfg(target_os = "windows")]
 use crate::bubble;
 
 pub const LABEL: &str = "main";

@@ -47,6 +47,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "resources/collector/tokenme-x86_64": "collector/tokenme-x86_64",
+      "resources/collector/tokenme-aarch64": "collector/tokenme-aarch64"
+    },
     "macOS": {
       "minimumSystemVersion": "12.0"
     },

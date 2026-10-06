@@ -9,13 +9,14 @@
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
 use usage_core::{
-    local_day_of, AggregatePlan, CallFact, FactGroup, QuotaFact, QuotaSample, ReportFacts,
-    Result, RollupRow, SessionFact, SessionGroup, TokenCounts, LIVE_HOUR0, LIVE_PREV, LIVE_TODAY,
+    local_day_of, AggregatePlan, CallFact, FactGroup, MachineScope, QuotaFact, QuotaSample,
+    ReportFacts, Result, RollupRow, SessionFact, SessionGroup, TokenCounts, LIVE_HOUR0, LIVE_PREV,
+    LIVE_TODAY,
 };
 
 use crate::{
     call_kind_of, ingest::{local_day_bounds, recompute_day_tx},
-    meter_of, sql_err, Index,
+    meter_of, sql_err, Index, ORIGIN_SQL,
 };
 
 /// Most local days the eager build will walk forward before falling back to a
@@ -55,7 +56,14 @@ impl Index {
     /// Everything [`usage_core::summarize_facts`] needs, in ~2.2k rows instead
     /// of ~390k events. `plan` carries every period boundary, resolved in
     /// chrono by the caller — SQL never derives a local time here.
-    pub fn report_facts(&mut self, plan: &AggregatePlan) -> Result<ReportFacts> {
+    ///
+    /// `scope` must be the same [`MachineScope`] the caller passes to
+    /// [`usage_core::summarize_facts`]: everything except the sessions is
+    /// fetched unscoped and filtered by the fold, but the session list's LIMIT
+    /// cannot be re-applied after the fact — its top-N has to be the top-N
+    /// *within the scope*, or a heavy local machine would starve a remote's
+    /// list empty.
+    pub fn report_facts(&mut self, plan: &AggregatePlan, scope: &MachineScope) -> Result<ReportFacts> {
         let mut facts = ReportFacts::default();
         // Lazy build: only when there is something to build from and nothing to
         // build into. Any other state is already consistent.
@@ -74,7 +82,7 @@ impl Index {
         facts.live = self.fetch_live(plan)?;
         facts.calls = self.fetch_calls(plan)?;
         facts.quotas = self.fetch_quotas(plan.now_ms)?;
-        facts.sessions = self.fetch_sessions(plan.recent_session_limit)?;
+        facts.sessions = self.fetch_sessions(plan.recent_session_limit, scope)?;
         facts.syncs = self.fetch_syncs()?;
         Ok(facts)
     }
@@ -163,7 +171,7 @@ impl Index {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT day, tool, session, project, model, meter, \
+                "SELECT day, origin, tool, session, project, model, meter, \
                         in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts \
                  FROM event_rollup",
             )
@@ -172,23 +180,24 @@ impl Index {
             .query_map([], |r| {
                 Ok(RollupRow {
                     day: r.get(0)?,
-                    tool: r.get(1)?,
-                    session: r.get(2)?,
-                    project: opt_of(r.get(3)?),
-                    model: opt_of(r.get(4)?),
-                    meter: meter_of(&r.get::<_, String>(5)?),
+                    origin: r.get(1)?,
+                    tool: r.get(2)?,
+                    session: r.get(3)?,
+                    project: opt_of(r.get(4)?),
+                    model: opt_of(r.get(5)?),
+                    meter: meter_of(&r.get::<_, String>(6)?),
                     counts: TokenCounts {
-                        input: r.get(6)?,
-                        cache_creation: r.get(7)?,
-                        cache_read: r.get(8)?,
-                        output: r.get(9)?,
-                        reasoning: r.get(10)?,
-                        credits: r.get(11)?,
+                        input: r.get(7)?,
+                        cache_creation: r.get(8)?,
+                        cache_read: r.get(9)?,
+                        output: r.get(10)?,
+                        reasoning: r.get(11)?,
+                        credits: r.get(12)?,
                     },
-                    n: r.get::<_, i64>(12)?.max(0) as u64,
-                    nonzero: r.get::<_, i64>(13)?.max(0) as u64,
-                    min_ts: r.get(14)?,
-                    max_ts: r.get(15)?,
+                    n: r.get::<_, i64>(13)?.max(0) as u64,
+                    nonzero: r.get::<_, i64>(14)?.max(0) as u64,
+                    min_ts: r.get(15)?,
+                    max_ts: r.get(16)?,
                 })
             })
             .map_err(sql_err)?;
@@ -214,10 +223,11 @@ impl Index {
             buckets.iter().map(|(bid, _, _)| format!("({bid}, ?, ?)")).collect::<Vec<_>>().join(", ");
         let sql = format!(
             "WITH b(bid, lo, hi) AS (VALUES {values}) \
-             SELECT b.bid, e.tool, e.session, COALESCE(e.project, ''), COALESCE(e.model, ''), e.meter, \
-                    {GROUP_SUMS} \
+             SELECT b.bid, {ORIGIN_SQL}, e.tool, e.session, COALESCE(e.project, ''), \
+                    COALESCE(e.model, ''), e.meter, {GROUP_SUMS} \
              FROM b JOIN event e ON e.ts_ms >= b.lo AND e.ts_ms < b.hi \
-             GROUP BY b.bid, e.tool, e.session, COALESCE(e.project, ''), COALESCE(e.model, ''), e.meter \
+             GROUP BY b.bid, {ORIGIN_SQL}, e.tool, e.session, \
+                      COALESCE(e.project, ''), COALESCE(e.model, ''), e.meter \
              ORDER BY b.bid"
         );
         let mut flat: Vec<i64> = Vec::with_capacity(buckets.len() * 3);
@@ -230,21 +240,22 @@ impl Index {
             .query_map(params_from_iter(flat.iter()), |r| {
                 Ok(FactGroup {
                     bucket: r.get::<_, i64>(0)?.max(0) as u32,
-                    tool: r.get(1)?,
-                    session: r.get(2)?,
-                    project: opt_of(r.get(3)?),
-                    model: opt_of(r.get(4)?),
-                    meter: meter_of(&r.get::<_, String>(5)?),
+                    origin: r.get(1)?,
+                    tool: r.get(2)?,
+                    session: r.get(3)?,
+                    project: opt_of(r.get(4)?),
+                    model: opt_of(r.get(5)?),
+                    meter: meter_of(&r.get::<_, String>(6)?),
                     counts: TokenCounts {
-                        input: r.get(6)?,
-                        cache_creation: r.get(7)?,
-                        cache_read: r.get(8)?,
-                        output: r.get(9)?,
-                        reasoning: r.get(10)?,
-                        credits: r.get(11)?,
+                        input: r.get(7)?,
+                        cache_creation: r.get(8)?,
+                        cache_read: r.get(9)?,
+                        output: r.get(10)?,
+                        reasoning: r.get(11)?,
+                        credits: r.get(12)?,
                     },
-                    requests: r.get::<_, i64>(12)?.max(0) as u64,
-                    nonzero: r.get::<_, i64>(13)?.max(0) as u64,
+                    requests: r.get::<_, i64>(13)?.max(0) as u64,
+                    nonzero: r.get::<_, i64>(14)?.max(0) as u64,
                 })
             })
             .map_err(sql_err)?;
@@ -259,12 +270,12 @@ impl Index {
         let sql = format!(
             "WITH w(bid, lo, hi) AS (VALUES (0, ?, ?), (1, ?, ?), (2, ?, ?), (3, ?, ?)), \
              firsts AS ({FIRST_CALLS_CTE}) \
-             SELECT w.bid, f.kind, f.name, e.tool, e.session, \
+             SELECT w.bid, f.kind, f.name, {ORIGIN_SQL}, e.tool, e.session, \
                     COALESCE(e.project, ''), COALESCE(e.model, ''), e.meter, {GROUP_SUMS} \
              FROM w \
              JOIN event e ON e.ts_ms >= w.lo AND e.ts_ms < w.hi \
              JOIN firsts f ON f.event_id = e.id \
-             GROUP BY w.bid, f.kind, f.name, e.tool, e.session, \
+             GROUP BY w.bid, f.kind, f.name, {ORIGIN_SQL}, e.tool, e.session, \
                       COALESCE(e.project, ''), COALESCE(e.model, ''), e.meter \
              ORDER BY w.bid"
         );
@@ -280,21 +291,22 @@ impl Index {
                     bucket: r.get::<_, i64>(0)?.max(0) as u32,
                     kind: call_kind_of(&r.get::<_, String>(1)?),
                     name: r.get(2)?,
-                    tool: r.get(3)?,
-                    session: r.get(4)?,
-                    project: opt_of(r.get(5)?),
-                    model: opt_of(r.get(6)?),
-                    meter: meter_of(&r.get::<_, String>(7)?),
+                    origin: r.get(3)?,
+                    tool: r.get(4)?,
+                    session: r.get(5)?,
+                    project: opt_of(r.get(6)?),
+                    model: opt_of(r.get(7)?),
+                    meter: meter_of(&r.get::<_, String>(8)?),
                     counts: TokenCounts {
-                        input: r.get(8)?,
-                        cache_creation: r.get(9)?,
-                        cache_read: r.get(10)?,
-                        output: r.get(11)?,
-                        reasoning: r.get(12)?,
-                        credits: r.get(13)?,
+                        input: r.get(9)?,
+                        cache_creation: r.get(10)?,
+                        cache_read: r.get(11)?,
+                        output: r.get(12)?,
+                        reasoning: r.get(13)?,
+                        credits: r.get(14)?,
                     },
-                    requests: r.get::<_, i64>(14)?.max(0) as u64,
-                    nonzero: r.get::<_, i64>(15)?.max(0) as u64,
+                    requests: r.get::<_, i64>(15)?.max(0) as u64,
+                    nonzero: r.get::<_, i64>(16)?.max(0) as u64,
                 })
             })
             .map_err(sql_err)?;
@@ -340,19 +352,31 @@ impl Index {
     /// (first non-null by id) and model (last non-null by id) resolved from
     /// `event` via the `(tool, session)` index — 20 sessions means a handful of
     /// indexed point lookups, not a scan.
-    fn fetch_sessions(&self, limit: usize) -> Result<Vec<SessionFact>> {
+    ///
+    /// Scope is pushed into the `LIMIT` itself: filtering after the fact would
+    /// let other machines' sessions fill all 20 slots and starve the scoped
+    /// view. `All` keeps the status-quo merge of equal (tool, session) across
+    /// origins; a named scope restricts the same queries by `origin` (rollup)
+    /// or the source prefix (event).
+    fn fetch_sessions(&self, limit: usize, scope: &MachineScope) -> Result<Vec<SessionFact>> {
+        let (origin, all): (&str, bool) = match scope {
+            MachineScope::All => ("", true),
+            MachineScope::Local => ("", false),
+            MachineScope::Origin { name } => (name.as_str(), false),
+        };
         let mut top = self
             .conn
             .prepare(
                 "SELECT tool, session, MIN(min_ts), MAX(max_ts) \
                  FROM event_rollup \
+                 WHERE (?2 = 1 OR origin = ?3) \
                  GROUP BY tool, session \
                  ORDER BY MAX(max_ts) DESC, tool ASC, session ASC \
                  LIMIT ?1",
             )
             .map_err(sql_err)?;
         let heads: Vec<(String, String, i64, i64)> = top
-            .query_map(params![limit.max(1) as i64], |r| {
+            .query_map(params![limit.max(1) as i64, all, origin], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })
             .map_err(sql_err)?
@@ -367,31 +391,33 @@ impl Index {
                         IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
                         IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
                         sum(n) \
-                 FROM event_rollup WHERE tool = ?1 AND session = ?2 \
+                 FROM event_rollup WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR origin = ?4) \
                  GROUP BY model, meter ORDER BY model, meter",
             )
             .map_err(sql_err)?;
         let mut project_stmt = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT project FROM event \
-                 WHERE tool = ?1 AND session = ?2 AND project IS NOT NULL \
+                 WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR ({ORIGIN_SQL}) = ?4) \
+                   AND project IS NOT NULL \
                  ORDER BY id ASC LIMIT 1",
-            )
+            ))
             .map_err(sql_err)?;
         let mut model_stmt = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT model FROM event \
-                 WHERE tool = ?1 AND session = ?2 AND model IS NOT NULL \
+                 WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR ({ORIGIN_SQL}) = ?4) \
+                   AND model IS NOT NULL \
                  ORDER BY id DESC LIMIT 1",
-            )
+            ))
             .map_err(sql_err)?;
 
         let mut out = Vec::with_capacity(heads.len());
         for (tool, session, first_ms, last_ms) in heads {
             let groups_rows = groups_stmt
-                .query_map(params![tool, session], |r| {
+                .query_map(params![tool, session, all, origin], |r| {
                     Ok(SessionGroup {
                         model: opt_of(r.get(0)?),
                         meter: meter_of(&r.get::<_, String>(1)?),
@@ -410,11 +436,11 @@ impl Index {
             let groups =
                 groups_rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?;
             let project: Option<String> = project_stmt
-                .query_row(params![tool, session], |r| r.get(0))
+                .query_row(params![tool, session, all, origin], |r| r.get(0))
                 .optional()
                 .map_err(sql_err)?;
             let model: Option<String> = model_stmt
-                .query_row(params![tool, session], |r| r.get(0))
+                .query_row(params![tool, session, all, origin], |r| r.get(0))
                 .optional()
                 .map_err(sql_err)?;
             out.push(SessionFact {
@@ -446,25 +472,31 @@ fn rollup_one_day(tx: &rusqlite::Transaction<'_>, day: chrono::NaiveDate) -> Res
 /// `all_time` reads that bucket — which is precisely what the event path does
 /// with such rows.
 fn sweep_into_rollup(tx: &rusqlite::Transaction<'_>, up_to: Option<i64>) -> Result<()> {
-    const SWEEP: &str = "\
-INSERT INTO event_rollup(day, tool, session, project, model, meter, \
-    in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
-SELECT '', tool, session, IFNULL(project, ''), IFNULL(model, ''), meter, \
-    IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
-    IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
-    count(*), \
-    sum(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) \
-        + COALESCE(out_tok, 0) + COALESCE(credits, 0) > 0), \
-    min(ts_ms), max(ts_ms) \
-FROM event";
+    // `format!` (not a const): the origin expression must be substituted in.
+    let sweep = format!(
+        "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+            in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+         SELECT '', {ORIGIN_SQL}, tool, session, IFNULL(project, ''), IFNULL(model, ''), meter, \
+            IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
+            IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
+            count(*), \
+            sum(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) \
+                + COALESCE(out_tok, 0) + COALESCE(credits, 0) > 0), \
+            min(ts_ms), max(ts_ms) \
+         FROM event"
+    );
     match up_to {
-        Some(t) => {
-            tx.execute(&format!("{SWEEP} WHERE ts_ms < ?1 GROUP BY tool, session, project, model, meter"),
-                params![t])
-        }
-        None => {
-            tx.execute(&format!("{SWEEP} GROUP BY tool, session, project, model, meter"), [])
-        }
+        Some(t) => tx.execute(
+            &format!(
+                "{sweep} WHERE ts_ms < ?1 \
+                 GROUP BY {ORIGIN_SQL}, tool, session, project, model, meter"
+            ),
+            params![t],
+        ),
+        None => tx.execute(
+            &format!("{sweep} GROUP BY {ORIGIN_SQL}, tool, session, project, model, meter"),
+            [],
+        ),
     }
     .map_err(sql_err)?;
     Ok(())
@@ -798,6 +830,12 @@ mod golden {
             assert_f64(&format!("{p}.total_tokens"), x.total_tokens, y.total_tokens);
             assert_f64(&format!("{p}.cost"), x.cost, y.cost);
         }
+        assert_eq!(a.scope, b.scope, "scope echo");
+        assert_eq!(a.machines.len(), b.machines.len(), "machines {:?} vs {:?}", a.machines, b.machines);
+        for (i, (x, y)) in a.machines.iter().zip(&b.machines).enumerate() {
+            assert_eq!(x.origin, y.origin, "machines[{i}].origin");
+            assert_f64(&format!("machines[{i}].today_tokens"), x.today_tokens, y.today_tokens);
+        }
         assert_summary_eq("all_time", &a.all_time, &b.all_time);
     }
 
@@ -825,12 +863,12 @@ mod golden {
         let oracle = summarize(&idx.all_events().unwrap(), &opts);
 
         let plan = plan();
-        let facts_first = idx.report_facts(&plan).unwrap();
+        let facts_first = idx.report_facts(&plan, &MachineScope::All).unwrap();
         assert!(!facts_first.rebuilt, "the write path maintains the rollup; no rebuild expected");
         let mine = summarize_facts(&facts_first, &opts);
         assert_report_eq(&oracle, &mine);
 
-        let facts_second = idx.report_facts(&plan).unwrap();
+        let facts_second = idx.report_facts(&plan, &MachineScope::All).unwrap();
         assert_eq!(facts_first, facts_second, "a second read must be byte-stable");
         let mine_again = summarize_facts(&facts_second, &opts);
         assert_report_eq(&oracle, &mine_again);
@@ -893,11 +931,11 @@ mod golden {
         let oracle = summarize(&idx.all_events().unwrap(), &opts);
         let plan = plan();
 
-        let facts_first = idx.report_facts(&plan).unwrap();
+        let facts_first = idx.report_facts(&plan, &MachineScope::All).unwrap();
         assert!(facts_first.rebuilt, "an empty rollup must be lazily rebuilt");
         assert_report_eq(&oracle, &summarize_facts(&facts_first, &opts));
 
-        let facts_second = idx.report_facts(&plan).unwrap();
+        let facts_second = idx.report_facts(&plan, &MachineScope::All).unwrap();
         assert!(!facts_second.rebuilt);
         // `rebuilt` is diagnostic: the first read did build, the second rode
         // the result. Parity is about content, which must be byte-stable.
@@ -928,7 +966,7 @@ mod golden {
             ],
         );
 
-        let facts = idx.report_facts(&plan()).unwrap();
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
         assert!(facts.rebuilt);
 
         // No dated rollup row exists for the ancient days; they live in the
@@ -987,10 +1025,10 @@ mod golden {
 
         let opts = golden_opts(&p);
         let oracle = summarize(&idx.all_events().unwrap(), &opts);
-        assert_report_eq(&oracle, &summarize_facts(&idx.report_facts(&plan()).unwrap(), &opts));
+        assert_report_eq(&oracle, &summarize_facts(&idx.report_facts(&plan(), &MachineScope::All).unwrap(), &opts));
         // The purged spend is really gone from the rollup, not just from event.
         assert!(
-            !idx.report_facts(&plan()).unwrap().rollup.iter().any(|r| r.counts.input == 1_000.0 || r.counts.input == 2_000.0),
+            !idx.report_facts(&plan(), &MachineScope::All).unwrap().rollup.iter().any(|r| r.counts.input == 1_000.0 || r.counts.input == 2_000.0),
             "purged tokens must not survive in any rollup group"
         );
     }
@@ -1017,7 +1055,7 @@ mod golden {
         let opts = golden_opts(&p);
         let oracle = summarize(&idx.all_events().unwrap(), &opts);
         assert_eq!(oracle.all_time.requests, 2, "the boundary event survived");
-        assert_report_eq(&oracle, &summarize_facts(&idx.report_facts(&plan()).unwrap(), &opts));
+        assert_report_eq(&oracle, &summarize_facts(&idx.report_facts(&plan(), &MachineScope::All).unwrap(), &opts));
     }
 
     /// `clear` empties the rollup along with everything else; a re-ingest
@@ -1031,7 +1069,7 @@ mod golden {
 
         idx.clear().unwrap();
         assert_eq!(idx.event_count().unwrap(), 0);
-        let facts = idx.report_facts(&plan()).unwrap();
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
         assert!(facts.rollup.is_empty() && facts.live.is_empty() && facts.calls.is_empty());
         assert!(!facts.rebuilt, "an empty index has nothing to rebuild");
 
@@ -1044,7 +1082,7 @@ mod golden {
 
         let opts = golden_opts(&p);
         let oracle = summarize(&idx.all_events().unwrap(), &opts);
-        let facts = idx.report_facts(&plan()).unwrap();
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
         assert!(!facts.rebuilt, "the re-ingest maintained the rollup again");
         assert_report_eq(&oracle, &summarize_facts(&facts, &opts));
     }
@@ -1056,9 +1094,141 @@ mod golden {
         let mut idx = Index::open_in_memory().unwrap();
         let opts = golden_opts(&p);
         let oracle = summarize(&idx.all_events().unwrap(), &opts);
-        let facts = idx.report_facts(&plan()).unwrap();
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
         assert!(facts.rollup.is_empty());
         assert!(!facts.rebuilt);
+        assert_report_eq(&oracle, &summarize_facts(&facts, &opts));
+    }
+
+    /// The scoped fold, against its golden twin: with a second machine's
+    /// bundle merged, `Local` and `Origin` each fold exactly that machine's
+    /// events on both report paths, `machines` still lists every machine under
+    /// every scope (that is what the switcher draws), and the two scoped folds
+    /// partition the unscoped one.
+    #[test]
+    fn scoped_folds_match_the_event_path_oracle() {
+        let p = pricing();
+
+        // A "remote" machine's own index, exported as its bundle. The huge
+        // `days` keeps this deterministic: the export window is cut against
+        // the *wall clock*, and these fixtures are dated 2026-09-30, so the
+        // window must stay wider than any clock this test will ever see.
+        let mut remote = Index::open_in_memory().unwrap();
+        let remote_mock = Mock::new(PathBuf::from("/fixture/remote.jsonl"), batch_one());
+        remote.ingest_adapter(&remote_mock, &DateFilter::default()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = remote
+            .export_sync(&crate::sync::ExportOptions {
+                days: 5_000_000,
+                out_dir: dir.path().to_path_buf(),
+                origin: "ops-box".into(),
+            })
+            .unwrap();
+
+        // This machine: its own fresh batch, plus the merged remote bundle.
+        let mut idx = Index::open_in_memory().unwrap();
+        let mock = Mock::new(PathBuf::from("/fixture/local.jsonl"), batch_two());
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        let rep = idx
+            .import_sync(&crate::sync::ImportOptions { file: bundle.gz_path, dry_run: false })
+            .unwrap();
+        assert!(rep.inserted > 0, "the bundle merged onto the local index");
+
+        let events = idx.all_events().unwrap();
+        assert!(
+            events.iter().any(|e| e.source.starts_with("linux:ops-box:")),
+            "imported rows carry the origin-stamped source"
+        );
+        let facts_all = idx.report_facts(&plan(), &MachineScope::All).unwrap();
+        assert!(!facts_all.rebuilt, "ingest and the merge both maintain the rollup");
+
+        // The sessions' top-N is resolved in SQL, so — exactly like the panel
+        // does on every publish — each scope gets its own `report_facts` call;
+        // everything else in the fold re-filters the same facts object.
+        for scope in [
+            MachineScope::All,
+            MachineScope::Local,
+            MachineScope::Origin { name: "ops-box".into() },
+        ] {
+            let mut opts = golden_opts(&p);
+            opts.scope = scope.clone();
+            let facts = idx.report_facts(&plan(), &scope).unwrap();
+            let oracle = summarize(&events, &opts);
+            assert_report_eq(&oracle, &summarize_facts(&facts, &opts));
+        }
+        let facts = facts_all;
+
+        // The menu material: both machines under a scoped report, local first
+        // ("" sorts first), the remote's today volume real.
+        let mut opts = golden_opts(&p);
+        opts.scope = MachineScope::Local;
+        let local = summarize_facts(&facts, &opts);
+        let names: Vec<&str> = local.machines.iter().map(|m| m.origin.as_str()).collect();
+        assert_eq!(names, vec!["", "ops-box"], "{:?}", local.machines);
+        assert!(local.machines[1].today_tokens > 0.0, "{:?}", local.machines);
+
+        // The scoped folds partition the unscoped one on the day window.
+        let all = summarize_facts(&facts, &golden_opts(&p));
+        let mut opts = golden_opts(&p);
+        opts.scope = MachineScope::Origin { name: "ops-box".into() };
+        let remote_r = summarize_facts(&facts, &opts);
+        assert_f64(
+            "day tokens partition",
+            local.day.summary.total_tokens + remote_r.day.summary.total_tokens,
+            all.day.summary.total_tokens,
+        );
+        assert_f64("day cost partition", local.day.summary.cost + remote_r.day.summary.cost, all.day.summary.cost);
+    }
+
+    /// The upgrade path for the origin column: an index written by the older
+    /// build holds a 6-column-PK `event_rollup` (no origin, and no
+    /// `schema_version` bump either — it is a cache). Opening it again must
+    /// drop that table, not silently keep it under `CREATE TABLE IF NOT
+    /// EXISTS` (which would make every scoped read fail on the missing
+    /// column), and the first read rebuilds the modern shape from `event`.
+    #[test]
+    fn legacy_rollup_is_dropped_on_open_and_rebuilt_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let mut idx = Index::open(&path).unwrap();
+            let mock = Mock::new(PathBuf::from("/fixture/legacy.jsonl"), batch_one());
+            idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+            // Swap in the pre-origin shape, plus one row of legacy junk that
+            // must not survive into the rebuilt table.
+            idx.conn()
+                .execute_batch(
+                    "DROP TABLE event_rollup; \
+                     CREATE TABLE event_rollup(day TEXT NOT NULL, tool TEXT NOT NULL, \
+                        session TEXT NOT NULL, project TEXT NOT NULL, model TEXT NOT NULL, \
+                        meter TEXT NOT NULL, in_tok REAL, cc_tok REAL, cr_tok REAL, \
+                        out_tok REAL, reason_tok REAL, credits REAL, n INTEGER NOT NULL, \
+                        nonzero INTEGER NOT NULL, min_ts INTEGER NOT NULL, max_ts INTEGER NOT NULL, \
+                        PRIMARY KEY(day, tool, session, project, model, meter)); \
+                     INSERT INTO event_rollup VALUES('1999-01-01','junk','s','','','tokens', \
+                        9,0,0,0,0,0,1,1,0,0)",
+                )
+                .unwrap();
+        }
+        let mut idx = Index::open(&path).unwrap();
+        let cols: i64 = idx
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('event_rollup') WHERE name = 'origin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 1, "reopening recreated the table with the origin column");
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
+        assert!(facts.rebuilt, "the emptied rollup rebuilds from the events");
+        assert!(
+            facts.rollup.iter().all(|r| r.day != "1999-01-01"),
+            "the legacy junk row is gone, not carried into the new shape"
+        );
+        let p = pricing();
+        let opts = golden_opts(&p);
+        let oracle = summarize(&idx.all_events().unwrap(), &opts);
         assert_report_eq(&oracle, &summarize_facts(&facts, &opts));
     }
 
@@ -1072,7 +1242,7 @@ mod golden {
         idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
         let opts = golden_opts(&p);
         let oracle = summarize(&idx.all_events().unwrap(), &opts);
-        let facts = idx.report_facts(&plan()).unwrap();
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
         let mine = summarize_facts(&facts, &opts);
         let oracle_bugx = oracle.day.breakdown.mcps.iter().find(|i| i.key == "bugx").expect("oracle has bugx");
         let mine_bugx = mine.day.breakdown.mcps.iter().find(|i| i.key == "bugx").expect("facts have bugx");

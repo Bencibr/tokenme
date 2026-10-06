@@ -49,6 +49,12 @@ pub use watcher::Watcher;
 /// (`workbuddy#<call id>`, tokens + credits). The two key spaces never collide,
 /// so an index that kept both would bill every session twice; a version bump is
 /// what makes the old rows disappear instead of lingering as invisible money.
+///
+/// The `event_rollup.origin` column (machine scope) did NOT bump this: the
+/// rollup is a cache, so its shape change is handled by [`drop_legacy_rollup`]
+/// + the lazy rebuild, and a bump here would cost a full re-ingest of every
+/// source tree — and worse, the `sync:` memos in `meta` survive a wipe and
+/// would make every known bundle skip as "already imported" on the way back.
 const SCHEMA_VERSION: &str = "4";
 
 const SCHEMA: &str = r#"
@@ -107,15 +113,19 @@ CREATE TABLE IF NOT EXISTS file_state(
     events     INTEGER,
     updated_ms INTEGER
 );
--- P1 publish path: one row per local (day, tool, session, project, model,
--- meter) group, maintained in the same transaction as the event inserts, so a
--- report can fold ~2.2k of these instead of ~390k events. `project`/`model`
--- are NOT NULL with `''` standing in for the event table's NULL (a NOT NULL
--- group key keeps the upsert simple); the fold maps `''` back to `None`.
+-- P1 publish path: one row per local (day, origin, tool, session, project,
+-- model, meter) group, maintained in the same transaction as the event
+-- inserts, so a report can fold ~2.2k of these instead of ~390k events.
+-- `project`/`model` are NOT NULL with `''` standing in for the event table's
+-- NULL (a NOT NULL group key keeps the upsert simple); the fold maps `''`
+-- back to `None`. `origin` is the machine the rows came from — `''` for this
+-- machine, the bundle origin for merged imports — derived from the event's
+-- `source` prefix by `ORIGIN_SQL`; the panel's scope filter reads it.
 -- Additive to the frozen `event` schema: if it ever disagrees with the events,
 -- the reads below wipe and rebuild it lazily rather than losing data.
 CREATE TABLE IF NOT EXISTS event_rollup(
     day        TEXT    NOT NULL,
+    origin     TEXT    NOT NULL DEFAULT '',
     tool       TEXT    NOT NULL,
     session    TEXT    NOT NULL,
     project    TEXT    NOT NULL DEFAULT '',
@@ -131,7 +141,7 @@ CREATE TABLE IF NOT EXISTS event_rollup(
     nonzero    INTEGER NOT NULL,
     min_ts     INTEGER NOT NULL,
     max_ts     INTEGER NOT NULL,
-    PRIMARY KEY(day, tool, session, project, model, meter)
+    PRIMARY KEY(day, origin, tool, session, project, model, meter)
 );
 -- Serves the per-session correlated lookups (first project / last model) and
 -- the newest-event probe without a full scan.
@@ -152,6 +162,17 @@ const SELECT_EVENT_COLS: &str = "id, tool, ts_ms, session, project, model, meter
 pub(crate) fn sql_err(e: rusqlite::Error) -> Error {
     Error::Sqlite(e.to_string())
 }
+
+/// The origin of a row's `source`, in SQL. The Rust twin is
+/// [`usage_core::origin_of`]; both must agree. Interpreted: everything a
+/// bundle merge wrote (`linux:<origin>:<their key>` — see `sync.rs`) shadows
+/// under its origin, and everything else is this machine (`''`). A `linux:`
+/// without a second colon was never written by a merge, so it stays local
+/// rather than inventing an origin.
+pub(crate) const ORIGIN_SQL: &str = "\
+CASE WHEN substr(source, 1, 6) = 'linux:' AND instr(substr(source, 7), ':') > 0 \
+     THEN substr(source, 7, instr(substr(source, 7), ':') - 1) \
+     ELSE '' END";
 
 /// Moves a corrupted index and its sidecars aside, keeping them for forensics.
 /// The connection must already be closed.
@@ -199,6 +220,39 @@ fn quarantine(path: &Path) -> bool {
 
 pub(crate) fn now_ms() -> i64 {
     usage_core::report::now_ms()
+}
+
+/// Drops a pre-`origin` `event_rollup` so the new SCHEMA recreates it.
+///
+/// The rollup is a pure cache of `event`, so the migration is a drop, not a
+/// rebuild: the next report read finds it empty, rebuilds from the events on
+/// disk, and no row is lost. Detection is by column shape, not by
+/// `SCHEMA_VERSION` — a version bump would re-ingest every source tree, and
+/// the `sync:file:` memos in `meta` (which a wipe does not clear) would then
+/// make every imported bundle skip as already-known and lose the merged rows
+/// for good.
+fn drop_legacy_rollup(conn: &Connection) -> Result<()> {
+    let table: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'event_rollup')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    if !table {
+        return Ok(());
+    }
+    let has_origin: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('event_rollup') WHERE name = 'origin')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    if !has_origin {
+        conn.execute("DROP TABLE event_rollup", []).map_err(sql_err)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn meter_str(m: Meter) -> &'static str {
@@ -304,6 +358,7 @@ impl Index {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
         )
         .map_err(sql_err)?;
+        drop_legacy_rollup(&conn)?;
         conn.execute_batch(SCHEMA).map_err(sql_err)?;
         let stored: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))

@@ -153,6 +153,133 @@ export interface SyncRecord {
   file: string;
   sha256?: string;
 }
+
+/** Which machines a report's numbers cover. Mirrors Rust `MachineScope`
+    (`{"kind":"all"}` / `{"kind":"local"}` / `{"kind":"origin","name":"ops-box"}`). */
+export type MachineScope = { kind: "all" } | { kind: "local" } | { kind: "origin"; name: string };
+
+/* ── 远程服务器（拉取式采集） --------------------------------------------- */
+/* 与 `src-tauri/src/servers/` 的 serde 输出逐字对应；命令面见 Bridge。 */
+
+/** A classified backend failure (`SshError`): `kind` picks the title, `detail` is the raw text. */
+export interface SshError {
+  kind: string;
+  detail: string;
+}
+
+export type ServerStatus = "ok" | "warn" | "error" | "syncing" | "none";
+
+/** One completed pull attempt, newest last (capped server-side). */
+export interface ServerSyncEvent {
+  at_ms: number;
+  rows: number;
+  took_ms: number;
+  ok: boolean;
+}
+
+/** `ServerView` — the record plus live scheduling facts. Never carries a password. */
+export interface ServerView {
+  id: number;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  fingerprint: string;
+  every_secs: number;
+  days: number;
+  enabled: boolean;
+  status: ServerStatus;
+  last_ok_ms: number | null;
+  last_error: SshError | null;
+  last_rows: number;
+  last_took_ms: number;
+  next_due_ms: number | null;
+  tools: string[];
+  history: ServerSyncEvent[];
+}
+
+/** `AuthReq` (tagged by `kind`). The password lives only in a wizard session. */
+export type ServerAuth =
+  | { kind: "password"; password: string }
+  | { kind: "key"; path: string; passphrase?: string | null }
+  | { kind: "default" };
+
+export interface ServerProbeReq {
+  name: string;
+  host: string;
+  port?: number;
+  user: string;
+  auth: ServerAuth;
+}
+
+export interface ServerProbeOutcome {
+  ok: boolean;
+  /** The wizard session that install must present; null on failure. */
+  session: number | null;
+  fingerprint: string | null;
+  /** What `servers.json` already pins for this host:port. */
+  known_fingerprint: string | null;
+  /** Presented key differs from the pin — the UI must ask for explicit re-confirmation. */
+  mismatch: boolean;
+  arch: string | null;
+  hostname: string | null;
+  error: SshError | null;
+}
+
+/** Mirrors the Rust step keys in order: keygen…merge. */
+export type InstallStepState = "pending" | "active" | "done" | "warn" | "error";
+
+export interface InstallStep {
+  key: string;
+  state: InstallStepState;
+  detail: string | null;
+}
+
+export interface ServerInstallProgress {
+  session: number;
+  steps: InstallStep[];
+  done: boolean;
+  ok: boolean;
+  error: SshError | null;
+}
+
+export interface ServerInstallReq {
+  session: number;
+  every_secs: number;
+  days: number;
+  fingerprint: string;
+}
+
+export interface ServerInstallOutcome {
+  ok: boolean;
+  server: ServerView | null;
+  detected: string[];
+  rows: number;
+  /** The bundle is on disk but the engine had not published its merge yet. */
+  merge_pending: boolean;
+  error: SshError | null;
+}
+
+export interface ServerRemoveOutcome {
+  removed: boolean;
+  /** `true` cleanup ran ok; `false` it was wanted but failed; `null` not requested. */
+  cleaned: boolean | null;
+  cleanup_error: SshError | null;
+}
+
+export interface ServerUpdateReq {
+  id: number;
+  every_secs?: number;
+  days?: number;
+  enabled?: boolean;
+}
+
+/** One machine row of the scope switcher; `origin: ""` is this machine. */
+export interface MachineView {
+  origin: string;
+  today_tokens: number;
+}
+
 export interface Report {
   generated_at_ms: number;
   utc_offset: string;
@@ -170,6 +297,12 @@ export interface Report {
   pricing: PricingMeta;
   recent_sessions: SessionRow[];
   all_time: Summary;
+  /** The scope these numbers were folded under — echoed so a report that
+      arrives after a switch is identifiable. Absent on older snapshots. */
+  scope?: MachineScope;
+  /** Every machine in the index, unscoped: `""` (this machine) first, then
+      origins by name. Absent on older snapshots. */
+  machines?: MachineView[];
   /** Machine-sync imports, newest first. Absent on snapshots taken before
       this field existed (older engines), hence optional. */
   syncs?: SyncRecord[];
@@ -205,6 +338,9 @@ export interface Bridge {
   onReport: (handler: (report: Report) => void) => () => void;
   /** A tray menu entry ("本周"/"今日") asks the panel to focus a period. */
   onTrayPeriod: (handler: (period: PeriodKey) => void) => () => void;
+  /** Switch the whole panel's machine scope; the engine re-folds and the next
+   *  published report echoes it in `Report.scope`. */
+  setReportScope: (scope: MachineScope) => Promise<void>;
   /** `tool id → data:image/png;base64,…` for the tools that ship a macOS app. */
   toolIcons: () => Promise<Record<string, string>>;
   /** The saved drag order of the quota section (empty lists ⇒ report order). */
@@ -235,6 +371,19 @@ export interface Bridge {
   openExternal: (url: string) => Promise<void>;
   /** Reveal the diagnostic log directory in the file manager. */
   openLogDir: () => Promise<void>;
+  /** Configured remote servers with live scheduling facts (empty most of the time). */
+  servers: () => Promise<ServerView[]>;
+  /** The dedicated key pair's public half; generates on first call. */
+  serverPublicKey: () => Promise<{ path: string; line: string }>;
+  serverProbe: (req: ServerProbeReq) => Promise<ServerProbeOutcome>;
+  serverInstall: (req: ServerInstallReq) => Promise<ServerInstallOutcome>;
+  /** Drop a wizard session (zeroizes its password); safe to call twice. */
+  serverAbortSession: (session: number) => Promise<void>;
+  serverSyncNow: (id: number) => Promise<void>;
+  serverUpdate: (req: ServerUpdateReq) => Promise<ServerView[]>;
+  serverRemove: (id: number, cleanupRemote: boolean) => Promise<ServerRemoveOutcome>;
+  onServersUpdated: (handler: (servers: ServerView[]) => void) => () => void;
+  onInstallProgress: (handler: (progress: ServerInstallProgress) => void) => () => void;
 }
 
 /** `system` defers to the OS media query; `light`/`dark` pin the panel. */

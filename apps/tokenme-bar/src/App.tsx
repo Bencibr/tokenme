@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { PageKey, PanelSettings, PeriodKey, Report, TrayMode, TrayState } from "./types";
+import type { MachineScope, PageKey, PanelSettings, PeriodKey, Report, ServerView, TrayMode, TrayState } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
@@ -17,6 +17,7 @@ import { QuotaStrip } from "./components/QuotaStrip";
 import { RankedList } from "./components/RankedList";
 import { Sessions } from "./components/Sessions";
 import { SettingsSheet } from "./components/SettingsSheet";
+import { ServerSheet } from "./components/ServerSheet";
 import { Sources } from "./components/Sources";
 import { IconProvider } from "./components/ToolIcon";
 import { StatusBar } from "./components/StatusBar";
@@ -52,6 +53,16 @@ const [page, setPage] = useState<PageKey>(() => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Remote servers: the list powers the footer icon's dot and the scope menu's
+  // "manual" tags; the sheet itself only borrows it.
+  const [servers, setServers] = useState<ServerView[]>([]);
+  const [serversOpen, setServersOpen] = useState(false);
+  // The sheet's own close guard (a running install must not be dismissed) —
+  // Escape asks through this ref instead of closing the sheet blind.
+  const serverCloseRef = useRef<() => void>(() => {});
+  // The scope dropdown's open state lives here rather than inside the header,
+  // only so Escape can dismiss it before the sheet and the panel itself.
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [showMoney, setShowMoney] = useState(false);
   // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
   // switch without touching persistence.
@@ -123,6 +134,15 @@ const [page, setPage] = useState<PageKey>(() => {
         })
         .catch(() => {});
     readTray();
+    // Remote servers boot once and then ride the event: every install, sync
+    // and edit republishes the whole list, so there is no polling here.
+    void bridge
+      .servers()
+      .then((v) => {
+        if (alive) setServers(v);
+      })
+      .catch(() => {});
+    const unServers = bridge.onServersUpdated((v) => setServers(v));
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
@@ -138,6 +158,7 @@ const [page, setPage] = useState<PageKey>(() => {
       window.clearInterval(updateTick);
       un();
       unPeriod();
+      unServers();
     };
   }, []);
 
@@ -160,6 +181,12 @@ const [page, setPage] = useState<PageKey>(() => {
   const closePanel = useCallback(() => {
     if (inTauri) void getCurrentWindow().hide();
   }, []);
+  // Ask the engine to re-fold; the panel keeps rendering the last report until
+  // the new one arrives, and that report's own `scope` echo is what the UI
+  // labels itself with — numbers and label can never disagree.
+  const switchScope = useCallback((next: MachineScope) => {
+    void bridge.setReportScope(next).catch((e: unknown) => setError(String(e)));
+  }, []);
   // A new page that keeps the old scroll offset lands mid-list.
   useEffect(() => {
     scroll.current?.scrollTo(0, 0);
@@ -170,15 +197,27 @@ const [page, setPage] = useState<PageKey>(() => {
     setTray(await bridge.setTrayMode(next));
   }, [tray?.mode]);
 
-  // Escape dismisses the sheet first, then the panel; focus-loss dismissal is
-  // handled natively so it also works while another app holds keyboard focus.
+  // Escape dismisses the scope menu first, then the sheets in their z-order
+  // (settings above servers), then the panel; the server sheet's own guard
+  // refuses while an install is running. Focus-loss dismissal is handled
+  // natively so it also works while another app holds keyboard focus (hence
+  // the menu can also close on outside-click only inside the webview — hiding
+  // the panel with it open is harmless).
   useEscape(useCallback(() => {
+    if (scopeMenuOpen) {
+      setScopeMenuOpen(false);
+      return;
+    }
     if (settingsOpen) {
       setSettingsOpen(false);
       return;
     }
+    if (serversOpen) {
+      serverCloseRef.current();
+      return;
+    }
     if (inTauri) void getCurrentWindow().hide();
-  }, [settingsOpen]));
+  }, [settingsOpen, scopeMenuOpen, serversOpen]));
 
   const now = useMemo(() => Date.now(), [tick]);
   // QA pin, same family as ?showempty=: pretend the last publish is `?stale=<min>`
@@ -206,6 +245,11 @@ const [page, setPage] = useState<PageKey>(() => {
     return { ago: relativeTime(publishedAt, now), afterSecs: Math.round(staleAfterMs / 1000) };
   }, [report, now, loading, stalePin, staleAfterMs]);
 
+  // The scope the numbers cover, exactly as the report echoes it. The UI never
+  // guesses ahead of a switch: until the engine's re-folded report arrives,
+  // every label keeps describing the numbers actually on screen.
+  const scope = useMemo<MachineScope>(() => report?.scope ?? { kind: "all" }, [report]);
+
   // Machine sync (a Linux collector's bundles merged in by the engine): a
   // broken sync otherwise reads exactly like a quiet collector — the same
   // lesson as the frozen badge. Newest import wins the line; anything past
@@ -217,7 +261,10 @@ const [page, setPage] = useState<PageKey>(() => {
     return Number.isFinite(hours) && hours > 0 ? hours : null;
   }, []);
   const sync = useMemo(() => {
-    const records = [...(report?.syncs ?? [])].sort((a, b) => b.imported_at_ms - a.imported_at_ms);
+    const all = [...(report?.syncs ?? [])].sort((a, b) => b.imported_at_ms - a.imported_at_ms);
+    // The badge says whose numbers these are: under a machine scope it reports
+    // that machine's merge only, and the local scope has no import to report.
+    const records = scope.kind === "origin" ? all.filter((r) => r.origin === scope.name) : scope.kind === "local" ? [] : all;
     if (records.length === 0) return null;
     const importedAt = syncPin === null ? records[0].imported_at_ms : now - syncPin * 3_600_000;
     return {
@@ -235,7 +282,7 @@ const [page, setPage] = useState<PageKey>(() => {
         age: i === 0 ? relativeTime(importedAt, now) : relativeTime(r.imported_at_ms, now),
       })),
     };
-  }, [report, now, syncPin]);
+  }, [report, now, syncPin, scope]);
 
   // The tools page lists every *detected* source, not just the ones that
   // billed this window: a credits-only tool that metered nothing here, or a
@@ -246,20 +293,31 @@ const [page, setPage] = useState<PageKey>(() => {
     if (!report) return [];
     const w = report[period];
     const inWindow = new Set(w.breakdown.tools.map((t) => t.key));
-    const silent = report.sources
-      .filter((s) => s.detected && !inWindow.has(s.id))
-      .map((s) => ({
-        key: s.id,
-        label: s.display,
-        counts: { input: 0, cache_creation: 0, cache_read: 0, output: 0, reasoning: 0, credits: 0 },
-        total_tokens: 0,
-        cost: 0,
-        requests: 0,
-        sessions: 0,
-        priced: true,
-      }));
+    // Under an origin scope the tail would lie: the window lists only that
+    // machine's tools, so every local-only tool would read as "zero sessions"
+    // when the scope simply excludes it. The window's own rows never filter.
+    const silent =
+      scope.kind === "origin"
+        ? []
+        : report.sources
+            .filter((s) => s.detected && !inWindow.has(s.id))
+            .map((s) => ({
+              key: s.id,
+              label: s.display,
+              counts: { input: 0, cache_creation: 0, cache_read: 0, output: 0, reasoning: 0, credits: 0 },
+              total_tokens: 0,
+              cost: 0,
+              requests: 0,
+              sessions: 0,
+              priced: true,
+            }));
     return [...w.breakdown.tools, ...silent].filter((t) => showEmptyTools || t.sessions > 0);
-  }, [report, period, showEmptyTools]);
+  }, [report, period, showEmptyTools, scope]);
+
+  // The scope menu's "manual import" tags: everything not server-backed. With
+  // no servers configured the set stays empty and the menu shows no tags.
+  // Hooks rule: above the boot screen's early return, like `tools`.
+  const serverOrigins = useMemo(() => new Set(servers.map((s) => s.name)), [servers]);
 
   if (!report) {
     // "indexing" is the backend sentinel for "first scan still running"; the
@@ -295,6 +353,12 @@ const [page, setPage] = useState<PageKey>(() => {
           onClose={isWindows ? closePanel : undefined}
           frozen={frozen}
           sync={sync}
+          scope={scope}
+          onScope={switchScope}
+          scopeMenuOpen={scopeMenuOpen}
+          onScopeMenuOpen={setScopeMenuOpen}
+          serverOrigins={serverOrigins}
+          now={now}
         />
 
         <main className="scroll" tabIndex={-1} ref={scroll}>
@@ -306,7 +370,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "overview" ? (
                 <>
                   <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} period={period} />
-                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
@@ -333,6 +397,8 @@ const [page, setPage] = useState<PageKey>(() => {
           loading={loading}
           onRefresh={() => void refresh()}
           onOpenSettings={() => setSettingsOpen(true)}
+          onOpenServers={() => setServersOpen(true)}
+          servers={servers}
           tray={inTauri ? { mode: tray?.mode ?? "tray_tokens", onCycle: () => void cycleTrayMode() } : null}
           update={update}
         />
@@ -342,6 +408,15 @@ const [page, setPage] = useState<PageKey>(() => {
             onClose={() => setSettingsOpen(false)}
             onEmptyTools={setShowEmptyTools}
             onRefreshSecs={setRefreshSecs}
+          />
+        ) : null}
+
+        {serversOpen ? (
+          <ServerSheet
+            servers={servers}
+            onServers={setServers}
+            onClose={() => setServersOpen(false)}
+            closeRef={serverCloseRef}
           />
         ) : null}
       </div>

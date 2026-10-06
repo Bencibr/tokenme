@@ -170,7 +170,7 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs
 
 Only counts get indexed, never content — your code and prompts are not stored. What lands in the index is each request's token counts, model name, and project path. Scanning is read-only throughout; no telemetry, no third-party proxies. The index lives in your system data directory (`~/Library/Application Support/tokenme/` on macOS), and each tool's log paths are listed in the [user guide](docs/USER_GUIDE.md).
 
-Machines can sync their indexes to each other — a file-based `tokenme export` / `tokenme import` over a channel you own (ssh/scp, Syncthing), no accounts and no cloud. Every merge is sha256- and manifest-validated before a single row lands, in one all-or-nothing transaction, and bundles are written `0600` on unix.
+Machines can sync their indexes to each other — a file-based `tokenme export` / `tokenme import` over a channel you own (ssh/scp, Syncthing), no accounts and no cloud. Every merge is sha256- and manifest-validated before a single row lands, in one all-or-nothing transaction, and bundles are written `0600` on unix. The panel's footer server button can also provision that channel end to end: an SSH wizard takes the address and one password (or a key file), installs a dedicated key plus the static collector on the remote host, and pulls its bundle on a schedule — the password is never stored. See the [user guide](docs/USER_GUIDE.md) §4.
 
 ## Community
 

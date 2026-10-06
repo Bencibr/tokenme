@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import type { PageKey, PeriodKey, Report } from "../types";
+import type { MachineScope, PageKey, PeriodKey, Report } from "../types";
 import {
   PERIOD_LABEL,
   PERIOD_PREV,
@@ -17,6 +17,7 @@ import { useTweenNumber } from "../lib/hooks";
 import { useMoney } from "../lib/display";
 import { t } from "../lib/i18n";
 import { IconArrowDown, IconArrowUp, IconClose, IconFlat, IconRefresh, IconWarn } from "./Icons";
+import { ScopeDropdown } from "./ScopeDropdown";
 
 const ORDER: PeriodKey[] = ["day", "week", "month", "year"];
 
@@ -46,6 +47,18 @@ interface Props {
     stale: boolean;
     rows: { origin: string; file: string; rows: number; window: string; age: string }[];
   } | null;
+  /** The scope the current report was folded under (its echoed value). */
+  scope: MachineScope;
+  onScope: (scope: MachineScope) => void;
+  /** The scope menu's open state lives in App so Escape can order
+   *  menu → settings sheet → panel. */
+  scopeMenuOpen: boolean;
+  onScopeMenuOpen: (open: boolean) => void;
+  /** Origins backed by a configured server. The scope menu tags every other
+   *  imported origin as a manual export/import. Empty = no tags at all. */
+  serverOrigins?: Set<string>;
+  /** The shared 30 s tick, so the menu's sync ages stay honest. */
+  now: number;
 }
 
 function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
@@ -74,7 +87,7 @@ function syncTip(sync: NonNullable<Props["sync"]>): string {
   return lines.join("\n");
 }
 
-export function Header({ report, period, onPeriod, page, onPage, onClose, frozen, sync }: Props) {
+export function Header({ report, period, onPeriod, page, onPage, onClose, frozen, sync, scope, onScope, scopeMenuOpen, onScopeMenuOpen, serverOrigins, now }: Props) {
   const showMoney = useMoney();
   const win = report[period];
   const { summary } = win;
@@ -210,27 +223,41 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, frozen
           </>
         ) : null}
       </div>
-      <div className="page-tabs" role="tablist" aria-label={t("page.overview")}>
-        {PAGES.map((p, i) => (
-          <button
-            key={p.key}
-            type="button"
-            role="tab"
-            className="page-tab"
-            aria-selected={page === p.key}
-            tabIndex={page === p.key ? 0 : -1}
-            title={p.hint()}
-            onClick={() => onPage(p.key)}
-            onKeyDown={(e) => {
-              const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
-              if (!d) return;
-              e.preventDefault();
-              onPage(PAGES[(i + d + PAGES.length) % PAGES.length].key);
-            }}
-          >
-            {p.label()}
-          </button>
-        ))}
+      {/* The scope dropdown shares the tabs' line and hugs the far right; with
+          no imported origins it renders nothing and the row is unchanged. */}
+      <div className="tabs-row">
+        <div className="page-tabs" role="tablist" aria-label={t("page.overview")}>
+          {PAGES.map((p, i) => (
+            <button
+              key={p.key}
+              type="button"
+              role="tab"
+              className="page-tab"
+              aria-selected={page === p.key}
+              tabIndex={page === p.key ? 0 : -1}
+              title={p.hint()}
+              onClick={() => onPage(p.key)}
+              onKeyDown={(e) => {
+                const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+                if (!d) return;
+                e.preventDefault();
+                onPage(PAGES[(i + d + PAGES.length) % PAGES.length].key);
+              }}
+            >
+              {p.label()}
+            </button>
+          ))}
+        </div>
+        <ScopeDropdown
+          scope={scope}
+          onScope={onScope}
+          machines={report.machines ?? []}
+          syncs={report.syncs}
+          now={now}
+          open={scopeMenuOpen}
+          onOpen={onScopeMenuOpen}
+          serverOrigins={serverOrigins}
+        />
       </div>
     </header>
   );

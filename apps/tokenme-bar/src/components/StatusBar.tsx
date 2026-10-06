@@ -1,9 +1,9 @@
-import type { PricingMeta, TrayMode } from "../types";
+import type { PricingMeta, ServerStatus, ServerView, TrayMode } from "../types";
 import { bridge } from "../lib/bridge";
 import { TRAY_MODE_LABEL, count } from "../lib/format";
 import { t } from "../lib/i18n";
 import type { UpdateInfo } from "../lib/update";
-import { IconRefresh, IconSettings, IconWarn } from "./Icons";
+import { IconRefresh, IconServer, IconSettings, IconWarn } from "./Icons";
 
 const SOURCE_KEY: Record<PricingMeta["source"], Parameters<typeof t>[0] | "models_dev"> = {
   models_dev: "models_dev",
@@ -13,6 +13,14 @@ const SOURCE_KEY: Record<PricingMeta["source"], Parameters<typeof t>[0] | "model
 };
 const sourceLabel = (k: PricingMeta["source"]): string => (SOURCE_KEY[k] === "models_dev" ? "models.dev" : t(SOURCE_KEY[k]));
 
+/** One dot for the whole fleet: the most actionable state wins. */
+function aggServerStatus(servers: ServerView[]): ServerStatus {
+  for (const s of ["syncing", "error", "warn", "ok"] as const) {
+    if (servers.some((v) => v.status === s)) return s;
+  }
+  return "none";
+}
+
 /** Persistent status line: where the prices came from, how much is indexed, refresh. */
 export function StatusBar({
   pricing,
@@ -20,6 +28,8 @@ export function StatusBar({
   loading,
   onRefresh,
   onOpenSettings,
+  onOpenServers,
+  servers,
   tray,
   update,
 }: {
@@ -28,6 +38,9 @@ export function StatusBar({
   loading: boolean;
   onRefresh: () => void;
   onOpenSettings: () => void;
+  onOpenServers: () => void;
+  /** The fleet behind the server icon; the dot aggregates one state for all. */
+  servers: ServerView[];
   /** Present only inside Tauri: a browser has no menu-bar title to configure. */
   tray?: { mode: TrayMode; onCycle: () => void } | null;
   /** A newer release answered the manifest; the chip opens its download page. */
@@ -67,6 +80,17 @@ export function StatusBar({
             {TRAY_MODE_LABEL[tray.mode]}
           </button>
         ) : null}
+        <button
+          type="button"
+          className="icon-btn"
+          data-status={aggServerStatus(servers)}
+          onClick={onOpenServers}
+          title={servers.length ? t("srv.title.count", { n: servers.length }) : t("srv.title")}
+          aria-label={t("srv.title")}
+        >
+          <IconServer size={15} />
+          <span className="srv-dot" aria-hidden="true" />
+        </button>
         <button type="button" className="settings-btn" onClick={onOpenSettings} title={t("status.settings")} aria-label={t("status.settings")}>
           <IconSettings size={15} />
         </button>

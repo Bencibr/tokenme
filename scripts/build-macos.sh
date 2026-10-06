@@ -60,6 +60,13 @@ else
 fi
 
 t=$SECONDS
+# The panel bundles the two static linux collectors it uploads to servers;
+# stage them when missing so a fresh checkout builds a working app unassisted.
+if [[ ! -x "$APP/src-tauri/resources/collector/tokenme-x86_64" \
+   || ! -x "$APP/src-tauri/resources/collector/tokenme-aarch64" ]]; then
+  echo "==> collector resources missing; staging them"
+  ./scripts/bundle-collector.sh
+fi
 (cd "$APP" && pnpm tauri build)
 echo "==> tauri build: $((SECONDS - t))s"
 

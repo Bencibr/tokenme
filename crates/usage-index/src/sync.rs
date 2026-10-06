@@ -900,6 +900,7 @@ impl Index {
 mod tests {
     use super::*;
     use crate::Index;
+    use usage_core::MachineScope;
 
     fn ts(hours_ago: i64) -> i64 {
         now_ms() - hours_ago * 3_600_000
@@ -1253,7 +1254,7 @@ mod tests {
             .unwrap();
 
         let plan = usage_core::AggregatePlan::build(usage_core::report::now_ms(), 5);
-        let facts = tgt.report_facts(&plan).unwrap();
+        let facts = tgt.report_facts(&plan, &MachineScope::All).unwrap();
         assert_eq!(facts.syncs.len(), 1, "{:?}", facts.syncs);
         let rec = &facts.syncs[0];
         assert_eq!(rec.origin, "linux-origin-1");

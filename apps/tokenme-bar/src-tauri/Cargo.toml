@@ -16,6 +16,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 ureq = "3"
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "time", "net", "sync"] }
 
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
@@ -28,6 +29,11 @@ usage-adapter-all = { path = "../../../crates/adapters/all" }
 usage-adapter-dsh = { path = "../../../crates/adapters/dsh" }
 usage-adapter-codex = { path = "../../../crates/adapters/codex" }
 usage-quota = { path = "../../../crates/usage-quota" }
+russh = "0.64"
+russh-sftp = "3.0"
+zeroize = "1"
+rand = "0.10"
+sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
@@ -37,6 +43,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+# The `test` feature brings `tauri::test` (mock app runtime) for the live
+# server-pull E2E (src/servers/e2e.rs); production builds are unaffected.
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 
 [profile.release]
 # thin LTO + parallel codegen compiles several times faster than the old

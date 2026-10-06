@@ -5,6 +5,7 @@ mod logging;
 mod engine;
 mod scan_log;
 mod panel;
+mod servers;
 mod settings;
 mod tray;
 mod updater;
@@ -32,6 +33,7 @@ pub fn run() {
         .plugin(tauri_plugin_positioner::init())
         .manage(EngineChannel(tx))
         .manage(engine::Shared::new(Settings::load()))
+        .manage(servers::state())
         .invoke_handler(tauri::generate_handler![
             commands::get_report,
             commands::get_tray_state,
@@ -47,6 +49,15 @@ pub fn run() {
             commands::set_theme,
             commands::set_show_money,
             commands::set_show_empty_tools,
+            commands::set_report_scope,
+            servers::commands::get_servers,
+            servers::commands::server_public_key,
+            servers::commands::server_probe,
+            servers::commands::server_install,
+            servers::commands::server_abort_session,
+            servers::commands::server_sync_now,
+            servers::commands::server_update,
+            servers::commands::server_remove,
             updater::check_update,
             updater::download_update,
             updater::install_update,
@@ -77,6 +88,10 @@ pub fn run() {
             panel::configure(&handle);
             bubble::configure(&handle)?;
             engine_start(handle.clone(), rx);
+            servers::hub::start(
+                handle.clone(),
+                handle.state::<std::sync::Arc<servers::ServersState>>().inner().clone(),
+            );
             tray::reconcile_autostart(&handle);
             // Screenshots and manual QA need the panel up without a tray click.
             if std::env::var_os("TOKENME_SHOW_PANEL").is_some() {
