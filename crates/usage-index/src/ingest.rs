@@ -185,6 +185,10 @@ pub struct IngestReport {
     pub files_changed: usize,
     pub new_events: u64,
     pub deduped: u64,
+    /// Rows whose money was unchanged but whose `project`/`model` were re-derived
+    /// differently since — labels converge to the freshest reading of the source,
+    /// so an adapter that learns to name a workspace repairs its own history.
+    pub relabeled: u64,
     pub purged: u64,
     pub total_events: u64,
     pub took_ms: i64,
@@ -199,6 +203,7 @@ pub(crate) struct Acc {
     files_changed: usize,
     new_events: u64,
     deduped: u64,
+    relabeled: u64,
     purged: u64,
     errors: Vec<String>,
 }
@@ -315,6 +320,7 @@ fn pass<'a>(
         files_changed: acc.files_changed,
         new_events: acc.new_events,
         deduped: acc.deduped,
+        relabeled: acc.relabeled,
         purged: acc.purged,
         total_events: per_tool.values().sum(),
         took_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
@@ -595,7 +601,8 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
         let mut ins_event = tx.prepare(INSERT_EVENT).map_err(sql_err)?;
         let mut sel_existing = tx
             .prepare(
-                "SELECT id, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, ts_ms \
+                "SELECT id, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, ts_ms, \
+                        IFNULL(project, ''), IFNULL(model, '') \
                  FROM event WHERE dedupe_key = ?1",
             )
             .map_err(sql_err)?;
@@ -610,6 +617,11 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
             .map_err(sql_err)?;
         let mut ins_call =
             tx.prepare("INSERT INTO call(event_id, kind, name) VALUES(?1,?2,?3)").map_err(sql_err)?;
+        // Labels only. Money never moves backwards, so this is the one write a row
+        // with an unchanged total can still get.
+        let mut up_label = tx
+            .prepare("UPDATE event SET project = ?1, model = ?2 WHERE id = ?3")
+            .map_err(sql_err)?;
         let mut ins_quota = tx
             .prepare(
                 "INSERT OR REPLACE INTO quota(event_id, used_percent, window_minutes, resets_at_ms, label) \
@@ -619,9 +631,10 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
         // Prepared once per persist, not once per event: on a first ingest of a
         // big file this statement runs as often as INSERT_EVENT.
         let mut up_rollup = tx.prepare(ROLLUP_UPSERT).map_err(sql_err)?;
+        let mut relabeled_days: Vec<i64> = Vec::new();
         for ev in &events {
             let c = &ev.counts;
-            let existing: Option<(i64, f64, f64, f64, f64, f64, f64, i64)> =
+            let existing: Option<(i64, f64, f64, f64, f64, f64, f64, i64, String, String)> =
                 if let Some(dk) = ev.dedupe_key.as_deref() {
                     sel_existing
                         .query_row(params![dk], |r| {
@@ -634,6 +647,8 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                                 r.get(5)?,
                                 r.get(6)?,
                                 r.get(7)?,
+                                r.get(8)?,
+                                r.get(9)?,
                             ))
                         })
                         .optional()
@@ -642,7 +657,7 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                     None
                 };
 
-            if let Some((old_id, old_in, old_cc, old_cr, old_out, old_reason, old_credits, old_ts)) = existing {
+            if let Some((old_id, old_in, old_cc, old_cr, old_out, old_reason, old_credits, old_ts, old_project, old_model)) = existing {
                 let old_total = old_in + old_cc + old_cr + old_out + old_credits;
                 let new_total = c.total();
                 if new_total > old_total {
@@ -698,7 +713,23 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                         recompute_days_tx(&tx, &[old_ts, ev.ts_ms])?;
                     }
                 } else {
-                    acc.deduped += 1;
+                    // Same money, different label: an adapter that learns to name
+                    // a workspace — Cline's desktop sub-agents keep their meta in
+                    // a sibling dir, or in none at all — must not leave the rows
+                    // it already wrote unattributed forever. Totals stay exactly
+                    // as they were; only `project`/`model` move, and the rollup
+                    // (keyed by both) is rebuilt from `event` once per pass.
+                    let project = ev.project.as_deref().unwrap_or("");
+                    let model = ev.model.as_deref().unwrap_or("");
+                    if new_total == old_total && (project != old_project || model != old_model) {
+                        up_label
+                            .execute(params![ev.project, ev.model, old_id])
+                            .map_err(sql_err)?;
+                        acc.relabeled += 1;
+                        relabeled_days.push(old_ts);
+                    } else {
+                        acc.deduped += 1;
+                    }
                 }
                 continue;
             }
@@ -766,6 +797,12 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                     ev.ts_ms,
                 ])
                 .map_err(sql_err)?;
+        }
+        if !relabeled_days.is_empty() {
+            // One rebuild per affected day, not per row: relabelling a session's
+            // whole transcript would otherwise recompute the same day dozens of
+            // times inside one transaction.
+            recompute_days_tx(&tx, &relabeled_days)?;
         }
     }
     // The cursor only becomes durable once the events it covers are durable, so

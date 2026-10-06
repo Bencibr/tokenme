@@ -346,3 +346,50 @@ fn cumulative_dedupe_replaces_with_greater_total_and_updates_rollup() {
     assert_eq!(ev3.counts.output, 60.0);
 }
 
+/// Cline's desktop build writes a sub-agent's transcript before its meta exists
+/// at all, so the first read bills the call with no project and the second read
+/// — after the meta landed — knows the workspace. The money must not move; the
+/// label must.
+#[test]
+fn a_better_label_repairs_the_row_and_its_rollup_bucket_without_moving_the_money() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("label.jsonl");
+    std::fs::write(&file, b"{\"id\":\"k1\",\"ts\":1789172800000,\"session\":\"s1\",\"in\":100,\"out\":20}\n").unwrap();
+    let adapter = Mock { ignore_cursor: true, ..Mock::new("mocka", dir.path().to_path_buf()) };
+    let (mut idx, first) = ingest(&adapter, DateFilter::default());
+    assert_eq!(first.new_events, 1);
+    assert_eq!(idx.all_events().unwrap()[0].project, None, "the first read could not name the workspace");
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::fs::write(
+        &file,
+        b"{\"id\":\"k1\",\"ts\":1789172800000,\"session\":\"s1\",\"project\":\"AutoRSA\",\"model\":\"deepseek\",\"in\":100,\"out\":20}\n",
+    )
+    .unwrap();
+    let second = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(second.relabeled, 1, "same money, better label: the row is repaired, not swallowed");
+    assert_eq!(second.deduped, 0);
+    assert_eq!(second.new_events, 0, "one call stays one row");
+    let ev = &idx.all_events().unwrap()[0];
+    assert_eq!(ev.project.as_deref(), Some("AutoRSA"));
+    assert_eq!(ev.counts.input, 100.0, "money never moves sideways either");
+
+    let mut rows: Vec<(String, f64, i64)> = idx
+        .conn()
+        .prepare("SELECT project, in_tok, n FROM event_rollup WHERE tool = 'mocka'")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        rows,
+        vec![("AutoRSA".to_string(), 100.0, 1)],
+        "the rollup followed the label instead of leaving the old bucket holding the tokens"
+    );
+
+    let third = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(third.relabeled, 0, "a steady-state pass has nothing to repair");
+}
+
