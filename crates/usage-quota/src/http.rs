@@ -36,7 +36,19 @@ pub fn post_form_any_status(
     headers: &[(&str, &str)],
     form: &[(&str, &str)],
 ) -> Option<(u16, Value)> {
-    let agent = ureq::AgentBuilder::new().timeout_connect(CONNECT).timeout_read(READ).build();
+    post_form_any_status_read(url, headers, form, READ)
+}
+
+/// Same form POST with a caller-chosen read timeout: a token-refresh endpoint
+/// can sit well past the 6 s probe budget, and a half-timeout refresh is
+/// worse than none (the caller would give up mid-exchange).
+pub fn post_form_any_status_read(
+    url: &str,
+    headers: &[(&str, &str)],
+    form: &[(&str, &str)],
+    read: std::time::Duration,
+) -> Option<(u16, Value)> {
+    let agent = ureq::AgentBuilder::new().timeout_connect(CONNECT).timeout_read(read).build();
     let mut req = agent.post(url);
     for (name, value) in headers {
         req = req.set(name, value);

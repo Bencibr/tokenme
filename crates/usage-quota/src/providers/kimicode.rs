@@ -76,9 +76,21 @@ fn live() -> Option<Vec<QuotaSample>> {
 }
 
 /// The signed-in CLI's own windows: the finer answer, so it wins whenever it has
-/// one. `None` means no credential, or every base declined.
+/// one. An expired access token (the vendor's 15-minute lifetime) is refreshed
+/// once — the vendor's own refresh contract rotates the refresh_token and the
+/// rotation is persisted before the usages retry — and a dead login answers
+/// nothing.
 fn via_cli() -> Option<Vec<QuotaSample>> {
     let token = access_token()?;
+    if let Some(samples) = usages_with(&token) {
+        return Some(samples);
+    }
+    let fresh = refresh_credentials()?;
+    usages_with(&fresh)
+}
+
+/// `/usages` across the base ladder. `None` means every base declined.
+fn usages_with(token: &str) -> Option<Vec<QuotaSample>> {
     let headers = [
         ("authorization", format!("Bearer {token}")),
         ("accept", "application/json".to_string()),
@@ -96,6 +108,64 @@ fn via_cli() -> Option<Vec<QuotaSample>> {
     None
 }
 
+/// The vendor's own refresh contract (`packages/oauth/src/oauth.ts:239`):
+/// `POST {authHost}/api/oauth/token`, form-encoded
+/// `{client_id, grant_type: "refresh_token", refresh_token}` — and the response
+/// **always carries a rotated `refresh_token`** the client must persist
+/// (`tokenFromResponse` rejects a response without one). The rotation is
+/// written back to the credential file atomically before the usages retry, so
+/// the CLI's next read picks up the fresh pair; a 401/403/invalid_grant means
+/// the login itself is dead — touch nothing.
+const OAUTH_HOST: &str = "https://auth.kimi.com";
+const CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+
+fn refresh_credentials() -> Option<String> {
+    let path = newest_credential_path()?;
+    let mut file = read_json(&path)?;
+    if file.as_object().is_none() {
+        return None;
+    }
+    let refresh_token = file.get("refresh_token").and_then(Value::as_str)?.trim().to_string();
+    if refresh_token.is_empty() {
+        return None;
+    }
+    let form = [
+        ("client_id", CLIENT_ID),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token.as_str()),
+    ];
+    let (_status, body) = match crate::http::post_form_any_status_read(
+        &format!("{OAUTH_HOST}/api/oauth/token"),
+        &[("accept", "application/json")],
+        &form,
+        std::time::Duration::from_secs(20),
+    ) {
+        Some(pair) => pair,
+        None => { eprintln!("[kimi] DBG refresh transport failed"); return None }
+    };
+    if body.get("access_token").and_then(Value::as_str).is_none() {
+        eprintln!("[kimi] DBG refresh rejected: {}", body);
+        return None;
+    }
+    let access = body.get("access_token").and_then(Value::as_str)?.trim().to_string();
+    let rotated = body.get("refresh_token").and_then(Value::as_str)?.trim().to_string();
+    if access.is_empty() || rotated.is_empty() {
+        return None;
+    }
+    let expires_in = body.get("expires_in").and_then(Value::as_i64).unwrap_or(900);
+    file["access_token"] = Value::String(access.clone());
+    file["refresh_token"] = Value::String(rotated);
+    file["expires_in"] = Value::Number(expires_in.into());
+    file["expires_at"] = Value::Number(
+        (chrono::Utc::now().timestamp() + expires_in).into(),
+    );
+    // Atomic write: a crash mid-write must not leave the CLI without a file.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&file).ok()?).ok()?;
+    usage_core::replace_file(&tmp, &path).ok()?;
+    Some(access)
+}
+
 /// The env override pins one base; otherwise CN then global, which is what makes
 /// an account on either side answer without being told which one it is.
 fn bases() -> Vec<String> {
@@ -105,26 +175,27 @@ fn bases() -> Vec<String> {
     }
 }
 
-/// The stored access token, newest expiry first, skipping an empty one. A token
-/// already past `expires_at` is still offered: the server's 401 is the authority
-/// on that, and guessing from a local clock would hide a working session.
-fn access_token() -> Option<String> {
+/// The newest-expiry credential file, skipping empties. A token already past
+/// `expires_at` is still offered: the server's 401 is the authority on that,
+/// and guessing from a local clock would hide a working session.
+fn newest_credential_path() -> Option<PathBuf> {
     let dir = credentials_dir()?;
-    let mut found: Vec<(i64, String)> = Vec::new();
+    let mut found: Vec<(i64, PathBuf)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else { return None };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Some(token) = token_at(&path) {
-            let expires = expiry_at(&path);
-            found.push((expires, token));
-        }
+        found.push((expiry_at(&path), path));
     }
-    // Newest expiry last in the list, so the pick below takes the longest-lived.
     found.sort_by_key(|(expires, _)| *expires);
-    found.into_iter().next_back().map(|(_, token)| token)
+    found.pop().map(|(_, path)| path)
+}
+
+/// The stored access token, newest expiry first, skipping an empty one.
+fn access_token() -> Option<String> {
+    token_at(&newest_credential_path()?)
 }
 
 fn token_at(path: &Path) -> Option<String> {
