@@ -213,6 +213,10 @@
     --heat-2: #215c4d;
     --heat-3: #2b8069;
     --heat-4: #30d9aa;
+    /* today marker: a warm ring against the all-teal scale */
+    --today: #f0b45c;
+    /* light-gray veil: lifting the dimmed panel is what draws the sheet's edge */
+    --scrim: rgba(255, 255, 255, 0.14);
 
     --warn: #e6b35a;
     --warn-soft: rgba(230, 179, 90, 0.16);
@@ -289,7 +293,7 @@
   --cat-15: #5cb8d9;
   --cat-16: #d9a58f;
   --cat-17: #a8c98f;
-  --cat-18: #e08fa8;
+  --cat-18: #8f9ff0;
   --cat-19: #8f9ff0;
   --cat-20: #b09ae0;
   /* trae 的品牌薄荷绿（暗色提亮） */

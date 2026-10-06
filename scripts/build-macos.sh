@@ -37,6 +37,12 @@ t=$SECONDS
 (cd "$APP" && pnpm install --frozen-lockfile --prefer-offline && pnpm build)
 echo "==> frontend: $((SECONDS - t))s"
 
+# theme.css declares the dark palette twice over (the OS media query and the
+# 深色 pin) and drift between them is silent: follow-system once shipped a
+# settings sheet with no mask at all. Sub-second, and it guards a source file
+# the cargo gate below never looks at, so it runs even with --fast.
+python3 scripts/check-theme-parity.py
+
 # The test gate. A workspace test pass recompiles every crate in debug —
 # minutes that a frontend-only iteration pays for nothing. Hash everything
 # under the crates and the app's Rust tree (sources, fixtures, manifests);
