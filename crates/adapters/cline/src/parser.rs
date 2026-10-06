@@ -37,12 +37,16 @@
 //! it verbatim instead of reconstructing a context-occupancy delta.
 //!
 //! ## Session meta is label-only
-//! `<ts>_<id>.json` next to the transcript holds `metadata.usage` AND
-//! `metadata.aggregateUsage`, which are two copies of one cumulative
-//! accumulator that already equals the per-message sums (proved by
-//! `emitted_tokens_equal_the_session_accumulator`) — reading either as events
-//! would double the session. It is parsed for `cwd`/`workspace_root` only, and
-//! **no event is ever emitted from that file**.
+//! `<name>.json` next to the transcript holds `metadata.usage` AND
+//! `metadata.aggregateUsage`: cumulative totals that already equal the
+//! per-message sums. With no sub-agents they are one counter written twice
+//! (`emitted_tokens_equal_the_session_accumulator` proves it on the fixture);
+//! once agents join, `usage` stays the orchestrator's and `aggregateUsage`
+//! becomes that transcript plus every agent's — measured 2026-10-06 on a live
+//! session as 83,680,472 vs 92,918,715 input, the difference exactly the ten
+//! agent transcripts. Reading either as events would double the session, so the
+//! file is parsed for `cwd`/`workspace_root` only and **no event is ever emitted
+//! from it**.
 
 use usage_core::{Meter, TokenCounts, UsageEvent};
 
@@ -73,20 +77,6 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// The four numbers exactly as Cline writes them (`inputTokens` still holds
-    /// the cached prefix).
-    #[cfg(test)]
-    pub fn wire_counts(&self) -> TokenCounts {
-        TokenCounts {
-            input: self.wire_input as f64,
-            cache_creation: self.wire_cache_write as f64,
-            cache_read: self.wire_cache_read as f64,
-            output: self.wire_output as f64,
-            reasoning: 0.0,
-            credits: 0.0,
-        }
-    }
-
     /// The same totals through the adapter's stage split — what the events add up
     /// to when no row was dropped for an unparseable `ts`.
     #[cfg(test)]
@@ -305,7 +295,7 @@ mod tests {
             assert_eq!(u["cacheWriteTokens"].as_u64(), Some(stats.wire_cache_write), "{key}");
             assert_eq!(u["outputTokens"].as_u64(), Some(stats.wire_output), "{key}");
         }
-        assert_eq!(meta["metadata"]["usage"], meta["metadata"]["aggregateUsage"], "two copies of one accumulator");
+        assert_eq!(meta["metadata"]["usage"], meta["metadata"]["aggregateUsage"], "one accumulator, written twice, while no sub-agent runs");
         assert_eq!(events.len(), stats.assistant_with_metrics);
     }
 

@@ -1,10 +1,15 @@
 //! Where Cline keeps its transcripts, and how to walk back from a transcript to
-//! the session directory that names it.
+//! the session meta that names its workspace.
 //!
-//! Layout measured here: `~/.cline/data/sessions/<ts>_<id>/` holding
-//! `<ts>_<id>.json` (session meta) and `<ts>_<id>.messages.json` (the transcript).
-//! 10 session dirs exist, only 5 have a transcript, so the pairing must be
-//! tolerant in both directions.
+//! Layout measured here (`~/.cline/data/sessions`, 40 dirs on 2026-10-06): the
+//! CLI writes `<ts>_<id>_cli/`, the older desktop build `<ts>_<id>/`, the current
+//! one `session_<ts>_<id>/`; each holds `<name>.json` (session meta) and
+//! `<name>.messages.json` (the transcript). A desktop sub-agent's transcript is
+//! written *into its parent's* dir as `agent_<uuid>.messages.json`, while its own
+//! meta goes to a sibling `session_…__agent_<uuid>/` dir — and of this machine's
+//! ten agents only four have one; the other six are labelled by their session's
+//! meta, since one session runs in one workspace. Many dirs hold no transcript at
+//! all, so the pairing must be tolerant in both directions.
 
 use std::path::{Path, PathBuf};
 
@@ -58,21 +63,65 @@ pub fn session_id(messages: &Path, payload_session: Option<&str>) -> String {
     messages.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or("cline-session").to_string()
 }
 
-/// Project label from the *sibling session meta* (`cwd`, else `workspace_root`).
+/// Meta files that can name this transcript's workspace, nearest truth first.
 ///
-/// Its `metadata.usage` / `metadata.aggregateUsage` accumulators are never
-/// parsed: they are two copies of one cumulative total that already equals the
-/// per-message sums, so emitting events from them would double every session.
-/// Only the label is taken, and no event ever comes from that file.
+/// The CLI and the older desktop build write `<stem>.json` beside the transcript.
+/// The current desktop build writes a sub-agent's meta into a sibling
+/// `<session>__agent_<uuid>/` dir instead, and when even that is missing the
+/// agent still ran in its session's workspace, so the containing session's own
+/// meta labels it. Measured here: 10 agent transcripts, 4 with their own meta,
+/// 6 with only the session's.
+pub fn session_meta_candidates(messages: &Path) -> Vec<PathBuf> {
+    let Some(sibling) = session_meta_path(messages) else {
+        return Vec::new();
+    };
+    let stem = messages
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(MESSAGES_SUFFIX));
+    let (Some(stem), Some(dir)) = (stem, messages.parent()) else {
+        return vec![sibling];
+    };
+    let Some(dir_name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return vec![sibling];
+    };
+    let mut out = vec![sibling];
+    if dir_name != stem {
+        // Only a sub-agent's transcript is named differently from its directory,
+        // and only for one does the desktop layout offer a second and third home.
+        if let Some(root) = dir.parent() {
+            let name = format!("{dir_name}__{stem}");
+            out.push(root.join(&name).join(format!("{name}.json")));
+        }
+        // One session runs in one workspace, so the orchestrator's meta labels it.
+        out.push(dir.join(format!("{dir_name}.json")));
+    }
+    out
+}
+
+/// Project label from the session meta (`cwd`, else `workspace_root`).
+///
+/// The meta's `metadata.usage` / `metadata.aggregateUsage` accumulators are never
+/// parsed: they are cumulative totals that already equal the per-message sums —
+/// `usage` for the orchestrator transcript, `aggregateUsage` for that transcript
+/// plus every sub-agent's — so emitting events from them would double each
+/// session. Only the label is taken, and no event ever comes from a meta file.
 pub fn project_label(messages: &Path) -> Option<String> {
-    let meta_path = session_meta_path(messages)?;
-    let text = std::fs::read_to_string(meta_path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let cwd = ["cwd", "workspace_root", "workspaceRoot"]
-        .iter()
-        .filter_map(|k| value.get(*k).and_then(serde_json::Value::as_str))
-        .find(|s| !s.is_empty())?;
-    Path::new(cwd).file_name().and_then(|n| n.to_str()).map(String::from)
+    for meta in session_meta_candidates(messages) {
+        let Ok(text) = std::fs::read_to_string(meta) else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let Some(cwd) = ["cwd", "workspace_root", "workspaceRoot"]
+            .iter()
+            .filter_map(|k| value.get(*k).and_then(serde_json::Value::as_str))
+            .find(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if let Some(label) = Path::new(cwd).file_name().and_then(|n| n.to_str()) {
+            return Some(label.to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -107,5 +156,41 @@ mod tests {
         assert_eq!(project_label(&msgs), None, "empty cwd is no label; usage stays unread");
         std::fs::write(sess.join("1_ts.json"), b"{oops").unwrap();
         assert_eq!(project_label(&msgs), None);
+    }
+
+    #[test]
+    fn a_desktop_sub_agent_is_labelled_by_its_own_meta_then_the_session_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let sess = root.join("session_1_ts");
+        std::fs::create_dir_all(&sess).unwrap();
+        let msgs = sess.join("agent_aaa.messages.json");
+        std::fs::write(&msgs, b"{\"messages\":[]}").unwrap();
+        assert_eq!(project_label(&msgs), None, "no meta anywhere yet");
+
+        // Six of this machine's ten agents have only the session's own meta.
+        std::fs::write(sess.join("session_1_ts.json"), br#"{"cwd":"/w/AutoRSA"}"#).unwrap();
+        assert_eq!(project_label(&msgs).as_deref(), Some("AutoRSA"), "one session, one workspace");
+
+        // Four carry a desktop agent meta of their own, and that is nearer truth.
+        let agent = root.join("session_1_ts__agent_aaa");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(agent.join("session_1_ts__agent_aaa.json"), br#"{"workspace_root":"/w/elsewhere"}"#).unwrap();
+        assert_eq!(project_label(&msgs).as_deref(), Some("elsewhere"), "the agent's own cwd beats the session's");
+        std::fs::write(agent.join("session_1_ts__agent_aaa.json"), br#"{"cwd":""}"#).unwrap();
+        assert_eq!(project_label(&msgs).as_deref(), Some("AutoRSA"), "an empty cwd is no label, so the chain moves on");
+
+        // The orchestrator's transcript never grows candidates of its own.
+        let parent = sess.join("session_1_ts.messages.json");
+        std::fs::write(&parent, b"{\"messages\":[]}").unwrap();
+        assert_eq!(session_meta_candidates(&parent), vec![sess.join("session_1_ts.json")]);
+        assert_eq!(
+            session_meta_candidates(&msgs),
+            vec![
+                sess.join("agent_aaa.json"),
+                root.join("session_1_ts__agent_aaa").join("session_1_ts__agent_aaa.json"),
+                sess.join("session_1_ts.json"),
+            ]
+        );
     }
 }

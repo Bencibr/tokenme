@@ -429,12 +429,29 @@ def cline():
     Like zcode, the aggregate is compared against the index *minus* the
     quantified deletions, and the per-row identity below proves the survivors.
     The caliber mirrors the adapter exactly: role=assistant, `metrics` present as
-    an object, a parseable `ts`/`timestamp`/`created_at`."""
+    an object, a parseable `ts`/`timestamp`/`created_at`.
+
+    Cline also keeps its own per-session ledger in the sibling `<dir>.json`:
+    `metadata.usage` for the orchestrator transcript and `metadata.aggregateUsage`
+    for that transcript *plus every sub-agent's* — measured 2026-10-06 on the live
+    92.9M-token session `session_1791191498435_ti6bi`, where `aggregateUsage −
+    usage` equalled the ten agent transcripts to the token. Two readers of one
+    transcript can agree by construction; agreeing with the product's own
+    accounting is what proves the *mapping* of the stages, so those accumulators
+    come back as `_vendor`. A session whose files changed while this function read
+    it drops out of that sum (`live=` in the notes) rather than becoming a phantom
+    mismatch."""
     agg = defaultdict(float)
     n = sessions = negative = 0
     keyed = {}
+    # Wire numbers per session dir (`inputTokens` still holds the cached prefix,
+    # exactly as the app's own accumulator counts them), over every row carrying
+    # `metrics` — including one the adapter could not date, because the app billed
+    # that call too.
+    per_dir = defaultdict(lambda: {"gross": 0.0, "cr": 0.0, "cw": 0.0, "out": 0.0, "paths": {}, "files": 0})
     for path in files("~/.cline/data/sessions/*/*.messages.json"):
         try:
+            before = os.stat(path).st_mtime_ns
             records = json.load(open(path, encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
@@ -445,6 +462,9 @@ def cline():
         if not isinstance(records, list):
             continue
         sessions += 1
+        slot = per_dir[os.path.dirname(path)]
+        slot["paths"][path] = before
+        slot["files"] += 1
         session = sid if isinstance(sid, str) and sid else os.path.basename(path)[: -len(".messages.json")]
         for idx, rec in enumerate(records):
             if not isinstance(rec, dict) or rec.get("role") != "assistant":
@@ -456,6 +476,10 @@ def cline():
             cw, out = num(m.get("cacheWriteTokens")), num(m.get("outputTokens"))
             if gross - cr < 0:
                 negative += 1
+            slot["gross"] += gross
+            slot["cr"] += cr
+            slot["cw"] += cw
+            slot["out"] += out
             ts = None
             for k in ("ts", "timestamp", "created_at"):
                 ts = _ts_ms(rec.get(k))
@@ -471,6 +495,66 @@ def cline():
             agg["cc"] += cw
             agg["out"] += out
             n += 1
+    vendor = defaultdict(float)
+    live = lagged = no_ledger = settled = 0
+    worst = (0.0, "")
+    for d, got in sorted(per_dir.items()):
+        name = os.path.basename(d)
+        meta = os.path.join(d, name + ".json")
+        try:
+            doc = json.load(open(meta, encoding="utf-8"))
+            churn = any(os.stat(p).st_mtime_ns != stamp for p, stamp in got["paths"].items())
+            meta_at = os.stat(meta).st_mtime_ns
+        except (OSError, json.JSONDecodeError):
+            no_ledger += 1
+            continue
+        if churn:
+            live += 1
+            continue
+        if meta_at < max(got["paths"].values()):
+            # The ledger predates a transcript it cannot describe: the app writes
+            # the meta after the transcript, so a session that is still running
+            # always looks short here. Measured 2026-10-06 on
+            # `session_1791191498435_ti6bi`: 7.4M of tokens landed in the seven
+            # minutes between its meta and its transcript.
+            lagged += 1
+            continue
+        md = doc.get("metadata") if isinstance(doc, dict) else None
+        agg_of = md.get("aggregateUsage") if isinstance(md, dict) else None
+        own = md.get("usage") if isinstance(md, dict) else None
+        acc = agg_of if isinstance(agg_of, dict) else own
+        if not isinstance(acc, dict):
+            no_ledger += 1
+            continue
+        if got["files"] > 1 and not isinstance(agg_of, dict):
+            # Sub-agent spend lives in this dir, and a `usage`-only ledger counts
+            # just the orchestrator — comparing them would be unfair, not true.
+            no_ledger += 1
+            continue
+        theirs = {
+            "in": num(acc.get("inputTokens")) - num(acc.get("cacheReadTokens")),
+            "cc": num(acc.get("cacheWriteTokens")),
+            "cr": num(acc.get("cacheReadTokens")),
+            "out": num(acc.get("outputTokens")),
+        }
+        ours = {"in": got["gross"] - got["cr"], "cc": got["cw"], "cr": got["cr"], "out": got["out"]}
+        for f in ("in", "cc", "cr", "out"):
+            vendor[f] += theirs[f]
+        settled += 1
+        delta = theirs["in"] - ours["in"]
+        if abs(delta) > abs(worst[0]):
+            worst = (delta, name)
+    note = f"sessions={sessions}, rows where cache>input={negative} (clamped)"
+    if vendor:
+        note += f", vendor ledger over {settled} settled session(s)"
+        if worst[1]:
+            note += f", largest input residue {worst[0]:+,.0f} in {worst[1]}"
+    if live:
+        note += f", live={live} (rewritten while read, excluded)"
+    if lagged:
+        note += f", ledger predates its transcript={lagged} (excluded)"
+    if no_ledger:
+        note += f", no session ledger={no_ledger}"
     return {
         "n": n,
         "in": agg["in"],
@@ -478,7 +562,8 @@ def cline():
         "cr": agg["cr"],
         "out": agg["out"],
         "_keyed": keyed,
-        "notes": f"sessions={sessions}, rows where cache>input={negative} (clamped)",
+        "_vendor": dict(vendor),
+        "notes": note,
     }
 
 
@@ -1310,19 +1395,24 @@ def main():
             failures.extend(id_failures)
             deleted_by_tool[tool] = sums
             identity_notes[tool] = note
-    # MiniMax Code keeps its own tally of these same records. Two readings of one
+    # Sources that keep their own tally of these same records (MiniMax Code's
+    # runtime table, Cline's per-session accumulators). Two readings of one
     # transcript can agree by construction; agreeing with the product's accounting
-    # is the check that the *mapping* of the stages is right.
-    mmx = low.get("minimaxcode", {})
-    if isinstance(mmx.get("_vendor"), dict) and mmx["_vendor"]:
-        for f in ("n", "in", "cc", "cr", "out", "reason"):
-            mine, theirs = mmx.get(f, 0.0), mmx["_vendor"].get(f, 0.0)
+    # is the check that the *mapping* of the stages is right. Only the fields the
+    # vendor actually publishes are compared — a ledger that counts no rows must
+    # not be scored on `n`.
+    for tool in sorted(low):
+        ven = low[tool].get("_vendor")
+        if not isinstance(ven, dict) or not ven:
+            continue
+        for f in ven:
+            mine, theirs = low[tool].get(f, 0.0), ven[f]
             if mine == theirs:
                 continue
             rel = abs(mine - theirs) / max(abs(theirs), 1.0)
             if rel > args.tolerance:
                 failures.append(
-                    f"minimaxcode.{f}: the vendor's own usage table says {theirs:,.0f}, "
+                    f"{tool}.{f}: the vendor's own ledger says {theirs:,.0f}, "
                     f"the transcripts say {mine:,.0f}"
                 )
     print(f"{'tool':<12}{'field':<8}{'independent':>17}{'index':>17}{'delta':>13}  verdict")
