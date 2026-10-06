@@ -100,7 +100,7 @@ export function RankRows({
   );
 }
 
-/** `/Users/me/work/tokenme` → dim the directory, keep the basename at full ink. */
+/** `/Users/dev/work/tokenme` → dim the directory, keep the basename at full ink. */
 function splitPath(label: string): [string, string] {
   const i = label.lastIndexOf("/");
   return i > 0 ? [label.slice(0, i + 1), label.slice(i + 1)] : ["", label];

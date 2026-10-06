@@ -984,15 +984,27 @@ mod tests {
 
     #[test]
     fn credential_fallback_matches_zcode_platform_and_identity_contract() {
-        let home = Path::new(r"C:\Users\me");
+        let home = Path::new(r"C:\Users\dev");
         assert_eq!(
-            credential_fallback_secret("win32", home, "sp"),
-            r"zcode-credential-fallback:win32:C:\Users\me:sp"
+            credential_fallback_secret("win32", home, "dev"),
+            r"zcode-credential-fallback:win32:C:\Users\dev:dev"
         );
         assert_eq!(
-            credential_fallback_secret("darwin", Path::new("/Users/me"), "sp"),
-            "zcode-credential-fallback:darwin:/Users/me:sp"
+            credential_fallback_secret("darwin", Path::new("/Users/dev"), "dev"),
+            "zcode-credential-fallback:darwin:/Users/dev:dev"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_uses_node_compatible_platform_name() {
+        assert_eq!(platform_name(), "darwin");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_uses_node_compatible_platform_name() {
+        assert_eq!(platform_name(), "linux");
     }
 
     #[cfg(windows)]

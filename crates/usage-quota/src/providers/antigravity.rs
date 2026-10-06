@@ -297,8 +297,15 @@ fn listening_ports(pid: u32) -> Vec<u16> {
     else {
         return Vec::new();
     };
+    listen_ports_from_lsof(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The pure half of `listening_ports`, split out so the test drives this
+/// function rather than a copy of its filter chain.
+#[cfg(unix)]
+fn listen_ports_from_lsof(output: &str) -> Vec<u16> {
     let mut ports = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in output.lines() {
         if !line.ends_with("(LISTEN)") {
             continue;
         }
@@ -726,7 +733,7 @@ mod tests {
 
     #[test]
     fn the_cli_server_is_found_without_a_token() {
-        let (desktop, csrf) = classify("/Users/me/.local/bin/agy language-server --port 8080")
+        let (desktop, csrf) = classify("/Users/dev/.local/bin/agy language-server --port 8080")
             .expect("the CLI's server classifies");
         assert!(!desktop);
         assert_eq!(csrf, None, "the CLI needs no CSRF token");
@@ -752,22 +759,21 @@ mod tests {
 
     // -- lsof parsing ------------------------------------------------------
 
+    #[cfg(unix)]
     #[test]
     fn loopback_listen_lines_yield_their_ports_in_order() {
         let lsof = "COMMAND   PID USER   FD   TYPE NODE NAME\n\
-                    language_ 123 sp    7u  IPv4 TCP 127.0.0.1:57939 (LISTEN)\n\
-                    language_ 123 sp    8u  IPv4 TCP [::1]:57940 (LISTEN)\n\
-                    language_ 123 sp    9u  IPv4 TCP *:9000 (LISTEN)\n\
-                    language_ 123 sp   10u  IPv4 TCP 10.0.0.2:9100 (LISTEN)\n";
-        let ports: Vec<u16> = lsof
-            .lines()
-            .filter(|l| l.ends_with("(LISTEN)"))
-            .filter_map(|l| l.split_whitespace().find(|t| t.contains(':')))
-            .filter(|n| n.starts_with("127.0.0.1:") || n.starts_with("[::1]:") || n.starts_with("localhost:"))
-            .filter_map(|n| n.rsplit(':').next().unwrap_or_default().parse::<u16>().ok())
-            .filter(|p| *p != 0)
-            .collect();
-        assert_eq!(ports, vec![57939, 57940], "non-loopback listeners never surface");
+                    language_ 123 dev    7u  IPv4 TCP 127.0.0.1:57939 (LISTEN)\n\
+                    language_ 123 dev    8u  IPv4 TCP [::1]:57940 (LISTEN)\n\
+                    language_ 123 dev    9u  IPv4 TCP *:9000 (LISTEN)\n\
+                    language_ 123 dev   10u  IPv4 TCP 203.0.113.9:9100 (LISTEN)\n\
+                    language_ 123 dev   11u  IPv4 TCP localhost:57941 (LISTEN)\n\
+                    language_ 123 dev   12u  IPv6 TCP [::1]:57939 (LISTEN)\n";
+        assert_eq!(
+            listen_ports_from_lsof(lsof),
+            vec![57939, 57940, 57941],
+            "non-loopback listeners never surface and a dual-stack port counts once"
+        );
     }
 
     // -- the breaker -------------------------------------------------------
