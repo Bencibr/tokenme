@@ -58,6 +58,15 @@ impl SourceAdapter for ClineAdapter {
         loader::discover(filter)
     }
 
+    /// The default snapshot path re-stats the transcript only; Cline's
+    /// fingerprint also carries its label's freshness, so restat here.
+    fn discover_cached(&self, filter: &DateFilter, snapshot: Option<Vec<SourceFile>>) -> Vec<SourceFile> {
+        match snapshot {
+            None => loader::discover(filter),
+            Some(files) => files.into_iter().filter_map(loader::restat).collect(),
+        }
+    }
+
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
         loader::read(file, cursor)
     }
