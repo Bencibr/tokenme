@@ -1,17 +1,28 @@
 import type { PricingMeta, ServerStatus, ServerView, TrayMode } from "../types";
 import { bridge } from "../lib/bridge";
-import { TRAY_MODE_LABEL, count } from "../lib/format";
+import { TRAY_MODE_LABEL, count, relativeTime } from "../lib/format";
 import { t } from "../lib/i18n";
 import type { UpdateInfo } from "../lib/update";
 import { IconRefresh, IconServer, IconSettings, IconWarn } from "./Icons";
 
 const SOURCE_KEY: Record<PricingMeta["source"], Parameters<typeof t>[0] | "models_dev"> = {
   models_dev: "models_dev",
-  cache: "status.source.cache",
+  cache: "models_dev",
   bundled: "status.source.bundled",
   unavailable: "status.source.none",
 };
+// A fresh fetch and a snapshot read are the same thing to the reader: models.dev
+// prices, TTL-cached like any other price table. Only the two states that change
+// what a cost number *means* — the snapshot baked into the bundle, and no prices
+// at all — get their own word. The provenance that used to sit here went to the
+// tooltip, because the footer is the panel's scarcest horizontal space.
 const sourceLabel = (k: PricingMeta["source"]): string => (SOURCE_KEY[k] === "models_dev" ? "models.dev" : t(SOURCE_KEY[k]));
+const sourceTitle = (p: PricingMeta): string | undefined =>
+  p.source === "cache"
+    ? t("status.source.cache.tip", { ago: relativeTime(p.fetched_at_ms, Date.now()) })
+    : p.source === "models_dev"
+      ? t("status.source.fresh.tip")
+      : undefined;
 
 /** One dot for the whole fleet: the most actionable state wins. */
 function aggServerStatus(servers: ServerView[]): ServerStatus {
@@ -21,10 +32,9 @@ function aggServerStatus(servers: ServerView[]): ServerStatus {
   return "none";
 }
 
-/** Persistent status line: where the prices came from, how much is indexed, refresh. */
+/** Persistent status line: where the prices came from, and the refresh control. */
 export function StatusBar({
   pricing,
-  events,
   loading,
   onRefresh,
   onOpenSettings,
@@ -34,7 +44,6 @@ export function StatusBar({
   update,
 }: {
   pricing: PricingMeta;
-  events: number;
   loading: boolean;
   onRefresh: () => void;
   onOpenSettings: () => void;
@@ -49,14 +58,11 @@ export function StatusBar({
   return (
     <footer className="status">
       <span className="status-left">
-        <span className="badge" data-source={pricing.source}>
+        <span className="badge" data-source={pricing.source} title={sourceTitle(pricing)}>
           {sourceLabel(pricing.source)}
         </span>
         <span className="num">{count(pricing.key_count)}</span>
         <span>{t("status.prices")}</span>
-        <span className="dot-sep" aria-hidden="true" />
-        <span className="num">{count(events)}</span>
-        <span>{t("status.events")}</span>
         {pricing.stale ? (
           <span className="stale" title={t("status.stale.tip")}>
             <IconWarn size={11} />

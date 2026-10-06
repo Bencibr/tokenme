@@ -286,11 +286,11 @@ const zh = {
   "quota.meta.local": "本机 · 与筛选无关",
 
   /* 状态栏 ---------------------------------------------------------------- */
-  "status.source.cache": "缓存",
+  "status.source.cache.tip": "价格表读自本地快照 · 上次抓取 {ago}",
+  "status.source.fresh.tip": "价格表刚从 models.dev 取回",
   "status.source.bundled": "内置快照",
   "status.source.none": "无价格源",
   "status.prices": "价格",
-  "status.events": "事件",
   "status.stale.tip": "价格快照超过 24 小时未更新，成本为估算值",
   "status.stale": "价格已过期",
   "status.update.chip": "新版本 v{v}",
@@ -667,11 +667,11 @@ const en: Record<StrKey, string> = {
   "quota.bar.a11y": "{tool} {label}: {p}% used",
   "quota.meta.local": "This machine · filter-independent",
 
-  "status.source.cache": "Cache",
+  "status.source.cache.tip": "Price table served from the local snapshot · fetched {ago}",
+  "status.source.fresh.tip": "Price table just fetched from models.dev",
   "status.source.bundled": "Bundled",
   "status.source.none": "No prices",
   "status.prices": "prices",
-  "status.events": "events",
   "status.stale.tip": "Price snapshot older than 24 h — costs are estimates",
   "status.stale": "Prices stale",
   "status.update.chip": "New v{v}",

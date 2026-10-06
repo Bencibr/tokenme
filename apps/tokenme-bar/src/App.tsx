@@ -227,7 +227,6 @@ const [page, setPage] = useState<PageKey>(() => {
     const mins = Number(new URLSearchParams(location.search).get("stale"));
     return Number.isFinite(mins) && mins > 0 ? mins : null;
   }, []);
-  const events = useMemo(() => (report ? report.sources.reduce((a, s) => a + s.events_ingested, 0) : 0), [report]);
   const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
 
   // A dead engine looks exactly like a quiet afternoon: the numbers stop moving
@@ -393,7 +392,6 @@ const [page, setPage] = useState<PageKey>(() => {
 
         <StatusBar
           pricing={report.pricing}
-          events={events}
           loading={loading}
           onRefresh={() => void refresh()}
           onOpenSettings={() => setSettingsOpen(true)}

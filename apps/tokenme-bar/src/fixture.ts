@@ -414,6 +414,16 @@ const PRICING: PricingMeta = {
   cache_dir: "~/Library/Caches/tokenme",
 };
 
+// QA pin: `?psource=cache|bundled|unavailable` renders the footer's other price
+// provenances — a hand-authored fixture otherwise only ever shows the fresh one,
+// and the label the badge carries is what differs between them.
+const PSOURCES: PricingMeta["source"][] = ["models_dev", "cache", "bundled", "unavailable"];
+const pinnedSource = (): PricingMeta["source"] | null => {
+  if (typeof location === "undefined") return null;
+  const q = new URLSearchParams(location.search).get("psource");
+  return PSOURCES.includes(q as PricingMeta["source"]) ? (q as PricingMeta["source"]) : null;
+};
+
 /* -------------------------------------------------------------------- build */
 
 export function makeFixtureReport(nowMs = Date.now()): Report {
@@ -600,7 +610,7 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     hourly: buildHourly(now),
     quotas: quotasOf(nowMs2),
     sources: SOURCES,
-    pricing: { ...PRICING, fetched_at_ms: nowMs2 - 42 * 60_000 },
+    pricing: { ...PRICING, source: pinnedSource() ?? PRICING.source, fetched_at_ms: nowMs2 - 42 * 60_000 },
     recent_sessions: sessionsOf(nowMs2),
     all_time: allTime,
     // The whole panel is folded on one machine scope; a hand-authored report
