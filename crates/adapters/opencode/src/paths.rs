@@ -96,8 +96,8 @@ pub(crate) fn data_dir_for(product: &Product) -> Option<PathBuf> {
     // filters on existence; this must keep answering the plain join or the
     // frozen contract above breaks on machines without the tool installed.
     if let Ok(v) = std::env::var(product.env_dir) {
-        if !v.trim().is_empty() {
-            return Some(PathBuf::from(v.trim()));
+        if let Some(first) = split_paths(&v).first() {
+            return Some(first.clone());
         }
     }
     let mut dir = dirs::home_dir()?;
@@ -107,26 +107,55 @@ pub(crate) fn data_dir_for(product: &Product) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// A comma-separated list, because a relocated or containerised install has to
+/// be able to name more than one root — the same convention `CLAUDE_CONFIG_DIR`
+/// already uses in this codebase.
+fn split_paths(value: &str) -> Vec<PathBuf> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
 /// Every existing data directory for the product, priority order. The env
-/// override pins exactly one; otherwise the `~/.local/share` root and the
-/// desktop app's Electron userData root both count when they exist — the
-/// desktop product writes there while the legacy root keeps the older history,
-/// and the stores hold disjoint message ids.
+/// override pins exactly the roots it names; otherwise the `XDG_DATA_HOME` root
+/// (which the upstream product honours, and a Nix or container install points
+/// somewhere else with it), the `~/.local/share` root, and the desktop app's
+/// Electron userData root all count when they exist — the desktop product writes
+/// there while the legacy root keeps the older history, and the stores hold
+/// disjoint message ids. Duplicates are dropped: two roots naming the same
+/// directory would put one file in the manifest twice.
 pub(crate) fn data_dirs_for(product: &Product) -> Vec<PathBuf> {
     if let Ok(v) = std::env::var(product.env_dir) {
-        if !v.trim().is_empty() {
-            return vec![PathBuf::from(v.trim())];
-        }
+        return dedupe(split_paths(&v)).into_iter().filter(|p| p.is_dir()).collect();
     }
     let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        let xdg = PathBuf::from(xdg);
+        // A relative XDG root is undefined by the spec, so it is ignored rather
+        // than resolved against an arbitrary working directory.
+        if xdg.is_absolute() {
+            let mut dir = xdg;
+            // The product's own directory name is the last segment of the
+            // home-relative default; that is what hangs off XDG_DATA_HOME.
+            if let Some(name) = product.default_rel.last() {
+                dir = dir.join(name);
+            }
+            dirs.push(dir);
+        }
+    }
     let mut legacy = match dirs::home_dir() {
         Some(h) => h,
-        None => return dirs,
+        None => PathBuf::new(),
     };
-    for part in product.default_rel {
-        legacy = legacy.join(part);
+    if !legacy.as_os_str().is_empty() {
+        for part in product.default_rel {
+            legacy = legacy.join(part);
+        }
+        dirs.push(legacy);
     }
-    dirs.push(legacy);
     if !product.desktop_rel.is_empty() {
         if let Some(data) = dirs::data_dir() {
             let mut desktop = data;
@@ -136,7 +165,12 @@ pub(crate) fn data_dirs_for(product: &Product) -> Vec<PathBuf> {
             dirs.push(desktop);
         }
     }
-    dirs.into_iter().filter(|p| p.is_dir()).collect()
+    dedupe(dirs).into_iter().filter(|p| p.is_dir()).collect()
+}
+
+fn dedupe(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
 }
 
 /// OpenCode's database file, i.e. its name joined on, never globbed. See
@@ -214,13 +248,82 @@ fn encode_uri_path(path: &Path) -> String {
     out
 }
 
-/// Proves a connection can read the one table this adapter ingests.
-pub(crate) const USABLE_SQL: &str = "SELECT count(*) FROM message";
+/// Proves a connection can read a store of this dialect, and does it without
+/// touching a data page: the old `count(*) FROM message` proof walked the whole
+/// table on every cold open, which on a multi-gigabyte live store is the cost
+/// [`RUNG_TTL`] exists to avoid.
+///
+/// Either table name qualifies, because the dialect has two generations of record
+/// table ([`DIALECT_TABLES`]) and a product mid-migration carries both.
+pub(crate) const USABLE_SQL: &str =
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name IN ('message', 'session_message') LIMIT 1";
 
-/// The table every product of this dialect ingests. Also the cheap cache-hit
-/// probe (schema presence only) that keeps the full-table `USABLE_SQL` count
-/// off the per-pass path.
-const DIALECT_TABLE: &str = "message";
+/// The record tables this dialect has used, in the order they were introduced.
+/// The second is OpenCode's v2 shape: the role moves out of `data` into a
+/// `type` column and a `seq` orders the session, which is why a row read from it
+/// must not have its role re-derived from JSON the column already settled.
+pub(crate) const DIALECT_TABLES: [(&str, bool); 2] = [("message", false), ("session_message", true)];
+
+/// The columns a table must carry to be this dialect's record table at all.
+const REQUIRED_COLUMNS: [&str; 4] = ["id", "session_id", "data", "time_created"];
+
+/// The record table one database bills from, and what was already consumed.
+pub(crate) struct Dialect {
+    pub table: &'static str,
+    /// True when the role lives in a `type` column rather than in `data`.
+    pub role_from_column: bool,
+    /// The table's own rowid high-water mark — an O(1) b-tree probe.
+    pub max_rowid: i64,
+    /// The sibling table's high-water mark, when it exists: the cursor sitting
+    /// exactly there belongs to the sibling, not to the table we are reading.
+    pub sibling_max: Option<i64>,
+}
+
+/// Which dialect table this store writes, if any.
+///
+/// The one with the most rows decides, and a tie goes to `message` because that
+/// is the table the dialect has always had. A product that flips its write target
+/// mid-life is the reason [`Dialect::sibling_max`] exists: see the cursor rule in
+/// [`crate::loader`].
+pub(crate) fn dialect(conn: &Connection) -> Option<Dialect> {
+    let mut best: Option<Dialect> = None;
+    let mut other: Option<i64> = None;
+    for (table, role_from_column) in DIALECT_TABLES {
+        if !has_columns(conn, table) {
+            continue;
+        }
+        let Ok(max_rowid) = conn.query_row(
+            &format!("SELECT COALESCE(MAX(rowid), 0) FROM {table}"),
+            [],
+            |row| row.get::<_, i64>(0),
+        ) else {
+            continue;
+        };
+        match &best {
+            Some(winner) if winner.max_rowid >= max_rowid => other = other.max(Some(max_rowid)),
+            _ => {
+                other = best.map(|w| w.max_rowid);
+                best = Some(Dialect { table, role_from_column, max_rowid, sibling_max: None });
+            }
+        }
+    }
+    let mut chosen = best?;
+    chosen.sibling_max = other;
+    Some(chosen)
+}
+
+/// True when `table` exists and carries every [`REQUIRED_COLUMNS`] entry. One
+/// `LIMIT 0` prepare answers both at once: SQLite gives no column list for a
+/// table that is not there.
+fn has_columns(conn: &Connection, table: &str) -> bool {
+    let Ok(stmt) = conn.prepare(&format!("SELECT * FROM {table} LIMIT 0")) else {
+        return false;
+    };
+    let names: Vec<String> = (0..stmt.column_count())
+        .filter_map(|i| stmt.column_name(i).ok().map(str::to_string))
+        .collect();
+    REQUIRED_COLUMNS.iter().all(|c| names.iter().any(|n| n == c))
+}
 
 /// How long a proven ladder rung is reused without re-running its proof. The
 /// proof walks the whole table — seconds on a multi-gigabyte live store — and
@@ -271,11 +374,7 @@ fn open_rung(path: &Path, rung: usize) -> rusqlite::Result<Connection> {
 /// Cache-hit proof: schema presence only. The real proof of a rung is the read
 /// it serves; when that read fails, the caller forgets the rung.
 fn cheap_prove(conn: &Connection) -> rusqlite::Result<()> {
-    conn.query_row(
-        &format!("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{DIALECT_TABLE}'"),
-        [],
-        |_| Ok(()),
-    )?;
+    conn.query_row(USABLE_SQL, [], |_| Ok(()))?;
     Ok(())
 }
 
@@ -354,6 +453,58 @@ pub(crate) fn stat_file(path: &Path) -> Option<(u64, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `set_var` is process-global, so the tests that touch the roots below share
+    /// one lock instead of racing each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A relocated or containerised install has to be able to name more than one
+    /// root, and a root that is not there must not become a phantom source.
+    #[test]
+    fn the_env_override_is_a_list_of_existing_directories() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let missing = a.path().join("absent");
+        std::env::set_var("MIMOCODE_DATA_DIR", format!("{},{}", a.path().display(), missing.display()));
+        assert_eq!(data_dirs_for(&MIMOCODE), vec![a.path().to_path_buf()], "the missing root drops out");
+        std::env::set_var("MIMOCODE_DATA_DIR", format!("{},{}", missing.display(), b.path().display()));
+        assert_eq!(data_dirs_for(&MIMOCODE), vec![b.path().to_path_buf()], "order follows the list");
+        // The frozen single-root surface answers with the first entry it was given.
+        std::env::set_var("MIMOCODE_DATA_DIR", format!("{},{}", b.path().display(), a.path().display()));
+        assert_eq!(data_dir_for(&MIMOCODE), Some(b.path().to_path_buf()), "first named, first used");
+        std::env::remove_var("MIMOCODE_DATA_DIR");
+    }
+
+    /// `XDG_DATA_HOME` is the root the upstream product itself honours, so a store
+    /// relocated that way used to be invisible here.
+    #[test]
+    fn xdg_data_home_is_another_root_and_never_the_same_one_twice() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OPENCODE_DATA_DIR");
+        let xdg = tempfile::tempdir().unwrap();
+        let relocated = xdg.path().join("opencode");
+        std::fs::create_dir_all(&relocated).unwrap();
+        let legacy = dirs::home_dir().unwrap().join(".local").join("share").join("opencode");
+
+        std::env::set_var("XDG_DATA_HOME", xdg.path());
+        let got = data_dirs_for(&OPENCODE);
+        assert_eq!(got.first(), Some(&relocated), "the XDG root is read, and first");
+        if legacy.is_dir() {
+            assert!(got.contains(&legacy), "the home-relative root keeps counting beside it: {got:?}");
+            // XDG resolving to the very directory the legacy root already names
+            // must not put one store into the manifest twice.
+            std::env::set_var("XDG_DATA_HOME", legacy.parent().unwrap());
+            let once = data_dirs_for(&OPENCODE);
+            assert_eq!(once.iter().filter(|p| *p == &legacy).count(), 1, "duplicates collapse: {once:?}");
+        }
+
+        // A relative XDG root is undefined by the spec, so it is ignored rather
+        // than resolved against whatever the process happens to be doing.
+        std::env::set_var("XDG_DATA_HOME", "not/absolute");
+        assert!(!data_dirs_for(&OPENCODE).iter().any(|p| p.to_string_lossy().starts_with("not/")));
+        std::env::remove_var("XDG_DATA_HOME");
+    }
 
     #[test]
     fn percent_encodes_the_characters_that_would_break_a_uri() {

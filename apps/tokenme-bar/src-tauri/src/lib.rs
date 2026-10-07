@@ -5,7 +5,9 @@ mod logging;
 mod engine;
 mod scan_log;
 mod panel;
+mod servers;
 mod settings;
+mod snapshot;
 mod tray;
 mod updater;
 
@@ -19,6 +21,8 @@ use crate::engine::EngineChannel;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Start the cold-start clock before anything else can read it.
+    panel::mark_launch();
     let (tx, rx) = std::sync::mpsc::channel::<engine::Msg>();
 
     let builder = tauri::Builder::default()
@@ -32,10 +36,12 @@ pub fn run() {
         .plugin(tauri_plugin_positioner::init())
         .manage(EngineChannel(tx))
         .manage(engine::Shared::new(Settings::load()))
+        .manage(servers::state())
         .invoke_handler(tauri::generate_handler![
             commands::get_report,
             commands::get_tray_state,
             commands::set_ui_lang,
+            commands::panel_page_signal,
             commands::set_tray_mode,
             commands::get_quota_order,
             commands::set_quota_order,
@@ -47,6 +53,15 @@ pub fn run() {
             commands::set_theme,
             commands::set_show_money,
             commands::set_show_empty_tools,
+            commands::set_report_scope,
+            servers::commands::get_servers,
+            servers::commands::server_public_key,
+            servers::commands::server_probe,
+            servers::commands::server_install,
+            servers::commands::server_abort_session,
+            servers::commands::server_sync_now,
+            servers::commands::server_update,
+            servers::commands::server_remove,
             updater::check_update,
             updater::download_update,
             updater::install_update,
@@ -56,6 +71,7 @@ pub fn run() {
             commands::set_bubble_enabled,
             commands::begin_bubble_drag,
             commands::show_panel,
+            commands::panel_keyboard,
             commands::quit_app,
             commands::open_external,
             commands::open_log_dir
@@ -77,6 +93,10 @@ pub fn run() {
             panel::configure(&handle);
             bubble::configure(&handle)?;
             engine_start(handle.clone(), rx);
+            servers::hub::start(
+                handle.clone(),
+                handle.state::<std::sync::Arc<servers::ServersState>>().inner().clone(),
+            );
             tray::reconcile_autostart(&handle);
             // Screenshots and manual QA need the panel up without a tray click.
             if std::env::var_os("TOKENME_SHOW_PANEL").is_some() {

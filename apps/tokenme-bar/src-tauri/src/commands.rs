@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use usage_core::pricing::PricingOptions;
-use usage_core::{PricingMap, PricingMeta, Report};
+use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
@@ -235,8 +235,20 @@ pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
     Ok(())
 }
 
-/// Like the theme, a webview-only concern: the panel hides its dollar figures
-/// itself; persisting is what makes the choice survive a relaunch.
+/// The page's two cold-start milestones, reported by name because they answer
+/// different questions: `boot` is when the bundle executed (index.html's shell is
+/// on screen), `content` is when it has figures — and only the second one retires
+/// the native boot note. See `panel::mark_page_boot` / `panel::mark_content_ready`
+/// for why neither may gate the window.
+#[tauri::command]
+pub fn panel_page_signal(app: tauri::AppHandle, stage: String) {
+    match stage.as_str() {
+        "boot" => crate::panel::mark_page_boot(),
+        "content" => crate::panel::mark_content_ready(&app),
+        other => crate::logging::error(&format!("panel: unknown page signal {other:?}")),
+    }
+}
+
 /// Reveal the diagnostic log directory in the OS file manager.
 #[tauri::command]
 pub fn open_log_dir() -> Result<(), String> {
@@ -311,6 +323,13 @@ pub fn show_panel(app: AppHandle) {
     panel::show(&app, None);
 }
 
+/// While a text field holds focus the frontend asks for a keyboard session —
+/// the non-activating tray panel otherwise never owns the keys on Windows.
+#[tauri::command]
+pub fn panel_keyboard(app: AppHandle, on: bool) {
+    panel::set_keyboard_mode(&app, on);
+}
+
 /// Hands the press to the Rust-side drag loop. `window.startDragging()` cannot
 /// move this non-activating window (see `bubble::begin_drag`); non-Windows is a
 /// no-op so the bridge stays platform-neutral.
@@ -333,6 +352,28 @@ pub async fn set_refresh_secs(app: AppHandle, secs: u64) -> Result<(), String> {
     }
     if let Some(channel) = app.try_state::<EngineChannel>() {
         let _ = channel.0.send(Msg::Refresh);
+    }
+    Ok(())
+}
+
+/// Switches the machine scope the panel folds with. The command returns as
+/// soon as the engine has the message — the new report arrives through the
+/// ordinary `report-updated` event, so the UI never blocks on a refold.
+#[tauri::command]
+pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), String> {
+    // The scope normally comes from a menu built out of the report itself, but
+    // this is a boundary: an origin name that `origin_of` cannot parse back
+    // would silently select nothing, so reject it loudly instead.
+    if let MachineScope::Origin { name } = &scope {
+        if !origin_ok(name) {
+            return Err(format!(
+                "origin {name:?} contains ':', '/' or '\\' or a control character"
+            ));
+        }
+    }
+    app.state::<Shared>().set_scope(scope.clone())?;
+    if let Some(channel) = app.try_state::<EngineChannel>() {
+        let _ = channel.0.send(Msg::Scope(scope));
     }
     Ok(())
 }

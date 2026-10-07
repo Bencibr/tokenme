@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
+import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
-import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress } from "../types";
+import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -19,6 +20,15 @@ export function applyTheme(theme: ThemeKey): void {
   const effective: ThemeKey = pin === "light" || pin === "dark" ? pin : theme;
   if (effective === "system") delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = effective;
+  // index.html's boot shell paints before this can run, and it reads the last
+  // applied theme synchronously: a shell in the wrong appearance would flip
+  // colour the moment the sheet mounts. `system` is stored as it is, which lets
+  // the shell fall through to the media query — what 跟随系统 means anyway.
+  try {
+    localStorage.setItem("tokenme:theme", effective);
+  } catch {
+    /* private mode / disabled storage: the shell just follows the OS */
+  }
 }
 
 /** Dollar figures off => the components read the flag from context; the
@@ -50,6 +60,20 @@ async function injected(): Promise<Report | null> {
       .catch(() => null);
   }
   return real ?? null;
+}
+
+/** Subscribe with the same cancel-safe unlisten dance `onReport` spells out. */
+function once<T>(event: string, handler: (payload: T) => void): () => void {
+  let unlisten: (() => void) | null = null;
+  let cancelled = false;
+  void listen<T>(event, (e) => handler(e.payload)).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
 }
 
 /**
@@ -108,6 +132,13 @@ export const bridge: Bridge = {
     };
   },
 
+  /** The browser preview has no engine to re-fold the numbers, so this is a
+   *  no-op there; the panel only reacts to the report's own scope echo. */
+  async setReportScope(scope: MachineScope): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("set_report_scope", { scope });
+  },
+
   /**
    * Icons come from `/Applications`, so the browser review path reads the same
    * file the `?real=1` report comes from: `tokenme icons --json > icons.json`.
@@ -136,6 +167,23 @@ export const bridge: Bridge = {
   async setUiLang(lang: string): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("set_ui_lang", { lang });
+  },
+
+  /** Cold-start telemetry, stage 1: the bundle executed and index.html's boot
+   *  shell is on screen. Called from `main.tsx`. Fire-and-forget. */
+  async reportBoot(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("panel_page_signal", { stage: "boot" });
+  },
+
+  /** Cold-start telemetry, stage 2, and the handover: the page has real figures,
+   *  so the native boot note can go away. Called once from `App.tsx` when the
+   *  first report lands — reporting at bundle-execution time retired the note
+   *  seconds before anything was drawn, which the cold-start recording measured
+   *  as a bare sheet from +3.2 s to +8.1 s. Fire-and-forget. */
+  async reportContent(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("panel_page_signal", { stage: "content" });
   },
 
   async panelSettings(): Promise<PanelSettings> {
@@ -243,6 +291,11 @@ export const bridge: Bridge = {
     await invoke<void>("show_panel");
   },
 
+  async setKeyboardMode(on: boolean): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("panel_keyboard", { on });
+  },
+
   async beginBubbleDrag(): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("begin_bubble_drag");
@@ -264,6 +317,58 @@ export const bridge: Bridge = {
   async openLogDir(): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("open_log_dir");
+  },
+
+  /* 远程服务器（拉取式采集）。浏览器预览由 `serverFixture.ts` 的内存假件驱动，
+     与真实命令同形，QA 截图走的也是同一条组件路径。 */
+  async servers(): Promise<ServerView[]> {
+    if (!inTauri) return serverMock.servers();
+    return invoke<ServerView[]>("get_servers");
+  },
+
+  async serverPublicKey(): Promise<{ path: string; line: string }> {
+    if (!inTauri) return serverMock.publicKey();
+    return invoke<{ path: string; line: string }>("server_public_key");
+  },
+
+  async serverProbe(req: ServerProbeReq): Promise<ServerProbeOutcome> {
+    if (!inTauri) return serverMock.probe(req);
+    return invoke<ServerProbeOutcome>("server_probe", { req });
+  },
+
+  async serverInstall(req: ServerInstallReq): Promise<ServerInstallOutcome> {
+    if (!inTauri) return serverMock.install(req);
+    return invoke<ServerInstallOutcome>("server_install", { req });
+  },
+
+  async serverAbortSession(session: number): Promise<void> {
+    if (!inTauri) return serverMock.abort(session);
+    await invoke<void>("server_abort_session", { session });
+  },
+
+  async serverSyncNow(id: number): Promise<void> {
+    if (!inTauri) return serverMock.syncNow(id);
+    await invoke<void>("server_sync_now", { id });
+  },
+
+  async serverUpdate(req: ServerUpdateReq): Promise<ServerView[]> {
+    if (!inTauri) return serverMock.update(req);
+    return invoke<ServerView[]>("server_update", { req });
+  },
+
+  async serverRemove(id: number, cleanupRemote: boolean): Promise<ServerRemoveOutcome> {
+    if (!inTauri) return serverMock.remove(id, cleanupRemote);
+    return invoke<ServerRemoveOutcome>("server_remove", { id, cleanupRemote });
+  },
+
+  onServersUpdated(handler: (servers: ServerView[]) => void): () => void {
+    if (!inTauri) return serverMock.onServersUpdated(handler);
+    return once("servers-updated", handler);
+  },
+
+  onInstallProgress(handler: (progress: ServerInstallProgress) => void): () => void {
+    if (!inTauri) return serverMock.onInstallProgress(handler);
+    return once("server-install-progress", handler);
   },
 };
 

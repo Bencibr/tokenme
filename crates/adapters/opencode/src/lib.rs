@@ -45,14 +45,26 @@ pub struct MimocodeAdapter;
 #[derive(Debug, Clone, Copy)]
 struct ProductAdapter(&'static paths::Product);
 
+/// What one product's stores actually carry, as [`ProductAdapter::located`] reports it.
+struct Located {
+    dirs: Vec<std::path::PathBuf>,
+    files: Vec<std::path::PathBuf>,
+    /// Rows across every store's live dialect table.
+    rows: i64,
+    /// Those tables, deduped — a store writing `session_message` must say so in
+    /// the sources list, because that is the shape a silent blindness comes back as.
+    tables: Vec<&'static str>,
+}
+
 impl ProductAdapter {
-    /// The tool's own `message` table is the whole detection test: counting rows
-    /// fails for a missing file, a database we cannot open in any usable mode,
-    /// and a build without the table, all of which mean "nothing to show".
-    fn located(&self) -> Option<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>, i64)> {
+    /// The product's readable stores and what is in them. A database we cannot
+    /// open in any usable mode, or that carries neither dialect record table,
+    /// means "nothing to show" rather than an error.
+    fn located(&self) -> Option<Located> {
         let dirs = paths::data_dirs_for(self.0);
         let mut files = Vec::new();
         let mut rows = 0i64;
+        let mut tables: Vec<&'static str> = Vec::new();
         for dir in &dirs {
             for db in paths::db_list_for(dir, self.0) {
                 if paths::stat_file(&db).is_none() {
@@ -60,13 +72,15 @@ impl ProductAdapter {
                 }
                 let Ok(conn) = paths::open_readonly(&db, paths::USABLE_SQL) else { continue };
                 // `max(rowid)` seeks the table btree's rightmost page; it is not a scan.
-                rows += conn
-                    .query_row("SELECT max(rowid) FROM message", [], |row| row.get(0))
-                    .unwrap_or(0);
+                let Some(dialect) = paths::dialect(&conn) else { continue };
+                rows += dialect.max_rowid;
+                if !tables.contains(&dialect.table) {
+                    tables.push(dialect.table);
+                }
                 files.push(db);
             }
         }
-        (!files.is_empty()).then_some((dirs, files, rows))
+        (!files.is_empty()).then_some(Located { dirs, files, rows, tables })
     }
 }
 
@@ -90,16 +104,27 @@ impl SourceAdapter for ProductAdapter {
     }
 
     fn probe(&self) -> Option<DetectedSource> {
-        let (dir, files, rows) = self.located()?;
+        let Located { dirs: dir, files, rows, tables } = self.located()?;
+        // A store that writes anything but the table this dialect has always used
+        // says so in the hint: that is the one visible place a schema flip can be
+        // noticed before it turns into numbers that quietly stop moving.
+        let other: Vec<&str> = tables.iter().copied().filter(|t| *t != "message").collect();
+        let suffix = if other.is_empty() {
+            String::new()
+        } else {
+            format!(" in `{}`", other.join("`, `"))
+        };
         let hint = match (rows, files.len()) {
             // A multi-store product has to say which files it read and how many it
             // skipped over, because that set is decided from the directory.
             (n, k) if n > 0 && self.0.multi_db && k > 1 => Some(format!(
-                "{n} messages in {k} stores ({})",
+                "{n} messages in {k} stores ({}){suffix}",
                 files.iter().map(|f| paths::file_label(f)).collect::<Vec<_>>().join(", ")
             )),
-            (n, _) if n > 0 && self.0.multi_db => Some(format!("{n} messages in {}", paths::file_label(&files[0]))),
-            (n, _) if n > 0 => Some(format!("{n} messages")),
+            (n, _) if n > 0 && self.0.multi_db => {
+                Some(format!("{n} messages in {}{suffix}", paths::file_label(&files[0])))
+            }
+            (n, _) if n > 0 => Some(format!("{n} messages{suffix}")),
             _ => None,
         };
         Some(DetectedSource {

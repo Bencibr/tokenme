@@ -1,10 +1,13 @@
 //! cline adapter.
 //!
-//! Source: `~/.cline/data/sessions/<ts>_<id>/<ts>_<id>.messages.json` — one JSON
-//! object rewritten in place, `{version, updated_at, agent, sessionId, origin,
-//! system_prompt, messages:[…]}`; assistant entries carry
-//! `metrics{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`.
-//! The sibling `<ts>_<id>.json` is read for the project label only.
+//! Source: `~/.cline/data/sessions/<session>/<name>.messages.json` — one JSON
+//! object rewritten in place, `{version, updated_at, agent, sessionId, messages:
+//! […]}`; assistant entries carry
+//! `metrics{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`. The
+//! CLI, the older desktop build and the current one differ only in how they name
+//! the session dir, and a desktop sub-agent's transcript lives inside its
+//! parent's dir — see `paths`. A session meta (`<name>.json`) is read for the
+//! project label only.
 //!
 //! Owned by the cline-adapter workstream.
 //! The public surface (`ClineAdapter`, `TOOL_ID`) is frozen — `usage-adapter-all`
@@ -55,6 +58,15 @@ impl SourceAdapter for ClineAdapter {
         loader::discover(filter)
     }
 
+    /// The default snapshot path re-stats the transcript only; Cline's
+    /// fingerprint also carries its label's freshness, so restat here.
+    fn discover_cached(&self, filter: &DateFilter, snapshot: Option<Vec<SourceFile>>) -> Vec<SourceFile> {
+        match snapshot {
+            None => loader::discover(filter),
+            Some(files) => files.into_iter().filter_map(loader::restat).collect(),
+        }
+    }
+
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
         loader::read(file, cursor)
     }
@@ -62,98 +74,135 @@ impl SourceAdapter for ClineAdapter {
 
 #[cfg(test)]
 mod smoke {
-    use std::collections::BTreeSet;
-    use std::path::Path;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
 
     use usage_core::{DateFilter, ReadCursor, TokenCounts};
 
     use super::*;
 
-    /// `metadata.usage` + `metadata.aggregateUsage` of one session meta file.
-    #[derive(Debug, serde::Deserialize)]
-    struct SessionMeta {
-        #[serde(default)]
-        metadata: Option<Metadata>,
+    /// One session dir's ledger, as Cline accumulates it: `metadata.usage` covers
+    /// the orchestrator transcript and `metadata.aggregateUsage` that transcript
+    /// plus every sub-agent's, so the wider one is the dir's total.
+    fn ledger(dir: &Path) -> Option<(TokenCounts, i64)> {
+        let name = dir.file_name()?.to_str()?;
+        let path = dir.join(format!("{name}.json"));
+        #[derive(Debug, Default, serde::Deserialize)]
+        #[serde(rename_all = "camelCase", default)]
+        struct Accumulator {
+            input_tokens: u64,
+            output_tokens: u64,
+            cache_read_tokens: u64,
+            cache_write_tokens: u64,
+        }
+        #[derive(serde::Deserialize)]
+        struct Meta {
+            metadata: Option<MetaInner>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct MetaInner {
+            #[serde(default)]
+            usage: Option<Accumulator>,
+            #[serde(default)]
+            aggregate_usage: Option<Accumulator>,
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
+        let meta: Meta = serde_json::from_str(&text).ok()?;
+        let inner = meta.metadata?;
+        let acc = inner.aggregate_usage.or(inner.usage)?;
+        let mtime = std::fs::metadata(&path)
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as i64;
+        // The adapter's stage caliber: `inputTokens` already holds the cached
+        // prefix, so the net input is the difference.
+        Some((
+            TokenCounts {
+                input: acc.input_tokens.saturating_sub(acc.cache_read_tokens) as f64,
+                cache_creation: acc.cache_write_tokens as f64,
+                cache_read: acc.cache_read_tokens as f64,
+                output: acc.output_tokens as f64,
+                reasoning: 0.0,
+                credits: 0.0,
+            },
+            mtime,
+        ))
     }
 
-    #[derive(Debug, serde::Deserialize)]
-    struct Metadata {
-        #[serde(default)]
-        usage: Option<Accumulator>,
-        #[serde(default)]
-        #[serde(rename = "aggregateUsage")]
-        aggregate_usage: Option<Accumulator>,
-    }
-
-    #[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Accumulator {
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: u64,
-        cache_write_tokens: u64,
-        total_cost: f64,
-    }
-
-    fn meta_for(transcript: &Path) -> Option<Accumulator> {
-        let path = paths::session_meta_path(transcript)?;
-        let text = std::fs::read_to_string(path).ok()?;
-        let meta: SessionMeta = serde_json::from_str(&text).ok()?;
-        let md = meta.metadata?;
-        let usage = md.usage?;
-        // The two accumulators are one counter written twice; if a future build
-        // ever splits them, this smoke test must say so rather than pick one.
-        assert_eq!(Some(usage.total_cost), md.aggregate_usage.map(|a| a.total_cost), "usage and aggregateUsage diverged");
-        Some(usage)
-    }
-
-    /// Reads the real `~/.cline/data/sessions` and proves the mapping against
-    /// the numbers Cline accumulates itself.
+    /// Reads the real `~/.cline/data/sessions` and asserts what the desktop
+    /// dialect cannot break: every call is dated, every transcript finds a meta
+    /// that names its workspace (including a sub-agent's, whose own meta lives in
+    /// a sibling `…__agent_<uuid>/` dir or not at all), no dedupe key repeats
+    /// across sessions, Cline bills no cache-write tier, and no money is read
+    /// from the source. The numeric reconciliation against the ledger printed
+    /// below is `scripts/verify-totals.py`'s `cline._vendor` check — it owns the
+    /// tolerance and the vendor-pruned-row accounting, and a ledger written
+    /// before its transcripts (a session still running) proves nothing here.
     #[test]
     #[ignore = "reads ~/.cline/data/sessions"]
     fn real_data_matches_the_session_accumulator() {
         let adapter = ClineAdapter;
         let files = adapter.discover(&DateFilter::default());
         assert!(!files.is_empty(), "no Cline transcripts under ~/.cline/data/sessions");
-        let mut bytes = 0_u64;
-        let mut billed = TokenCounts::default();
-        let mut reported = TokenCounts::default();
+
+        let mut per_dir: BTreeMap<PathBuf, (TokenCounts, i64)> = BTreeMap::new();
+        let mut keys = BTreeSet::new();
         let mut models = BTreeSet::new();
         let mut events = 0_usize;
-        let mut sessions = BTreeSet::new();
-        let mut keys = BTreeSet::new();
+        let mut billed = TokenCounts::default();
         for file in &files {
             let outcome = adapter.read(file, ReadCursor(0)).unwrap();
             let stats = loader::stats_for(file);
             assert_eq!(stats.events, outcome.events.len(), "no call is undated: {}", file.path.display());
-            if let Some(meta) = meta_for(&file.path) {
-                // Per-message `metrics` sum to exactly the session accumulator,
-                // which is why the meta file may never produce events.
-                let wire = TokenCounts {
-                    input: meta.input_tokens as f64,
-                    cache_creation: meta.cache_write_tokens as f64,
-                    cache_read: meta.cache_read_tokens as f64,
-                    output: meta.output_tokens as f64,
-                    reasoning: 0.0,
-                    credits: 0.0,
-                };
-                assert_eq!(wire, stats.wire_counts(), "{}", file.path.display());
-                reported += &stats.mapped_counts();
-            }
-            bytes += file.size;
-            events += outcome.events.len();
+            let dir = file.path.parent().expect("a transcript lives in a session dir").to_path_buf();
+            let slot = per_dir.entry(dir).or_default();
             for e in &outcome.events {
-                assert!(e.dedupe_key.as_ref().is_some_and(|k| keys.insert(k.clone())), "duplicate dedupe key across sessions: {:?}", e.dedupe_key);
-                sessions.insert(e.session.clone());
+                assert!(
+                    e.dedupe_key.as_ref().is_some_and(|k| keys.insert(k.clone())),
+                    "duplicate dedupe key across sessions: {:?}",
+                    e.dedupe_key
+                );
+                assert!(e.project.is_some(), "transcript with no workspace label: {}", file.path.display());
                 models.insert(e.model.clone().unwrap_or_default());
                 billed += &e.counts;
+                slot.0 += &e.counts;
             }
+            slot.1 = slot.1.max(file.mtime_ms);
+            events += outcome.events.len();
         }
-        assert_eq!(billed, reported, "our per-call totals must equal Cline's own accumulator");
+        assert_eq!(billed.cache_creation, 0.0, "Cline never reports a cache write: {}", billed.cache_creation);
         assert_eq!(billed.credits, 0.0, "cost is priced centrally, never read from the source");
-        assert!(reported.cache_creation == 0.0, "Cline never reports a cache write: {}", reported.cache_creation);
-        println!("[cline] files={} bytes={:.1}MiB sessions={} events={} models={:?}", files.len(), bytes as f64 / 1_048_576.0, sessions.len(), events, models);
-        println!("[cline] input(uncached)={:.0} cacheRead={:.0} cacheWrite={:.0} output={:.0} total={:.0} | prompt incl. cache={:.0} (would be {:.2}x if cache were double-counted)", billed.input, billed.cache_read, billed.cache_creation, billed.output, billed.total(), billed.input + billed.cache_read, (billed.input + 2.0 * billed.cache_read) / billed.total());
         assert!(events > 200, "expected the real sessions, got {events}");
+
+        let mut settled = 0_usize;
+        let mut lagging = 0_usize;
+        for (dir, (ours, newest)) in &per_dir {
+            let Some((theirs, meta_mtime)) = ledger(dir) else { continue };
+            if meta_mtime < *newest {
+                lagging += 1;
+                continue;
+            }
+            settled += 1;
+            println!(
+                "[cline] {:<46} ledger in/cr/out={:>12.0}/{:>12.0}/{:>9.0}  ours={:>12.0}/{:>12.0}/{:>9.0}  Δ={:+.0}/{:+.0}/{:+.0}",
+                dir.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                theirs.input,
+                theirs.cache_read,
+                theirs.output,
+                ours.input,
+                ours.cache_read,
+                ours.output,
+                theirs.input - ours.input,
+                theirs.cache_read - ours.cache_read,
+                theirs.output - ours.output,
+            );
+            assert_eq!(theirs.cache_creation, 0.0, "the ledger bills a cache-write tier: {}", dir.display());
+        }
+        println!("[cline] files={} sessions={} settled={} ledger-predates-its-transcripts={} events={} models={:?}", files.len(), per_dir.len(), settled, lagging, events, models);
+        println!("[cline] billed input(uncached)={:.0} cacheRead={:.0} cacheWrite={:.0} output={:.0} | prompt incl. cache={:.0}", billed.input, billed.cache_read, billed.cache_creation, billed.output, billed.input + billed.cache_read);
     }
 }

@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDate, TimeZone};
 use rusqlite::{params, OptionalExtension, Transaction};
-use usage_core::{local_day_of, DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent};
+use usage_core::{
+    local_day_of, origin_of, DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent,
+};
 
-use crate::{call_kind_str, meter_str, now_ms, sql_err, Index, INSERT_EVENT};
+use crate::{call_kind_str, meter_str, now_ms, sql_err, Index, INSERT_EVENT, ORIGIN_SQL};
 
 /// Nothing older than this stays in the index, which is also how far `rebuild`
 /// re-reads. `report`'s heatmap spans 371 days, so 400 keeps it full.
@@ -43,14 +45,15 @@ pub const CLAIM_TTL_MS: i64 = 120_000;
 // cache empty (first publish after the upgrade, a fail-safe wipe) rebuild it
 // from `event` and go on — see `facts.rs`.
 
-/// Per-event upsert: sums the new event into its (day, tool, session, project,
-/// model, meter) group. `project`/`model` arrive as the `''` NULL sentinel and
-/// `n` is the literal 1 — one row per event before conflict resolution.
+/// Per-event upsert: sums the new event into its (day, origin, tool, session,
+/// project, model, meter) group. `project`/`model` arrive as the `''` NULL
+/// sentinel, `origin` comes from [`origin_of`] over the file key, and `n` is
+/// the literal 1 — one row per event before conflict resolution.
 pub(crate) const ROLLUP_UPSERT: &str = "\
-INSERT INTO event_rollup(day, tool, session, project, model, meter, \
+INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
-VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15) \
-ON CONFLICT(day, tool, session, project, model, meter) DO UPDATE SET \
+VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16) \
+ON CONFLICT(day, origin, tool, session, project, model, meter) DO UPDATE SET \
     in_tok     = in_tok     + excluded.in_tok, \
     cc_tok     = cc_tok     + excluded.cc_tok, \
     cr_tok     = cr_tok     + excluded.cr_tok, \
@@ -69,18 +72,20 @@ ON CONFLICT(day, tool, session, project, model, meter) DO UPDATE SET \
 pub(crate) fn recompute_day_tx(tx: &Transaction<'_>, day_key: &str, lo: i64, hi: i64) -> Result<()> {
     tx.execute("DELETE FROM event_rollup WHERE day = ?1", params![day_key]).map_err(sql_err)?;
     tx.execute(
-        "INSERT INTO event_rollup(day, tool, session, project, model, meter, \
-             in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
-         SELECT ?1, tool, session, IFNULL(project, ''), IFNULL(model, ''), meter, \
-             IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
-             IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
-             count(*), \
-             sum(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) \
-                 + COALESCE(out_tok, 0) + COALESCE(credits, 0) > 0), \
-             min(ts_ms), max(ts_ms) \
-         FROM event \
-         WHERE ts_ms >= ?2 AND ts_ms < ?3 \
-         GROUP BY tool, session, project, model, meter",
+        &format!(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                 in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+             SELECT ?1, {ORIGIN_SQL}, tool, session, IFNULL(project, ''), IFNULL(model, ''), meter, \
+                 IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
+                 IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
+                 count(*), \
+                 sum(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) \
+                     + COALESCE(out_tok, 0) + COALESCE(credits, 0) > 0), \
+                 min(ts_ms), max(ts_ms) \
+             FROM event \
+             WHERE ts_ms >= ?2 AND ts_ms < ?3 \
+             GROUP BY {ORIGIN_SQL}, tool, session, project, model, meter"
+        ),
         params![day_key, lo, hi],
     )
     .map_err(sql_err)?;
@@ -180,6 +185,10 @@ pub struct IngestReport {
     pub files_changed: usize,
     pub new_events: u64,
     pub deduped: u64,
+    /// Rows whose money was unchanged but whose `project`/`model` were re-derived
+    /// differently since — labels converge to the freshest reading of the source,
+    /// so an adapter that learns to name a workspace repairs its own history.
+    pub relabeled: u64,
     pub purged: u64,
     pub total_events: u64,
     pub took_ms: i64,
@@ -194,6 +203,7 @@ pub(crate) struct Acc {
     files_changed: usize,
     new_events: u64,
     deduped: u64,
+    relabeled: u64,
     purged: u64,
     errors: Vec<String>,
 }
@@ -310,6 +320,7 @@ fn pass<'a>(
         files_changed: acc.files_changed,
         new_events: acc.new_events,
         deduped: acc.deduped,
+        relabeled: acc.relabeled,
         purged: acc.purged,
         total_events: per_tool.values().sum(),
         took_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
@@ -590,7 +601,8 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
         let mut ins_event = tx.prepare(INSERT_EVENT).map_err(sql_err)?;
         let mut sel_existing = tx
             .prepare(
-                "SELECT id, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, ts_ms \
+                "SELECT id, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, ts_ms, \
+                        IFNULL(project, ''), IFNULL(model, '') \
                  FROM event WHERE dedupe_key = ?1",
             )
             .map_err(sql_err)?;
@@ -605,6 +617,11 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
             .map_err(sql_err)?;
         let mut ins_call =
             tx.prepare("INSERT INTO call(event_id, kind, name) VALUES(?1,?2,?3)").map_err(sql_err)?;
+        // Labels only. Money never moves backwards, so this is the one write a row
+        // with an unchanged total can still get.
+        let mut up_label = tx
+            .prepare("UPDATE event SET project = ?1, model = ?2 WHERE id = ?3")
+            .map_err(sql_err)?;
         let mut ins_quota = tx
             .prepare(
                 "INSERT OR REPLACE INTO quota(event_id, used_percent, window_minutes, resets_at_ms, label) \
@@ -614,9 +631,10 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
         // Prepared once per persist, not once per event: on a first ingest of a
         // big file this statement runs as often as INSERT_EVENT.
         let mut up_rollup = tx.prepare(ROLLUP_UPSERT).map_err(sql_err)?;
+        let mut relabeled_days: Vec<i64> = Vec::new();
         for ev in &events {
             let c = &ev.counts;
-            let existing: Option<(i64, f64, f64, f64, f64, f64, f64, i64)> =
+            let existing: Option<(i64, f64, f64, f64, f64, f64, f64, i64, String, String)> =
                 if let Some(dk) = ev.dedupe_key.as_deref() {
                     sel_existing
                         .query_row(params![dk], |r| {
@@ -629,6 +647,8 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                                 r.get(5)?,
                                 r.get(6)?,
                                 r.get(7)?,
+                                r.get(8)?,
+                                r.get(9)?,
                             ))
                         })
                         .optional()
@@ -637,7 +657,7 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                     None
                 };
 
-            if let Some((old_id, old_in, old_cc, old_cr, old_out, old_reason, old_credits, old_ts)) = existing {
+            if let Some((old_id, old_in, old_cc, old_cr, old_out, old_reason, old_credits, old_ts, old_project, old_model)) = existing {
                 let old_total = old_in + old_cc + old_cr + old_out + old_credits;
                 let new_total = c.total();
                 if new_total > old_total {
@@ -672,6 +692,7 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                         up_rollup
                             .execute(params![
                                 new_day,
+                                origin_of(&key),
                                 tool,
                                 ev.session,
                                 ev.project.as_deref().unwrap_or(""),
@@ -692,7 +713,23 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                         recompute_days_tx(&tx, &[old_ts, ev.ts_ms])?;
                     }
                 } else {
-                    acc.deduped += 1;
+                    // Same money, different label: an adapter that learns to name
+                    // a workspace — Cline's desktop sub-agents keep their meta in
+                    // a sibling dir, or in none at all — must not leave the rows
+                    // it already wrote unattributed forever. Totals stay exactly
+                    // as they were; only `project`/`model` move, and the rollup
+                    // (keyed by both) is rebuilt from `event` once per pass.
+                    let project = ev.project.as_deref().unwrap_or("");
+                    let model = ev.model.as_deref().unwrap_or("");
+                    if new_total == old_total && (project != old_project || model != old_model) {
+                        up_label
+                            .execute(params![ev.project, ev.model, old_id])
+                            .map_err(sql_err)?;
+                        acc.relabeled += 1;
+                        relabeled_days.push(old_ts);
+                    } else {
+                        acc.deduped += 1;
+                    }
                 }
                 continue;
             }
@@ -743,6 +780,7 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
             up_rollup
                 .execute(params![
                     day,
+                    origin_of(&key),
                     tool,
                     ev.session,
                     ev.project.as_deref().unwrap_or(""),
@@ -759,6 +797,12 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                     ev.ts_ms,
                 ])
                 .map_err(sql_err)?;
+        }
+        if !relabeled_days.is_empty() {
+            // One rebuild per affected day, not per row: relabelling a session's
+            // whole transcript would otherwise recompute the same day dozens of
+            // times inside one transaction.
+            recompute_days_tx(&tx, &relabeled_days)?;
         }
     }
     // The cursor only becomes durable once the events it covers are durable, so

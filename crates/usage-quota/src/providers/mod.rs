@@ -15,6 +15,8 @@ mod dsh;
 mod funide;
 mod gemini;
 mod joycode;
+mod kimicode;
+mod minimaxcode;
 mod opencode;
 mod qoder;
 mod trae;
@@ -35,6 +37,8 @@ pub use dsh::DshQuota;
 pub use funide::FunIdeQuota;
 pub use gemini::GeminiQuota;
 pub use joycode::JoycodeQuota;
+pub use kimicode::KimiCodeQuota;
+pub use minimaxcode::MiniMaxCodeQuota;
 pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
 pub use trae::TraeQuota;
@@ -52,6 +56,8 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(AntigravityQuota),
         Box::new(AtomCodeQuota),
         Box::new(ColaQuota),
+        Box::new(KimiCodeQuota),
+        Box::new(MiniMaxCodeQuota),
         Box::new(FunIdeQuota),
         Box::new(ClineQuota),
         Box::new(OpenCodeQuota),

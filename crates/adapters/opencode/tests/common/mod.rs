@@ -74,6 +74,13 @@ fn create_db(path: &Path, wal: bool) {
           id text PRIMARY KEY, session_id text NOT NULL,
           time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL
         );
+        -- The dialect's v2 record table, verbatim in shape from the live store,
+        -- where OpenCode 1.18.30 keeps it empty while `message` is still written.
+        CREATE TABLE session_message (
+          id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL,
+          seq integer NOT NULL, time_created integer NOT NULL,
+          time_updated integer NOT NULL, data text NOT NULL
+        );
         "#,
     )
     .unwrap();
@@ -116,6 +123,33 @@ pub fn message(conn: &Connection, id: &str, session_id: &str, time_created: i64,
     )
     .unwrap();
     conn.query_row("SELECT max(rowid) FROM message", [], |r| r.get(0)).unwrap()
+}
+
+/// One `session_message` (v2) row; returns its rowid. `type` is where the role
+/// lives now, and the payload carries none.
+pub fn v2_message(
+    conn: &Connection,
+    id: &str,
+    session_id: &str,
+    type_: &str,
+    seq: i64,
+    time_created: i64,
+    data: &str,
+) -> i64 {
+    conn.execute(
+        "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+         VALUES (?1,?2,?3,?4,?5,?5,?6)",
+        rusqlite::params![id, session_id, type_, seq, time_created, data],
+    )
+    .unwrap();
+    conn.query_row("SELECT max(rowid) FROM session_message", [], |r| r.get(0)).unwrap()
+}
+
+/// The v2 payload: the same stage numbers, no `role` key at all.
+pub fn v2_assistant_data(model: &str, total: i64, input: i64, output: i64, reasoning: i64, read: i64) -> String {
+    format!(
+        r#"{{"agent":"build","modelID":"{model}","providerID":"opencode","cost":0.5,"time":{{"created":1787799862846}},"tokens":{{"total":{total},"input":{input},"output":{output},"reasoning":{reasoning},"cache":{{"write":0,"read":{read}}}}}}}"#
+    )
 }
 
 pub fn assistant_data(model: &str, total: i64, input: i64, output: i64, reasoning: i64, read: i64, cwd: &str) -> String {

@@ -396,7 +396,7 @@ function sessionsOf(now: number): SessionRow[] {
   return rows.map(([tool, session, project, model, ago, tokens, cost, requests]) => ({
     tool,
     session,
-    project: `/Users/sp/work/${project}`,
+    project: `/Users/dev/work/${project}`,
     model,
     first_ms: now - ago - 12 * 60_000,
     last_ms: now - ago,
@@ -412,6 +412,15 @@ const PRICING: PricingMeta = {
   stale: false,
   key_count: 4_213,
   cache_dir: "~/Library/Caches/tokenme",
+};
+
+// QA pin: `?qpending=1` shows the quota section's wait state — the boot publish
+// carries usage but no quota windows yet. A hand-authored fixture always has its
+// probes answered, so without this the frame nobody can see on a fast machine is
+// unreachable.
+const pinnedQuotaWait = (): boolean => {
+  if (typeof location === "undefined") return false;
+  return new URLSearchParams(location.search).get("qpending") === "1";
 };
 
 /* -------------------------------------------------------------------- build */
@@ -437,11 +446,11 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
       ["qmodel-latest", 0, 0, 17, "credit"],
     ],
     projects: [
-      ["/Users/sp/work/tokenme", 6_902_000, 2.31, 168],
-      ["/Users/sp/work/wallet-web", 3_148_000, 1.14, 87],
-      ["/Users/sp/work/tokenscope-rs", 1_604_000, 0.52, 44],
-      ["/Users/sp/work/infra", 548_000, 0.18, 21],
-      ["/Users/sp/work/docs-site", 178_000, 0.06, 11],
+      ["/Users/dev/work/tokenme", 6_902_000, 2.31, 168],
+      ["/Users/dev/work/wallet-web", 3_148_000, 1.14, 87],
+      ["/Users/dev/work/tokenscope-rs", 1_604_000, 0.52, 44],
+      ["/Users/dev/work/infra", 548_000, 0.18, 21],
+      ["/Users/dev/work/docs-site", 178_000, 0.06, 11],
     ],
     mcps: [
       ["bugx", 2_864_000, 64],
@@ -477,11 +486,11 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
       ["gpt-5-mini", 4_902_000, 0.71, 158],
     ],
     projects: [
-      ["/Users/sp/work/tokenme", 34_118_000, 11.84, 842],
-      ["/Users/sp/work/wallet-web", 18_264_000, 6.12, 428],
-      ["/Users/sp/work/tokenscope-rs", 8_146_000, 2.24, 214],
-      ["/Users/sp/work/infra", 3_402_000, 0.72, 108],
-      ["/Users/sp/work/docs-site", 1_876_000, 0.32, 75],
+      ["/Users/dev/work/tokenme", 34_118_000, 11.84, 842],
+      ["/Users/dev/work/wallet-web", 18_264_000, 6.12, 428],
+      ["/Users/dev/work/tokenscope-rs", 8_146_000, 2.24, 214],
+      ["/Users/dev/work/infra", 3_402_000, 0.72, 108],
+      ["/Users/dev/work/docs-site", 1_876_000, 0.32, 75],
     ],
     mcps: [
       ["bugx", 14_802_000, 318],
@@ -517,11 +526,11 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
       ["gpt-5-mini", 16_402_000, 2.44, 538],
     ],
     projects: [
-      ["/Users/sp/work/tokenme", 154_286_000, 52.84, 3_728],
-      ["/Users/sp/work/wallet-web", 78_142_000, 26.44, 1_842],
-      ["/Users/sp/work/tokenscope-rs", 34_028_000, 9.88, 812],
-      ["/Users/sp/work/infra", 18_402_000, 3.72, 486],
-      ["/Users/sp/work/docs-site", 12_148_000, 2.08, 348],
+      ["/Users/dev/work/tokenme", 154_286_000, 52.84, 3_728],
+      ["/Users/dev/work/wallet-web", 78_142_000, 26.44, 1_842],
+      ["/Users/dev/work/tokenscope-rs", 34_028_000, 9.88, 812],
+      ["/Users/dev/work/infra", 18_402_000, 3.72, 486],
+      ["/Users/dev/work/docs-site", 12_148_000, 2.08, 348],
     ],
     mcps: [
       ["bugx", 68_142_000, 1_428],
@@ -564,11 +573,11 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
       ["kimi-k3", 96_402_000, 18.44, 3_538],
     ],
     projects: [
-      ["/Users/sp/work/tokenme", 1_042_286_000, 352.84, 21_728],
-      ["/Users/sp/work/wallet-web", 478_142_000, 146.44, 8_842],
-      ["/Users/sp/work/tokenscope-rs", 234_028_000, 68.88, 4_812],
-      ["/Users/sp/work/infra", 118_402_000, 24.72, 2_486],
-      ["/Users/sp/work/docs-site", 62_148_000, 12.08, 1_348],
+      ["/Users/dev/work/tokenme", 1_042_286_000, 352.84, 21_728],
+      ["/Users/dev/work/wallet-web", 478_142_000, 146.44, 8_842],
+      ["/Users/dev/work/tokenscope-rs", 234_028_000, 68.88, 4_812],
+      ["/Users/dev/work/infra", 118_402_000, 24.72, 2_486],
+      ["/Users/dev/work/docs-site", 62_148_000, 12.08, 1_348],
     ],
     mcps: [
       ["bugx", 168_142_000, 3_428],
@@ -598,11 +607,46 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     year,
     heatmap: buildHeatmap(localMidnight(now)),
     hourly: buildHourly(now),
-    quotas: quotasOf(nowMs2),
+    quotas: pinnedQuotaWait() ? [] : quotasOf(nowMs2),
+    quotas_pending: pinnedQuotaWait(),
     sources: SOURCES,
     pricing: { ...PRICING, fetched_at_ms: nowMs2 - 42 * 60_000 },
     recent_sessions: sessionsOf(nowMs2),
     all_time: allTime,
+    // The whole panel is folded on one machine scope; a hand-authored report
+    // can only be the 全部 view (the engine owns re-folding).
+    scope: { kind: "all" },
+    // Today's tokens per machine; they sum to the day window's total, which is
+    // the identity the switcher promises (全部 = 各机器之和). The remote origins
+    // match `syncs` below — one fresh, one past the amber line.
+    machines: [
+      { origin: "", today_tokens: 7_428_000 },
+      { origin: "build-01", today_tokens: 3_095_000 },
+      { origin: "gpu-02", today_tokens: 1_857_000 },
+    ],
+    // Two machines mid-sync: the badge shows the newest; the older origin only
+    // surfaces in the tooltip. `?sync=30` pins the newest import 30h old to
+    // drive the stale state.
+    syncs: [
+      {
+        origin: "build-01",
+        imported_at_ms: nowMs2 - 6 * 60_000,
+        window_lo_ms: nowMs2 - 30 * 86_400_000,
+        window_hi_ms: nowMs2 + 1,
+        rows: 12_431,
+        file: "tokenme-build-01.jsonl.gz",
+        sha256: "0d6f2c9a4e8b17d3542f0c6a98b3e712fa45cd90be2211447356a1b0c9d8e2f4",
+      },
+      {
+        origin: "gpu-02",
+        imported_at_ms: nowMs2 - 2 * 86_400_000,
+        window_lo_ms: nowMs2 - 32 * 86_400_000,
+        window_hi_ms: nowMs2 + 1,
+        rows: 3_208,
+        file: "tokenme-gpu-02.jsonl.gz",
+        sha256: "b7e1a0d35c94f2816a7e2d4b08c3f95741de8806fe2c31902b4d7a6c5e0f1843",
+      },
+    ],
   };
 }
 

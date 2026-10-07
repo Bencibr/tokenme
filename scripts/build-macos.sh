@@ -37,6 +37,12 @@ t=$SECONDS
 (cd "$APP" && pnpm install --frozen-lockfile --prefer-offline && pnpm build)
 echo "==> frontend: $((SECONDS - t))s"
 
+# theme.css declares the dark palette twice over (the OS media query and the
+# 深色 pin) and drift between them is silent: follow-system once shipped a
+# settings sheet with no mask at all. Sub-second, and it guards a source file
+# the cargo gate below never looks at, so it runs even with --fast.
+python3 scripts/check-theme-parity.py
+
 # The test gate. A workspace test pass recompiles every crate in debug —
 # minutes that a frontend-only iteration pays for nothing. Hash everything
 # under the crates and the app's Rust tree (sources, fixtures, manifests);
@@ -55,11 +61,23 @@ elif [[ -f "$TEST_STAMP" && "$(cat "$TEST_STAMP")" == "$(rust_hash)" ]]; then
   echo "==> tests: skipped (crate sources unchanged since the last green run)"
 else
   cargo test --workspace --all-targets
+  # The panel's Rust lives in its own workspace (root Cargo.toml excludes
+  # apps/tokenme-bar), so the run above never compiles it — and the shipped
+  # binary is the one it produces. The anchor and engine-loop tests caught real
+  # bugs and are invisible to the gate unless asked for directly.
+  (cd "$APP/src-tauri" && cargo test)
   rust_hash > "$TEST_STAMP"
   echo "==> tests: $((SECONDS - t))s"
 fi
 
 t=$SECONDS
+# The panel bundles the two static linux collectors it uploads to servers;
+# stage them when missing so a fresh checkout builds a working app unassisted.
+if [[ ! -x "$APP/src-tauri/resources/collector/tokenme-x86_64" \
+   || ! -x "$APP/src-tauri/resources/collector/tokenme-aarch64" ]]; then
+  echo "==> collector resources missing; staging them"
+  ./scripts/bundle-collector.sh
+fi
 (cd "$APP" && pnpm tauri build)
 echo "==> tauri build: $((SECONDS - t))s"
 

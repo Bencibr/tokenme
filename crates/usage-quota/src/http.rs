@@ -27,6 +27,41 @@ pub fn post_json(url: &str, headers: &[(&str, &str)], body: Value) -> Option<Val
     request(url, headers, Some(body)).and_then(|r| r.into_json().ok())
 }
 
+/// Form POST for OAuth exchanges (MiniMax Code's token endpoint): a non-2xx here
+/// still carries a parseable `{"error":"invalid_grant",…}` the caller must read —
+/// it is the difference between "rotate and write back" and "the login is dead,
+/// touch nothing". Only a transport failure or an unparsable body is `None`.
+pub fn post_form_any_status(
+    url: &str,
+    headers: &[(&str, &str)],
+    form: &[(&str, &str)],
+) -> Option<(u16, Value)> {
+    post_form_any_status_read(url, headers, form, READ)
+}
+
+/// Same form POST with a caller-chosen read timeout: a token-refresh endpoint
+/// can sit well past the 6 s probe budget, and a half-timeout refresh is
+/// worse than none (the caller would give up mid-exchange).
+pub fn post_form_any_status_read(
+    url: &str,
+    headers: &[(&str, &str)],
+    form: &[(&str, &str)],
+    read: std::time::Duration,
+) -> Option<(u16, Value)> {
+    let agent = ureq::AgentBuilder::new().timeout_connect(CONNECT).timeout_read(read).build();
+    let mut req = agent.post(url);
+    for (name, value) in headers {
+        req = req.set(name, value);
+    }
+    let resp = match req.send_form(form) {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(_, resp)) => resp,
+        Err(_) => return None,
+    };
+    let status = resp.status();
+    Some((status, resp.into_json().ok()?))
+}
+
 fn request(url: &str, headers: &[(&str, &str)], body: Option<Value>) -> Option<ureq::Response> {
     let resp = send(url, headers, body)?;
     if !(200u16..300).contains(&resp.status()) {

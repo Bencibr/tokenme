@@ -161,6 +161,30 @@ impl UsageEvent {
     }
 }
 
+/// The origin a row's `source` belongs to: `''` for this machine's own files,
+/// the machine name for rows a bundle merge stamped as
+/// `linux:<origin>:<their key>` (`usage_index::sync`). Origin names with a
+/// colon are rejected at the sync boundary, so the first colon after the
+/// prefix is always the separator. The SQL twin lives in the index's
+/// `ORIGIN_SQL`; both must agree.
+pub fn origin_of(source: &str) -> &str {
+    match source.strip_prefix("linux:") {
+        Some(rest) => rest.split_once(':').map(|(origin, _)| origin).unwrap_or(""),
+        None => "",
+    }
+}
+
+/// Whether `name` can be used as a sync origin. Deliberately narrow: `:`
+/// separates origin from key inside `linux:<origin>:<key>` sources and dedupe
+/// keys (and would break [`origin_of`] and its SQL twin), `/` and `\` would
+/// turn `tokenme-<origin>.jsonl.gz` into a path, and control characters would
+/// corrupt manifests and log lines. Everything a hostname can contain, and
+/// anything a person would type into the panel's server dialog, still passes.
+pub fn origin_ok(name: &str) -> bool {
+    !name.trim().is_empty()
+        && !name.chars().any(|c| c == ':' || c == '/' || c == '\\' || c.is_control())
+}
+
 /// Parse the timestamp dialects seen across sources: RFC 3339 with `Z` or an
 /// offset, and bare unix seconds or milliseconds.
 pub fn parse_ts_ms(raw: &str) -> Option<i64> {
@@ -208,5 +232,23 @@ mod tests {
     fn zero_counts_are_not_a_billable_event() {
         assert!(TokenCounts::default().is_zero());
         assert!(!TokenCounts { credits: 0.27, ..Default::default() }.is_zero());
+    }
+
+    #[test]
+    fn origin_parses_and_validates_symmetrically() {
+        assert_eq!(origin_of(""), "");
+        assert_eq!(origin_of("/logs/x.jsonl"), "");
+        assert_eq!(origin_of("linux:ops-box:/logs/x.jsonl"), "ops-box");
+        // No colon after the prefix: not a stamped source, not an origin.
+        assert_eq!(origin_of("linux:ops-box"), "");
+
+        assert!(origin_ok("ops-box"));
+        assert!(origin_ok("服务器 01")); // names a person would type
+        assert!(!origin_ok(""));
+        assert!(!origin_ok("   "));
+        assert!(!origin_ok("a:b"));
+        assert!(!origin_ok("a/b"));
+        assert!(!origin_ok("a\\b"));
+        assert!(!origin_ok("a\nb"));
     }
 }

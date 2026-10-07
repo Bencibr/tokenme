@@ -20,7 +20,7 @@ pub const HEATMAP_DAYS: i64 = 371;
 /// panel after its last mention.
 pub const LOG_ROW_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
     pub counts: TokenCounts,
     pub total_tokens: f64,
@@ -37,7 +37,7 @@ pub struct Summary {
     pub unpriced: Vec<UnpricedModel>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnpricedModel {
     pub tool: String,
     pub model: String,
@@ -45,7 +45,7 @@ pub struct UnpricedModel {
     pub requests: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub key: String,
     pub label: String,
@@ -58,7 +58,7 @@ pub struct Item {
     pub priced: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Breakdown {
     pub tools: Vec<Item>,
     pub models: Vec<Item>,
@@ -67,7 +67,7 @@ pub struct Breakdown {
     pub skills: Vec<Item>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Window {
     /// `2026-09-23`, `2026-W39`, `2026-09`.
     pub key: String,
@@ -83,7 +83,7 @@ pub struct Window {
     pub breakdown: Breakdown,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeatCell {
     pub date: String,
     pub total_tokens: f64,
@@ -94,7 +94,7 @@ pub struct HeatCell {
 /// One local-hour bucket of today, for the panel's 今日 chart. The hour is the
 /// vec index (0..24 always present), so the frontend never guesses which slots
 /// exist and an hour that has not happened yet is a zero, not a gap.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HourCell {
     pub total_tokens: f64,
     pub cost: f64,
@@ -116,7 +116,7 @@ pub enum QuotaOrigin {
     Budget,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaView {
     pub tool: String,
     pub used_percent: f64,
@@ -131,7 +131,7 @@ pub struct QuotaView {
     pub origin: QuotaOrigin,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceStatus {
     pub id: String,
     pub display: String,
@@ -141,7 +141,45 @@ pub struct SourceStatus {
     pub events_ingested: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Which machines' rows a report folds over. `All` is the pre-feature merge
+/// (this machine plus every imported origin). `Local` is this machine alone —
+/// origin `''` in the index. `Origin` is one remote machine. The panel sends
+/// it as `{"kind":"all"}` / `{"kind":"local"}` / `{"kind":"origin",
+/// "name":"ops-box"}`; the report echoes it back so a stale in-flight report
+/// can never paint a freshly switched panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum MachineScope {
+    #[default]
+    All,
+    Local,
+    Origin {
+        name: String,
+    },
+}
+
+impl MachineScope {
+    /// Whether one index row's `origin` belongs in this scope.
+    pub fn keeps(&self, origin: &str) -> bool {
+        match self {
+            MachineScope::All => true,
+            MachineScope::Local => origin.is_empty(),
+            MachineScope::Origin { name } => origin == name,
+        }
+    }
+}
+
+/// One machine's today volume for the panel's scope menu — `origin: ""` is
+/// this machine. Every origin with any indexed row appears (a remote that has
+/// not synced today still gets a row, with 0); the panel joins ages from
+/// [`Report::syncs`] and hides the whole control when no remote exists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineView {
+    pub origin: String,
+    pub today_tokens: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRow {
     pub tool: String,
     pub session: String,
@@ -154,7 +192,7 @@ pub struct SessionRow {
     pub requests: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub generated_at_ms: i64,
     /// Local UTC offset, e.g. `+08:00`. All period boundaries are local time.
@@ -176,11 +214,48 @@ pub struct Report {
     /// snapshots, the browser preview) read as "already settled".
     #[serde(default)]
     pub quotas_pending: bool,
+    /// This payload is last-known numbers restored from disk, not a fresh fold
+    /// over the index: the previous run published them and this run is still
+    /// scanning. The panel labels them as such and must not read them as a
+    /// stalled engine. Defaults off — a report without the field is live.
+    #[serde(default)]
+    pub from_previous_run: bool,
     pub sources: Vec<SourceStatus>,
+    /// One record per origin whose Linux bundle was successfully merged into
+    /// this index, newest first — the panel's sync-health badge reads this.
+    /// Defaults empty for reports that predate the field.
+    #[serde(default)]
+    pub syncs: Vec<SyncRecord>,
     pub pricing: PricingMeta,
+    /// The machine scope this report was folded under, echoed from the
+    /// request; the panel compares it against its own selection and ignores
+    /// mismatched pushes.
+    pub scope: MachineScope,
+    /// Per-machine today volumes for the scope menu, this machine first
+    /// (`""`), then remotes by name. Independent of `scope` on purpose: the
+    /// menu must list every machine even while one of them is selected.
+    #[serde(default)]
+    pub machines: Vec<MachineView>,
     pub recent_sessions: Vec<SessionRow>,
     /// Whole indexed history, for the "总计" line.
     pub all_time: Summary,
+}
+
+/// What one `tokenme import` merged from one origin, as written to the index's
+/// `meta` table (`sync:linux:<origin>`) in the same transaction as the merge —
+/// so a record can never describe a batch that was rolled back. The panel
+/// renders it as the "Linux 同步" badge; `imported_at_ms` is what tells a
+/// stalled sync apart from a quiet afternoon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncRecord {
+    pub origin: String,
+    pub imported_at_ms: i64,
+    pub window_lo_ms: i64,
+    pub window_hi_ms: i64,
+    pub rows: u64,
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +269,12 @@ pub struct ReportOptions<'a> {
     /// Spend caps set in tokenme, keyed by tool id. They become quota bars too,
     /// measured against the cost this same report computes.
     pub budgets: BTreeMap<String, Budget>,
+    /// Which machines to fold. [`summarize_facts`] honors it, including for
+    /// the budget bars' cost inputs (budgets and vendor quotas stay the local
+    /// machine's, whatever the scope). The event path ([`summarize`]) only
+    /// ever sees this machine's events, so `All` and `Local` fold them and a
+    /// remote scope folds none.
+    pub scope: MachineScope,
 }
 
 impl<'a> ReportOptions<'a> {
@@ -205,6 +286,7 @@ impl<'a> ReportOptions<'a> {
             recent_session_limit: 20,
             polled_quota: Vec::new(),
             budgets: BTreeMap::new(),
+            scope: MachineScope::All,
         }
     }
 
@@ -721,7 +803,7 @@ fn merge_quotas<'a>(
 
 /// Build the whole panel/CLI payload from already-deduplicated events.
 pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
-    let rows: Vec<Row> = events
+    let all_rows: Vec<Row> = events
         .iter()
         .map(|ev| {
             let credits = ev.meter == Meter::Credits;
@@ -738,6 +820,12 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
             Row { ev, cost, priced: credits || price.is_some(), credit_money: credits && rate.is_some() }
         })
         .collect();
+    // The scope filter, applied the same way `summarize_facts` applies it to
+    // the index's per-origin rows. Quota samples and budget cost inputs stay
+    // out of it on purpose: vendor windows and spend caps describe *this*
+    // machine whichever machine's numbers are on screen.
+    let keep = |source: &str| opts.scope.keeps(crate::origin_of(source));
+    let rows: Vec<Row> = all_rows.iter().copied().filter(|r| keep(&r.ev.source)).collect();
 
     let (day_span, week_span, month_span, year_span) = spans(opts.now_ms);
     let day = build_window(day_span, &rows);
@@ -786,12 +874,24 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
     // several windows at once. The whole pipeline (newest-log-row-per-window,
     // probe override, expiry filter, budget bars, family sort) lives in
     // [`merge_quotas`], shared verbatim with the rollup fold so the two report
-    // paths cannot drift.
+    // paths cannot drift. Its inputs are the *unscoped* rows: quotas are this
+    // machine's, whatever scope the rest of the report was folded under.
+    let (spent_today, spent_month) = match opts.scope {
+        MachineScope::All => {
+            (cost_by_tool(&day.breakdown.tools), cost_by_tool(&month.breakdown.tools))
+        }
+        _ => {
+            let (d, _, m, _) = spans(opts.now_ms);
+            let day_all = build_window(d, &all_rows);
+            let month_all = build_window(m, &all_rows);
+            (cost_by_tool(&day_all.breakdown.tools), cost_by_tool(&month_all.breakdown.tools))
+        }
+    };
     let quotas = merge_quotas(
-        rows.iter().filter_map(|r| r.ev.quota.as_ref().map(|q| (r.ev.tool.as_str(), r.ev.ts_ms, q))),
+        all_rows.iter().filter_map(|r| r.ev.quota.as_ref().map(|q| (r.ev.tool.as_str(), r.ev.ts_ms, q))),
         &opts.polled_quota,
-        &cost_by_tool(&day.breakdown.tools),
-        &cost_by_tool(&month.breakdown.tools),
+        &spent_today,
+        &spent_month,
         opts.now_ms,
         &opts.budgets,
     );
@@ -826,6 +926,21 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
     recent_sessions.sort_by_key(|s| -s.last_ms);
     recent_sessions.truncate(opts.recent_session_limit.max(1));
 
+    // Unscoped by definition: the scope menu must list every machine present
+    // in the input while one of them is selected. Same accumulation as
+    // `summarize_facts`.
+    let mut machine_acc: BTreeMap<&str, f64> = BTreeMap::new();
+    for r in &all_rows {
+        let entry = machine_acc.entry(crate::origin_of(&r.ev.source)).or_insert(0.0);
+        if date_of(r.ev.ts_ms) == Some(today) {
+            *entry += r.tokens();
+        }
+    }
+    let machines: Vec<MachineView> = machine_acc
+        .into_iter()
+        .map(|(origin, today_tokens)| MachineView { origin: origin.to_string(), today_tokens })
+        .collect();
+
     Report {
         generated_at_ms: opts.now_ms,
         utc_offset: utc_offset(opts.now_ms),
@@ -839,8 +954,14 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         // The caller (the panel engine) flips this when its boot publish
         // skipped the probes; summarize itself has no opinion.
         quotas_pending: false,
+        // A fold built here is this run's own. Only the panel's boot restore
+        // marks a report as last-known, and it sets the flag itself.
+        from_previous_run: false,
         sources: opts.sources.clone(),
+        syncs: Vec::new(),
         pricing: opts.pricing.meta().clone(),
+        scope: opts.scope.clone(),
+        machines,
         recent_sessions,
         all_time: summarize_events(&rows),
     }
@@ -947,6 +1068,10 @@ pub struct RollupRow {
     /// the event path, where `date_of` returning `None` skips heatmap/hourly but
     /// keeps the row in every raw-ts aggregate.
     pub day: String,
+    /// The machine these rows came from: `""` for this machine's own files,
+    /// the bundle origin for rows merged by `tokenme import`. What
+    /// [`MachineScope`] filters on.
+    pub origin: String,
     pub tool: String,
     pub session: String,
     /// `''` sentinel in the table folds back to `None` here.
@@ -967,6 +1092,8 @@ pub struct RollupRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactGroup {
     pub bucket: u32,
+    /// `""` for this machine's own rows — see [`RollupRow::origin`].
+    pub origin: String,
     pub tool: String,
     pub session: String,
     pub project: Option<String>,
@@ -986,6 +1113,8 @@ pub struct CallFact {
     pub bucket: u32,
     pub kind: CallKind,
     pub name: String,
+    /// `""` for this machine's own rows — see [`RollupRow::origin`].
+    pub origin: String,
     pub tool: String,
     pub session: String,
     pub project: Option<String>,
@@ -1048,6 +1177,8 @@ pub struct ReportFacts {
     pub quotas: Vec<QuotaFact>,
     /// The top-N recent sessions, resolved and ordered.
     pub sessions: Vec<SessionFact>,
+    /// `meta`-derived sync records (one per imported origin), newest first.
+    pub syncs: Vec<SyncRecord>,
     /// True when this call had to rebuild the rollup from `event` first (first
     /// publish after the upgrade, or after a fail-safe invalidation). The
     /// engine logs it; it does not change the report.
@@ -1256,6 +1387,11 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
     let cur_keys: Vec<String> = plan.cur_start_ms.iter().copied().map(day_key).collect();
     let prev_keys: Vec<String> = plan.prev_start_ms.iter().copied().map(day_key).collect();
 
+    // The scope filter over every row's origin. Quotas and budget cost inputs
+    // stay out of it on purpose: vendor windows and spend caps describe *this*
+    // machine whichever machine's numbers are on screen.
+    let keep = |origin: &str| opts.scope.keeps(origin);
+
     // Cur = whole rollup days from the window's local midnight through yesterday,
     // plus today's live slice; prev = whole days strictly between the prev head
     // day and the cur start, plus that head day's live tail. Together they
@@ -1267,19 +1403,36 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
         let cur: Vec<G<'_>> = facts
             .rollup
             .iter()
-            .filter(|r| r.day.as_str() >= cur_keys[i as usize].as_str() && r.day.as_str() < today_key.as_str())
+            .filter(|r| {
+                keep(&r.origin)
+                    && r.day.as_str() >= cur_keys[i as usize].as_str()
+                    && r.day.as_str() < today_key.as_str()
+            })
             .map(rollup_g)
-            .chain(facts.live.iter().filter(|f| f.bucket == LIVE_TODAY).map(live_g))
+            .chain(
+                facts
+                    .live
+                    .iter()
+                    .filter(|f| f.bucket == LIVE_TODAY && keep(&f.origin))
+                    .map(live_g),
+            )
             .collect();
         let prev: Vec<G<'_>> = facts
             .rollup
             .iter()
             .filter(|r| {
-                r.day.as_str() > prev_keys[i as usize].as_str()
+                keep(&r.origin)
+                    && r.day.as_str() > prev_keys[i as usize].as_str()
                     && r.day.as_str() < cur_keys[i as usize].as_str()
             })
             .map(rollup_g)
-            .chain(facts.live.iter().filter(|f| f.bucket == LIVE_PREV + i).map(live_g))
+            .chain(
+                facts
+                    .live
+                    .iter()
+                    .filter(|f| f.bucket == LIVE_PREV + i && keep(&f.origin))
+                    .map(live_g),
+            )
             .collect();
         let (summary, _) = fold_groups(cur.iter().copied(), &mut money);
         let (prev_summary, _) = fold_groups(prev.iter().copied(), &mut money);
@@ -1288,13 +1441,13 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
         let mcps: Vec<G<'_>> = facts
             .calls
             .iter()
-            .filter(|c| c.bucket == i && c.kind == CallKind::Mcp)
+            .filter(|c| c.bucket == i && c.kind == CallKind::Mcp && keep(&c.origin))
             .map(call_g)
             .collect();
         let skills: Vec<G<'_>> = facts
             .calls
             .iter()
-            .filter(|c| c.bucket == i && c.kind == CallKind::Skill)
+            .filter(|c| c.bucket == i && c.kind == CallKind::Skill && keep(&c.origin))
             .map(call_g)
             .collect();
         let breakdown = Breakdown {
@@ -1331,7 +1484,7 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
     // window is emitted, which is what the event path did too (it accumulated
     // everything, emitted the window). `""`-day rows never match a real date.
     let mut heat_acc: HashMap<&str, (f64, f64, u64)> = HashMap::new();
-    for r in &facts.rollup {
+    for r in facts.rollup.iter().filter(|r| keep(&r.origin)) {
         let (cost, _) = money.cost(&r.tool, r.model.as_deref(), &r.counts, r.meter);
         let e = heat_acc.entry(r.day.as_str()).or_insert((0.0, 0.0, 0));
         e.0 += r.counts.total();
@@ -1353,17 +1506,29 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
     let mut hourly = Vec::with_capacity(24);
     for h in 0..24u32 {
         let (s, _) = fold_groups(
-            facts.live.iter().filter(|f| f.bucket == LIVE_HOUR0 + h).map(live_g),
+            facts.live.iter().filter(|f| f.bucket == LIVE_HOUR0 + h && keep(&f.origin)).map(live_g),
             &mut money,
         );
         hourly.push(HourCell { total_tokens: s.total_tokens, cost: s.cost, requests: s.requests });
     }
 
+    // Budget bars keep this machine's own cost inputs even when the panel is
+    // scoped to a remote machine — a spend cap is not the remote's. At `All`
+    // the day/month breakdowns below already are those unscoped inputs.
+    let (spent_today, spent_month) = match opts.scope {
+        MachineScope::All => {
+            (cost_by_tool(&day.breakdown.tools), cost_by_tool(&month.breakdown.tools))
+        }
+        _ => (
+            cost_by_tool(&window_tool_items(facts, &cur_keys[0], &today_key, &mut money)),
+            cost_by_tool(&window_tool_items(facts, &cur_keys[2], &today_key, &mut money)),
+        ),
+    };
     let quotas = merge_quotas(
         facts.quotas.iter().map(|q| (q.tool.as_str(), q.ts_ms, &q.sample)),
         &opts.polled_quota,
-        &cost_by_tool(&day.breakdown.tools),
-        &cost_by_tool(&month.breakdown.tools),
+        &spent_today,
+        &spent_month,
         opts.now_ms,
         &opts.budgets,
     );
@@ -1400,7 +1565,26 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
 
     // Whole indexed history: every rollup row, including `""`-day ones — the
     // event path's all_time never filtered by date either.
-    let (all_time, _) = fold_groups(facts.rollup.iter().map(rollup_g), &mut money);
+    let (all_time, _) =
+        fold_groups(facts.rollup.iter().filter(|r| keep(&r.origin)).map(rollup_g), &mut money);
+
+    // Unscoped by definition: the menu lists every machine while one of them
+    // is selected. Origins are enumerated from the rollup (a remote whose
+    // today slice is empty still gets a row); the numbers are today's live
+    // sums, `""` being this machine.
+    let mut machine_acc: BTreeMap<&str, f64> = BTreeMap::new();
+    for r in &facts.rollup {
+        machine_acc.entry(r.origin.as_str()).or_insert(0.0);
+    }
+    for f in &facts.live {
+        if f.bucket == LIVE_TODAY {
+            *machine_acc.entry(f.origin.as_str()).or_default() += f.counts.total();
+        }
+    }
+    let machines: Vec<MachineView> = machine_acc
+        .into_iter()
+        .map(|(origin, today_tokens)| MachineView { origin: origin.to_string(), today_tokens })
+        .collect();
 
     Report {
         generated_at_ms: opts.now_ms,
@@ -1413,11 +1597,36 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
         hourly,
         quotas,
         quotas_pending: false,
+        // A fold built here is this run's own. Only the panel's boot restore
+        // marks a report as last-known, and it sets the flag itself.
+        from_previous_run: false,
         sources: opts.sources.clone(),
+        syncs: facts.syncs.clone(),
         pricing: opts.pricing.meta().clone(),
+        scope: opts.scope.clone(),
+        machines,
         recent_sessions,
         all_time,
     }
+}
+
+/// The unscoped per-tool items of one cur window (whole rollup days from
+/// `lo_key` through yesterday, plus today's live slice) — the budget bars'
+/// input under a scoped report, where the window breakdown itself is filtered.
+fn window_tool_items<'a>(
+    facts: &'a ReportFacts,
+    lo_key: &str,
+    today_key: &str,
+    money: &mut Money<'a>,
+) -> Vec<Item> {
+    let cur: Vec<G<'a>> = facts
+        .rollup
+        .iter()
+        .filter(|r| r.day.as_str() >= lo_key && r.day.as_str() < today_key)
+        .map(rollup_g)
+        .chain(facts.live.iter().filter(|f| f.bucket == LIVE_TODAY).map(live_g))
+        .collect();
+    items_from(&cur, money, |g| Some((g.tool.to_string(), g.tool.to_string())))
 }
 
 #[cfg(test)]

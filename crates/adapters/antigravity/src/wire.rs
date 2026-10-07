@@ -123,6 +123,22 @@ pub(crate) fn bytes_field(buf: &[u8], field: u32) -> Option<&[u8]> {
     None
 }
 
+/// Every `bytes`-wire value for `field`, in wire order. A `repeated` message
+/// field — Antigravity's retry boxes — is one call site's worth of occurrences,
+/// and reading only the first would silently drop the attempts that failed over.
+pub(crate) fn bytes_fields(buf: &[u8], field: u32) -> Vec<&[u8]> {
+    let mut r = Reader::new(buf);
+    let mut out = Vec::new();
+    while let Some((n, value)) = r.next() {
+        if n == field {
+            if let Value::Bytes(b) = value {
+                out.push(b);
+            }
+        }
+    }
+    out
+}
+
 /// First varint value for `field`.
 pub(crate) fn varint_field(buf: &[u8], field: u32) -> Option<u64> {
     let mut r = Reader::new(buf);

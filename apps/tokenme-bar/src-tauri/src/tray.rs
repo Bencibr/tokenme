@@ -2,7 +2,7 @@
 
 use tauri::menu::{CheckMenuItem, MenuBuilder, MenuEvent, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Rect};
+use tauri::{AppHandle, Manager, Rect, Runtime};
 use tauri_plugin_autostart::ManagerExt;
 use usage_core::pricing::PricingOptions;
 use usage_core::{PricingMap, QuotaView, Report};
@@ -133,7 +133,7 @@ pub fn tray_state(app: &AppHandle) -> Option<TrayState> {
 /// thread itself is fine — the body then runs after the current handler
 /// returns. Skipping the update (instead of crashing the pool drain) when the
 /// event loop is already gone, i.e. during shutdown.
-fn on_main<F: FnOnce() + Send + 'static>(app: &AppHandle, body: F) {
+fn on_main<R: Runtime, F: FnOnce() + Send + 'static>(app: &AppHandle<R>, body: F) {
     if let Err(e) = app.run_on_main_thread(body) {
         crate::logging::error(&format!("tray update dropped, event loop is gone: {e}"));
     }
@@ -141,13 +141,13 @@ fn on_main<F: FnOnce() + Send + 'static>(app: &AppHandle, body: F) {
 
 /// Pushes the current numbers onto the status bar. Callable from any thread;
 /// the painting itself is marshalled onto the main thread.
-pub fn refresh(app: &AppHandle, report: &Report, mode: TrayMode) {
+pub fn refresh<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
     let handle = app.clone();
     let report = report.clone();
     on_main(app, move || paint(&handle, &report, mode));
 }
 
-fn paint(app: &AppHandle, report: &Report, mode: TrayMode) {
+fn paint<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
     let (title, tooltip) = label_for(report, mode);
     // Re-setting the image repaints the status item — visible as a flicker on

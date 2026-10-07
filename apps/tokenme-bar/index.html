@@ -15,6 +15,16 @@
         document.documentElement.dataset.platform =
           /Win/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "macos" : "linux";
       }
+      // The appearance the boot shell below must paint in. React applies the
+      // persisted setting a second later, and a shell in the wrong appearance
+      // would flip colour on the panel's first real frame; localStorage is the
+      // only copy readable synchronously here (see applyTheme in lib/bridge).
+      try {
+        var pinned = localStorage.getItem("tokenme:theme");
+        if (pinned === "light" || pinned === "dark") document.documentElement.dataset.theme = pinned;
+      } catch (e) {
+        /* no storage: the media query decides, as 跟随系统 would anyway */
+      }
     </script>
     <style>
       /* Keep the transparent window transparent before the stylesheet loads. */
@@ -35,10 +45,114 @@
         margin: 0;
         overflow: hidden;
       }
+
+      /* ---------------------------------------------------------------- boot shell */
+
+      /* The two colours below are theme.css's --ink-3 and --accent, copied here
+         because this frame paints a full second before that stylesheet arrives
+         and an unstyled shell is worse than none: black text in the top-left
+         corner with two arcs that have no stroke at all. The copy is bound to
+         the real palette by scripts/check-theme-parity.py, which runs on every
+         build — colour drift here would flip the panel on its first real frame.
+         `:not([data-theme="light"])` keeps 跟随系统 honest: an explicit light pin
+         must not paint dark ink for a second while the OS is dark. */
+      /* boot-shell:light { */
+      html {
+        --boot-ink: #66748a;
+        --boot-accent: #0d8f74;
+      }
+      /* } boot-shell:light */
+      /* boot-shell:dark { */
+      @media (prefers-color-scheme: dark) {
+        html:not([data-theme="light"]) {
+          --boot-ink: #8a99ad;
+          --boot-accent: #30d9aa;
+        }
+      }
+      html[data-theme="dark"] {
+        --boot-ink: #8a99ad;
+        --boot-accent: #30d9aa;
+      }
+      /* } boot-shell:dark */
+
+      html,
+      body,
+      #root {
+        height: 100%;
+      }
+      #boot-shell {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        font-size: 11px;
+        color: var(--boot-ink);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      #boot-shell .boot-mark {
+        display: inline-flex;
+      }
+      /* transform-origin relative to the viewBox: the two arcs share centre (24,24). */
+      #boot-shell svg path {
+        transform-box: view-box;
+        transform-origin: center;
+        fill: none;
+      }
+      #boot-shell .arc-hi {
+        stroke: var(--boot-accent);
+        animation: boot-spin-ccw 1.3s linear infinite;
+      }
+      #boot-shell .arc-lo {
+        stroke: var(--boot-accent);
+        opacity: 0.28;
+        animation: boot-spin-cw 0.9s linear infinite;
+      }
+      @keyframes boot-spin-cw {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes boot-spin-ccw {
+        to {
+          transform: rotate(-360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-shell .arc-hi,
+        #boot-shell .arc-lo {
+          animation: none;
+        }
+      }
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Pre-paint boot shell. The bundle needs ~1 s before React can render
+           its own loading card, and until then this surface is empty — which on
+           a cold start is exactly the white panel people report. It mirrors
+           App.tsx's boot branch and React replaces #root's children on its
+           first commit, so nothing has to coordinate the handover. Its own
+           scoped classes (not the app's `.boot`/`.loading`) so no stylesheet,
+           loaded or not, can restyle this frame. -->
+      <div id="boot-shell">
+        <span class="boot-mark" role="status">
+          <svg width="34" height="34" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+            <path class="arc-hi" d="M 4.3 20.53 A 20 20 0 0 1 43.7 20.53" stroke-width="4" stroke-linecap="round" />
+            <path class="arc-lo" d="M 34.84 25.91 A 11 11 0 0 1 13.16 25.91" stroke-width="3.5" stroke-linecap="round" />
+          </svg>
+        </span>
+        <span id="boot-text">正在索引本机用量…</span>
+      </div>
+    </div>
+    <script>
+      // Same rule as lib/i18n: `?lang=` wins, otherwise an English system
+      // locale, else Chinese. Runs while parsing, before the deferred module.
+      var q = new URLSearchParams(location.search).get("lang");
+      var en = q ? q === "en" : /^en/i.test(navigator.language || "");
+      if (en) document.getElementById("boot-text").textContent = "Indexing this machine\u2026";
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

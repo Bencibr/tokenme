@@ -27,9 +27,10 @@
 //!   (`refreshClineToken`: `POST /api/v1/auth/refresh` with the stored refresh
 //!   token), and the rotated pair is persisted back into `providers.json` —
 //!   the persistence is what makes this safe, because a refresh whose result
-//!   is not written back consumes the rotation and logs the user out. This is
-//!   the one place tokenme writes to another tool's file, and it writes only
-//!   the three rotated fields, atomically, permissions preserved.
+//!   is not written back consumes the rotation and logs the user out. Writing
+//!   the rotation back into the tool's own store is what Kimi Code and MiniMax
+//!   Code do too; here it touches only the three rotated fields, atomically,
+//!   permissions preserved.
 //!
 //! ```text
 //! GET https://api.cline.bot/api/v1/users/me/plan/usage-limits

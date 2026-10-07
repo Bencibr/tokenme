@@ -59,18 +59,49 @@ pub fn discover(filter: &DateFilter) -> Vec<SourceFile> {
         // cheap upper bound: a file last written before `until_ms` cannot hold a
         // newer call. `since_ms` cannot prune, because the accumulator keeps being
         // rewritten long after the older calls it contains.
-        if filter.until_ms.is_some_and(|until| mtime_ms(&meta) > until) {
+        let stamp = label_freshness(&path).max(mtime_ms(&meta));
+        if filter.until_ms.is_some_and(|until| stamp > until) {
             continue;
         }
         out.push(SourceFile {
             path,
             kind: FileKind::Tree,
             size: meta.len(),
-            mtime_ms: mtime_ms(&meta),
+            mtime_ms: stamp,
         });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// Re-stat one snapshot entry the way `discover` would have built it.
+///
+/// The generic `SourceFile::restat` re-stats the transcript alone, which
+/// downgrades the fingerprint `discover` builds (that one also carries the
+/// label's freshness) — the panel's snapshot passes would then undo what its
+/// walk passes recorded and the same 46 files would re-read on every other
+/// pass, forever.
+pub fn restat(file: SourceFile) -> Option<SourceFile> {
+    let restatted = file.restat()?;
+    let mtime_ms = label_freshness(&restatted.path).max(restatted.mtime_ms);
+    Some(SourceFile { mtime_ms, ..restatted })
+}
+
+/// The freshest mtime among the files this transcript's project label is read
+/// from.
+///
+/// A desktop sub-agent's transcript stops changing the moment its agent exits,
+/// while the meta that names the workspace can be written later still — so a
+/// fingerprint over the transcript alone would never re-read it, and the rows
+/// the first pass could not label would stay unattributed forever. Measured
+/// 2026-10-06: 226 rows / 9,238,243 prompt tokens sitting in that state.
+fn label_freshness(messages: &Path) -> i64 {
+    paths::session_meta_candidates(messages)
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| mtime_ms(&m))
+        .max()
+        .unwrap_or(0)
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -243,6 +274,42 @@ mod tests {
         assert!(probe().is_some(), "probe finds the same single transcript");
         std::env::remove_var(paths::ENV_SESSIONS_DIR);
         assert!(probe().is_some() || paths::sessions_root().is_none(), "probe still resolves the real profile after the override is dropped");
+    }
+
+    #[test]
+    fn a_late_meta_makes_a_frozen_transcript_look_changed() {
+        let _env = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("session_1_ts");
+        std::fs::create_dir_all(&sess).unwrap();
+        let msgs = sess.join("agent_aaa.messages.json");
+        std::fs::write(&msgs, b"{\"messages\":[]}").unwrap();
+        std::env::set_var(paths::ENV_SESSIONS_DIR, dir.path());
+        let first = discover(&DateFilter::default()).remove(0);
+
+        // The desktop app writes a sub-agent's meta after its transcript stops
+        // growing. If the fingerprint covered only the transcript, that file
+        // would never be read again and its rows would keep the empty project
+        // they were born with — measured on this machine: 226 rows, 9.2M tokens.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let agent = dir.path().join("session_1_ts__agent_aaa");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(agent.join("session_1_ts__agent_aaa.json"), br#"{"cwd":"/w/AutoRSA"}"#).unwrap();
+        let second = discover(&DateFilter::default()).remove(0);
+
+        assert_eq!(second.size, first.size, "the transcript itself did not change");
+        assert!(second.mtime_ms > first.mtime_ms, "the label's own freshness moved the fingerprint");
+
+        // The panel's snapshot passes re-stat without walking the tree. That path
+        // has to fold the label in too, or it quietly downgrades the fingerprint
+        // and the two paths re-read the same files on every other pass.
+        use usage_core::SourceAdapter as _;
+        let via_cache = crate::ClineAdapter.discover_cached(&DateFilter::default(), Some(vec![second.clone()]));
+        assert_eq!(via_cache.len(), 1);
+        assert_eq!(via_cache[0].mtime_ms, second.mtime_ms, "a snapshot pass keeps the fingerprint");
+        let third = discover(&DateFilter::default()).remove(0);
+        assert_eq!(third.mtime_ms, second.mtime_ms, "and the next walk agrees with it");
+        std::env::remove_var(paths::ENV_SESSIONS_DIR);
     }
 
     #[test]

@@ -1,0 +1,1296 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TokenMe · 远程服务器（拉取式采集）交互原型</title>
+<style>
+/* ================================================================ tokens
+   直接取自 apps/tokenme-bar/src/styles/theme.css（两套主题的取值逐字复制），
+   保证原型配色与真实面板一致。 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #0c0f15;
+  --surface: #000000;
+  --surface-solid: #000000;
+  --surface-2: rgba(148, 180, 220, 0.08);
+  --wallpaper:
+    radial-gradient(120% 90% at 18% 0%, #3a5a8c 0%, transparent 58%),
+    radial-gradient(130% 100% at 88% 100%, #6a3f96 0%, transparent 55%),
+    linear-gradient(160deg, #232e40, #151d2a 55%, #1e1730);
+  --ink: #e8edf5; --ink-2: #b7c3d4; --ink-3: #8a99ad;
+  --hair: rgba(205, 225, 250, 0.11); --hair-2: rgba(205, 225, 250, 0.2);
+  --track: rgba(205, 225, 250, 0.13);
+  --fill-hover: rgba(205, 225, 250, 0.07); --fill-active: rgba(205, 225, 250, 0.13);
+  --accent: #30d9aa; --accent-2: #3fc8ec; --accent-ink: #71e6c6;
+  --accent-soft: rgba(48, 217, 170, 0.15); --on-accent: #072019;
+  --edge-hi: rgba(255, 255, 255, 0.09);
+  --heat-1: #1a3f36; --heat-2: #215c4d; --heat-3: #2b8069; --heat-4: #30d9aa;
+  --today: #f0b45c;
+  --scrim: rgba(255, 255, 255, 0.14);
+  --warn: #e6b35a; --warn-soft: rgba(230, 179, 90, 0.16);
+  --ok: #74d88a; --bad: #f2806f; --bad-soft: rgba(242, 128, 111, 0.16);
+  --cat-1: #2fc6a4; --cat-2: #8faee8; --cat-3: #d9b24c; --cat-4: #de9ac9;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ground: #eef1f6;
+  --surface: #ffffff; --surface-solid: #ffffff;
+  --surface-2: rgba(30, 52, 84, 0.06);
+  --wallpaper:
+    radial-gradient(120% 90% at 18% 0%, #7fa4d4 0%, transparent 58%),
+    radial-gradient(130% 100% at 88% 100%, #a488cc 0%, transparent 55%),
+    linear-gradient(160deg, #b9c8dc, #98a8c0 55%, #b0a2c8);
+  --ink: #182234; --ink-2: #455468; --ink-3: #66748a;
+  --hair: rgba(24, 44, 72, 0.1); --hair-2: rgba(24, 44, 72, 0.17);
+  --track: rgba(24, 44, 72, 0.09);
+  --fill-hover: rgba(24, 44, 72, 0.05); --fill-active: rgba(24, 44, 72, 0.1);
+  --accent: #0d8f74; --accent-2: #0c82bd; --accent-ink: #0a725e;
+  --accent-soft: rgba(13, 143, 116, 0.11); --on-accent: #ffffff;
+  --edge-hi: rgba(255, 255, 255, 0.85);
+  --heat-1: #d8e7e4; --heat-2: #a7cdc9; --heat-3: #4f9c94; --heat-4: #0d8f74;
+  --today: #d98a2b;
+  --scrim: rgba(20, 20, 24, 0.18);
+  --warn: #8a5a12; --warn-soft: rgba(138, 90, 18, 0.14);
+  --ok: #3e7c38; --bad: #a12d2d; --bad-soft: rgba(161, 45, 45, 0.14);
+  --cat-1: #0c7f6c; --cat-2: #3d5a9e; --cat-3: #8a6a15; --cat-4: #8a4a78;
+}
+:root {
+  --r-sm: 3px; --r-md: 5px;
+  --stack: -apple-system, "SF Pro Text", "Inter", system-ui, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --t-hero: 34px; --t-body: 13px; --t-meta: 11px;
+  --dur-fast: 160ms; --dur-slow: 240ms;
+  --ease: cubic-bezier(0.22, 0.8, 0.32, 1);
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; font-family: var(--stack); font-size: var(--t-body); line-height: 1.45;
+  color: var(--ink); background: var(--ground);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  user-select: none;
+}
+.num, .badge, .row-val { font-variant-numeric: tabular-nums; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+/* ================================================================ page chrome */
+.pagebar {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 18px;
+  background: color-mix(in srgb, var(--ground) 86%, var(--surface));
+  border-bottom: 1px solid var(--hair-2);
+  backdrop-filter: blur(10px);
+}
+.pagebar h1 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.01em; }
+.pagebar .sub { font-size: var(--t-meta); color: var(--ink-3); }
+.pagebar .grow { flex: 1; }
+.btn-quiet {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; font-size: var(--t-meta); color: var(--ink-2);
+  border: 1px solid var(--hair-2); border-radius: var(--r-md);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.btn-quiet:hover { background: var(--fill-hover); color: var(--ink); }
+.btn-accent {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 12px; font-size: var(--t-meta); font-weight: 600;
+  color: var(--on-accent); background: var(--accent); border-radius: var(--r-sm);
+  transition: filter var(--dur-fast) var(--ease);
+}
+.btn-accent:hover { filter: brightness(1.08); }
+.btn-accent:disabled { background: var(--fill-active); color: var(--ink-3); cursor: default; filter: none; }
+.btn-danger {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; font-size: var(--t-meta); color: var(--bad);
+  border: 1px solid color-mix(in srgb, var(--bad) 38%, transparent); border-radius: var(--r-sm);
+}
+.btn-danger:hover { color: var(--surface); background: var(--bad); }
+
+.stage {
+  display: flex; gap: 28px; align-items: flex-start; justify-content: center;
+  padding: 26px 24px 60px;
+  background: var(--wallpaper) fixed;
+  min-height: calc(100vh - 46px);
+}
+
+/* ================================================================ panel mock */
+.desk { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.desk-caption { font-size: var(--t-meta); color: rgba(255,255,255,0.82); text-shadow: 0 1px 2px rgba(0,0,0,0.35); max-width: 430px; text-align: center; }
+:root[data-theme="light"] .desk-caption { color: rgba(20,30,50,0.78); text-shadow: none; }
+
+.panel {
+  position: relative; display: flex; flex-direction: column;
+  width: 400px; height: 700px; max-height: 86vh;
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--hair-2); border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--edge-hi);
+  overflow: hidden;
+}
+
+/* header */
+.hdr { flex: none; padding: 12px 16px 0; border-bottom: 1px solid var(--hair); }
+.hdr-bar { display: flex; align-items: center; justify-content: space-between; }
+.brand { font-size: var(--t-meta); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+.seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--surface-2); border-radius: var(--r-md); }
+.seg-btn { min-width: 30px; padding: 2px 8px; font-size: var(--t-meta); color: var(--ink-3); border-radius: var(--r-sm); }
+.seg-btn:hover { color: var(--ink); }
+.seg-btn[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent); }
+.hero { margin-top: 10px; }
+.hero-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; }
+.hero-value { font-size: var(--t-hero); font-weight: 700; letter-spacing: -0.02em; }
+.hero-unit { font-size: 15px; color: var(--ink-2); }
+.hero-unit-word { font-size: var(--t-meta); color: var(--ink-3); margin-left: 2px; }
+.hero-side { margin-left: auto; display: inline-flex; align-items: baseline; gap: 7px; }
+.hero-cost { font-size: 15px; font-weight: 600; color: var(--accent-ink); }
+.chip { display: inline-flex; align-items: center; gap: 2px; font-size: var(--t-meta); color: var(--ink-3); }
+.hdr-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 6px; font-size: var(--t-meta); color: var(--ink-3); }
+.dot-sep { width: 2px; height: 2px; border-radius: 50%; background: var(--hair-2); margin: 0 3px; }
+.sync { display: inline-flex; align-items: center; gap: 3px; color: var(--accent-ink); }
+.sync svg { opacity: 0.9; }
+.page-tabs { display: flex; gap: 14px; margin-top: 10px; }
+.page-tab { padding: 3px 0 5px; font-size: var(--t-meta); color: var(--ink-3); border-bottom: 2px solid transparent; }
+.page-tab[aria-selected="true"] { color: var(--accent-ink); font-weight: 600; border-bottom-color: var(--accent); }
+
+/* body */
+.scroll { flex: 1; overflow-y: auto; padding: 12px 16px; min-height: 0; }
+.sec-label { margin: 8px 0 6px; font-size: var(--t-meta); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); }
+.heat { display: grid; grid-template-columns: repeat(13, 1fr); gap: 3px; }
+.heat i { aspect-ratio: 1; border-radius: 2px; background: var(--heat-1); }
+.heat i[data-l="2"] { background: var(--heat-2); }
+.heat i[data-l="3"] { background: var(--heat-3); }
+.heat i[data-l="4"] { background: var(--heat-4); }
+.heat i[data-today] { box-shadow: inset 0 0 0 1.5px var(--today); }
+.quota { display: flex; flex-direction: column; gap: 9px; margin-top: 4px; }
+.q-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center; }
+.q-dot { width: 9px; height: 9px; border-radius: 50%; }
+.q-main { min-width: 0; }
+.q-top { display: flex; justify-content: space-between; font-size: var(--t-meta); gap: 8px; }
+.q-name { color: var(--ink-2); }
+.q-reset { color: var(--ink-3); }
+.q-track { height: 4px; margin-top: 4px; border-radius: 2px; background: var(--track); overflow: hidden; }
+.q-fill { height: 100%; border-radius: 2px; }
+.q-pct { font-size: var(--t-meta); color: var(--ink-2); }
+
+/* footer（现状 + 新增服务器入口） */
+.status {
+  flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 7px 16px; border-top: 1px solid var(--hair-2); background: var(--surface);
+  font-size: var(--t-meta); color: var(--ink-3);
+}
+.status-left { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.status-right { display: flex; align-items: center; gap: 4px; flex: none; }
+.badge { padding: 1px 5px; font-size: var(--t-meta); font-weight: 600; color: var(--accent-ink); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: var(--r-sm); flex: none; }
+.tray-mode { display: inline-flex; align-items: center; gap: 5px; padding: 3px 4px; font-size: var(--t-meta); color: var(--ink-3); border-radius: var(--r-sm); }
+.tray-mode:hover { color: var(--ink); background: var(--fill-hover); }
+.icon-btn { position: relative; display: grid; place-items: center; width: 24px; height: 24px; color: var(--ink-2); border-radius: var(--r-md); transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease); }
+.icon-btn:hover { color: var(--ink); background: var(--fill-hover); }
+.icon-btn .srv-dot { position: absolute; top: 1px; right: 1px; width: 7px; height: 7px; border-radius: 50%; border: 2px solid var(--surface); display: none; }
+.icon-btn[data-status="ok"] .srv-dot { display: block; background: var(--ok); }
+.icon-btn[data-status="syncing"] .srv-dot { display: block; background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
+.icon-btn[data-status="error"] .srv-dot { display: block; background: var(--bad); }
+.icon-btn[data-status="warn"] .srv-dot { display: block; background: var(--warn); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.refresh { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; font-size: var(--t-meta); font-weight: 600; color: var(--on-accent); background: var(--accent); border-radius: var(--r-sm); }
+.refresh:hover { filter: brightness(1.08); }
+.refresh svg { display: block; }
+
+/* ================================================================ sheet */
+.sheet-backdrop {
+  position: absolute; inset: 0; z-index: 20; display: none; align-items: flex-end;
+  background: var(--scrim);
+}
+.sheet-backdrop[data-open] { display: flex; animation: fade var(--dur-fast) var(--ease); }
+@keyframes fade { from { opacity: 0; } }
+.sheet {
+  width: 100%; max-height: 88%;
+  display: flex; flex-direction: column;
+  background: var(--surface-solid); border-top: 1px solid var(--hair-2);
+  border-radius: 10px 10px 0 0; box-shadow: 0 -8px 24px rgba(20, 20, 24, 0.12);
+  animation: up var(--dur-fast) var(--ease);
+}
+@keyframes up { from { transform: translateY(10px); opacity: 0; } }
+.sheet-hd { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 16px 6px; }
+.sheet-hd h2 { margin: 0; font-size: var(--t-body); font-weight: 600; }
+.sheet-hd .step-chip { font-size: var(--t-meta); color: var(--ink-3); margin-left: 8px; font-weight: 400; }
+.sheet-close { display: grid; place-items: center; width: 20px; height: 20px; color: var(--ink-3); border-radius: var(--r-sm); }
+.sheet-close:hover { color: var(--ink); background: var(--fill-hover); }
+.sheet-body { flex: 1; overflow-y: auto; padding: 4px 16px 16px; min-height: 0; }
+
+/* list */
+.srv-empty { text-align: center; padding: 22px 8px 10px; }
+.srv-empty .big { font-size: 13px; color: var(--ink-2); }
+.srv-empty .hint { margin-top: 4px; font-size: var(--t-meta); color: var(--ink-3); line-height: 1.6; }
+.srv-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--hair); text-align: left; width: 100%; }
+.srv-row:hover { background: var(--fill-hover); }
+.srv-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--ink-3); }
+.srv-dot[data-s="ok"] { background: var(--ok); }
+.srv-dot[data-s="syncing"] { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
+.srv-dot[data-s="error"] { background: var(--bad); }
+.srv-dot[data-s="warn"] { background: var(--warn); }
+.srv-main { flex: 1; min-width: 0; }
+.srv-name { font-size: var(--t-body); color: var(--ink); display: flex; align-items: center; gap: 6px; }
+.srv-host { font-size: var(--t-meta); color: var(--ink-3); font-family: var(--mono); }
+.srv-meta { margin-top: 1px; font-size: var(--t-meta); color: var(--ink-3); }
+.srv-meta[data-err] { color: var(--bad); }
+.srv-act { flex: none; display: flex; align-items: center; gap: 2px; color: var(--ink-3); }
+.srv-act .icon-btn { width: 26px; height: 26px; }
+.sheet-foot { flex: none; padding: 10px 16px 12px; border-top: 1px solid var(--hair); }
+.foot-note { margin-top: 8px; font-size: var(--t-meta); color: var(--ink-3); display: flex; align-items: center; gap: 6px; }
+.foot-note svg { flex: none; }
+
+/* wizard */
+.wiz-steps { display: flex; gap: 5px; margin: 2px 0 10px; }
+.wiz-steps i { flex: 1; height: 3px; border-radius: 2px; background: var(--track); }
+.wiz-steps i[data-on] { background: var(--accent); }
+.f-row { margin: 10px 0; }
+.f-label { font-size: var(--t-meta); color: var(--ink-2); margin-bottom: 4px; display: flex; justify-content: space-between; }
+.f-label .opt { color: var(--ink-3); }
+.f-input, .f-select {
+  width: 100%; padding: 6px 8px; font: inherit; font-size: var(--t-body);
+  color: var(--ink); background: var(--surface-2);
+  border: 1px solid var(--hair-2); border-radius: var(--r-md);
+}
+.f-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.f-input::placeholder { color: var(--ink-3); }
+.f-grid { display: grid; grid-template-columns: 1fr 84px; gap: 8px; }
+.f-hint { margin-top: 4px; font-size: var(--t-meta); color: var(--ink-3); line-height: 1.55; }
+.f-hint[data-err] { color: var(--bad); }
+.auth-cards { display: flex; flex-direction: column; gap: 6px; }
+.auth-card { display: flex; gap: 9px; align-items: flex-start; padding: 9px 10px; border: 1px solid var(--hair-2); border-radius: var(--r-md); cursor: pointer; text-align: left; width: 100%; }
+.auth-card:hover { background: var(--fill-hover); }
+.auth-card[aria-checked="true"] { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: var(--accent-soft); }
+.auth-radio { flex: none; width: 13px; height: 13px; margin-top: 2px; border-radius: 50%; border: 1.5px solid var(--hair-2); position: relative; }
+.auth-card[aria-checked="true"] .auth-radio { border-color: var(--accent); }
+.auth-card[aria-checked="true"] .auth-radio::after { content: ""; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--accent); }
+.auth-name { font-size: var(--t-body); color: var(--ink); }
+.auth-sub { font-size: var(--t-meta); color: var(--ink-3); margin-top: 1px; line-height: 1.5; }
+.alt-toggle { margin-top: 9px; font-size: var(--t-meta); color: var(--accent-ink); }
+.alt-toggle:hover { text-decoration: underline; }
+.alt-panel { margin-top: 8px; padding: 10px; border: 1px dashed var(--hair-2); border-radius: var(--r-md); background: var(--surface-2); }
+.alt-panel .mono { font-family: var(--mono); font-size: 10.5px; word-break: break-all; color: var(--ink-2); background: var(--surface); border: 1px solid var(--hair); border-radius: var(--r-sm); padding: 6px 7px; margin: 6px 0; user-select: text; }
+.fp-box { padding: 12px; border: 1px solid var(--hair-2); border-radius: var(--r-md); background: var(--surface-2); }
+.fp-box[data-bad] { border-color: color-mix(in srgb, var(--bad) 45%, transparent); background: var(--bad-soft); }
+.fp-title { font-size: var(--t-meta); color: var(--ink-3); }
+.fp-val { margin-top: 6px; font-family: var(--mono); font-size: 12px; word-break: break-all; color: var(--ink); user-select: text; }
+.fp-row { display: flex; justify-content: space-between; gap: 8px; font-size: var(--t-meta); margin-top: 5px; }
+.fp-row .k { color: var(--ink-3); }
+.fp-row .v { font-family: var(--mono); color: var(--ink-2); word-break: break-all; text-align: right; }
+.prog { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; }
+.prog-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; font-size: var(--t-body); color: var(--ink-2); }
+.prog-row .st { flex: none; width: 14px; height: 14px; margin-top: 1.5px; display: grid; place-items: center; }
+.prog-row[data-s="wait"] { color: var(--ink-3); opacity: 0.55; }
+.prog-row[data-s="err"] { color: var(--bad); }
+.prog-row.detail { padding-left: 22px; font-size: var(--t-meta); color: var(--ink-3); margin-top: -3px; }
+.spin { width: 11px; height: 11px; border-radius: 50%; border: 1.6px solid var(--track); border-top-color: var(--accent); animation: rot 0.8s linear infinite; }
+@keyframes rot { to { transform: rotate(360deg); } }
+.ok-w { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink); font-size: 9px; font-weight: 700; }
+.err-w { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--bad-soft); color: var(--bad); font-size: 9px; font-weight: 700; }
+.err-box { margin: 10px 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent); border-radius: var(--r-md); background: var(--bad-soft); }
+.err-box .t { font-size: var(--t-body); color: var(--bad); font-weight: 600; }
+.err-box .d { margin-top: 3px; font-size: var(--t-meta); color: var(--ink-2); line-height: 1.6; user-select: text; }
+.err-box .a { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+.sum-box { padding: 12px; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: var(--r-md); background: var(--accent-soft); }
+.sum-title { display: flex; align-items: center; gap: 6px; font-size: var(--t-body); font-weight: 600; color: var(--accent-ink); }
+.sum-list { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; font-size: var(--t-meta); color: var(--ink-2); }
+.sum-list li { display: flex; gap: 7px; }
+.sum-list .k { color: var(--ink-3); flex: none; width: 74px; }
+.sum-list .v { user-select: text; }
+.wiz-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--hair); }
+.wiz-foot .left { display: flex; gap: 8px; }
+/* detail */
+.d-row { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--hair); font-size: var(--t-body); }
+.d-row .k { color: var(--ink-3); flex: none; }
+.d-row .v { text-align: right; color: var(--ink); min-width: 0; word-break: break-all; user-select: text; }
+.d-row .v .mono, .mono { font-family: var(--mono); }
+.tool-chips { display: inline-flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.tool-chip { font-size: var(--t-meta); color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--hair); border-radius: var(--r-sm); padding: 1px 6px; }
+.hist { margin: 2px 0 0; padding: 0; list-style: none; font-size: var(--t-meta); color: var(--ink-3); }
+.hist li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--hair); }
+.confirm-box { padding: 12px; border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent); border-radius: var(--r-md); background: var(--bad-soft); margin: 8px 0; }
+.chk { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; font-size: var(--t-meta); color: var(--ink-2); cursor: pointer; text-align: left; width: 100%; }
+.chk i { flex: none; width: 13px; height: 13px; margin-top: 1px; border: 1.5px solid var(--hair-2); border-radius: 3px; display: grid; place-items: center; font-style: normal; font-size: 9px; color: var(--on-accent); }
+.chk[aria-checked="true"] i { background: var(--accent); border-color: var(--accent); }
+:root[data-theme="light"] .chk i { color: #fff; }
+
+/* toast */
+.toast {
+  position: absolute; left: 50%; bottom: 52px; transform: translateX(-50%) translateY(6px);
+  z-index: 25; max-width: 92%;
+  padding: 7px 12px; border-radius: var(--r-md);
+  background: var(--surface-2); color: var(--ink);
+  border: 1px solid var(--hair-2);
+  box-shadow: 0 8px 22px rgba(0,0,0,0.28);
+  font-size: var(--t-meta); opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+  backdrop-filter: blur(8px);
+}
+.toast[data-show] { opacity: 1; transform: translateX(-50%); }
+
+/* ================================================================ audit column */
+.audit { width: 380px; flex: none; display: flex; flex-direction: column; gap: 14px; position: sticky; top: 70px; max-height: calc(100vh - 90px); overflow-y: auto; padding-bottom: 20px; }
+.card { background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--hair-2); border-radius: 10px; padding: 13px 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.18); }
+:root[data-theme="light"] .card { background: rgba(255,255,255,0.9); }
+.card h3 { margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); }
+.note { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+.note li { display: flex; gap: 8px; font-size: 12px; color: var(--ink-2); line-height: 1.55; }
+.note .tag { flex: none; width: 34px; padding-top: 1px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; text-align: right; }
+.note .tag[data-k="后端"] { color: var(--accent-ink); }
+.note .tag[data-k="安全"] { color: var(--warn); }
+.note .tag[data-k="边界"] { color: var(--cat-4); }
+.note .tag[data-k="复用"] { color: var(--cat-2); }
+.note .tag[data-k="失败"] { color: var(--bad); }
+.demo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.demo-grid .btn-quiet { justify-content: center; }
+.chk-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-2); }
+.chk-list li { display: flex; gap: 7px; }
+.chk-list li::before { content: "✓"; color: var(--accent); font-weight: 700; flex: none; }
+</style>
+</head>
+<body>
+
+<div class="pagebar">
+  <h1>TokenMe · 远程服务器（拉取式采集）</h1>
+  <span class="sub">交互原型 — 只演示交互与状态，不等同于实现；编码需审计通过后开始</span>
+  <span class="grow"></span>
+  <button class="btn-quiet" data-act="toggleTheme">切换浅色 / 深色</button>
+  <button class="btn-quiet" data-act="resetAll">复位全部</button>
+</div>
+
+<div class="stage">
+  <div class="desk">
+    <div class="desk-caption">
+      面板底部新增「服务器」图标 → 点击打开管理弹层。方向：桌面机做 SSH 客户端主动拉取；
+      服务器上无常驻服务，桌面也无需 sshd。
+    </div>
+
+    <div class="panel" id="panel">
+      <!-- header mock -->
+      <header class="hdr">
+        <div class="hdr-bar">
+          <span class="brand">TokenMe</span>
+          <div class="seg" role="radiogroup" aria-label="周期">
+            <button class="seg-btn" aria-checked="true">日</button>
+            <button class="seg-btn" aria-checked="false">周</button>
+            <button class="seg-btn" aria-checked="false">月</button>
+            <button class="seg-btn" aria-checked="false">年</button>
+          </div>
+        </div>
+        <div class="hero">
+          <div class="hero-main">
+            <span class="hero-value num">1.74</span><span class="hero-unit">B</span>
+            <span class="hero-unit-word">tokens</span>
+            <span class="hero-side">
+              <span class="hero-cost num">$99.15</span>
+              <span class="chip num">↑ 12.4%</span>
+            </span>
+          </div>
+        </div>
+        <div class="hdr-stats">
+          <span class="sync" id="hdrSync" style="display:none">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
+            Linux 同步<span class="dot-sep"></span><span id="hdrSyncName">ops-box</span><span class="dot-sep"></span><span id="hdrSyncAge">3 分钟前</span><span class="dot-sep"></span><span class="num" id="hdrSyncRows">41,455 行</span>
+          </span>
+          <span>今日</span><span class="dot-sep"></span><span class="num">20,026</span><span>请求</span>
+          <span class="dot-sep"></span><span class="num">256</span><span>会话</span>
+          <span class="dot-sep"></span><span>缓存 96.1%</span>
+        </div>
+        <div class="page-tabs" role="tablist">
+          <button class="page-tab" aria-selected="true">总览</button>
+          <button class="page-tab" aria-selected="false">工具</button>
+          <button class="page-tab" aria-selected="false">排行</button>
+          <button class="page-tab" aria-selected="false">明细</button>
+        </div>
+      </header>
+
+      <main class="scroll">
+        <div class="sec-label">活动</div>
+        <div class="heat" id="heat"></div>
+        <div class="sec-label" style="margin-top:14px">额度</div>
+        <div class="quota">
+          <div class="q-row">
+            <span class="q-dot" style="background:var(--cat-1)"></span>
+            <span class="q-main">
+              <span class="q-top"><span class="q-name">Claude Code · 5 小时窗口</span><span class="q-reset num">3 小时 12 分后重置</span></span>
+              <span class="q-track"><span class="q-fill" style="width:61%;background:var(--bar-fill,var(--accent))"></span></span>
+            </span>
+            <span class="q-pct num">61%</span>
+          </div>
+          <div class="q-row">
+            <span class="q-dot" style="background:var(--cat-2)"></span>
+            <span class="q-main">
+              <span class="q-top"><span class="q-name">Codex · 周窗口</span><span class="q-reset num">2 天 4 小时后重置</span></span>
+              <span class="q-track"><span class="q-fill" style="width:82%;background:var(--cat-2)"></span></span>
+            </span>
+            <span class="q-pct num">82%</span>
+          </div>
+        </div>
+      </main>
+
+      <!-- 新增入口：底部服务器图标 -->
+      <footer class="status">
+        <span class="status-left">
+          <span class="badge">缓存</span><span class="num">1,204</span><span>价格</span>
+          <span class="dot-sep"></span><span class="num">2.88B</span><span>事件</span>
+        </span>
+        <span class="status-right">
+          <button class="tray-mode">● 托盘+Token</button>
+          <button class="icon-btn" id="srvBtn" data-act="openServers" data-status="none" title="远程服务器" aria-label="远程服务器">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/>
+              <circle cx="8" cy="7.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="8" cy="16.5" r="0.9" fill="currentColor" stroke="none"/>
+            </svg>
+            <span class="srv-dot"></span>
+          </button>
+          <button class="icon-btn" title="设置" aria-label="设置" data-act="openSettingsMock">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+          </button>
+          <button class="refresh">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
+            刷新
+          </button>
+        </span>
+      </footer>
+
+      <div class="toast" id="toast"></div>
+
+      <!-- sheet -->
+      <div class="sheet-backdrop" id="sheetBackdrop" data-act="backdrop">
+        <div class="sheet" id="sheet" role="dialog" aria-modal="true"></div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="audit">
+    <div class="card">
+      <h3>审计批注（随界面更新）</h3>
+      <ul class="note" id="notes"></ul>
+    </div>
+    <div class="card">
+      <h3>演示控制</h3>
+      <div class="demo-grid">
+        <button class="btn-quiet" data-act="demo" data-demo="happy">正常流程</button>
+        <button class="btn-quiet" data-act="demo" data-demo="pwd-rejected">服务器拒绝密码</button>
+        <button class="btn-quiet" data-act="demo" data-demo="unreachable">主机不可达</button>
+        <button class="btn-quiet" data-act="demo" data-demo="fp-mismatch">指纹与上次不一致</button>
+        <button class="btn-quiet" data-act="demo" data-demo="arch-unsupported">不支持的架构</button>
+        <button class="btn-quiet" data-act="demo" data-demo="preset">预置一台已配置服务器</button>
+        <button class="btn-quiet" data-act="demo" data-demo="sync-fail" style="grid-column:1/-1">已配置服务器：同步失败与退避</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>审计清单</h3>
+      <ul class="chk-list">
+        <li>底部服务器图标，状态点 = 最近一次同步健康度</li>
+        <li>三种认证：密码 / 私钥 / 已免密；密码仅换密钥、绝不落盘</li>
+        <li>首次连接必须确认主机指纹（TOFU，防中间人）</li>
+        <li>免密验证通过后才算完成；失败可改用「手动装公钥」</li>
+        <li>服务器上不装常驻；拉取由面板按间隔发起（可退避）</li>
+        <li>移除服务器默认不动服务器，勾选后才远程清理</li>
+        <li>拉回的 bundle 走既有合并门禁（sha256/行上限/增长判据/幂等）</li>
+      </ul>
+    </div>
+  </aside>
+</div>
+
+<script>
+"use strict";
+/* ================================================================ state */
+const $ = (id) => document.getElementById(id);
+const state = {
+  servers: [],            // 已配置服务器
+  view: "list",           // list | wizard | detail | confirm
+  demo: "happy",
+  wiz: null,              // 向导状态（打开时初始化）
+  detailId: null,
+  epoch: 0,               // 异步序列的取消令牌
+  timer: null,
+};
+
+/* 演示用数据。指纹为虚构样例；真实实现为 SHA256(base64) 字符串。 */
+const FP_OK = "SHA256:yFk8Rk3pQmTz6Wc1Jd94Lx2Hn7Vs0Gq5Ue8Ab3MoP1w";
+const FP_OLD = "SHA256:sQ2nB7vT1xWk4Jm8Rc5Pe0Dz9Gh3La6Yu2Vf7iN4QoXk";
+
+function resetAll() {
+  state.servers = [];
+  state.view = "list";
+  state.demo = "happy";
+  state.wiz = null;
+  state.detailId = null;
+  state.epoch++;
+  closeSheet();
+  renderFooter();
+  renderHeaderSync();
+  renderNotes();
+}
+
+function openServers() {
+  state.epoch++;
+  state.view = "list";
+  state.wiz = null;
+  openSheet(renderSheet());
+}
+
+function initWizard() {
+  state.wiz = {
+    step: 1,
+    host: "", port: "22", user: "", name: "",
+    auth: "password", password: "", keyPath: null, passphrase: "",
+    altOpen: false,
+    fp: null, fpMismatch: (state.demo === "fp-mismatch"),
+    error: null,              // { title, detail, actions:[...] } 渲染用
+    prog: [], progIdx: -1, progEpoch: 0,
+    running: false, done: false,
+    interval: 900, days: 30,
+    detected: [],
+  };
+  state.view = "wizard";
+}
+
+/* ================================================================ sheet */
+function openSheet(html) {
+  $("sheet").innerHTML = html;
+  $("sheetBackdrop").dataset.open = "1";
+}
+function closeSheet() {
+  delete $("sheetBackdrop").dataset.open;
+  state.wiz = null;
+}
+function renderSheet() {
+  if (state.view === "list") return renderList();
+  if (state.view === "wizard") return renderWizard();
+  if (state.view === "detail") return renderDetail();
+  if (state.view === "confirm") return renderConfirm();
+  return renderList();
+}
+function refreshSheet() { if ($("sheetBackdrop").dataset.open) openSheet(renderSheet()); }
+
+/* ---------------------------------------------------------------- list */
+function renderList() {
+  const rows = state.servers.map((s) => {
+    const meta = statusMeta(s);
+    return `
+    <button class="srv-row" data-act="openDetail" data-id="${s.id}">
+      <span class="srv-dot" data-s="${s.status}"></span>
+      <span class="srv-main">
+        <span class="srv-name">${esc(s.name)} <span class="srv-host">${esc(s.user)}@${esc(s.host)}:${s.port}</span></span>
+        <span class="srv-meta num" ${s.status === "error" ? "data-err" : ""}>${meta}</span>
+      </span>
+      <span class="srv-act">
+        <span class="icon-btn" title="立即同步" data-act="syncNow" data-id="${s.id}">
+          ${s.status === "syncing"
+            ? '<span class="spin"></span>'
+            : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>'}
+        </span>
+        <span class="icon-btn" title="详情">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+        </span>
+      </span>
+    </button>`;
+  }).join("");
+
+  const empty = !state.servers.length;
+  return `
+  <div class="sheet-hd">
+    <h2>远程服务器</h2>
+    <button class="sheet-close" data-act="closeSheet" aria-label="关闭">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="sheet-body">
+    ${empty ? `
+      <div class="srv-empty">
+        <div class="big">还没有远程服务器</div>
+        <div class="hint">
+          从 Linux 服务器自动拉取用量：填地址、选认证、点完成。<br>
+          工具会替你配好免密登录，之后按间隔自动采集；<br>
+          服务器上不安装任何常驻服务。
+        </div>
+      </div>` : rows}
+  </div>
+  <div class="sheet-foot">
+    <button class="btn-accent" style="width:100%;justify-content:center" data-act="addServer">＋ 添加服务器</button>
+    ${empty ? '<div class="foot-note"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>密码只用于一次性安装密钥，不会保存；也可以继续用 install-linux.sh --push 的手工方式。</div>' : ""}
+  </div>`;
+}
+
+function statusMeta(s) {
+  if (s.status === "syncing") return "同步中…（连接 → 导出 → 拉取 → 合并）";
+  if (s.status === "error") return `${s.lastAgo} · ${s.error.title} · ${s.error.backoff ? "退避中，重试 " + s.error.backoff : "待重试"}`;
+  return `${s.lastAgo} · ${fmt(s.rows)} 行 · 下次 ${s.intervalSecs / 60} 分钟内`;
+}
+
+/* ---------------------------------------------------------------- wizard */
+function renderWizard() {
+  const w = state.wiz;
+  const steps = [1, 2, 3, 4, 5].map((i) => `<i ${i <= w.step ? "data-on" : ""}></i>`).join("");
+  const titles = { 1: "添加服务器", 2: "认证方式", 3: "确认主机指纹", 4: "安装与首次采集", 5: "完成" };
+  let body = "";
+  if (w.step === 1) body = step1(w);
+  if (w.step === 2) body = step2(w);
+  if (w.step === 3) body = step3(w);
+  if (w.step === 4) body = step4(w);
+  if (w.step === 5) body = step5(w);
+  return `
+  <div class="sheet-hd">
+    <h2>${titles[w.step]}<span class="step-chip">第 ${w.step}/5 步</span></h2>
+    <button class="sheet-close" data-act="${w.running ? "noop" : "closeSheet"}" aria-label="关闭">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="sheet-body">
+    <div class="wiz-steps">${steps}</div>
+    ${body}
+  </div>`;
+}
+
+function step1(w) {
+  return `
+  <div class="f-row">
+    <div class="f-label"><span>服务器地址</span></div>
+    <input class="f-input" id="wHost" placeholder="server.example.com" value="${esc(w.host)}" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="f-grid">
+    <div class="f-row">
+      <div class="f-label"><span>用户名</span></div>
+      <input class="f-input" id="wUser" placeholder="服务器上的登录用户名" value="${esc(w.user)}" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="f-row">
+      <div class="f-label"><span>端口</span></div>
+      <input class="f-input num" id="wPort" value="${esc(w.port)}" autocomplete="off">
+    </div>
+  </div>
+  <div class="f-row">
+    <div class="f-label"><span>名称</span><span class="opt">可选</span></div>
+    <input class="f-input" id="wName" placeholder="用于区分数据来源，默认取服务器主机名" value="${esc(w.name)}" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="f-hint" id="w1Hint">服务器需要支持 SSH（默认已带）。名称会成为数据的来源标记（origin），仅允许字母、数字、点、下划线、连字符。</div>
+  <div class="wiz-foot">
+    <div class="left"></div>
+    <div class="left">
+      <button class="btn-quiet" data-act="closeSheet">取消</button>
+      <button class="btn-accent" data-act="w1Next">下一步：认证方式</button>
+    </div>
+  </div>`;
+}
+
+function step2(w) {
+  const err = w.error ? errBox(w.error) : "";
+  const alt = w.altOpen ? `
+  <div class="alt-panel">
+    <div class="auth-name" style="font-size:12px">在服务器上手动安装公钥</div>
+    <div class="f-hint">把下面一行加入服务器的 <span class="mono">~/.ssh/authorized_keys</span>（权限 600），然后回来点“测试连接”。适用于服务器禁止密码登录或启用了双因素的情况。</div>
+    <div class="mono">ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleTokenmeAgentKey0f3Pq9xWv2Zk8N1s7Rb4Yd6Mc tokenme@localhost</div>
+    <div class="left" style="display:flex;gap:8px">
+      <button class="btn-quiet" data-act="copyPub">复制公钥</button>
+      <button class="btn-accent" data-act="altDone">我已完成，测试连接</button>
+    </div>
+  </div>` : "";
+  return `
+  ${err}
+  <div class="auth-cards" role="radiogroup" aria-label="认证方式">
+    <button class="auth-card" role="radio" aria-checked="${w.auth === "password"}" data-act="auth" data-kind="password">
+      <span class="auth-radio"></span>
+      <span><span class="auth-name">密码</span>
+      <span class="auth-sub">仅用于这一次安装专用密钥；随即从内存清除，绝不保存、绝不写入日志。</span></span>
+    </button>
+    ${w.auth === "password" ? `
+    <div style="padding:0 2px 2px">
+      <input class="f-input" id="wPwd" type="password" placeholder="服务器登录密码" value="${esc(w.password)}" autocomplete="off">
+    </div>` : ""}
+    <button class="auth-card" role="radio" aria-checked="${w.auth === "key"}" data-act="auth" data-kind="key">
+      <span class="auth-radio"></span>
+      <span><span class="auth-name">私钥</span>
+      <span class="auth-sub">选择本机已有私钥文件（可选口令）。首次仍会安装专用密钥，之后拉取只用专用密钥。</span></span>
+    </button>
+    ${w.auth === "key" ? `
+    <div style="padding:0 2px 2px">
+      <button class="btn-quiet" style="width:100%;justify-content:center" data-act="pickKey">${w.keyPath ? "已选择：" + esc(w.keyPath) : "选择私钥文件…（原型模拟 ~/.ssh/id_ed25519）"}</button>
+      <input class="f-input" id="wPass" type="password" placeholder="私钥口令（没有可留空）" style="margin-top:6px" value="${esc(w.passphrase)}" autocomplete="off">
+    </div>` : ""}
+    <button class="auth-card" role="radio" aria-checked="${w.auth === "agent"}" data-act="auth" data-kind="agent">
+      <span class="auth-radio"></span>
+      <span><span class="auth-name">已配置免密</span>
+      <span class="auth-sub">直接验证本机默认密钥 / ssh-agent 能否登录（适合同机已配好的情况下）。</span></span>
+    </button>
+  </div>
+  <button class="alt-toggle" data-act="altToggle">无法使用密码？（服务器禁止密码登录 / 双因素）</button>
+  ${alt}
+  ${w.error && w.error.actions ? "" : ""}
+  <div class="wiz-foot">
+    <div class="left"><button class="btn-quiet" data-act="wizBack">返回</button></div>
+    <div class="left"><button class="btn-accent" data-act="w2Next" ${w.running ? "disabled" : ""}>${w.running ? "连接中…" : "连接并继续"}</button></div>
+  </div>`;
+}
+
+function step3(w) {
+  const bad = w.fpMismatch;
+  return `
+  <div class="fp-box" ${bad ? "data-bad" : ""}>
+    <div class="fp-title">${bad ? "指纹与上次不一致！" : "首次连接：确认这是你的服务器"}</div>
+    <div class="fp-val">${esc(w.fp || FP_OK)}</div>
+    ${bad ? `
+    <div class="fp-row"><span class="k">上次记录</span><span class="v">${esc(FP_OLD)}</span></div>
+    <div class="f-hint" data-err style="margin-top:8px">可能是服务器重装了系统，也可能是中间人攻击。请通过你自己的渠道核对服务器身份，再决定是否更新。</div>
+    ` : `
+    <div class="f-hint" style="margin-top:8px">指纹将记住在本机；以后连接只认这一枚。用于防止中间人冒充服务器。</div>`}
+  </div>
+  <div class="wiz-foot">
+    <div class="left"><button class="btn-quiet" data-act="wizBack">返回</button></div>
+    <div class="left">
+      <button class="btn-quiet" data-act="closeSheet">取消连接</button>
+      <button class="btn-accent" data-act="w3Trust">${bad ? "仍要信任并更新（我已核实）" : "信任并记住"}</button>
+    </div>
+  </div>`;
+}
+
+/* ---- step 4：安装与首次采集（按场景生成进度序列） ---- */
+function seqFor(demo) {
+  const base = [
+    { l: "生成专用密钥 tokenme_ed25519（本机）", n: "安全 · 一个总控私钥，只存在本机" },
+    { l: "写入服务器 ~/.ssh/authorized_keys", n: "经当前会话写入，先保证 ~/.ssh 权限 700" },
+    { l: "断开并以密钥重连 —— 免密已生效", n: "验证失败就不继续；密码此刻仍未离开内存" },
+    { l: "从内存清除密码（未落盘）", n: "缓冲清零；日志与配置文件均无密码" },
+    { l: "识别系统与架构", n: "uname -m → x86_64 / aarch64" },
+    { l: "上传采集器 tokenme v0.1.5 并校验 sha256", n: "sftp 上传 → 校验 → chmod 755 → 原子替换" },
+    { l: "首次采集：export --days 30 --origin {name}", n: "只读扫描日志；不装常驻、不改服务器配置" },
+    { l: "检测到 3 个工具：Claude Code · Codex · Qoder", n: "由采集器自报，来自服务器上的日志探测" },
+    { l: "合并到本机索引：41,290 行", n: "写入本机 ~/tokenme-sync → 走既有合并门禁" },
+  ];
+  if (demo === "arch-unsupported") {
+    return [
+      ...base.slice(0, 4),
+      { l: "识别系统与架构 — Debian 12 · armv7l", f: "目前只提供 x86_64 / aarch64 的静态采集器；此架构请用 install-linux.sh 手动安装后配 --push 方式。" },
+    ];
+  }
+  return base;
+}
+
+function step4(w) {
+  const rows = w.prog.map((it) => {
+    const st = it.state;
+    const icon = st === "ok" ? '<span class="ok-w">✓</span>'
+      : st === "err" ? '<span class="err-w">✕</span>'
+      : st === "run" ? '<span class="spin"></span>'
+      : '<span style="width:14px;height:14px;border-radius:50%;border:1.6px solid var(--hair-2);display:inline-block"></span>';
+    const row = `<div class="prog-row" data-s="${st === "ok" ? "ok" : st === "err" ? "err" : st === "run" ? "run" : "wait"}">${icon}<span>${esc(it.label)}</span></div>`;
+    const det = (st === "ok" || st === "run") && it.detail ? `<div class="prog-row detail">${esc(it.detail)}</div>` : "";
+    return row + det;
+  }).join("");
+  const failed = w.prog.some((i) => i.state === "err");
+  return `
+  <div class="prog" id="progList">${rows}</div>
+  ${failed ? errBox({
+    title: w.error.title,
+    detail: w.error.detail,
+    actions: [["改用「手动安装公钥」", "w4Alt"], ["返回上一步", "wizBack"]],
+  }) : ""}
+  <div class="wiz-foot">
+    <div class="left">${w.running ? "" : '<button class="btn-quiet" data-act="wizBack">返回</button>'}</div>
+    <div class="left">
+      ${w.running
+        ? '<span class="f-hint" style="margin:0">安装中…（此过程只在你点“完成”后生效）</span>'
+        : failed ? '<button class="btn-quiet" data-act="closeSheet">取消</button>'
+        : '<button class="btn-accent" data-act="w5Go">继续</button>'}
+    </div>
+  </div>`;
+}
+
+function step5(w) {
+  const name = w.name || "ops-box";
+  return `
+  <div class="sum-box">
+    <div class="sum-title"><span class="ok-w">✓</span>服务器已接入：免密已生效</div>
+    <ul class="sum-list">
+      <li><span class="k">来源名称</span><span class="v">${esc(name)}（origin）</span></li>
+      <li><span class="k">认证</span><span class="v">专用密钥 tokenme_ed25519（密码已清除）</span></li>
+      <li><span class="k">指纹</span><span class="v mono">${esc((w.fp || FP_OK).slice(0, 30))}…</span></li>
+      <li><span class="k">采集器</span><span class="v">tokenme v0.1.5 · x86_64 · 服务器上无常驻服务</span></li>
+      <li><span class="k">首次合并</span><span class="v num">41,290 行 · 3 个工具</span></li>
+    </ul>
+  </div>
+  <div class="f-row" style="margin-top:14px">
+    <div class="f-label"><span>自动同步间隔</span></div>
+    <div class="seg" role="radiogroup" aria-label="同步间隔">
+      <button class="seg-btn" aria-checked="${w.interval === 300}" data-act="wizInt" data-v="300">5 分钟</button>
+      <button class="seg-btn" aria-checked="${w.interval === 900}" data-act="wizInt" data-v="900">15 分钟</button>
+      <button class="seg-btn" aria-checked="${w.interval === 3600}" data-act="wizInt" data-v="3600">1 小时</button>
+    </div>
+  </div>
+  <div class="f-row">
+    <div class="f-label"><span>拉取窗口</span></div>
+    <div class="seg" role="radiogroup" aria-label="拉取窗口">
+      <button class="seg-btn" aria-checked="${w.days === 7}" data-act="wizDays" data-v="7">7 天</button>
+      <button class="seg-btn" aria-checked="${w.days === 30}" data-act="wizDays" data-v="30">30 天</button>
+      <button class="seg-btn" aria-checked="${w.days === 90}" data-act="wizDays" data-v="90">90 天</button>
+    </div>
+  </div>
+  <div class="f-hint">失败会自动退避（1 → 2 → 4 → … 最长 30 分钟），恢复后自动回到正常间隔；服务器灰掉不影响既有数字显示。</div>
+  <div class="wiz-foot">
+    <div class="left"></div>
+    <div class="left"><button class="btn-accent" data-act="w5Done">完成</button></div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------- detail / confirm */
+function renderDetail() {
+  const s = state.servers.find((x) => x.id === state.detailId);
+  if (!s) { state.view = "list"; return renderList(); }
+  const err = s.status === "error" ? errBox({
+    title: s.error.title,
+    detail: s.error.detail,
+    actions: [["立即重试一次", "syncNowRetry"], ["复制公钥（核对是否被移除）", "copyPub"]],
+  }) : "";
+  return `
+  <div class="sheet-hd">
+    <h2>${esc(s.name)}<span class="step-chip">${esc(s.user)}@${esc(s.host)}:${s.port}</span></h2>
+    <button class="sheet-close" data-act="backList" aria-label="返回">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+  </div>
+  <div class="sheet-body">
+    ${err}
+    <div class="d-row"><span class="k">状态</span><span class="v">${s.status === "ok" ? "正常 · " + s.lastAgo : s.status === "syncing" ? "同步中…" : s.status === "error" ? "失败 · 退避中" : "未同步"}</span></div>
+    <div class="d-row"><span class="k">认证</span><span class="v">专用密钥 tokenme_ed25519（免密）</span></div>
+    <div class="d-row"><span class="k">主机指纹</span><span class="v mono">${esc(s.fp)}</span></div>
+    <div class="d-row"><span class="k">采集器</span><span class="v">tokenme v0.1.5 · x86_64 · 4.0 MB</span></div>
+    <div class="d-row"><span class="k">检测到</span><span class="v"><span class="tool-chips">${s.tools.map((t) => `<span class="tool-chip">${t}</span>`).join("")}</span></span></div>
+    <div class="d-row"><span class="k">同步间隔</span><span class="v"><span class="seg">
+      <button class="seg-btn" aria-checked="${s.intervalSecs === 300}" data-act="detInt" data-v="300">5 分钟</button>
+      <button class="seg-btn" aria-checked="${s.intervalSecs === 900}" data-act="detInt" data-v="900">15 分钟</button>
+      <button class="seg-btn" aria-checked="${s.intervalSecs === 3600}" data-act="detInt" data-v="3600">1 小时</button>
+    </span></span></div>
+    <div class="d-row"><span class="k">拉取窗口</span><span class="v"><span class="seg">
+      <button class="seg-btn" aria-checked="${s.days === 7}" data-act="detDays" data-v="7">7 天</button>
+      <button class="seg-btn" aria-checked="${s.days === 30}" data-act="detDays" data-v="30">30 天</button>
+      <button class="seg-btn" aria-checked="${s.days === 90}" data-act="detDays" data-v="90">90 天</button>
+    </span></span></div>
+    <div class="d-row"><span class="k">自动同步</span>
+      <span class="v"><button class="switch" role="switch" aria-checked="${s.enabled}" data-act="detToggle" aria-label="自动同步" style="position:relative;width:34px;height:20px;border-radius:999px;background:${s.enabled ? "var(--accent)" : "var(--hair-2)"};display:inline-block;vertical-align:middle">
+        <span style="position:absolute;top:2px;left:${s.enabled ? "16px" : "2px"};width:16px;height:16px;border-radius:50%;background:var(--surface-solid);box-shadow:0 1px 3px rgba(20,20,24,.25);transition:left 160ms"></span>
+      </button></span></div>
+    <div class="sec-label" style="margin-top:14px">最近合并</div>
+    <ul class="hist">${s.history.map((h) => `<li><span>${h.ago}</span><span class="num">${fmt(h.rows)} 行（+${h.add}）· ${h.took}</span></li>`).join("")}</ul>
+    <div class="wiz-foot">
+      <div class="left"><button class="btn-quiet" data-act="backList">返回列表</button></div>
+      <div class="left">
+        <button class="btn-quiet" data-act="copyPub">复制公钥</button>
+        <button class="btn-quiet" data-act="syncNow" data-id="${s.id}" ${s.status === "syncing" ? "disabled" : ""}>立即同步</button>
+        <button class="btn-danger" data-act="removeAsk" data-id="${s.id}">移除</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderConfirm() {
+  const s = state.servers.find((x) => x.id === state.detailId);
+  if (!s) { state.view = "list"; return renderList(); }
+  return `
+  <div class="sheet-hd"><h2>移除服务器</h2>
+    <button class="sheet-close" data-act="backList" aria-label="返回"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+  </div>
+  <div class="sheet-body">
+    <div class="confirm-box">
+      <div style="font-size:13px;color:var(--bad);font-weight:600">移除「${esc(s.name)}」？</div>
+      <div class="f-hint" style="margin-top:5px">本机将停止拉取，并删除这台服务器的配置与指纹记录。已合并的数据保留在索引里（与手工删除 bundle 的行为一致）。</div>
+      <button class="chk" role="checkbox" aria-checked="${state.chkCleanup ? "true" : "false"}" data-act="chkCleanup">
+        <i>${state.chkCleanup ? "✓" : ""}</i>
+        <span>同时清理服务器上的采集器与公钥行（rm ~/.tokenme/bin/tokenme；从 authorized_keys 中删除本机公钥行）</span>
+      </button>
+    </div>
+    <div class="wiz-foot">
+      <div class="left"><button class="btn-quiet" data-act="backDetail">取消</button></div>
+      <div class="left"><button class="btn-danger" data-act="removeConfirm">确认移除</button></div>
+    </div>
+  </div>`;
+}
+
+/* ================================================================ shared bits */
+function errBox(e) {
+  return `
+  <div class="err-box">
+    <div class="t">${esc(e.title)}</div>
+    ${e.detail ? `<div class="d">${esc(e.detail)}</div>` : ""}
+    ${e.actions ? `<div class="a">${e.actions.map(([label, act]) => `<button class="btn-quiet" data-act="${act}">${esc(label)}</button>`).join("")}</div>` : ""}
+  </div>`;
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function fmt(n) { return n.toLocaleString("en-US"); }
+
+let toastTimer = null;
+function toast(msg, ms = 2600) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.dataset.show = "1";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => delete t.dataset.show, ms);
+}
+
+/* ================================================================ footer / header */
+function renderFooter() {
+  const btn = $("srvBtn");
+  if (!state.servers.length) { btn.dataset.status = "none"; return; }
+  if (state.servers.some((s) => s.status === "syncing")) btn.dataset.status = "syncing";
+  else if (state.servers.some((s) => s.status === "error")) btn.dataset.status = "error";
+  else if (state.servers.some((s) => s.status === "warn")) btn.dataset.status = "warn";
+  else btn.dataset.status = "ok";
+}
+function renderHeaderSync() {
+  const any = state.servers.filter((s) => s.rows > 0).sort((a, b) => b.rows - a.rows)[0];
+  const el = $("hdrSync");
+  if (!any) { el.style.display = "none"; return; }
+  el.style.display = "";
+  $("hdrSyncName").textContent = any.name;
+  $("hdrSyncAge").textContent = any.lastAgo || "刚刚";
+  $("hdrSyncRows").textContent = fmt(any.rows) + " 行";
+}
+
+/* ================================================================ actions */
+document.addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-act]");
+  if (!el) return;
+  const act = el.dataset.act;
+  const w = state.wiz;
+
+  if (act === "toggleTheme") {
+    const root = document.documentElement;
+    root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+    return;
+  }
+  if (act === "resetAll") { resetAll(); toast("已复位"); return; }
+  if (act === "openServers") { openServers(); return; }
+  if (act === "openSettingsMock") { toast("设置面板不在此原型范围内"); return; }
+  if (act === "backdrop") { if (ev.target === $("sheetBackdrop")) closeSheet(); return; }
+  if (act === "closeSheet") { state.epoch++; closeSheet(); return; }
+  if (act === "noop") return;
+
+  if (act === "demo") { runDemo(el.dataset.demo); return; }
+  if (act === "addServer") { initWizard(); state.wiz.fp = FP_OK; refreshSheet(); return; }
+  if (act === "backList") { state.view = "list"; refreshSheet(); return; }
+  if (act === "backDetail") { state.view = "detail"; refreshSheet(); return; }
+
+  if (act === "w1Next") {
+    w.host = $("wHost").value.trim();
+    w.user = $("wUser").value.trim();
+    w.port = $("wPort").value.trim() || "22";
+    w.name = $("wName").value.trim();
+    if (!w.host || !w.user) { $("w1Hint").dataset.err = "1"; $("w1Hint").textContent = "地址与用户名必填。"; return; }
+    if (w.name && !/^[A-Za-z0-9._-]{1,64}$/.test(w.name)) { $("w1Hint").dataset.err = "1"; $("w1Hint").textContent = "名称只允许字母、数字、点、下划线、连字符（≤64 字符）。"; return; }
+    w.step = 2; w.error = null; refreshSheet(); return;
+  }
+  if (act === "wizBack") {
+    if (w.step === 2 && w.running) return;
+    w.step = Math.max(1, w.step - 1); w.error = null; refreshSheet(); return;
+  }
+  if (act === "auth") {
+    w.auth = el.dataset.kind; w.error = null;
+    if (w.auth !== "password") w.password = "";
+    refreshSheet(); return;
+  }
+  if (act === "pickKey") { w.keyPath = "~/.ssh/id_ed25519"; refreshSheet(); return; }
+  if (act === "altToggle") { w.altOpen = !w.altOpen; refreshSheet(); return; }
+  if (act === "copyPub") { toast("公钥已复制（ssh-ed25519 …tokenme@localhost）"); return; }
+  if (act === "altDone") { w.fp = FP_OK; w.fpMismatch = false; w.step = 3; w.error = null; refreshSheet(); return; }
+
+  if (act === "w2Next") {
+    if (w.auth === "password") w.password = ($("wPwd") || {}).value || w.password;
+    if (w.auth === "key" && !w.keyPath) { w.keyPath = "~/.ssh/id_ed25519"; }
+    w.error = null;
+    // 场景注入：连接类失败停在第二步
+    if (state.demo === "pwd-rejected" && w.auth === "password") {
+      w.error = {
+        title: "服务器拒绝了密码认证",
+        detail: "sshd 返回：PasswordAuthentication no。可以改用私钥，或在服务器上手动安装下方公钥（「无法使用密码？」）。",
+        actions: [["改用私钥", "toKey"], ["手动安装公钥", "toAlt"]],
+      };
+      refreshSheet(); return;
+    }
+    if (state.demo === "unreachable") {
+      w.error = {
+        title: "连接超时（10 s）",
+        detail: w.host + ":" + w.port + " 无响应。检查地址、端口、防火墙与 sshd 是否在运行。",
+        actions: [["重试一次", "tmpOk"]],
+      };
+      refreshSheet(); return;
+    }
+    w.fp = w.fpMismatch ? "SHA256:New9vQx2Zk4Jm7Rt1Wp5Lc8De0Gh3Yu6Fb8Ns2Vr4TqXw" : FP_OK;
+    w.step = 3; refreshSheet(); return;
+  }
+  if (act === "toKey") { w.auth = "key"; w.error = null; w.keyPath = w.keyPath || "~/.ssh/id_ed25519"; refreshSheet(); return; }
+  if (act === "toAlt") { w.altOpen = true; w.error = null; refreshSheet(); return; }
+  if (act === "tmpOk") { state.demo = "happy"; w.error = null; w.fp = FP_OK; w.step = 3; refreshSheet(); return; }
+
+  if (act === "w3Trust") { w.step = 4; w.error = null; refreshSheet(); startInstall(); return; }
+  if (act === "w4Alt") { w.altOpen = true; w.step = 2; w.error = null; refreshSheet(); return; }
+  if (act === "w5Go") { w.step = 5; refreshSheet(); return; }
+  if (act === "wizInt") { w.interval = Number(el.dataset.v); refreshSheet(); return; }
+  if (act === "wizDays") { w.days = Number(el.dataset.v); refreshSheet(); return; }
+  if (act === "w5Done") { finishWizard(); return; }
+
+  if (act === "openDetail") { state.detailId = Number(el.dataset.id); state.view = "detail"; refreshSheet(); return; }
+  if (act === "detInt") { const s = findSrv(el); s.intervalSecs = Number(el.dataset.v); refreshSheet(); renderNotes(); return; }
+  if (act === "detDays") { const s = findSrv(el); s.days = Number(el.dataset.v); refreshSheet(); return; }
+  if (act === "detToggle") { const s = findSrv(el); s.enabled = !s.enabled; refreshSheet(); renderFooter(); return; }
+  if (act === "removeAsk") { state.view = "confirm"; state.chkCleanup = false; refreshSheet(); return; }
+  if (act === "chkCleanup") { state.chkCleanup = !state.chkCleanup; refreshSheet(); return; }
+  if (act === "removeConfirm") { removeServer(el); return; }
+  if (act === "syncNow" || act === "syncNowRetry") { syncNow(Number(el.dataset.id) || state.detailId); return; }
+});
+
+/* 输入即回写：任何重渲染（切认证、出错提示）都不吞已输入的字段。 */
+document.addEventListener("input", (ev) => {
+  const w = state.wiz;
+  const t = ev.target;
+  if (!w || !t || !t.id) return;
+  if (t.id === "wHost") w.host = t.value;
+  else if (t.id === "wUser") w.user = t.value;
+  else if (t.id === "wPort") w.port = t.value;
+  else if (t.id === "wName") w.name = t.value;
+  else if (t.id === "wPwd") w.password = t.value;
+  else if (t.id === "wPass") w.passphrase = t.value;
+});
+
+function findSrv(el) { return state.servers.find((s) => s.id === Number(el.closest("[data-id]") ? el.closest("[data-id]").dataset.id : state.detailId)); }
+
+/* ================================================================ flows */
+function startInstall() {
+  const w = state.wiz;
+  const ep = ++w.progEpoch;
+  const items = seqFor(state.demo);
+  w.prog = items.map((it) => ({ label: it.l, detail: null, state: "wait", fail: it.f || null, note: it.n || null }));
+  w.running = true; w.progIdx = -1;
+  refreshSheet();
+  let i = 0;
+  const tick = () => {
+    if (ep !== w.progEpoch) return;
+    if (i >= w.prog.length) { w.running = false; refreshSheet(); renderNotes(); return; }
+    const cur = w.prog[i];
+    cur.state = "run"; cur.detail = null;
+    refreshSheet();
+    const dur = 260 + Math.random() * 420;
+    setTimeout(() => {
+      if (ep !== w.progEpoch) return;
+      if (cur.fail) {
+        cur.state = "err";
+        w.running = false;
+        w.prog = w.prog.slice(0, i + 1);
+        w.error = { title: "安装未完成", detail: cur.fail };
+        refreshSheet(); renderNotes();
+        return;
+      }
+      cur.state = "ok"; cur.detail = cur.note || null;
+      i += 1;
+      tick();
+    }, dur);
+  };
+  tick();
+}
+
+function finishWizard() {
+  const w = state.wiz;
+  const id = Date.now();
+  state.servers.push({
+    id,
+    name: w.name || "ops-box",
+    host: w.host || "ops.example.com",
+    port: w.port || "22",
+    user: w.user || "ubuntu",
+    fp: (w.fp || FP_OK).slice(0, 30) + "…",
+    status: "ok",
+    lastAgo: "刚刚",
+    rows: 41290,
+    intervalSecs: w.interval,
+    days: w.days,
+    enabled: true,
+    tools: ["Claude Code", "Codex", "Qoder"],
+    error: null,
+    history: [{ ago: "刚刚", rows: 41290, add: 41290, took: "6.1 s" }],
+  });
+  state.view = "list";
+  state.wiz = null;
+  closeSheet();
+  renderFooter(); renderHeaderSync();
+  toast("服务器 " + (w.name || "ops-box") + " 已配置：免密已生效，首次合并 41,290 行");
+  renderNotes();
+}
+
+function syncNow(id) {
+  const s = state.servers.find((x) => x.id === id);
+  if (!s || s.status === "syncing") return;
+  const ep = ++state.epoch;
+  s.status = "syncing";
+  refreshSheet(); renderFooter(); renderNotes();
+  setTimeout(() => {
+    if (ep !== state.epoch) return;
+    if (state.demo === "sync-fail" && s._failing) {
+      s.status = "error";
+      s.error = { title: "仍不可达（第 3 次重试）", detail: "连接超时。已按退避策略把下次自动重试延长到 16 分钟后；也可以检查服务器防火墙或 sshd。", backoff: "16 分钟" };
+      s.lastAgo = "18 分钟前";
+      toast("同步失败：连接超时（已退避）");
+    } else {
+      s.status = "ok";
+      s.rows += 165;
+      s.lastAgo = "刚刚";
+      s.error = null;
+      s.history.unshift({ ago: "刚刚", rows: s.rows, add: 165, took: "2.4 s" });
+      s.history = s.history.slice(0, 4);
+      toast("已合并 " + fmt(s.rows) + " 行（+165 新增）");
+    }
+    refreshSheet(); renderFooter(); renderHeaderSync(); renderNotes();
+  }, 2300);
+}
+
+function removeServer() {
+  const s = state.servers.find((x) => x.id === state.detailId);
+  if (!s) return;
+  state.servers = state.servers.filter((x) => x.id !== s.id);
+  const cleaned = state.chkCleanup;
+  state.view = "list"; state.detailId = null;
+  refreshSheet(); renderFooter(); renderHeaderSync(); renderNotes();
+  toast(cleaned ? "已移除「" + s.name + "」，并已清理服务器上的采集器与公钥行" : "已移除「" + s.name + "」（服务器端未做改动）");
+}
+
+/* ---- demo controls ---- */
+function runDemo(kind) {
+  if (kind === "preset") {
+    resetAll();
+    state.servers = [{
+      id: 1, name: "ops-box", host: "ops.example.com", port: "22", user: "ubuntu",
+      fp: FP_OK.slice(0, 30) + "…", status: "ok", lastAgo: "3 分钟前", rows: 41455,
+      intervalSecs: 900, days: 30, enabled: true, tools: ["Claude Code", "Codex", "Qoder"],
+      error: null,
+      history: [
+        { ago: "3 分钟前", rows: 41455, add: 165, took: "2.4 s" },
+        { ago: "18 分钟前", rows: 41290, add: 41290, took: "6.1 s" },
+      ],
+    }];
+    renderFooter(); renderHeaderSync();
+    openServers();
+    toast("已预置一台已配置的服务器（点行看详情，点刷新图标看同步）");
+    return;
+  }
+  if (kind === "sync-fail") {
+    state.demo = "sync-fail";
+    if (!state.servers.length) {
+      runDemo("preset");
+      state.demo = "sync-fail";
+    }
+    const s = state.servers[0];
+    s._failing = true;
+    s.status = "error";
+    s.lastAgo = "18 分钟前";
+    s.error = { title: "连接超时", detail: "ops.example.com:22 无响应。已自动退避，8 分钟后重试；点「立即同步」可立即重试一次。", backoff: "8 分钟" };
+    state.view = "detail"; state.detailId = s.id;
+    refreshSheet(); renderFooter(); renderNotes();
+    toast("演示：这台服务器同步失败（红点 + 退避），可点“立即重试一次”观察结果");
+    return;
+  }
+  // 向导类场景
+  state.demo = kind;
+  resetAllServersKeepSheet();
+  initWizard();
+  state.wiz.fpMismatch = (kind === "fp-mismatch");
+  openSheet(renderSheet());
+  renderNotes();
+  const names = { happy: "正常流程", "pwd-rejected": "服务器拒绝密码", unreachable: "主机不可达", "fp-mismatch": "指纹与上次不一致", "arch-unsupported": "不支持的架构" };
+  toast("演示场景：" + (names[kind] || kind) +
+    (kind === "fp-mismatch" ? "（走到第 3 步见差异态）" : kind === "arch-unsupported" ? "（走到第 4 步见失败态）" : ""));
+}
+function resetAllServersKeepSheet() {
+  state.servers = [];
+  renderFooter(); renderHeaderSync();
+}
+
+/* ================================================================ notes */
+const NOTE_SETS = {
+  "list-empty": [
+    ["入口", "服务器图标在底部状态栏（设置齿轮左侧），空态不显示状态点。"],
+    ["复用", "手工 --push 方式不受影响：两条路可以并存。"],
+  ],
+  "list": [
+    ["后端", "servers.json（面板数据目录）存 host/port/user/间隔/窗口/指纹；不含任何密码。"],
+    ["调度", "每台独立间隔；失败退避 1→2→4→…→30 分钟封顶，成功即重置。"],
+    ["安全", "拉取与合并都在本机进行；服务器离线时仅状态变红，既有数字不受影响。"],
+  ],
+  "wizard-1": [
+    ["边界", "地址/用户名必填；名称做字符集校验（会成为 origin，防注入远程命令）。"],
+    ["后端", "端口默认 22；地址经 DNS 解析后由 russh 直连（不经 shell）。"],
+  ],
+  "wizard-2": [
+    ["安全", "密码进 zeroize 缓冲，只用于安装密钥；失败也清零，缓存/日志/配置文件均不落。"],
+    ["边界", "私钥方式读取本机文件（可选口令）；「已配置免密」直接验证 agent/默认密钥。"],
+    ["失败", "sshd 关闭密码 / 双因素 → 引导「手动安装公钥」或改用私钥，不把用户卡死。"],
+  ],
+  "wizard-3": [
+    ["安全", "首次连接 TOFU：展示 SHA256 指纹并记住；此后只认这一枚，防中间人。"],
+    ["失败", "指纹变化 = 硬停：需显式“我已核实”才更新，绝不静默替换。"],
+  ],
+  "wizard-4": [
+    ["后端", "russh 执行固定命令面：uname / mkdir / chmod+mv / tokenme --version / tokenme export；sftp 上传与下载。插值仅 origin 与 days，其余全为常量。"],
+    ["安全", "专用密钥 ed25519 存本机（0600）；authorized_keys 只追加自己一行。"],
+    ["复用", "拉回的 bundle 写入本机 ~/tokenme-sync → 既有 import_sync 门禁：sha256 对账、行数上限、增长判据、幂等合并、0600。"],
+  ],
+  "wizard-5": [
+    ["边界", "服务器上无常驻服务；拉取完全由本机发起，卸载面板即停止一切联动。"],
+    ["复用", "合并成功后 Header 的「Linux 同步」徽标自动出现该服务器。"],
+  ],
+  "detail": [
+    ["安全", "移除默认不动服务器；勾选后才远程清理（删除采集器 + 仅移除自己那行公钥）。"],
+    ["失败", "红色行给出原因与退避剩余时间；详情页可立即重试，错误文案面向可行动。"],
+  ],
+  "demo-pwd": [
+    ["失败", "场景：sshd PasswordAuthentication no。停在认证步，给出两条出路（私钥 / 手动装公钥）。"],
+  ],
+  "demo-unreach": [
+    ["失败", "场景：TCP 10 s 超时。错误行常驻可重试；真实实现会对自动同步同样退避。"],
+  ],
+  "demo-fp": [
+    ["安全", "场景：指纹变化。展示新旧两枚，需人工核实后显式更新；这是防中间人的核心闸门。"],
+  ],
+  "demo-arch": [
+    ["边界", "场景：armv7l。我们只带 x86_64/aarch64 静态采集器；给出手动安装出路，不静默降级。"],
+  ],
+  "demo-syncfail": [
+    ["失败", "场景：已配置服务器失联 → 红点、原因、退避；点「立即重试一次」观察第 3 次失败后退避延长。"],
+  ],
+};
+
+function renderNotes() {
+  let key = "list-empty";
+  if (state.view === "wizard") {
+    key = "wizard-" + state.wiz.step;
+    if (state.wiz.step === 2 && state.demo === "pwd-rejected" && state.wiz.error) key = "demo-pwd";
+    if (state.wiz.step === 2 && state.demo === "unreachable" && state.wiz.error) key = "demo-unreach";
+    if (state.wiz.step === 3 && state.wiz.fpMismatch) key = "demo-fp";
+    if (state.wiz.step === 4 && state.demo === "arch-unsupported") key = "demo-arch";
+  } else if (state.view === "detail" || state.view === "confirm") {
+    key = "detail";
+  } else if (state.view === "list") {
+    key = state.servers.length ? "list" : "list-empty";
+  }
+  const notes = NOTE_SETS[key] || NOTE_SETS["list-empty"];
+  $("notes").innerHTML = notes.map(([k, v]) => `<li><span class="tag" data-k="${k}">${k}</span><span>${v}</span></li>`).join("");
+  if (state.demo === "sync-fail" && state.servers.length && state.view !== "wizard") {
+    $("notes").innerHTML += NOTE_SETS["demo-syncfail"].map(([k, v]) => `<li><span class="tag" data-k="${k}">${k}</span><span>${v}</span></li>`).join("");
+  }
+}
+
+/* ================================================================ init */
+(function init() {
+  const cells = [];
+  for (let i = 0; i < 91; i++) {
+    const l = Math.max(1, Math.min(4, Math.round(1 + Math.random() * 3.4)));
+    const today = i === 90 ? " data-today" : "";
+    cells.push(`<i data-l="${l}"${today}></i>`);
+  }
+  $("heat").innerHTML = cells.join("");
+  renderFooter(); renderHeaderSync(); renderNotes();
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet(); });
+})();
+</script>
+</body>
+</html>

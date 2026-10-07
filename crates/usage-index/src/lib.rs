@@ -19,6 +19,7 @@
 
 mod facts;
 mod ingest;
+mod sync;
 mod watcher;
 
 use std::collections::{BTreeMap, HashSet};
@@ -35,6 +36,10 @@ use usage_core::{
 pub use ingest::{
     retention_cutoff, IngestOptions, IngestReport, CLAIM_TTL_MS, RETENTION_DAYS,
 };
+pub use sync::{
+    default_sync_dir, hostname, sha256_file, ExportOptions, ExportReport, ImportOptions,
+    ImportReport, SyncManifest, SyncSums, SYNC_FORMAT,
+};
 pub use watcher::Watcher;
 
 /// Bumping this wipes `event`/`call`/`quota`/`file_state` on next open, because
@@ -44,6 +49,12 @@ pub use watcher::Watcher;
 /// (`workbuddy#<call id>`, tokens + credits). The two key spaces never collide,
 /// so an index that kept both would bill every session twice; a version bump is
 /// what makes the old rows disappear instead of lingering as invisible money.
+///
+/// The `event_rollup.origin` column (machine scope) did NOT bump this: the
+/// rollup is a cache, so its shape change is handled by [`drop_legacy_rollup`]
+/// + the lazy rebuild, and a bump here would cost a full re-ingest of every
+/// source tree — and worse, the `sync:` memos in `meta` survive a wipe and
+/// would make every known bundle skip as "already imported" on the way back.
 const SCHEMA_VERSION: &str = "4";
 
 const SCHEMA: &str = r#"
@@ -102,15 +113,19 @@ CREATE TABLE IF NOT EXISTS file_state(
     events     INTEGER,
     updated_ms INTEGER
 );
--- P1 publish path: one row per local (day, tool, session, project, model,
--- meter) group, maintained in the same transaction as the event inserts, so a
--- report can fold ~2.2k of these instead of ~390k events. `project`/`model`
--- are NOT NULL with `''` standing in for the event table's NULL (a NOT NULL
--- group key keeps the upsert simple); the fold maps `''` back to `None`.
+-- P1 publish path: one row per local (day, origin, tool, session, project,
+-- model, meter) group, maintained in the same transaction as the event
+-- inserts, so a report can fold ~2.2k of these instead of ~390k events.
+-- `project`/`model` are NOT NULL with `''` standing in for the event table's
+-- NULL (a NOT NULL group key keeps the upsert simple); the fold maps `''`
+-- back to `None`. `origin` is the machine the rows came from — `''` for this
+-- machine, the bundle origin for merged imports — derived from the event's
+-- `source` prefix by `ORIGIN_SQL`; the panel's scope filter reads it.
 -- Additive to the frozen `event` schema: if it ever disagrees with the events,
 -- the reads below wipe and rebuild it lazily rather than losing data.
 CREATE TABLE IF NOT EXISTS event_rollup(
     day        TEXT    NOT NULL,
+    origin     TEXT    NOT NULL DEFAULT '',
     tool       TEXT    NOT NULL,
     session    TEXT    NOT NULL,
     project    TEXT    NOT NULL DEFAULT '',
@@ -126,7 +141,7 @@ CREATE TABLE IF NOT EXISTS event_rollup(
     nonzero    INTEGER NOT NULL,
     min_ts     INTEGER NOT NULL,
     max_ts     INTEGER NOT NULL,
-    PRIMARY KEY(day, tool, session, project, model, meter)
+    PRIMARY KEY(day, origin, tool, session, project, model, meter)
 );
 -- Serves the per-session correlated lookups (first project / last model) and
 -- the newest-event probe without a full scan.
@@ -147,6 +162,17 @@ const SELECT_EVENT_COLS: &str = "id, tool, ts_ms, session, project, model, meter
 pub(crate) fn sql_err(e: rusqlite::Error) -> Error {
     Error::Sqlite(e.to_string())
 }
+
+/// The origin of a row's `source`, in SQL. The Rust twin is
+/// [`usage_core::origin_of`]; both must agree. Interpreted: everything a
+/// bundle merge wrote (`linux:<origin>:<their key>` — see `sync.rs`) shadows
+/// under its origin, and everything else is this machine (`''`). A `linux:`
+/// without a second colon was never written by a merge, so it stays local
+/// rather than inventing an origin.
+pub(crate) const ORIGIN_SQL: &str = "\
+CASE WHEN substr(source, 1, 6) = 'linux:' AND instr(substr(source, 7), ':') > 0 \
+     THEN substr(source, 7, instr(substr(source, 7), ':') - 1) \
+     ELSE '' END";
 
 /// Moves a corrupted index and its sidecars aside, keeping them for forensics.
 /// The connection must already be closed.
@@ -196,6 +222,39 @@ pub(crate) fn now_ms() -> i64 {
     usage_core::report::now_ms()
 }
 
+/// Drops a pre-`origin` `event_rollup` so the new SCHEMA recreates it.
+///
+/// The rollup is a pure cache of `event`, so the migration is a drop, not a
+/// rebuild: the next report read finds it empty, rebuilds from the events on
+/// disk, and no row is lost. Detection is by column shape, not by
+/// `SCHEMA_VERSION` — a version bump would re-ingest every source tree, and
+/// the `sync:file:` memos in `meta` (which a wipe does not clear) would then
+/// make every imported bundle skip as already-known and lose the merged rows
+/// for good.
+fn drop_legacy_rollup(conn: &Connection) -> Result<()> {
+    let table: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'event_rollup')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    if !table {
+        return Ok(());
+    }
+    let has_origin: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('event_rollup') WHERE name = 'origin')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    if !has_origin {
+        conn.execute("DROP TABLE event_rollup", []).map_err(sql_err)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn meter_str(m: Meter) -> &'static str {
     match m {
         Meter::Tokens => "tokens",
@@ -238,10 +297,13 @@ pub struct Index {
 impl Index {
     /// Opens (creating if needed) the index at `path`.
     ///
-    /// A file that no longer parses (damaged pages, a torn WAL) is quarantined
-    /// and recreated empty: every event is re-derivable from the source logs,
-    /// so the next ingest rebuilds the whole index instead of every read
-    /// failing forever with garbage-row errors.
+    /// A file that cannot be opened at all (damaged header, a torn WAL) is
+    /// quarantined and recreated empty: every event is re-derivable from the
+    /// source logs, so the next ingest rebuilds the whole index instead of every
+    /// read failing forever with garbage-row errors. A file that opens but is
+    /// internally damaged is caught by [`Index::verify_integrity`], which is
+    /// deliberately a separate call — it reads the whole file, and a panel that
+    /// is trying to show numbers should not wait for that.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -270,20 +332,47 @@ impl Index {
 
     fn open_connection(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).map_err(|e| Error::io(path, std::io::Error::other(e)))?;
-        let index = Self::setup(conn, Some(path.to_path_buf()))?;
-        // `setup` can succeed on a damaged file (its schema pages still read)
-        // and the first bad row would then fail every report read with garbage
-        // errors forever. quick_check reads every page once here, at open,
-        // where recovery is a re-ingest instead of a dead panel.
-        let clean = index
-            .conn
-            .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+        Self::setup(conn, Some(path.to_path_buf()))
+    }
+
+    /// `PRAGMA quick_check` — the whole file, read once.
+    fn quick_check_ok(conn: &Connection) -> bool {
+        conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
             .map(|row| row == "ok")
-            .unwrap_or(false);
-        if !clean {
+            .unwrap_or(false)
+    }
+
+    /// Read the image once and, if it is damaged, move it aside and rebuild the
+    /// schema in place so the next ingest refills it.
+    ///
+    /// This is deliberately *not* part of [`Index::open`]: quick_check touches
+    /// every page, which on a 170 MB index measured 0.4 s warm and 3.6 s cold —
+    /// exactly the time a menu-bar panel spends showing its loading card on a
+    /// cold start. The check still runs on every launch, just after the panel has
+    /// its numbers and before anything is written, so a damaged file still heals
+    /// as a re-ingest instead of failing every read with garbage errors forever.
+    ///
+    /// Returns the index — rebuilt in place when the image was damaged — and
+    /// whether that replacement happened.
+    pub fn verify_integrity(self) -> Result<(Self, bool)> {
+        if Self::quick_check_ok(&self.conn) {
+            return Ok((self, false));
+        }
+        let Some(path) = self.path().map(Path::to_path_buf) else {
+            return Err(Error::Sqlite("in-memory index failed quick_check".into()));
+        };
+        let moved = quarantine(&path);
+        // Close the handle on the image that was just moved aside before opening
+        // the fresh one: a live connection keeps reading through the renamed
+        // file, and on Windows it would hold the sidecars open behind the rebuild.
+        drop(self);
+        if !moved {
+            // Something still holds the file (a live peer, an antivirus scan);
+            // retrying now would just fail again — the next open heals it.
             return Err(Error::Sqlite("database disk image is malformed (quick_check)".into()));
         }
-        Ok(index)
+        let conn = Connection::open(&path).map_err(|e| Error::io(&path, std::io::Error::other(e)))?;
+        Ok((Self::setup(conn, Some(path))?, true))
     }
 
     /// `~/.local/share/tokenme/index.db` style location, or `None` when the
@@ -299,6 +388,7 @@ impl Index {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
         )
         .map_err(sql_err)?;
+        drop_legacy_rollup(&conn)?;
         conn.execute_batch(SCHEMA).map_err(sql_err)?;
         let stored: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
@@ -546,6 +636,22 @@ impl Index {
             .query_row("SELECT count(*) FROM event", [], |r| r.get::<_, i64>(0))
             .map(|n| n.max(0) as u64)
             .map_err(sql_err)
+    }
+
+    /// Whether the index holds anything at all. `event_count` scans the whole
+    /// table, which is fine when the number is the answer and wrong when only
+    /// "is it empty" is — the boot path asks the second question.
+    pub fn has_events(&self) -> Result<bool> {
+        match self
+            .conn
+            .query_row("SELECT 1 FROM event LIMIT 1", [], |_| Ok(()))
+        {
+            Ok(()) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            // A broken schema is not "empty": saying so keeps the boot publish
+            // honest instead of quietly skipping it.
+            Err(e) => Err(sql_err(e)),
+        }
     }
 
     /// Event totals per tool, currently in the index.
@@ -804,8 +910,9 @@ mod tests {
     }
 
     /// A damaged index must not wedge every future read into garbage-row errors:
-    /// open quarantines the file and hands back an empty one, and the next
-    /// ingest rebuilds everything from the source logs.
+    /// `verify_integrity` quarantines the file and hands back an empty one, and
+    /// the next ingest rebuilds everything from the source logs. Opening alone
+    /// does not do that work — opening is the panel's first-render path.
     #[test]
     fn a_corrupted_index_is_quarantined_and_reopened_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -828,14 +935,47 @@ mod tests {
             file.seek(SeekFrom::Start(4096)).unwrap();
             file.write_all(&[0xFF; 64]).unwrap();
         }
-        let idx = Index::open(&path).unwrap();
+        let (idx, healed) = Index::open(&path).unwrap().verify_integrity().unwrap();
+        assert!(healed, "verify reported that it replaced the image");
         assert_eq!(idx.event_count().unwrap(), 0, "the damaged index was replaced, not reused");
-        let survivors: Vec<String> = std::fs::read_dir(dir.path())
+        let moved: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains(".corrupt-"))
             .collect();
-        assert_eq!(survivors.len(), 1, "the damaged file is kept for forensics: {survivors:?}");
+        assert!(
+            moved.iter().any(|n| n.starts_with("index.db.corrupt-")),
+            "the damaged file is kept for forensics: {moved:?}"
+        );
+        assert_eq!(
+            moved.len(),
+            3,
+            "the image goes with its own -wal and -shm: a rebuild must not inherit the \
+             write-ahead log of the file that just failed its check: {moved:?}"
+        );
+    }
+
+    /// The common case: a healthy index verifies without touching the file, so
+    /// the guard costs nothing but the read it has to do.
+    #[test]
+    fn a_healthy_index_verifies_without_replacing_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let idx = Index::open(&path).unwrap();
+            idx.conn
+                .execute(
+                    "INSERT INTO event(tool, ts_ms, session, meter, source) VALUES('t', 1, 's', 'tokens', '/x')",
+                    [],
+                )
+                .unwrap();
+        }
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let (idx, healed) = Index::open(&path).unwrap().verify_integrity().unwrap();
+        assert!(!healed, "a clean image is left alone");
+        assert_eq!(idx.event_count().unwrap(), 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+        assert_eq!(idx.path(), Some(path.as_path()));
     }
 }

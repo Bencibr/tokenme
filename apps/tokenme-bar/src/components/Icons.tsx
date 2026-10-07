@@ -146,3 +146,42 @@ export function IconSortDesc(p: IconProps) {
     </Svg>
   );
 }
+
+/** Status bar's remote-server entry: a stacked 1U-box rack. */
+export function IconServer(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <rect x="4" y="4" width="16" height="7" rx="2" />
+      <rect x="4" y="13" width="16" height="7" rx="2" />
+      <circle cx="8" cy="7.5" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="8" cy="16.5" r="0.7" fill="currentColor" stroke="none" />
+    </Svg>
+  );
+}
+
+/** List rows' "open detail" affordance: a forward chevron. */
+export function IconNext(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M9 6l6 6-6 6" />
+    </Svg>
+  );
+}
+
+/** Wizard back-step / detail-sheet return: a backward chevron. */
+export function IconBack(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M15 6l-6 6 6 6" />
+    </Svg>
+  );
+}
+
+/** Progress rows: the check inside a filled disc. */
+export function IconCheck(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </Svg>
+  );
+}

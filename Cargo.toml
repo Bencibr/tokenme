@@ -19,6 +19,8 @@ members = [
     "crates/adapters/dsh",
     "crates/adapters/joycode",
     "crates/adapters/trae",
+    "crates/adapters/kimicode",
+    "crates/adapters/minimaxcode",
     "crates/adapters/all",
     "crates/usage-index",
     "crates/usage-quota",
@@ -27,7 +29,7 @@ members = [
 exclude = ["apps/tokenme-bar"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "MIT"
 repository = "https://gitea.sp.dev/sp/tokenme.git"
@@ -51,6 +53,8 @@ usage-adapter-hermes = { path = "crates/adapters/hermes" }
 usage-adapter-funide = { path = "crates/adapters/funide" }
 usage-adapter-joycode = { path = "crates/adapters/joycode" }
 usage-adapter-trae = { path = "crates/adapters/trae" }
+usage-adapter-kimicode = { path = "crates/adapters/kimicode" }
+usage-adapter-minimaxcode = { path = "crates/adapters/minimaxcode" }
 usage-adapter-all = { path = "crates/adapters/all" }
 
 serde = { version = "1", features = ["derive"] }

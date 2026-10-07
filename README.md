@@ -19,7 +19,7 @@
 
 ## What is TokenMe?
 
-TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, plus a CLI. It answers three questions that usually have no good home:
+TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, a fully static Linux collector and CLI. It answers three questions that usually have no good home:
 
 - How many tokens did I burn today, and what did they cost?
 - How much is left on each subscription, and when does it reset?
@@ -89,7 +89,7 @@ brew install tokenme-cli          # the CLI
 
 The tap is bumped automatically on every release, so `brew upgrade` keeps you current, and cask installs carry no quarantine flag — Gatekeeper never steps in.
 
-**Installers**: grab one from [Releases](https://github.com/Bencibr/tokenme/releases/latest) — a macOS menu bar app (drag to Applications) and a Windows setup are both there.
+**Installers**: grab one from [Releases](https://github.com/Bencibr/tokenme/releases/latest) — the macOS menu-bar app (drag to Applications), a Windows setup, and the static Linux collector tarballs (`x86_64` / `aarch64`, each with `install-linux.sh` beside it).
 
 > **First launch on macOS** (manual DMG only): the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in. Right-click → Open works, or clear the quarantine flag:
 >
@@ -114,6 +114,29 @@ tokenme daily --days 7  # the last week's daily usage and spend
 tokenme quota           # live quotas and reset countdowns
 ```
 
+## Linux — the headless collector
+
+The menu-bar panel is macOS and Windows. **Linux is where the work actually happens** — the box you SSH into, the container your agent runs in, the build machine that never shows a GUI — so Linux ships as a first-class collector rather than an afterthought: one fully static binary (musl, `x86_64` and `aarch64`, so there is no glibc version to match and no Rust or Python to install on the machine), plus one command to make it report home.
+
+```bash
+tar xzf tokenme-cli-*-linux-musl.tar.gz
+cd tokenme-cli-*-linux-musl
+./install-linux.sh --every 15 --push you@display-host
+```
+
+That puts `tokenme` in `~/.local/bin` (appending the PATH line to `~/.profile` when it is missing) and installs a **systemd `--user` timer** that runs `tokenme export --days 30` every 15 minutes into `~/tokenme-sync`, then scp's each fresh bundle to the display machine — whose panel merges it on its next pass and shows it as that machine's numbers, under its own name. No user manager reachable (a container, a bare ssh session)? The installer falls back to a **cron job running the same generated script**, and `--uninstall` cleans up either one while keeping your data. On a headless box the installer also turns on lingering (or prints the one `loginctl enable-linger $USER` line to run) so the timer keeps firing with nobody logged in. `--days 400` once pulls the whole retention window in as a backfill; `--prefix <dir>` moves the binary.
+
+Run it interactively and the same numbers are available in a terminal, with no display at all:
+
+```bash
+tokenme detect          # what is installed here, and where each tool's logs live
+tokenme daily --days 7  # a week of usage and spend
+tokenme quota           # live quotas and reset countdowns
+tokenme export          # one bundle into ~/tokenme-sync
+```
+
+Or skip the timer and move `~/tokenme-sync` yourself — Syncthing, a shared mount, a nightly rsync. The transport is yours: tokenme opens no port, runs no daemon beyond that timer, and holds no accounts. The panel can also do the SSH half for you — its footer 服务器 entry probes a host, pins its fingerprint, installs the collector and pulls bundles on a schedule. See the [user guide](docs/USER_GUIDE.md) §4.
+
 ## Common commands
 
 | Command | What it does |
@@ -122,13 +145,14 @@ tokenme quota           # live quotas and reset countdowns
 | `tokenme report --window week --group model` | One window, broken down every which way |
 | `tokenme quota` | Live quotas with reset countdowns |
 | `tokenme budget set zcode --monthly 50` | Put a monthly cap on a tool that has none |
+| `tokenme export` / `tokenme import` | Ship a window of the index to another machine and merge it back — file-based, idempotent, no accounts |
 | `tokenme pricing explain <model>` | Audit where a price comes from |
 
 ## Supported tools & live quota
 
-The quota bars come from each tool's own API or local credentials — read-only probes that never refresh or stand in for your login. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
+The quota bars come from each tool's own API or local credentials — probes that read, and never log you in. Three probes are deliberate exceptions, because those tools keep a short-lived access token on disk and the bar goes dead without a renewal: MiniMax Code (~1 h), Kimi Code (the vendor's own 15-minute token) and Cline's gateway token. Each exchanges the refresh token sitting in that same file and writes the rotated pair straight back, in that tool's own format and atomically — a rotation that is not persisted is a rotation consumed, and the app's own next refresh would then find its login dead. A failed exchange changes nothing. Every other probe reads credentials and never writes them. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
 
-Every tool below ships as a built-in adapter — twenty of them, indexed straight from the logs and databases each one writes to disk:
+Every tool below ships as a built-in adapter — 22 of them, indexed straight from the logs and databases each one writes to disk:
 
 | Tool | Live quota | Fixtures | Verified on |
 | :--- | :--- | :--- | :--- |
@@ -152,20 +176,24 @@ Every tool below ships as a built-in adapter — twenty of them, indexed straigh
 | <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | Plan quota — vendor billing API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE points — reads the IDE's own login state | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | Subscription quota — vendor v1 API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | Plan windows — 5h / weekly / monthly via the vendor's `/usages`; usage read from the CLI **or** the desktop app's embedded runtime; an expired access token is renewed in place through the vendor's own refresh contract | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | Plan windows — 5h / weekly — plus the credit balance (purchased + check-in wallets); the ~1 h access token is renewed in place from the app's own refresh token | ✅ | macOS ✅ · Windows ⏳ |
 
 > **Fixtures**: every adapter carries a fixture test suite, run in full on CI for each commit, and every integration was verified against a real machine's data before it landed.
 >
 > **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
 >
-> Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token expires, and refreshing credentials is outside a read-only probe's line.
+> Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 
-> **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `~/.config/tokenme/agnes.token` (or set `AGNES_TOKEN`).
+> **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
 
-Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · Adapter notes: [docs/ADAPTERS_DESIGN.md](docs/ADAPTERS_DESIGN.md)
+Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · Adapter notes: [docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
 
 ## Data & privacy
 
 Only counts get indexed, never content — your code and prompts are not stored. What lands in the index is each request's token counts, model name, and project path. Scanning is read-only throughout; no telemetry, no third-party proxies. The index lives in your system data directory (`~/Library/Application Support/tokenme/` on macOS), and each tool's log paths are listed in the [user guide](docs/USER_GUIDE.md).
+
+Machines can sync their indexes to each other — a file-based `tokenme export` / `tokenme import` over a channel you own (ssh/scp, Syncthing), no accounts and no cloud. Every merge is sha256- and manifest-validated before a single row lands, in one all-or-nothing transaction, and bundles are written `0600` on unix. The panel's footer server button can also provision that channel end to end: an SSH wizard takes the address and one password (or a key file), installs a dedicated key plus the static collector on the remote host, and pulls its bundle on a schedule — the password is never stored. Once more than one machine reports in, a header dropdown folds every figure, ranking and session list under **全部机器**, **本机** or any single remote by name — re-summarized from the same index, without re-ingesting — and a per-machine badge shows the newest merge. See the [user guide](docs/USER_GUIDE.md) §4.
 
 ## Community
 

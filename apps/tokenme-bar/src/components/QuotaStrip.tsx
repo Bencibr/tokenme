@@ -87,11 +87,16 @@ export function QuotaStrip({
   quotas,
   now,
   pending,
+  scoped,
 }: {
   quotas: QuotaView[];
   now: number;
   /** True while the boot publish has not run the probes yet. */
   pending?: boolean;
+  /** True when a machine scope other than "all" is active. Quotas are probed
+   *  on this machine only and never follow the scope, so the section says so
+   *  instead of silently mixing calibers. */
+  scoped?: boolean;
 }) {
   const live = quotas.filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now);
   const [order, setOrderState] = useState<QuotaOrder>(savedOrder);
@@ -255,7 +260,7 @@ export function QuotaStrip({
   return (
     <Section
       label={t("quota.section")}
-      meta={t("quota.meta", { w: live.length, g: groups.length })}
+      meta={scoped ? t("quota.meta.local") : t("quota.meta", { w: live.length, g: groups.length })}
       trail={
         <span className="quota-legend" aria-hidden="true">
           <span><i data-stage="low" />{t("quota.legend.low")}</span>
