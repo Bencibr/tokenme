@@ -348,6 +348,11 @@ export interface Bridge {
   setQuotaOrder: (order: QuotaOrder) => Promise<void>;
   /** Report the webview's detected UI language to the native chrome. */
   setUiLang: (lang: string) => Promise<void>;
+  /** Cold-start telemetry, stage 1: the bundle ran and index.html's shell is up. */
+  reportBoot: () => Promise<void>;
+  /** Cold-start telemetry, stage 2: the page has figures. This is what retires the
+   *  native boot note, so it must not fire earlier than real content. */
+  reportContent: () => Promise<void>;
   /** The settings sheet: autostart, fallback poll cadence, build version. */
   panelSettings: () => Promise<PanelSettings>;
   setAutostart: (on: boolean) => Promise<void>;

@@ -20,6 +20,15 @@ export function applyTheme(theme: ThemeKey): void {
   const effective: ThemeKey = pin === "light" || pin === "dark" ? pin : theme;
   if (effective === "system") delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = effective;
+  // index.html's boot shell paints before this can run, and it reads the last
+  // applied theme synchronously: a shell in the wrong appearance would flip
+  // colour the moment the sheet mounts. `system` is stored as it is, which lets
+  // the shell fall through to the media query — what 跟随系统 means anyway.
+  try {
+    localStorage.setItem("tokenme:theme", effective);
+  } catch {
+    /* private mode / disabled storage: the shell just follows the OS */
+  }
 }
 
 /** Dollar figures off => the components read the flag from context; the
@@ -158,6 +167,23 @@ export const bridge: Bridge = {
   async setUiLang(lang: string): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("set_ui_lang", { lang });
+  },
+
+  /** Cold-start telemetry, stage 1: the bundle executed and index.html's boot
+   *  shell is on screen. Called from `main.tsx`. Fire-and-forget. */
+  async reportBoot(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("panel_page_signal", { stage: "boot" });
+  },
+
+  /** Cold-start telemetry, stage 2, and the handover: the page has real figures,
+   *  so the native boot note can go away. Called once from `App.tsx` when the
+   *  first report lands — reporting at bundle-execution time retired the note
+   *  seconds before anything was drawn, which the cold-start recording measured
+   *  as a bare sheet from +3.2 s to +8.1 s. Fire-and-forget. */
+  async reportContent(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("panel_page_signal", { stage: "content" });
   },
 
   async panelSettings(): Promise<PanelSettings> {

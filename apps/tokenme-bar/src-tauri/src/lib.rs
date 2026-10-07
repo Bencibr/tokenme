@@ -20,6 +20,8 @@ use crate::engine::EngineChannel;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Start the cold-start clock before anything else can read it.
+    panel::mark_launch();
     let (tx, rx) = std::sync::mpsc::channel::<engine::Msg>();
 
     let builder = tauri::Builder::default()
@@ -38,6 +40,7 @@ pub fn run() {
             commands::get_report,
             commands::get_tray_state,
             commands::set_ui_lang,
+            commands::panel_page_signal,
             commands::set_tray_mode,
             commands::get_quota_order,
             commands::set_quota_order,

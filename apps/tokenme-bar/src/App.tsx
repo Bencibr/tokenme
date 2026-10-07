@@ -229,6 +229,19 @@ const [page, setPage] = useState<PageKey>(() => {
   }, []);
   const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
 
+  // Cold-start telemetry, stage 2 — and the handover. The native boot note covers
+  // the wait for this panel's first pixels, and it has to stay until there are
+  // figures to replace it with: reporting when the bundle merely executed retired
+  // it at +3.2 s while the first report landed at +8.1 s, and the recording caught
+  // the sheet sitting bare in between.
+  const contentReported = useRef(false);
+  useEffect(() => {
+    if (report && !contentReported.current) {
+      contentReported.current = true;
+      void bridge.reportContent();
+    }
+  }, [report]);
+
   // A dead engine looks exactly like a quiet afternoon: the numbers stop moving
   // and nothing says they stopped. That is how this panel served a frozen
   // "today" for six hours on 2026-10-04. The engine re-publishes on every cadence

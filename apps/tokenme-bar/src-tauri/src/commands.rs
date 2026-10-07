@@ -235,8 +235,20 @@ pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
     Ok(())
 }
 
-/// Like the theme, a webview-only concern: the panel hides its dollar figures
-/// itself; persisting is what makes the choice survive a relaunch.
+/// The page's two cold-start milestones, reported by name because they answer
+/// different questions: `boot` is when the bundle executed (index.html's shell is
+/// on screen), `content` is when it has figures — and only the second one retires
+/// the native boot note. See `panel::mark_page_boot` / `panel::mark_content_ready`
+/// for why neither may gate the window.
+#[tauri::command]
+pub fn panel_page_signal(app: tauri::AppHandle, stage: String) {
+    match stage.as_str() {
+        "boot" => crate::panel::mark_page_boot(),
+        "content" => crate::panel::mark_content_ready(&app),
+        other => crate::logging::error(&format!("panel: unknown page signal {other:?}")),
+    }
+}
+
 /// Reveal the diagnostic log directory in the OS file manager.
 #[tauri::command]
 pub fn open_log_dir() -> Result<(), String> {

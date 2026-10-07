@@ -131,6 +131,13 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     apply_window_background(window.app_handle(), None);
     let _ = window.show();
 
+    // The panel is on screen before its page can paint, and on macOS the only
+    // layer that can say something during that stretch is a native one.
+    #[cfg(target_os = "macos")]
+    if !content_is_ready() {
+        show_boot_note(window.app_handle());
+    }
+
     // Windows tray panels are intentionally non-activating. Calling set_focus
     // here invokes tao's foreground-window recovery (including Alt-key input),
     // which is both visible to the user and a source of popup latency. The
@@ -184,6 +191,155 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// When the page first had something to show — the cold-start budget line.
+///
+/// Deliberately telemetry, not a gate on showing the window. Measured on this
+/// machine: with nothing ever asking to show the panel, the page reported
+/// content in 1.1-1.6 s; with a gate that held the window back until the page
+/// reported, it took 3.5-4.3 s — WebKit does not load a page for a window that
+/// is never ordered front. Waiting on the thing the wait itself causes is a
+/// stall, not a fix.
+fn content_ready_flag() -> &'static std::sync::atomic::AtomicBool {
+    static CELL: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+}
+
+/// Whether the page has ever reported content — the native boot note keys off
+/// this so it never reappears on a panel that is already drawing.
+#[cfg(target_os = "macos")]
+fn content_is_ready() -> bool {
+    content_ready_flag().load(Ordering::Acquire)
+}
+
+/// Stage 1: the bundle ran, so `index.html`'s boot shell is on screen. Kept apart
+/// from the first report because the two are seconds apart on a cold start, and
+/// that gap is exactly where the native note has to live.
+pub fn mark_page_boot() {
+    static BOOT: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+    let booted = BOOT.get_or_init(|| std::sync::atomic::AtomicBool::new(false));
+    if !booted.swap(true, Ordering::AcqRel) {
+        crate::logging::info(&format!(
+            "panel: the page booted {} ms after launch",
+            launch_instant().elapsed().as_millis()
+        ));
+    }
+}
+
+/// The page has its first figures: say so once, and take the native note away.
+pub fn mark_content_ready(app: &AppHandle) {
+    if !content_ready_flag().swap(true, Ordering::AcqRel) {
+        crate::logging::info(&format!(
+            "panel: the page reported content {} ms after launch",
+            launch_instant().elapsed().as_millis()
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    hide_boot_note(app);
+}
+
+/// The panel sits on screen seconds before its page can paint. Measured here:
+/// the window is up at +1.5 s and every frame until the first report (~+8 s) is
+/// the bare native backing — a white sheet under 浅色 — with the web layer
+/// contributing nothing at all. Three builds of markup in `index.html` proved
+/// that interval is unreachable from the page, so the note is drawn by AppKit
+/// and removed the moment the page reports content.
+#[cfg(target_os = "macos")]
+pub fn show_boot_note(app: &AppHandle) {
+    let text = crate::lang::get()
+        .str("正在索引本机用量…", "Indexing this machine…")
+        .to_string();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || set_boot_note(&handle, Some(&text)));
+}
+
+#[cfg(target_os = "macos")]
+pub fn hide_boot_note(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || set_boot_note(&handle, None));
+}
+
+/// The label's tag, so an open finds and replaces its own note instead of
+/// stacking one per click.
+#[cfg(target_os = "macos")]
+const BOOT_NOTE_TAG: isize = 0x746b_426f;
+
+#[cfg(target_os = "macos")]
+fn set_boot_note(app: &AppHandle, text: Option<&str>) {
+    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
+
+    let Some(handle) = app.try_state::<PanelHandle>() else {
+        return; // no converted panel: there is no content view to hang a note on
+    };
+    let panel = handle.inner().0.clone();
+    unsafe {
+        let content: id = panel.content_view();
+        if content.is_null() {
+            return;
+        }
+        let subviews: id = msg_send![content, subviews];
+        let count: usize = msg_send![subviews, count];
+        for index in 0..count {
+            let view: id = msg_send![subviews, objectAtIndex: index];
+            let tag: isize = msg_send![view, tag];
+            if tag == BOOT_NOTE_TAG {
+                let _: () = msg_send![view, removeFromSuperview];
+            }
+        }
+        let Some(text) = text else { return };
+
+        let c_text = match std::ffi::CString::new(text) {
+            Ok(value) => value,
+            Err(_) => return, // interior NUL: no label, and the page will paint anyway
+        };
+        let ns_text: id = msg_send![class!(NSString), stringWithUTF8String: c_text.as_ptr()];
+        if ns_text.is_null() {
+            return;
+        }
+        let label: id = msg_send![class!(NSTextField), labelWithString: ns_text];
+        if label.is_null() {
+            return;
+        }
+        let clear: id = msg_send![class!(NSColor), clearColor];
+        let _: () = msg_send![label, setBackgroundColor: clear];
+        // --accent: #30d9aa dark · #0d8f74 light. One teal for both, because the
+        // note only ever lives on the empty sheet, where either reads correctly.
+        let teal: id =
+            msg_send![class!(NSColor), colorWithSRGBRed: 0.19 green: 0.85 blue: 0.66 alpha: 1.0];
+        let _: () = msg_send![label, setTextColor: teal];
+        let font: id = msg_send![class!(NSFont), systemFontOfSize: 11.0];
+        let _: () = msg_send![label, setFont: font];
+        let _: () = msg_send![label, setTag: BOOT_NOTE_TAG];
+
+        let size: NSSize = msg_send![label, fittingSize];
+        let bounds: NSRect = msg_send![content, bounds];
+        let frame = NSRect {
+            origin: NSPoint {
+                x: (bounds.size.width - size.width) / 2.0,
+                y: (bounds.size.height - size.height) / 2.0,
+            },
+            size,
+        };
+        let _: () = msg_send![label, setFrame: frame];
+        // Last subview, so it sits above the web view: the page is transparent
+        // until it paints, and the note has to survive exactly that interval.
+        let _: () = msg_send![content, addSubview: label];
+    }
+}
+
+/// When this process came up — the clock the cold-start latencies are read on.
+/// `mark_launch` must be called at startup: a lazily initialised clock would
+/// start at its first use and report every latency as 0 ms.
+fn launch_instant() -> std::time::Instant {
+    static CELL: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *CELL.get_or_init(std::time::Instant::now)
+}
+
+pub fn mark_launch() {
+    launch_instant();
+}
+
 fn accept_visibility_request(visible: bool) -> bool {
     let now = now_ms();
     if !visible && now < SHOW_FOCUS_GRACE_UNTIL_MS.load(Ordering::Acquire) {
@@ -218,7 +374,18 @@ pub fn open_at(app: &AppHandle, period: &str) {
 }
 
 fn anchor(window: &WebviewWindow, rect: Option<Rect>) {
-    let rect = rect.or_else(|| tray::last_rect(window.app_handle()));
+    // A tray rectangle is only an anchor if it describes a place on screen.
+    // Until the status item has been laid out — which, measured on this machine,
+    // is every launch until the first click — muda reports `(0, 2160, 68, 0)`:
+    // zero height, pinned to the bottom edge of the display. Centring the panel
+    // on that puts it in the bottom-left corner, so such a rect means "not yet
+    // known" and the menu-bar fallback below takes over.
+    let rect = rect
+        .or_else(|| tray::last_rect(window.app_handle()))
+        .filter(|rect| {
+            let (w, h) = rect_size(rect);
+            usable_tray_size(w, h)
+        });
 
     #[cfg(target_os = "windows")]
     {
@@ -232,14 +399,109 @@ fn anchor(window: &WebviewWindow, rect: Option<Rect>) {
         }
     }
 
-    if let Some(rect) = rect {
-        let (x, y) = rect_origin(&rect);
-        let (w, h) = rect_size(&rect);
-        let (x, y) = clamp_point(window, x + w / 2.0 - WIDTH / 2.0, y + h + GAP);
-        let _ = window.set_position(PhysicalPosition::new(x, y));
-    } else {
-        clamp(window);
+    let placed = match rect.as_ref() {
+        Some(rect) => {
+            let (rx, ry) = rect_origin(rect);
+            let (rw, rh) = rect_size(rect);
+            let (x, y) = clamp_point(window, rx + rw / 2.0 - WIDTH / 2.0, ry + rh + GAP);
+            Some((x, y, "tray rect"))
+        }
+        // Where the panel belongs when no tray rectangle is known: a launch-time
+        // or QA open (`TOKENME_SHOW_PANEL`), or a single-instance hand-off. The
+        // menu bar's right end is where the icon actually lives.
+        None => match menu_bar_origin(window) {
+            Some((x, y)) => Some((x, y, "menu bar")),
+            None => {
+                // A locked or waking session exposes no monitors: the panel then
+                // opens wherever the window server put it, and the next real
+                // open fixes it. Said out loud because "the panel appeared in the
+                // wrong corner" is otherwise undiagnosable from the log.
+                #[cfg(target_os = "macos")]
+                crate::logging::error(
+                    "panel: no monitor to anchor to — opening where the window server put it",
+                );
+                None
+            }
+        },
+    };
+    let Some((x, y, source)) = placed else { return };
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    // The first open of the process is the cold-start one, and it is the only
+    // one worth a log line: an anchor that computes the right number and still
+    // lands in a corner is otherwise invisible from the outside.
+    //
+    // The read-back is not a confirmation of `y`. AppKit refuses to place a
+    // window over the menu bar — a requested top edge of 0 comes back about 60
+    // pt lower — and `outer_position` reports the frame origin, shadow included.
+    // The two numbers are therefore never equal by design. The read-back is here
+    // to catch "2000 px away from the menu bar", not to settle a pixel; on-screen
+    // truth comes from a capture, as it did for the bottom-left-corner bug.
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::AcqRel) {
+        let back = window.outer_position().ok();
+        crate::logging::info(&format!(
+            "panel: first open anchored to {source} at ({x:.0}, {y:.0}) from rect {:?}, frame origin afterwards {:?} (AppKit clamps below the menu bar; not a pixel check)",
+            rect.as_ref().map(|r| {
+                let (rx, ry) = rect_origin(r);
+                let (rw, rh) = rect_size(r);
+                (rx as i64, ry as i64, rw as i64, rh as i64)
+            }),
+            back.map(|p| (p.x, p.y)),
+        ));
     }
+}
+
+/// Whether a tray rectangle of `w × h` can be trusted as an anchor. See
+/// [`anchor`]: the status item reports a zero-height rect at the bottom of the
+/// display until it has been laid out, and centring the panel on that is the
+/// bottom-left-corner bug.
+fn usable_tray_size(w: f64, h: f64) -> bool {
+    w > 0.0 && h > 0.0
+}
+
+/// Anywhere on screen beats nowhere: `anchor_windows` already had its chance at
+/// the tray rectangle, so a missing one here just gets pulled back inside the
+/// work area.
+#[cfg(not(target_os = "macos"))]
+fn menu_bar_origin(window: &WebviewWindow) -> Option<(f64, f64)> {
+    clamp(window);
+    None
+}
+
+/// The origin that hangs the panel off the right end of the menu bar's
+/// available area. `available_monitors` already stops below the menu bar, so its
+/// top edge is exactly where a menu-bar panel should start.
+#[cfg(target_os = "macos")]
+fn menu_bar_origin(window: &WebviewWindow) -> Option<(f64, f64)> {
+    let monitor = window.available_monitors().ok()?.into_iter().next()?;
+    let width = window
+        .outer_size()
+        .map(|s| s.width as f64)
+        .unwrap_or(WIDTH);
+    let (pos, size) = (monitor.position(), monitor.size());
+    Some(top_right_origin(
+        Bounds {
+            left: pos.x as f64,
+            top: pos.y as f64,
+            right: pos.x as f64 + size.width as f64,
+            bottom: pos.y as f64 + size.height as f64,
+        },
+        width,
+    ))
+}
+
+/// The panel's origin when it hangs off the right end of the menu bar.
+#[cfg(target_os = "macos")]
+fn top_right_origin(area: Bounds, width: f64) -> (f64, f64) {
+    (
+        (area.right - width - GAP).max(area.left),
+        area.top,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn anchor_without_tray(window: &WebviewWindow) {
+    clamp(window);
 }
 
 fn clamp_in_bounds(x: f64, y: f64, size: (f64, f64), bounds: Bounds, margin: f64) -> (f64, f64) {
@@ -708,6 +970,56 @@ mod tests {
         let height = panel_height_for_work_area(720.0, scale);
         assert!(height * scale <= 720.0 - 2.0 * GAP + 0.001);
     }
+
+    /// An open with no tray rectangle (launch, QA, single-instance hand-off)
+    /// belongs at the right end of the menu bar, where the icon lives. It used
+    /// to stay wherever the window was created — the bottom-left corner.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_open_without_a_tray_rect_hangs_off_the_menu_bar_s_right_end() {
+        // The available area starts below the menu bar; the panel top sits on it.
+        let screen = Bounds {
+            left: 0.0,
+            top: 37.0,
+            right: 1920.0,
+            bottom: 1080.0,
+        };
+        let (x, y) = top_right_origin(screen, WIDTH);
+        assert_eq!(y, 37.0);
+        assert_eq!(x, 1920.0 - WIDTH - GAP);
+        assert!(x + WIDTH <= screen.right);
+        // A work area narrower than the panel still starts at its left edge
+        // rather than running off the screen.
+        let tiny = Bounds {
+            left: 0.0,
+            top: 0.0,
+            right: 300.0,
+            bottom: 400.0,
+        };
+        assert_eq!(top_right_origin(tiny, WIDTH).0, 0.0);
+        // A secondary monitor to the left of the main one keeps its own edge.
+        let second = Bounds {
+            left: -1920.0,
+            top: 37.0,
+            right: 0.0,
+            bottom: 1080.0,
+        };
+        assert_eq!(top_right_origin(second, WIDTH).0, -WIDTH - GAP);
+    }
+
+    /// The tray rectangle reported at launch on this machine is
+    /// `(0, 2160, 68, 0)` — a status item that has not been laid out yet.
+    /// Centring the panel on it is exactly what put it in the bottom-left
+    /// corner, so a zero-sized one has to read as "no anchor".
+    #[test]
+    fn an_unlaid_out_tray_rect_is_no_anchor_at_all() {
+        assert!(usable_tray_size(68.0, 74.0), "a real status item anchors the panel");
+        assert!(
+            !usable_tray_size(68.0, 0.0),
+            "zero height means the item has no place on screen yet"
+        );
+        assert!(!usable_tray_size(0.0, 74.0), "same for zero width");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -852,7 +1164,61 @@ pub fn apply_window_background(app: &AppHandle, theme: Option<crate::settings::T
             if !layer.is_null() {
                 let _: () = msg_send![layer, setBackgroundColor: cg];
             }
+            // The webview is the one painter the page cannot reach: its own
+            // base colour is white whatever the theme says, so any area the
+            // page leaves uncovered (overscroll bounce, a frame composed
+            // before the sheet's own background is drawn) shows white through
+            // a dark panel. Paint it with the panel's surface instead.
+            paint_webview_backing(content, cg, fr, fg, fb);
         }
+    }
+}
+
+/// Paint the WKWebView's own backing with the panel's surface colour.
+///
+/// Only the webview's class answers `setUnderPageBackgroundColor:`, so that
+/// selector doubles as the identity test — no class-name coupling to wry — and
+/// every message is guarded: this runs on every show and on each theme switch,
+/// and a nil layer or an older WebKit has to degrade to "nothing repainted"
+/// rather than to an unrecognized-selector trap.
+#[cfg(target_os = "macos")]
+unsafe fn paint_webview_backing(
+    content: tauri_nspanel::cocoa::base::id,
+    surface: tauri_nspanel::cocoa::base::id,
+    r: f64,
+    g: f64,
+    b: f64,
+) {
+    use tauri_nspanel::cocoa::base::{id, YES};
+    use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
+
+    let subviews: id = msg_send![content, subviews];
+    if subviews.is_null() {
+        return;
+    }
+    let count: usize = msg_send![subviews, count];
+    for i in 0..count {
+        let view: id = msg_send![subviews, objectAtIndex: i];
+        if view.is_null() {
+            continue;
+        }
+        let answers: i8 = msg_send![view, respondsToSelector: sel!(setUnderPageBackgroundColor:)];
+        if answers == 0 {
+            continue; // a chrome subview, not the webview
+        }
+        let mut layer: id = msg_send![view, layer];
+        if layer.is_null() {
+            let _: () = msg_send![view, setWantsLayer: YES];
+            layer = msg_send![view, layer];
+        }
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setBackgroundColor: surface];
+        }
+        let color: id = msg_send![class!(NSColor), colorWithSRGBRed: r green: g blue: b alpha: 1.0f64];
+        if !color.is_null() {
+            let _: () = msg_send![view, setUnderPageBackgroundColor: color];
+        }
+        return;
     }
 }
 
