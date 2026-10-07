@@ -43,6 +43,21 @@ sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
+# The permission-query and auth-request entry points live here (`AuthorizationStatus`
+# among them); notify-rust's UNC backend already pulls this crate, so naming the
+# types directly adds no build weight.
+mac-usernotifications = "0.3"
+
+# Threshold banners. Deliberately not tauri-plugin-notification: on desktop that
+# plugin's permission API is an empty stub, its `show` drops the delivery error,
+# and its default macOS backend is the deprecated NSUserNotification path. The
+# `preview-macos-un` feature puts notify-rust on UNUserNotificationCenter — the
+# path this repo's spike proved delivers from an ad-hoc-signed bundle — and lets
+# `show` return the real result, which the dedup state machine needs (a banner
+# that failed to post must not be marked as fired). Windows rides the same
+# crate's WinRT toast backend. The feature is inert off macOS.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+notify-rust = { version = "4", features = ["preview-macos-un"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

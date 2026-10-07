@@ -17,6 +17,7 @@ use usage_core::report::{now_ms, AggregatePlan, QuotaView, ReportOptions};
 use usage_core::{DateFilter, DetectedSource, MachineScope, PricingMap, Report, SourceAdapter, SourceFile, SourceStatus};
 use usage_index::{Index, IngestOptions, Watcher, RETENTION_DAYS};
 
+use crate::notify;
 use crate::settings::Settings;
 use crate::snapshot;
 use crate::tray;
@@ -791,6 +792,11 @@ fn publish_with_quota<R: Runtime>(
     // that whatever the panel has been shown is also what gets remembered — a
     // snapshot of a report nobody saw would make "last known" mean two things.
     snapshot::write(&report);
+    // Threshold banners: the engine only offers the fresh views; the notify
+    // worker owns the tier state, the permission flow and its own file.
+    let displays: HashMap<String, String> =
+        sources.iter().map(|s| (s.id.clone(), s.display.clone())).collect();
+    notify::observe(&report.quotas, &displays, crate::lang::get());
     let _ = app.emit(REPORT_EVENT, &report);
     // Re-read the mode AFTER the slow quota probes: a switch made while
     // polling ran must not be painted back to the old display (the stale-read

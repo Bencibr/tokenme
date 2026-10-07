@@ -51,7 +51,7 @@ TokenMe puts all of it in one panel, a click away.
 
 The panel opens with four pages, each one drilling deeper:
 
-- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; and each vendor's quota bar with remaining share and reset countdown.
+- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; each vendor's quota bar with remaining share and reset countdown; and a native banner the moment a window crosses 80% used or runs out.
 - **Tools** — one row per tool: requests, sessions, tokens, cache rate — with each tool's share painted into the row itself.
 - **Rankings** — sessions ranked, so the expensive ones surface immediately.
 - **Details** — per-request records, filterable by model and project.

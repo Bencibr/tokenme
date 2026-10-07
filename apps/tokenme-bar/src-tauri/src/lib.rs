@@ -3,6 +3,7 @@ mod bubble;
 mod lang;
 mod logging;
 mod engine;
+mod notify;
 mod scan_log;
 mod panel;
 mod servers;
@@ -87,6 +88,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             logging::init();
+            notify::init(app.handle());
 
             let handle = app.handle().clone();
             tray::build(&handle)?;
@@ -101,6 +103,11 @@ pub fn run() {
             // Screenshots and manual QA need the panel up without a tray click.
             if std::env::var_os("TOKENME_SHOW_PANEL").is_some() {
                 panel::show(&handle, None);
+            }
+            // A one-shot banner for manual QA of the permission flow
+            // (`TOKENME_TEST_NOTIFY=1`), posted through the real gate.
+            if std::env::var_os("TOKENME_TEST_NOTIFY").is_some() {
+                notify::send_test();
             }
             Ok(())
         })
