@@ -61,6 +61,11 @@ elif [[ -f "$TEST_STAMP" && "$(cat "$TEST_STAMP")" == "$(rust_hash)" ]]; then
   echo "==> tests: skipped (crate sources unchanged since the last green run)"
 else
   cargo test --workspace --all-targets
+  # The panel's Rust lives in its own workspace (root Cargo.toml excludes
+  # apps/tokenme-bar), so the run above never compiles it — and the shipped
+  # binary is the one it produces. The anchor and engine-loop tests caught real
+  # bugs and are invisible to the gate unless asked for directly.
+  (cd "$APP/src-tauri" && cargo test)
   rust_hash > "$TEST_STAMP"
   echo "==> tests: $((SECONDS - t))s"
 fi

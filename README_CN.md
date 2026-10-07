@@ -19,7 +19,7 @@
 
 ## 这是什么
 
-TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的菜单栏应用，提供 macOS 和 Windows 的安装包，并具备命令行工具。它回答三个平时没地方看的问题：
+TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的菜单栏应用：macOS 与 Windows 有原生安装包，Linux 是一等的静态采集端，外加命令行工具。它回答三个平时没地方看的问题：
 
 - 今天用了多少 token、折合多少钱？
 - 各家订阅的额度还剩多少、什么时候重置？
@@ -89,7 +89,7 @@ brew install tokenme-cli          # CLI
 
 tap 随每次发布自动更新，`brew upgrade` 即可升级；cask 安装不带隔离标记，Gatekeeper 不会拦。
 
-**安装包**：到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载，里面有 macOS 菜单栏应用（拖入 Applications）和 Windows 安装程序。
+**安装包**：到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载，里面有 macOS 菜单栏应用（拖入 Applications）、Windows 安装程序，以及 Linux 静态采集端压缩包（`x86_64` / `aarch64`，包内已附 `install-linux.sh`）。
 
 > **macOS 首次打开**（仅手动装 DMG 时）：安装包是 ad-hoc 签名（没有开发者证书），Gatekeeper 可能拦一下——右键打开即可，或者清掉隔离标记后正常启动：
 >
@@ -114,6 +114,29 @@ tokenme daily --days 7  # 最近一周的每日消耗与账单
 tokenme quota           # 各家订阅的实时额度与重置倒计时
 ```
 
+## Linux —— 无头采集端
+
+菜单栏面板只有 macOS 和 Windows。而**真正干活的机器往往是 Linux**——你 ssh 上去的服务器、跑 agent 的容器、不出图形的构建机——所以 Linux 不是"能用命令行"的附庸，而是一等采集端：一个完全静态的二进制（musl，`x86_64` 与 `aarch64` 两种，不用对齐 glibc 版本，机器上也不需要装 Rust 或 Python），加一条命令就能把数据报回家。
+
+```bash
+tar xzf tokenme-cli-*-linux-musl.tar.gz
+cd tokenme-cli-*-linux-musl
+./install-linux.sh --every 15 --push you@display-host
+```
+
+这条命令把 `tokenme` 装进 `~/.local/bin`（`~/.profile` 里缺 PATH 时会补上），并装一个 **systemd `--user` 定时器**：每 15 分钟执行一次 `tokenme export --days 30`，把 bundle 写进 `~/tokenme-sync`，再 scp 给展示机——面板下一轮自动合并，并把这台机器当成独立来源按名字显示。如果机器上没有可用的 user manager（容器、裸 ssh 会话），安装器**退化成 cron 任务跑同一个脚本**；`--uninstall` 两种都会清理，且保留你的数据。无头机器上安装器还会打开 lingering（不行时就打印出那行要你自己跑的 `loginctl enable-linger $USER`），让定时器在无人登录时照样触发。首次想补齐历史就单独跑一次 `--days 400`（整个保留窗口），`--prefix <dir>` 可以换安装目录。
+
+在终端里直接用它，不接显示器也能拿到同一套数字：
+
+```bash
+tokenme detect          # 这台机器装了哪些工具、各自日志在哪
+tokenme daily --days 7  # 最近一周用量与花费
+tokenme quota           # 实时额度与重置倒计时
+tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
+```
+
+也可以完全不用定时器，自己搬 `~/tokenme-sync`——Syncthing、共享挂载、每晚 rsync 都行。传输通道由你决定：tokenme 不监听端口、除这个定时器外不驻留守护进程、也不持有任何账号。面板底栏的「服务器」入口还能把 SSH 这半边代办掉：探测主机、固定指纹、投放采集器并按周期拉取合并。详见[用户指南](docs/USER_GUIDE.md) §4。
+
 ## 常用命令
 
 | 命令 | 说明 |
@@ -127,7 +150,7 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 
 ## 支持的工具与实时配额
 
-配额条来自各工具自己的接口或本地凭据（只读探测，绝不刷新或代替你的登录态）。宿主应用退出后自动暂停对应工具的探测、保留最后数值，重新启动即恢复——设置里的"退出后暂停配额"开关可控制这一行为。
+配额条来自各工具自己的接口或本地凭据——探测只读，绝不代替你的登录。有三处是有意之外的例外，因为这些工具在磁盘上存的是短时效访问令牌，不续期额度条就会长期空白：MiniMax Code（约 1 小时）、Kimi Code（厂商自己的 15 分钟令牌）以及 Cline 的 gateway 令牌。三者都只拿同一份文件里的 refresh token 去换，并把轮换后的新对子按该工具自己的格式原子性地写回——没有落盘的轮换等于已经被消耗掉的轮换，应用下一次自己刷新时就会发现登录已经死了。换取失败则什么都不改。其余所有探测只读凭据、绝不写回。宿主应用退出后自动暂停对应工具的探测、保留最后数值，重新启动即恢复——设置里的"退出后暂停配额"开关可控制这一行为。
 
 以下工具全部内置适配器——共 22 款，直接从各工具自己落盘的日志与数据库建立索引：
 
@@ -153,16 +176,16 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 | <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | 套餐配额 — 官方 billing 接口，本地凭据解密 | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE 点数 — 读取 IDE 自身登录态 | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | 订阅配额 — 官方 v1 接口，本地凭据解密 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | 套餐额度 — 5 小时 / 每周 / 每月，走官方 `/usages`；用量读 CLI 或桌面端内嵌 runtime 的日志，凭据只读（绝不刷新） | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | 套餐额度 — 5 小时 / 每周 / 每月，走官方 `/usages`；用量读 CLI 或桌面端内嵌 runtime 的日志；访问令牌过期时按官方刷新契约就地续期 | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | 套餐额度 — 5 小时 / 每周 — 外加积分余额（购买与签到两种钱包）；约 1 小时过期的访问令牌由 tokenme 用应用自己的刷新令牌原地续期 | ✅ | macOS ✅ · Windows ⏳ |
 
 > **兼容性测试**：每款适配器都带夹具测试套件，CI 每次提交全量运行；每项接入落地前都用真实机器的数据验证过。
 >
 > **平台验证**：随实机验证进度更新。⏳ 表示该平台的路径已实现、但尚未在实机上跑通；验证通过后更新标记即可。
 >
-> 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——其落盘 OAuth 令牌会过期，而刷新凭据超出了只读探测的边界。
+> 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——实测其落盘 OAuth 令牌已过期，要续期就得用 Gemini CLI 自带包里的 client id/secret 去提交表单，而磁盘上也找不到该接口要的 project id（`crates/usage-quota/src/providers/gemini.rs`）。
 
-> **AgnesCode 令牌注入**：其登录令牌只存在于应用内存，无法静默读取。登录 agnescode.agnes-ai.cn 后从请求头取 `access_token`，写入 `~/.config/tokenme/agnes.token`（或设置 `AGNES_TOKEN`）即可启用。
+> **AgnesCode 令牌注入**：其登录令牌只存在于应用内存，无法静默读取。登录 agnescode.agnes-ai.cn 后从请求头取 `access_token`，写入 tokenme 系统配置目录下的 `agnes.token`（macOS 为 `~/Library/Application Support/tokenme/agnes.token`，Linux 为 `~/.config/tokenme/agnes.token`，Windows 为 `%APPDATA%\tokenme\agnes.token`），或设置 `AGNES_TOKEN` 即可启用。
 
 完整参考：**[docs/COMMANDS.md](docs/COMMANDS.md)** · 场景指南：**[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · 架构总览：**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · 适配器逆向备忘：[docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
 
@@ -170,7 +193,7 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 
 只索引计数，不碰内容——你的代码和 Prompt 不会被存储，入库的只有每次请求的 token 计数、模型名与项目路径。扫描全程只读，无遥测、无第三方代理。索引库位于系统数据目录（macOS 为 `~/Library/Application Support/tokenme/`）；各工具日志路径见[用户指南](docs/USER_GUIDE.md)。
 
-多机之间也可以同步各自的索引——基于文件的 `tokenme export` / `tokenme import`，走你自己的通道（ssh/scp、Syncthing），无账号、无云端。每次合并前先过 sha256 与清单校验、单事务要么全落要么全不动；unix 下 bundle 一律 `0600`。面板底栏的服务器按钮也能把这条通道一键拉起：SSH 向导用一次密码连接（或指定私钥），装上专用密钥、投放静态采集器，之后按周期自动拉取合并；密码不落盘。详见[用户指南](docs/USER_GUIDE.md) §4。
+多机之间也可以同步各自的索引——基于文件的 `tokenme export` / `tokenme import`，走你自己的通道（ssh/scp、Syncthing），无账号、无云端。每次合并前先过 sha256 与清单校验、单事务要么全落要么全不动；unix 下 bundle 一律 `0600`。面板底栏的服务器按钮也能把这条通道一键拉起：SSH 向导用一次密码连接（或指定私钥），装上专用密钥、投放静态采集器，之后按周期自动拉取合并；密码不落盘。只要有一台以上机器在报数，顶部的下拉就能把每一项数字、排行和会话列表按 **全部机器**、**本机** 或按名字选任意一台远程机器 折叠——同一份索引重新汇总，不重新索引，另有每台机器最近一次合并的徽标。详见[用户指南](docs/USER_GUIDE.md) §4。
 
 ## 社区
 

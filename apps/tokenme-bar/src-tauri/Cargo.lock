@@ -5917,7 +5917,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-agnes"
-version = "0.1.0"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -5970,7 +5970,7 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-atomcode"
-version = "0.1.0"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
