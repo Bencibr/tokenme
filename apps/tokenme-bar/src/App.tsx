@@ -219,6 +219,29 @@ const [page, setPage] = useState<PageKey>(() => {
     if (inTauri) void getCurrentWindow().hide();
   }, [settingsOpen, scopeMenuOpen, serversOpen]));
 
+  // A text field can only receive keys while the window owns the keyboard, and
+  // the non-activating tray panel never does on Windows. While any input or
+  // textarea holds focus, ask Rust for a keyboard session; blurring hands it
+  // back, so the flyout stays non-activating for every other interaction.
+  useEffect(() => {
+    if (!inTauri || !isWindows) return;
+    const textTarget = (target: EventTarget | null): boolean =>
+      target instanceof HTMLElement &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
+    const onFocusIn = (e: FocusEvent) => {
+      if (textTarget(e.target)) void bridge.setKeyboardMode(true);
+    };
+    const onFocusOut = (e: FocusEvent) => {
+      if (textTarget(e.target)) void bridge.setKeyboardMode(false);
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+    };
+  }, []);
+
   const now = useMemo(() => Date.now(), [tick]);
   // QA pin, same family as ?showempty=: pretend the last publish is `?stale=<min>`
   // minutes old, so the frozen line can be driven in a browser without waiting

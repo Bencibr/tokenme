@@ -67,6 +67,7 @@ pub fn run() {
             commands::set_bubble_enabled,
             commands::begin_bubble_drag,
             commands::show_panel,
+            commands::panel_keyboard,
             commands::quit_app,
             commands::open_external,
             commands::open_log_dir

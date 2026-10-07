@@ -311,6 +311,13 @@ pub fn show_panel(app: AppHandle) {
     panel::show(&app, None);
 }
 
+/// While a text field holds focus the frontend asks for a keyboard session —
+/// the non-activating tray panel otherwise never owns the keys on Windows.
+#[tauri::command]
+pub fn panel_keyboard(app: AppHandle, on: bool) {
+    panel::set_keyboard_mode(&app, on);
+}
+
 /// Hands the press to the Rust-side drag loop. `window.startDragging()` cannot
 /// move this non-activating window (see `bubble::begin_drag`); non-Windows is a
 /// no-op so the bridge stays platform-neutral.
