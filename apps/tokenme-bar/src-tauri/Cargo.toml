@@ -29,7 +29,13 @@ usage-adapter-all = { path = "../../../crates/adapters/all" }
 usage-adapter-dsh = { path = "../../../crates/adapters/dsh" }
 usage-adapter-codex = { path = "../../../crates/adapters/codex" }
 usage-quota = { path = "../../../crates/usage-quota" }
-russh = "0.64"
+# The `ring` backend keeps the Windows build NASM-free — the default
+# `aws-lc-rs` wants an assembler this toolchain image does not ship.
+russh = { version = "0.64", default-features = false, features = [
+    "flate2",
+    "ring",
+    "rsa",
+] }
 russh-sftp = "3.0"
 zeroize = "1"
 rand = "0.10"

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TokenMe",
-  "mainBinaryName": "tokenme",
+  "mainBinaryName": "TokenMe",
   "version": "0.1.5",
   "identifier": "dev.tokenme.bar",
   "build": {
@@ -57,6 +57,13 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installMode": "both",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": true
       }
     }
   }

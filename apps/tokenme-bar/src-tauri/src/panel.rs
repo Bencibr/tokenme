@@ -121,7 +121,15 @@ pub fn show(app: &AppHandle, rect: Option<Rect>) {
 }
 
 fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
-    panel_hidden().store(false, Ordering::Release);
+    let was_hidden = panel_hidden().swap(false, Ordering::Release);
+    #[cfg(target_os = "windows")]
+    if was_hidden {
+        // A keyboard session can outlive the panel's hide path (the webview
+        // does not always see a blur when the window goes away under it), so
+        // every fresh open starts non-activating again — with the window
+        // focusable, tao's post-first-show `SW_SHOW` would foreground it.
+        let _ = window.set_focusable(false);
+    }
     anchor(window, rect);
     // Re-sync the native backing with the persisted theme on every open: a
     // theme switch the app missed (label typo'd away once) or an OS
@@ -152,6 +160,24 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
         Ordering::Release,
     );
 }
+
+/// Text entry needs real keyboard focus, which the non-activating panel never
+/// has: `WS_EX_NOACTIVATE` keeps the tray flyout off the foreground, and with
+/// it the WebView receives no key events at all. The frontend turns this on
+/// while a text field holds focus and off when it blurs; macOS panels route
+/// keys without activating the app, so they need none of this.
+#[cfg(target_os = "windows")]
+pub fn set_keyboard_mode(app: &AppHandle, on: bool) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.set_focusable(on);
+        if on {
+            let _ = window.set_focus();
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_keyboard_mode(_app: &AppHandle, _on: bool) {}
 
 fn request_visibility(window: &WebviewWindow, visible: bool) {
     if !accept_visibility_request(visible) {

@@ -291,6 +291,11 @@ export const bridge: Bridge = {
     await invoke<void>("show_panel");
   },
 
+  async setKeyboardMode(on: boolean): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("panel_keyboard", { on });
+  },
+
   async beginBubbleDrag(): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("begin_bubble_drag");

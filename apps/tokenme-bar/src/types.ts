@@ -368,6 +368,10 @@ export interface Bridge {
   installUpdate: () => Promise<void>;
   onUpdateProgress: (handler: (progress: DownloadProgress) => void) => () => void;
   showPanel: () => Promise<void>;
+  /** Windows only: a text field can only receive keys while the window owns
+   *  the keyboard, and the non-activating tray panel never does. No-op in the
+   *  browser fixture and on macOS. */
+  setKeyboardMode: (on: boolean) => Promise<void>;
   /** Hands the press to the Rust drag loop; the native move loop cannot move a
    *  non-activating window. Resolves immediately; the drag runs in Rust. */
   beginBubbleDrag: () => Promise<void>;
