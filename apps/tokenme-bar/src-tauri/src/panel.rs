@@ -122,6 +122,10 @@ pub fn show(app: &AppHandle, rect: Option<Rect>) {
 
 fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     let was_hidden = panel_hidden().swap(false, Ordering::Release);
+    // `set_focusable` is Windows-only, so on macOS and Linux nothing reads the
+    // flag this swap returns — the warning is the proof, not the bug.
+    #[cfg(not(target_os = "windows"))]
+    let _ = was_hidden;
     #[cfg(target_os = "windows")]
     if was_hidden {
         // A keyboard session can outlive the panel's hide path (the webview
