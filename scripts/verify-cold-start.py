@@ -90,6 +90,18 @@ def stop_movie(proc, out, timeout=15.0):
     return out
 
 
+def bundle_processes(app):
+    """Every name this bundle's executable could be running as.
+
+    `mainBinaryName` has been `tokenme-bar`, `tokenme` and `TokenMe`, and copying a
+    new bundle over an old one on a case-insensitive volume keeps the earlier
+    spelling on disk — so the historical names are included, and matching is exact
+    (`pgrep -x`) rather than a substring that could hit an unrelated process.
+    """
+    found = {p.name for p in (Path(app) / "Contents" / "MacOS").glob("*") if p.is_file()}
+    return found | {"tokenme", "TokenMe", "tokenme-bar"}
+
+
 def launch(app):
     """Cold-start the app with its panel opening itself.
 
@@ -267,7 +279,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--region", type=parse_region, help="x,y,w,h in points")
     ap.add_argument("--app", default="/Applications/TokenMe.app")
-    ap.add_argument("--bundle", default="tokenme")
     ap.add_argument("--duration", type=float, default=9.0)
     ap.add_argument("--native-width", type=int, default=1920, help="logical display width in points")
     ap.add_argument("--panel-size", help="override the panel's WxH in points (default: tauri.conf.json)")
@@ -289,10 +300,27 @@ def main():
     print(f"verify-cold-start: looking for the panel at {want[0]:.0f}×{want[1]:.0f} points")
 
     if not args.no_quit:
-        run(["pkill", "-x", args.bundle])
+        # Kill by the names this bundle can actually produce, not by one hardcoded
+        # spelling: `mainBinaryName` has been tokenme-bar, tokenme and TokenMe, and a
+        # case-insensitive copy-over keeps the old one running. A surviving instance
+        # does not fail this run — it quietly measures a warm open and reports the
+        # panel as never appearing, which is the exact wrong verdict twice over.
+        names = bundle_processes(args.app)
+        for name in sorted(names):
+            run(["pkill", "-x", name])
         deadline = time.time() + 10
-        while time.time() < deadline and run(["pgrep", "-x", args.bundle]).returncode == 0:
+        while time.time() < deadline:
+            alive = [n for n in sorted(names) if run(["pgrep", "-x", n]).returncode == 0]
+            if not alive:
+                break
             time.sleep(0.2)
+        else:
+            sys.exit(
+                "verify-cold-start: "
+                + ", ".join(alive)
+                + " refused to quit — a running instance owns the window, so this "
+                "recording would measure a warm open. Quit it and re-run."
+            )
         # A process still holding the window would put the panel on screen before
         # the recording starts, and the whole run would measure a warm open.
         time.sleep(1.5)
