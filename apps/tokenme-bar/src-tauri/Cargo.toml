@@ -55,6 +55,17 @@ tauri-build = { version = "2", features = [] }
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 
+[profile.dev]
+# The root workspace has said this since someone measured it, and it never reached
+# here: `apps/tokenme-bar` is excluded from that workspace and carries its own, so
+# cargo's default `debug = true` applied — full DWARF for every one of the ~130
+# dependencies this app links, which is why `target/debug` grew to 16 GB against
+# `target/release`'s 6.4 GB. Line tables keep panic line numbers, and that is the
+# whole debugging path for this app: `panel.log`, `.ips` crash reports, and an
+# unstripped release binary for `atos`. An incremental rebuild after touching one
+# source file is the number this buys.
+debug = "line-tables-only"
+
 [profile.release]
 # thin LTO + parallel codegen compiles several times faster than the old
 # full-LTO single-unit setup, at near-identical size for this app; opt-level
