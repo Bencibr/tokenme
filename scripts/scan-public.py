@@ -24,6 +24,12 @@ range and fails on the mechanical version of those invariants:
   - author identity: commit author/committer emails outside ALLOWED_EMAILS.
     Every published snapshot carries agent@local; anything else is a
     deliberate decision, not a default.
+  - internal paths: `AGENTS.md` at the root and everything under
+    `docs/internal/`, plus the local agent tool state under `.bugx/`. These
+    are working notes, never product: the switch deletes the paths from
+    every revision and afterwards they stay untracked on disk, so a tracked
+    appearance — any revision, any range — is a finding. Until the switch
+    the findings are the recorded transitional state, not a surprise.
 
 Findings collapse per file (count + first hit); --verbose prints every match.
 Exit 0 clean / 1 findings.
@@ -47,6 +53,15 @@ CONTENT_CAP = 16 << 20  # bigger blobs are reported by size; pattern scan skippe
 ALLOWED_EMAILS = {"agent@local"}  # the identity every published snapshot carries
 PUBLIC_HOSTS = {"github.com"}
 DRIVE_ROOTS_OK = {"users", "windows", "program files", "programdata"}
+
+# Working notes that must never publish — deleted from every revision at the
+# switch and untracked afterwards; any tracked appearance is the regression
+# this catches.
+INTERNAL_PATHS = (
+    re.compile(r"^AGENTS\.md$"),
+    re.compile(r"^docs/internal/"),
+    re.compile(r"^\.bugx/"),
+)
 
 CRED_PATTERNS = [
     (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"), "openai-style key"),
@@ -228,6 +243,11 @@ def main():
     for sha, (_, size) in blob_info.items():
         if size > BLOB_LIMIT:
             findings.add("oversize blob", paths[sha], f"(blob {sha[:8]})", f"{size:,} B")
+
+    for sha in blob_info:
+        path = paths[sha]
+        if any(pat.search(path) for pat in INTERNAL_PATHS):
+            findings.add("internal path", path, f"(blob {sha[:8]})", path)
 
     scannable = [s for s, (_, size) in blob_info.items() if size <= CONTENT_CAP]
     skipped = len(blob_info) - len(scannable)
