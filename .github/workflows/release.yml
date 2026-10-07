@@ -7,7 +7,33 @@ permissions:
   contents: write
 
 jobs:
+
+  notes:
+    # The release body is the changelog section for the tag. GitHub's own
+    # generated notes are a bare "Full Changelog" link on a repo without pull
+    # requests — which is all the v0.1.0–v0.1.5 pages ever carried — so the
+    # section is extracted here and published through body_path below. Every
+    # build job needs this one, so a tag without its entry fails in seconds
+    # instead of after the whole matrix; a test of the same name in
+    # crates/adapters/all/src/lib.rs catches it before the tag is cut at all.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract the section and the commits link
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          {
+            python3 scripts/changelog-section.py "$V"
+            printf '\n**Full Changelog**: https://github.com/%s/commits/%s\n' \
+              "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}"
+          } > notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: notes.md
+
   macos:
+    needs: [notes]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +75,7 @@ jobs:
           path: dist/*
 
   macos-universal:
+    needs: [notes]
     # The Intel+Apple Silicon joint bundle: one DMG runs on every Mac. The
     # arm64 build above stays the smaller download for the common case.
     runs-on: macos-14
@@ -110,6 +137,7 @@ jobs:
           path: dist/*
 
   cli:
+    needs: [notes]
     strategy:
       matrix:
         include:
@@ -148,6 +176,7 @@ jobs:
           path: dist/*
 
   cli-linux:
+    needs: [notes]
     # Fully static musl builds for Linux collectors, cross-compiled with zig so
     # no distro toolchain enters the picture. Same recipe as
     # scripts/build-linux.sh; the tarball carries install-linux.sh next to the
@@ -190,6 +219,7 @@ jobs:
           path: dist/*
 
   windows-panel:
+    needs: [notes]
     # The NSIS setup exe for the Windows menu-bar panel. No cross-compile:
     # the runner IS the platform, Tauri's Windows bundling needs WebView2
     # tooling that only exists there.
@@ -224,7 +254,7 @@ jobs:
           path: dist/*
 
   release:
-    needs: [macos, macos-universal, windows-panel, cli, cli-linux]
+    needs: [notes, macos, macos-universal, windows-panel, cli, cli-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -238,6 +268,11 @@ jobs:
           sha256sum tokenme_*.dmg tokenme-macos-*.app.zip tokenme-windows-*.exe tokenme-cli-* > ../sha256.txt
       - uses: softprops/action-gh-release@v2
         with:
+          # The body is the notes job's artifact, merged into dist/ by
+          # download-artifact — and never generate_release_notes again: on a
+          # repo without pull requests the generator produces exactly the bare
+          # "Full Changelog" line every earlier page shipped.
+          body_path: dist/notes.md
           files: |
             dist/tokenme_*.dmg
             dist/tokenme-macos-*.app.zip
@@ -245,7 +280,6 @@ jobs:
             dist/tokenme-cli-*
             sha256.txt
             latest.json
-          generate_release_notes: true
 
   homebrew:
     # Bumps Bencibr/homebrew-tokenme (cask + formula) to the freshly published

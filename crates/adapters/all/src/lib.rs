@@ -281,6 +281,32 @@ mod tests {
         }
     }
 
+    /// The tag is the release page's address and the changelog section is its
+    /// story: `release.yml`'s `notes` job extracts `## [<version>]` from
+    /// `CHANGELOG.md` and publishes it as the GitHub release body
+    /// (`body_path`), failing the tag when the section is absent — but that
+    /// failure still costs a pushed tag and a red run, so the same question is
+    /// asked here first, in the gate every build already runs. It went unasked
+    /// for the whole snapshot era: GitHub's generated notes are a bare "Full
+    /// Changelog" link on a repo without pull requests, and every page from
+    /// v0.1.0 to v0.1.5 shipped empty because nothing local ever looked. The
+    /// section is what `scripts/changelog-section.py` prints on demand, so it
+    /// is written as the version moves, never after the page is bare.
+    #[test]
+    fn the_release_has_a_changelog_section_to_publish() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let text = std::fs::read_to_string(root.join("CHANGELOG.md"))
+            .expect("CHANGELOG.md must be readable at the repo root");
+        let heading = format!("## [{}]", env!("CARGO_PKG_VERSION"));
+        assert!(
+            text.lines().any(|line| line.starts_with(&heading)),
+            "CHANGELOG.md has no `{heading}` section for this crate's compiled version — \
+             release.yml publishes exactly that section as the GitHub release body (and \
+             refuses the tag without it), so the entry is written as the version moves, \
+             not after the release page is bare"
+        );
+    }
+
     /// `latest.json` is the published release manifest, not a build input:
     /// `scripts/release.sh` rewrites it at tag time, `release.yml:247` attaches it as
     /// a release asset, and the panel GETs it at boot from
