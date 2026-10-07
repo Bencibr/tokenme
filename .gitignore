@@ -19,5 +19,10 @@ apps/tokenme-bar/icons.json
 # static musl collector binaries, staged by scripts/bundle-collector.sh
 apps/tokenme-bar/src-tauri/resources/collector/
 
+# a compiled CLI binary landed at apps/tokenme-bar/tokenme once and was swept
+# into a commit; refuse the exact path — the global apps/ exclusion cannot
+# catch it, because the !apps/ rule below re-opens the directory
+/apps/tokenme-bar/tokenme
+
 # global gitignore excludes apps/; the panel is product code, keep it here
 !apps/
