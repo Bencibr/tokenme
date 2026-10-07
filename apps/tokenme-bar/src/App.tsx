@@ -431,7 +431,6 @@ const [page, setPage] = useState<PageKey>(() => {
           page={page}
           onPage={goPage}
           onClose={isWindows ? closePanel : undefined}
-          frozen={frozen}
           sync={sync}
           scope={scope}
           onScope={switchScope}
@@ -484,6 +483,7 @@ const [page, setPage] = useState<PageKey>(() => {
           publishedAt={report.generated_at_ms}
           refreshSecs={refreshSecs}
           pendingSince={refreshPending}
+          frozen={frozen}
         />
 
         {settingsOpen ? (

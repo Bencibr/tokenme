@@ -16,32 +16,36 @@ function aggServerStatus(servers: ServerView[]): ServerStatus {
 }
 
 /**
- * The footer's clock: when the numbers on screen were last recomputed. It keeps
- * its own 1 s tick — the app's 30 s one is sized for quota countdowns — so a
- * manual refresh visibly restarts it at "just now", and the seconds tier stays
- * honest. A restored first report keeps the accent chip instead (those figures
- * are older than the moment they are being read as); a manual pass that has not
- * published yet shows the busy label rather than the old age; the tooltip
- * always carries the absolute stamp plus the engine's cadence.
+ * The footer corner that answers "when are these numbers from" — one slot, and
+ * the state that owns it says which. It keeps its own 1 s tick — the app's 30 s
+ * one is sized for quota countdowns — so a manual refresh visibly restarts the
+ * clock at "just now". Precedence, highest first: a restored first report (the
+ * accent chip; those figures are older than the moment they are being read as),
+ * a manual pass that has not published yet (the busy label rather than the old
+ * age), an engine that has stopped publishing (the amber chip with the last
+ * pass's age), and finally the live clock. The last two are the same fact
+ * pointing opposite ways and never show together.
  */
 function Freshness({
   publishedAt,
   restored,
   pendingSince,
   refreshSecs,
+  frozen,
 }: {
   publishedAt: number;
   restored?: { at: number } | null;
   pendingSince: number | null;
   refreshSecs: number;
+  frozen?: { ago: string; afterSecs: number } | null;
 }) {
   const tick = useTicker(1000);
   const now = useMemo(() => Date.now(), [tick]);
   if (restored) {
     return (
-      <span className="restored" title={t("hdr.restored.tip", { a: relativeTime(restored.at, now) })}>
+      <span className="restored" title={t("status.restored.tip", { a: relativeTime(restored.at, now) })}>
         <IconRefresh size={11} />
-        {t("hdr.restored")}
+        {t("status.restored")}
         <span className="dot-sep" aria-hidden="true" />
         <span className="num">{relativeTime(restored.at, now)}</span>
       </span>
@@ -57,6 +61,20 @@ function Freshness({
       <span className="fresh busy">
         <IconRefresh size={11} />
         {t("status.refreshing")}
+      </span>
+    );
+  }
+  // The engine stopped publishing: the age stops being a freshness and becomes
+  // the size of the lie the figures would be telling, so it wears the warning
+  // hue instead of the muted clock. Same slot as the clock because both answer
+  // "when were these from" — the answer here is "19 min ago and nothing since".
+  if (frozen) {
+    return (
+      <span className="frozen" title={t("status.frozen.tip", { s: frozen.afterSecs })}>
+        <IconWarn size={11} />
+        {t("status.frozen")}
+        <span className="dot-sep" aria-hidden="true" />
+        <span className="num">{frozen.ago}</span>
       </span>
     );
   }
@@ -83,6 +101,7 @@ export function StatusBar({
   publishedAt,
   pendingSince,
   refreshSecs,
+  frozen,
 }: {
   pricing: PricingMeta;
   loading: boolean;
@@ -103,6 +122,9 @@ export function StatusBar({
   pendingSince: number | null;
   /** The engine's idle cadence, quoted in the readout's tooltip. */
   refreshSecs: number;
+  /** The engine stopped publishing: set once the last report ages past the
+   *  cadence line `App.tsx` draws. Null while the numbers are still live. */
+  frozen?: { ago: string; afterSecs: number } | null;
 }) {
   return (
     <footer className="status">
@@ -111,15 +133,19 @@ export function StatusBar({
             nothing else. The price table's provenance used to live here — models.dev
             with its key count — which is a fact about the cost column's source, not
             about the panel's state, and it read the same on almost every machine.
-            Three things earn this space: the freshness clock, which is also how a
-            manual refresh shows that it landed; a restored first report, because the
-            figures are older than the moment they are being read as; and a price
-            table that went stale because no fetch succeeded. */}
+            One slot answers "when are these from": the live clock, which is also how
+            a manual refresh shows that it landed; the busy label while that pass is
+            in flight; a restored first report, because the figures are older than
+            the moment they are being read as; and the amber stopped-publishing chip
+            when the engine has gone silent — the clock and the chip are the same
+            fact pointing opposite ways, so they never show together. A stale price
+            table is a different fact and keeps its own chip beside them. */}
         <Freshness
           publishedAt={publishedAt}
           restored={restored}
           pendingSince={pendingSince}
           refreshSecs={refreshSecs}
+          frozen={frozen}
         />
         {pricing.stale ? (
           <span className="stale" title={t("status.stale.tip")}>
