@@ -293,6 +293,9 @@ export interface Report {
   quotas: QuotaView[];
   /** True until the quota probes have run (boot publishes without them). */
   quotas_pending?: boolean;
+  /** The engine published this last run and this run restored it from disk
+   *  before folding anything: same machine and scope, older than the moment. */
+  from_previous_run?: boolean;
   sources: SourceStatus[];
   pricing: PricingMeta;
   recent_sessions: SessionRow[];

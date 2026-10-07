@@ -111,6 +111,9 @@
   .loading .loading-arc-lo {
     animation: none;
   }
+  .fresh.busy svg {
+    animation: none;
+  }
   .scope-menu {
     animation: none;
   }
@@ -587,6 +590,52 @@
 .frozen .dot-sep {
   background: currentColor;
   opacity: 0.5;
+}
+
+/* The first frame after a launch is last run's report, read off disk while this
+   run works. Informational, and deliberately not the warning hue the frozen badge
+   owns: one means "these are the newest numbers the engine has" and the other means
+   "there is no engine". Same words, opposite problems. */
+.restored {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--r-sm);
+  flex: none;
+}
+
+.restored .dot-sep {
+  background: currentColor;
+  opacity: 0.5;
+}
+
+/* The live twin of the restored chip: always on, answering "when were the
+   numbers on screen last recomputed". Muted and unpadded — a healthy age is
+   not news, so it reads as a fact of the footer rather than a badge. */
+.fresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  flex: none;
+}
+
+.fresh .dot-sep {
+  background: currentColor;
+  opacity: 0.5;
+}
+
+/* A manual pass runs for tens of seconds; the spin is the one moving part in
+   the footer, and the only signal that the click is still being served. */
+.fresh.busy svg {
+  animation: loading-spin-cw 1s linear infinite;
 }
 
 /* A machine sync that silently stopped reads exactly like a quiet machine —
@@ -1811,23 +1860,6 @@
   align-items: center;
   gap: var(--s1);
   flex: none;
-}
-
-.badge {
-  padding: 1px 5px;
-  font-size: var(--t-meta);
-  font-weight: 600;
-  color: var(--accent-ink);
-  background: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  border-radius: var(--r-sm);
-  flex: none;
-}
-
-.badge[data-source="bundled"],
-.badge[data-source="unavailable"] {
-  color: var(--warn);
-  border-color: var(--warn-soft);
 }
 
 .stale {

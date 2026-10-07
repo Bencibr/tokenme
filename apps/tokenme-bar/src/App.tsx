@@ -51,6 +51,18 @@ const [page, setPage] = useState<PageKey>(() => {
   const scroll = useRef<HTMLElement | null>(null);
   const [tray, setTray] = useState<TrayState | null>(null);
   const [loading, setLoading] = useState(false);
+  // When the current manual refresh was asked for. `get_report(force)` returns
+  // the still-current report at once and the fresh one arrives as a later
+  // event, so without this stamp the footer would sit on the old age for the
+  // whole multi-second pass with no sign the click registered. `?pending=<s>`
+  // is the QA pin, same family as `?restored=`: it seeds the stamp in the past
+  // so the busy chip can be inspected in a browser.
+  const [refreshPending, setRefreshPending] = useState<number | null>(() => {
+    const raw = new URLSearchParams(location.search).get("pending");
+    if (raw === null || raw === "") return null;
+    const secs = Number(raw);
+    return Number.isFinite(secs) && secs >= 0 ? Date.now() - secs * 1000 : null;
+  });
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Remote servers: the list powers the footer icon's dot and the scope menu's
@@ -146,6 +158,9 @@ const [page, setPage] = useState<PageKey>(() => {
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
+      // Any publish — this refresh's result, a cadence tick, a healed engine —
+      // means the figures on screen are new, so the busy readout is done.
+      setRefreshPending(null);
       readTray();
     });
     // The tray menu's "本周"/"今日" entries open the panel already focused on
@@ -164,13 +179,19 @@ const [page, setPage] = useState<PageKey>(() => {
 
   const refresh = useCallback(async () => {
     setLoading(true);
+    setRefreshPending(Date.now());
     try {
       // Full refresh: fresh price table (the engine re-summarizes when it
       // lands), re-ingest, and — engine-side — a forced quota re-probe.
       if (inTauri) void bridge.refreshPricing();
       setReport(await bridge.fetchReport(true));
+      // Inside Tauri that was the still-current report and the fresh one comes
+      // through report-updated, which clears the stamp; a browser's fixture
+      // regenerates synchronously, so the return already IS the result.
+      if (!inTauri) setRefreshPending(null);
       setError(null);
     } catch (e) {
+      setRefreshPending(null);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
@@ -273,12 +294,36 @@ const [page, setPage] = useState<PageKey>(() => {
   // cannot explain the silence any more — floored at 5 minutes, and clamped to
   // the engine's own cadence range so the line matches the timer it watches.
   const staleAfterMs = Math.max(5 * Math.min(Math.max(refreshSecs, 10), 3600) * 1000, 300_000);
+  // A report restored from the previous run's snapshot carries the same figures
+  // the user last saw, which is why it is worth drawing a second after launch —
+  // but it is not this run's fold, and the frozen line would report the engine as
+  // dead while the engine is mid-scan. `?restored=<min>` is the QA pin: it stamps
+  // the on-screen report as restored and `min` minutes old, so the label and its
+  // tooltip can be read in a browser without relaunching into a real restore.
+  const restoredPin = useMemo(() => {
+    const raw = new URLSearchParams(location.search).get("restored");
+    // `Number(null)` is 0, not NaN: a missing param must mean "no pin", not
+    // "0 minutes old" — that bug pinned every live report as restored at
+    // "刚刚" and kept the frozen line suppressed forever.
+    if (raw === null || raw === "") return null;
+    const mins = Number(raw);
+    return Number.isFinite(mins) && mins >= 0 ? mins : null;
+  }, []);
+  const restored = useMemo(() => {
+    if (!report) return null;
+    if (!(report.from_previous_run || restoredPin !== null)) return null;
+    const at = restoredPin === null ? report.generated_at_ms : Date.now() - restoredPin * 60_000;
+    // Kept through a manual refresh too: the numbers on screen are still last
+    // run's until the new report replaces them, so the label stays true.
+    return { at };
+  }, [report, restoredPin]);
+
   const frozen = useMemo(() => {
-    if (!report || loading) return null;
+    if (!report || loading || restored) return null;
     const publishedAt = stalePin === null ? report.generated_at_ms : now - stalePin * 60_000;
     if (now - publishedAt <= staleAfterMs) return null;
     return { ago: relativeTime(publishedAt, now), afterSecs: Math.round(staleAfterMs / 1000) };
-  }, [report, now, loading, stalePin, staleAfterMs]);
+  }, [report, now, loading, stalePin, staleAfterMs, restored]);
 
   // The scope the numbers cover, exactly as the report echoes it. The UI never
   // guesses ahead of a switch: until the engine's re-folded report arrives,
@@ -435,6 +480,10 @@ const [page, setPage] = useState<PageKey>(() => {
           servers={servers}
           tray={inTauri ? { mode: tray?.mode ?? "tray_tokens", onCycle: () => void cycleTrayMode() } : null}
           update={update}
+          restored={restored}
+          publishedAt={report.generated_at_ms}
+          refreshSecs={refreshSecs}
+          pendingSince={refreshPending}
         />
 
         {settingsOpen ? (

@@ -414,16 +414,6 @@ const PRICING: PricingMeta = {
   cache_dir: "~/Library/Caches/tokenme",
 };
 
-// QA pin: `?psource=cache|bundled|unavailable` renders the footer's other price
-// provenances — a hand-authored fixture otherwise only ever shows the fresh one,
-// and the label the badge carries is what differs between them.
-const PSOURCES: PricingMeta["source"][] = ["models_dev", "cache", "bundled", "unavailable"];
-const pinnedSource = (): PricingMeta["source"] | null => {
-  if (typeof location === "undefined") return null;
-  const q = new URLSearchParams(location.search).get("psource");
-  return PSOURCES.includes(q as PricingMeta["source"]) ? (q as PricingMeta["source"]) : null;
-};
-
 // QA pin: `?qpending=1` shows the quota section's wait state — the boot publish
 // carries usage but no quota windows yet. A hand-authored fixture always has its
 // probes answered, so without this the frame nobody can see on a fast machine is
@@ -620,7 +610,7 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     quotas: pinnedQuotaWait() ? [] : quotasOf(nowMs2),
     quotas_pending: pinnedQuotaWait(),
     sources: SOURCES,
-    pricing: { ...PRICING, source: pinnedSource() ?? PRICING.source, fetched_at_ms: nowMs2 - 42 * 60_000 },
+    pricing: { ...PRICING, fetched_at_ms: nowMs2 - 42 * 60_000 },
     recent_sessions: sessionsOf(nowMs2),
     all_time: allTime,
     // The whole panel is folded on one machine scope; a hand-authored report

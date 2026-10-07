@@ -158,6 +158,28 @@ export function relativeTime(ms: number, nowMs: number): string {
   return t("rel.week", { n: Math.floor(days / 7) });
 }
 
+/**
+ * Seconds-level age for the footer's freshness readout: exact within the first
+ * minute — where the seconds are the point, because they are how a manual
+ * refresh visibly lands — and calendar-grained after, where they are noise.
+ */
+export function freshness(ms: number, nowMs: number): string {
+  const diff = Math.max(0, nowMs - ms);
+  if (diff < 1000) return t("rel.now");
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return t("rel.sec", { n: sec });
+  return relativeTime(ms, nowMs);
+}
+
+/** Tooltip-grade absolute stamp: `HH:MM:SS`, date-prefixed when the value is
+    not from today — a panel left running overnight must not read ambiguously. */
+export function clockStamp(ms: number, nowMs: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return localDate(ms) === localDate(nowMs) ? time : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
+}
+
 /** "in 3h 12m" style countdown, dropping the unit pair that adds no information. */
 export function until(resetsAtMs: number, nowMs: number): string {
   const diff = resetsAtMs - nowMs;
