@@ -187,21 +187,6 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, frozen
             <span className="num">{frozen.ago}</span>
           </span>
         ) : null}
-        {/* Right after the frozen badge: whose numbers these are and how fresh
-            that merge is. Silent when no bundle was ever imported. */}
-        {sync ? (
-          <span className="sync" data-stale={sync.stale || undefined} title={syncTip(sync)}>
-            <IconRefresh size={11} />
-            {t("hdr.sync")}
-            <span className="dot-sep" aria-hidden="true" />
-            <span>{sync.latest.origin}</span>
-            <span className="dot-sep" aria-hidden="true" />
-            <span>{sync.age}</span>
-            <span className="dot-sep" aria-hidden="true" />
-            <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
-            {sync.more > 0 ? <span className="sync-more">{t("hdr.sync.more", { n: sync.more })}</span> : null}
-          </span>
-        ) : null}
         <span>{PERIOD_LABEL[period]}</span>
         <span className="dot-sep" aria-hidden="true" />
         <span className="num">{count(summary.requests)}</span>
@@ -223,6 +208,25 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, frozen
           </>
         ) : null}
       </div>
+      {/* Its own line, not another item in the stats: the badge names a machine,
+          how fresh its merge is and how many rows came in, so it wraps to a
+          second row of numbers all by itself — and it is silent until a bundle
+          has actually been imported. */}
+      {sync ? (
+        <div className="hdr-sync">
+          <span className="sync" data-stale={sync.stale || undefined} title={syncTip(sync)}>
+            <IconRefresh size={11} />
+            {t("hdr.sync")}
+            <span className="dot-sep" aria-hidden="true" />
+            <span>{sync.latest.origin}</span>
+            <span className="dot-sep" aria-hidden="true" />
+            <span>{sync.age}</span>
+            <span className="dot-sep" aria-hidden="true" />
+            <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
+            {sync.more > 0 ? <span className="sync-more">{t("hdr.sync.more", { n: sync.more })}</span> : null}
+          </span>
+        </div>
+      ) : null}
       {/* The scope dropdown shares the tabs' line and hugs the far right; with
           no imported origins it renders nothing and the row is unchanged. */}
       <div className="tabs-row">

@@ -424,6 +424,15 @@ const pinnedSource = (): PricingMeta["source"] | null => {
   return PSOURCES.includes(q as PricingMeta["source"]) ? (q as PricingMeta["source"]) : null;
 };
 
+// QA pin: `?qpending=1` shows the quota section's wait state — the boot publish
+// carries usage but no quota windows yet. A hand-authored fixture always has its
+// probes answered, so without this the frame nobody can see on a fast machine is
+// unreachable.
+const pinnedQuotaWait = (): boolean => {
+  if (typeof location === "undefined") return false;
+  return new URLSearchParams(location.search).get("qpending") === "1";
+};
+
 /* -------------------------------------------------------------------- build */
 
 export function makeFixtureReport(nowMs = Date.now()): Report {
@@ -608,7 +617,8 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     year,
     heatmap: buildHeatmap(localMidnight(now)),
     hourly: buildHourly(now),
-    quotas: quotasOf(nowMs2),
+    quotas: pinnedQuotaWait() ? [] : quotasOf(nowMs2),
+    quotas_pending: pinnedQuotaWait(),
     sources: SOURCES,
     pricing: { ...PRICING, source: pinnedSource() ?? PRICING.source, fetched_at_ms: nowMs2 - 42 * 60_000 },
     recent_sessions: sessionsOf(nowMs2),

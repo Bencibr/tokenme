@@ -549,6 +549,14 @@
   white-space: nowrap;
 }
 
+/* The Linux-sync badge on a line of its own: it names a machine, an age and a
+   row count, and inline it displaced the day's figures onto a second row. */
+.hdr-sync {
+  display: flex;
+  margin-top: var(--s2);
+  min-width: 0;
+}
+
 .dot-sep {
   width: 2px;
   height: 2px;
@@ -656,6 +664,13 @@
    的对象，只会读成一根多余的横线。 */
 .sec-nodiv {
   border-bottom: none;
+  /* It stands in for a whole list, so it takes the list's footprint: the wait
+     fills the height those rows would have had and the spinner sits in the
+     middle of it. Huddled under the section label it reads as an inline hint
+     rather than as the section's own content. */
+  display: flex;
+  flex-direction: column;
+  flex: 1;
 }
 
 .sec-hd {
@@ -2076,9 +2091,12 @@
 /* 配额探测进行中的等待行：内容居中，弱化到与区块同级。 */
 .quota-loading {
   display: flex;
+  flex: 1;
   align-items: center;
   justify-content: center;
-  padding: var(--s3) 0 var(--s2);
+  /* Only the bottom keeps its breathing room: the panel's edge is below, while
+     the section header above already carries its own padding. */
+  padding: 0 0 var(--s2);
 }
 
 /* iOS-shaped switch: the panel's only boolean, so it gets the control people
@@ -2950,6 +2968,12 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  /* A column that is at least one screenful, so a section that wants the
+     leftover height (`.sec-nodiv`) can have it. Content taller than the panel
+     still grows the page and scrolls: `min-height` is a floor, not a cap. */
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
   animation: page-in var(--dur-fast) var(--ease) both;
 }
 
