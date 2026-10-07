@@ -120,6 +120,19 @@ pub fn build(g: &Global) -> Result<Ctx, Fail> {
     };
     let index = Index::open(&db_path)
         .map_err(|e| Fail(format!("cannot open index at {}: {e}", db_path.display())))?;
+    // The whole-file guard stays on the CLI's path: this is what an operator
+    // runs when the numbers look wrong, and nothing here is rendering a panel.
+    // A damaged image is set aside and rebuilt empty, ready for the next ingest.
+    let (index, healed) = index.verify_integrity().map_err(|e| Fail(format!(
+        "index at {} is damaged and could not be replaced: {e}",
+        db_path.display()
+    )))?;
+    if healed {
+        eprintln!(
+            "warning: the index image failed its integrity check; it was moved aside as \
+             *.corrupt-<timestamp> and recreated empty — run `tokenme ingest` to refill it"
+        );
+    }
 
     let real_now = usage_core::report::now_ms();
     let since_ms = g.since.as_deref().map(|s| day_ms(s, false)).transpose()?;

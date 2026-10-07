@@ -222,13 +222,19 @@ impl Exit {
 }
 
 fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> Exit {
+    // Cold start is the one latency the user feels directly, so the boot path
+    // is measured rather than guessed: this clock is what the "boot:" line
+    // below breaks down, and it is where a slow open gets attributed.
+    let boot = Instant::now();
     let adapters: Vec<Box<dyn SourceAdapter>> = usage_adapter_all::builtin_adapters();
     let detected: Vec<DetectedSource> = usage_adapter_all::detect_all();
+    let at_detect = boot.elapsed();
     let mut pricing = PricingMap::load(&PricingOptions {
         offline: false,
         cache_dir: PricingOptions::default_cache_dir(),
         overrides: Default::default(),
     });
+    let at_pricing = boot.elapsed();
 
     // An index that cannot be opened is not a quiet day either: every pass would
     // return without publishing and the webview would sit on "indexing" forever.
@@ -241,6 +247,7 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
             None
         }
     };
+    let at_index = boot.elapsed();
 
     let roots: Vec<PathBuf> = detected.iter().flat_map(|d| d.roots.clone()).collect();
     let (wake_tx, wake_rx) = mpsc::channel();
@@ -266,11 +273,60 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
     // yet (fresh install). The quota probes are skipped here on purpose; they
     // land with the post-scan publish a moment later.
     if let Some(index) = index.as_mut() {
-        if index.event_count().unwrap_or(0) > 0 {
+        let events = index.event_count().unwrap_or(0);
+        let at_count = boot.elapsed();
+        if events > 0 {
             let sources =
                 index.source_statuses(&detected).unwrap_or_else(|_| fallback_sources(&detected));
+            let at_sources = boot.elapsed();
             publish_with_quota(&app, index, &sources, &pricing, &adapters, false);
-            crate::logging::info("boot: published last-known report before the scan");
+            let ms = |d: Duration| d.as_millis();
+            crate::logging::info(&format!(
+                "boot: published last-known report before the scan — detect {} ms, pricing {} ms, \
+                 index open {} ms, count {} ms, sources {} ms, report {} ms ({} ms of engine \
+                 startup spent before the panel could render)",
+                ms(at_detect),
+                ms(at_pricing - at_detect),
+                ms(at_index - at_pricing),
+                ms(at_count - at_index),
+                ms(at_sources - at_count),
+                ms(boot.elapsed() - at_sources),
+                ms(boot.elapsed()),
+            ));
+        }
+    }
+
+    // The whole-file integrity guard runs here, after the panel has its numbers
+    // and before the scan writes anything: a damaged image still heals as a
+    // quarantine + re-ingest on every launch, it just no longer sits in front of
+    // the first render (0.4 s warm, 3.6 s cold on this machine's 170 MB index).
+    if let Some(index_handle) = index.take() {
+        let checked = Instant::now();
+        match index_handle.verify_integrity() {
+            Ok((healthy, true)) => {
+                index = Some(healthy);
+                crate::logging::error(
+                    "integrity: the index image was damaged — quarantined and recreated empty, \
+                     the first scan rebuilds it from the source logs",
+                );
+            }
+            Ok((healthy, false)) => {
+                index = Some(healthy);
+                crate::logging::info(&format!(
+                    "integrity: index image verified in {} ms",
+                    checked.elapsed().as_millis()
+                ));
+            }
+            Err(e) => {
+                // The damaged file could not be moved aside, so there is nothing
+                // better to work with than it: keep the handle the next open
+                // gives back and say out loud that the image is bad.
+                index = Index::open(index_path()).ok();
+                crate::logging::error(&format!(
+                    "integrity: the index image is damaged and could not be replaced ({e}) — \
+                     numbers may be wrong until it heals"
+                ));
+            }
         }
     }
 
