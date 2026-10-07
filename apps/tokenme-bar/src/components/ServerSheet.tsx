@@ -179,6 +179,50 @@ function deriveName(host: string): string {
   return clean.slice(0, 64) || "server";
 }
 
+/** A form field with the trailing clear affordance: the × shows only when
+ *  there is something to clear, clearing keeps the field focused (the
+ *  mousedown that would otherwise blur it is swallowed), and the parent's
+ *  change handler travels as text so clearing is an ordinary empty value. */
+function ClearableInput({
+  value,
+  onChangeText,
+  className = "f-input",
+  ...rest
+}: Omit<React.ComponentProps<"input">, "value" | "onChange"> & {
+  value: string;
+  onChangeText: (text: string) => void;
+  className?: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  const filled = value.length > 0;
+  return (
+    <span className="f-input-wrap">
+      <input
+        ref={ref}
+        {...rest}
+        className={filled ? `${className} has-clear` : className}
+        value={value}
+        onChange={(e) => onChangeText(e.target.value)}
+      />
+      {filled ? (
+        <button
+          type="button"
+          className="f-clear"
+          aria-label={t("srv.f.clear")}
+          title={t("srv.f.clear")}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            onChangeText("");
+            ref.current?.focus();
+          }}
+        >
+          <IconClose size={11} />
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
 /**
  * The remote-server sheet: list → wizard (5 steps) → detail → removal.
  * All state changes that outlive this component arrive via the
@@ -488,14 +532,13 @@ export function ServerSheet({
             <div className="f-label">
               <span>{t("srv.f.host")}</span>
             </div>
-            <input
-              className="f-input"
+            <ClearableInput
               value={w.host}
+              onChangeText={(host) => setWiz({ ...w, host })}
               placeholder={t("srv.f.host.ph")}
               autoComplete="off"
               spellCheck={false}
               autoFocus
-              onChange={(e) => setWiz({ ...w, host: e.target.value })}
             />
           </div>
           <div className="f-grid">
@@ -503,24 +546,23 @@ export function ServerSheet({
               <div className="f-label">
                 <span>{t("srv.f.user")}</span>
               </div>
-              <input
-                className="f-input"
+              <ClearableInput
                 value={w.user}
+                onChangeText={(user) => setWiz({ ...w, user })}
                 placeholder={t("srv.f.user.ph")}
                 autoComplete="off"
                 spellCheck={false}
-                onChange={(e) => setWiz({ ...w, user: e.target.value })}
               />
             </div>
             <div className="f-row">
               <div className="f-label">
                 <span>{t("srv.f.port")}</span>
               </div>
-              <input
+              <ClearableInput
                 className="f-input num"
                 value={w.port}
+                onChangeText={(port) => setWiz({ ...w, port })}
                 inputMode="numeric"
-                onChange={(e) => setWiz({ ...w, port: e.target.value })}
               />
             </div>
           </div>
@@ -529,13 +571,12 @@ export function ServerSheet({
               <span>{t("srv.f.name")}</span>
               <span className="opt">{t("srv.f.opt")}</span>
             </div>
-            <input
-              className="f-input"
+            <ClearableInput
               value={w.name}
+              onChangeText={(name) => setWiz({ ...w, name })}
               placeholder={t("srv.f.name.ph")}
               autoComplete="off"
               spellCheck={false}
-              onChange={(e) => setWiz({ ...w, name: e.target.value })}
             />
           </div>
           <div className="f-hint" data-err={w.formError ? "" : undefined}>
@@ -594,14 +635,13 @@ export function ServerSheet({
             </button>
             {w.auth === "password" ? (
               <div className="auth-field">
-                <input
-                  className="f-input"
+                <ClearableInput
                   type="password"
                   value={w.password}
+                  onChangeText={(password) => setWiz({ ...w, password })}
                   placeholder={t("srv.auth.pwd.ph")}
                   autoComplete="off"
                   autoFocus
-                  onChange={(e) => setWiz({ ...w, password: e.target.value })}
                 />
               </div>
             ) : null}
@@ -620,21 +660,20 @@ export function ServerSheet({
             </button>
             {w.auth === "key" ? (
               <div className="auth-field">
-                <input
+                <ClearableInput
                   className="f-input mono"
                   value={w.keyPath}
+                  onChangeText={(keyPath) => setWiz({ ...w, keyPath })}
                   placeholder={t("srv.auth.key.ph")}
                   autoComplete="off"
                   spellCheck={false}
-                  onChange={(e) => setWiz({ ...w, keyPath: e.target.value })}
                 />
-                <input
-                  className="f-input"
+                <ClearableInput
                   type="password"
                   value={w.passphrase}
+                  onChangeText={(passphrase) => setWiz({ ...w, passphrase })}
                   placeholder={t("srv.auth.pass.ph")}
                   autoComplete="off"
-                  onChange={(e) => setWiz({ ...w, passphrase: e.target.value })}
                 />
               </div>
             ) : null}

@@ -2463,6 +2463,41 @@
   border-radius: var(--r-md);
 }
 
+/* The trailing clear affordance lives inside the wrapper, so the field
+   reserves its width whether or not the × is showing. */
+.f-input-wrap {
+  position: relative;
+  display: block;
+}
+
+.f-input.has-clear {
+  padding-right: 28px;
+}
+
+.f-clear {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.f-clear:hover {
+  background: var(--fill-hover);
+  color: var(--ink);
+}
+
 .f-input:focus {
   outline: none;
   border-color: var(--accent);
