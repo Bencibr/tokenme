@@ -70,6 +70,8 @@ pub fn run() {
             updater::set_auto_update_check,
             commands::set_host_exit_pause,
             commands::set_bubble_enabled,
+            notify::notify_status,
+            notify::notify_enable,
             commands::begin_bubble_drag,
             commands::show_panel,
             commands::panel_keyboard,

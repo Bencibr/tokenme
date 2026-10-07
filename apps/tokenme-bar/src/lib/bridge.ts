@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
 import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
-import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome } from "../types";
+import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -162,6 +162,19 @@ export const bridge: Bridge = {
   async setQuotaOrder(order: QuotaOrder): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("set_quota_order", { order });
+  },
+
+  /** The browser preview has no OS permission to read; `?notify=denied` (or
+   *  `not_determined`) pins the state so the guide row can be reviewed, same
+   *  QA-pin family as `?stale=` / `?showempty=`. */
+  async notifyStatus(): Promise<NotifyState> {
+    if (!inTauri) return pinnedNotifyState();
+    return invoke<NotifyState>("notify_status");
+  },
+
+  async notifyEnable(): Promise<NotifyState> {
+    if (!inTauri) return pinnedNotifyState();
+    return invoke<NotifyState>("notify_enable");
   },
 
   async setUiLang(lang: string): Promise<void> {
@@ -371,6 +384,12 @@ export const bridge: Bridge = {
     return once("server-install-progress", handler);
   },
 };
+
+/** The browser preview's notification pin: `?notify=denied|not_determined|unknown`. */
+function pinnedNotifyState(): NotifyState {
+  const pin = new URLSearchParams(location.search).get("notify");
+  return pin === "denied" || pin === "not_determined" || pin === "unknown" ? pin : "granted";
+}
 
 /** The browser preview has nothing to persist; the sheet still works in memory. */
 const browserSettings: PanelSettings = {

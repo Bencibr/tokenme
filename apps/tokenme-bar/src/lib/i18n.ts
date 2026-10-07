@@ -284,6 +284,11 @@ const zh = {
   "quota.balance.funide": "积分",
   "quota.bar.a11y": "{tool} {label} 已用 {p}%",
   "quota.meta.local": "本机 · 与筛选无关",
+  "quota.notify.ask": "开启系统通知后，额度跨过 80% 或耗尽时会自动弹出提醒。",
+  "quota.notify.denied": "系统通知已关闭——额度跨过 80% 或耗尽时无法提醒你。",
+  "quota.notify.enable": "开启通知",
+  "quota.notify.settings": "去开启",
+  "quota.notify.dismiss": "忽略",
 
   /* 状态栏 ---------------------------------------------------------------- */
   "status.stale.tip": "价格快照超过 24 小时未更新，成本为估算值",
@@ -667,6 +672,11 @@ const en: Record<StrKey, string> = {
   "quota.balance.funide": "Points",
   "quota.bar.a11y": "{tool} {label}: {p}% used",
   "quota.meta.local": "This machine · filter-independent",
+  "quota.notify.ask": "Turn on notifications and a banner will pop when a window crosses 80% used or runs out.",
+  "quota.notify.denied": "System notifications are off — the 80% and exhausted banners can't reach you.",
+  "quota.notify.enable": "Enable",
+  "quota.notify.settings": "Open Settings",
+  "quota.notify.dismiss": "Dismiss",
 
   "status.stale.tip": "Price snapshot older than 24 h — costs are estimates",
   "status.stale": "Prices stale",

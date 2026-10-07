@@ -110,6 +110,11 @@ export interface QuotaOrder {
   rows: string[];
 }
 
+/** What the OS says about TokenMe's notification permission, plus `unknown`
+ *  where the platform has no answer (Windows). Mirrors the Rust vocabulary in
+ *  `notify::permission_state`. */
+export type NotifyState = "granted" | "denied" | "not_determined" | "unknown";
+
 export interface SourceStatus {
   id: string;
   display: string;
@@ -349,6 +354,12 @@ export interface Bridge {
   /** The saved drag order of the quota section (empty lists ⇒ report order). */
   quotaOrder: () => Promise<QuotaOrder>;
   setQuotaOrder: (order: QuotaOrder) => Promise<void>;
+  /** The notification permission as the OS reports it, for the quota section's
+   *  guide. `?notify=` pins it in the browser preview, same family as `?stale=`. */
+  notifyStatus: () => Promise<NotifyState>;
+  /** The guide's one button: raises the system prompt (undecided) or opens the
+   *  notification settings pane (denied). Returns the state it routed on. */
+  notifyEnable: () => Promise<NotifyState>;
   /** Report the webview's detected UI language to the native chrome. */
   setUiLang: (lang: string) => Promise<void>;
   /** Cold-start telemetry, stage 1: the bundle ran and index.html's shell is up. */

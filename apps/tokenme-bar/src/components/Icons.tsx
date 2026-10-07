@@ -79,6 +79,16 @@ export function IconWarn(p: IconProps) {
   );
 }
 
+/** The quota section's notification guide. */
+export function IconBell(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M12 4.5a5 5 0 0 0-5 5V13l-1.6 2.6h13.2L17 13V9.5a5 5 0 0 0-5-5z" />
+      <path d="M10.4 18.4a1.6 1.6 0 0 0 3.2 0" />
+    </Svg>
+  );
+}
+
 export function IconMissing(p: IconProps) {
   return (
     <Svg {...p}>

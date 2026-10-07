@@ -903,6 +903,38 @@
   border-top: 1px solid var(--hair);
 }
 
+/* The guide to system notifications: present only while the OS would not
+   deliver a banner and there is a vendor window to warn about; the dismissal
+   is remembered per permission state (see QuotaStrip.tsx). */
+.quota-notify {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 2px 0 6px;
+  padding: 6px 8px 6px 10px;
+  font-size: var(--t-meta);
+  color: var(--ink-2);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--r-md);
+}
+
+.quota-notify > svg {
+  flex: none;
+  color: var(--accent-ink);
+}
+
+.quota-notify .q-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.quota-notify .btn-quiet,
+.quota-notify .sheet-close {
+  flex: none;
+}
+
 /* Long-press a bar (or a tool header) and drag it; the arrangement persists in
    settings.json. A still hold promotes to a drag, a moving one was a scroll,
    so panning the panel never reorders anything by accident. */

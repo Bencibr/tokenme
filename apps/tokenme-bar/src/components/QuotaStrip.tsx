@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Loading } from "./Loading";
-import type { QuotaOrder, QuotaView } from "../types";
+import type { NotifyState, QuotaOrder, QuotaView } from "../types";
 import { bridge } from "../lib/bridge";
 import { toolColor, toolDisplay, until } from "../lib/format";
 import { t } from "../lib/i18n";
 import { Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
+import { IconBell, IconClose } from "./Icons";
 
 /** Windows are named by length unless the source gave a better bucket name.
  *  A source-provided label passes through verbatim — it is the vendor's text. */
@@ -55,6 +56,19 @@ type Drag = { kind: "row" | "tool"; key: string };
  *  window is live), so a drag started before an empty spell keeps its order. */
 let savedOrder: QuotaOrder = { tools: [], rows: [] };
 let orderRequested = false;
+
+/** The guide's dismissal is remembered per permission state: observing the
+ *  state change re-arms it, so a grant now and a denial later still speaks. */
+const GUIDE_KEY = "tokenme:notifyHint";
+
+function readDismissed(): NotifyState | null {
+  try {
+    const raw = localStorage.getItem(GUIDE_KEY);
+    return raw === "denied" || raw === "not_determined" ? raw : null;
+  } catch {
+    return null;
+  }
+}
 
 /** How long a still press is held before it becomes a drag. Movement beyond
  *  {@link MOVE_CANCEL_PX} first means a scroll, never a reorder. */
@@ -129,6 +143,87 @@ export function QuotaStrip({
       .catch(() => {});
   }, []);
 
+  // The system-notification guide, shown while the OS would not deliver a
+  // banner. The permission is a fact about this machine, not the report, but
+  // the report is the panel's heartbeat: re-asking on each publish means a
+  // grant made in System Settings shows up within one cadence.
+  const [notify, setNotify] = useState<NotifyState | null>(null);
+  const [dismissedFor, setDismissedFor] = useState<NotifyState | null>(readDismissed);
+  const guideWatch = useRef<number | null>(null);
+
+  const stopGuideWatch = () => {
+    if (guideWatch.current !== null) {
+      window.clearInterval(guideWatch.current);
+      guideWatch.current = null;
+    }
+  };
+
+  const adoptNotify = (s: NotifyState) => {
+    setNotify(s);
+    if (s === "granted") {
+      // A real grant re-arms a dismissal: if the user turns notifications off
+      // again later, the guide may speak once more.
+      try {
+        localStorage.removeItem(GUIDE_KEY);
+      } catch {
+        /* nothing to clear */
+      }
+      setDismissedFor(null);
+    }
+  };
+
+  useEffect(() => {
+    let alive = true;
+    void bridge
+      .notifyStatus()
+      .then((s) => {
+        if (alive) adoptNotify(s);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [quotas]);
+
+  useEffect(() => stopGuideWatch, []);
+
+  const enableNotify = () => {
+    void bridge
+      .notifyEnable()
+      .then((s) => {
+        adoptNotify(s);
+        stopGuideWatch();
+        // The answer can take a while (the prompt sits on screen; System
+        // Settings needs the toggle flipped), so watch for it a bounded time.
+        if (s !== "not_determined" && s !== "denied") return;
+        let tries = 0;
+        guideWatch.current = window.setInterval(() => {
+          tries += 1;
+          void bridge
+            .notifyStatus()
+            .then((now) => {
+              if (now !== s) {
+                adoptNotify(now);
+                stopGuideWatch();
+              }
+            })
+            .catch(() => {});
+          if (tries >= 20) stopGuideWatch();
+        }, 2_000);
+      })
+      .catch(() => {});
+  };
+
+  const dismissGuide = () => {
+    if (!notify) return;
+    setDismissedFor(notify);
+    try {
+      localStorage.setItem(GUIDE_KEY, notify);
+    } catch {
+      /* the row just comes back on the next publish */
+    }
+  };
+
   if (live.length === 0) {
     // 探测未跑（boot 的首次发布故意跳过配额）：给一个可见的等待，
     // 而不是让配额区块无声消失。pending 为假且为空 = 真没有配额。
@@ -145,6 +240,15 @@ export function QuotaStrip({
     }
     return null;
   }
+
+  // The guide only speaks to a vendor-window audience — budget rows are this
+  // app's own caps, no OS banner is involved — and only while the OS would not
+  // deliver one at all.
+  const vendorLive = live.some((q) => (q.origin ?? "probe") !== "budget");
+  const guide =
+    notify !== null && notify !== "granted" && notify !== "unknown" && dismissedFor !== notify && vendorLive
+      ? notify
+      : null;
 
   const byTool = new Map<string, QuotaView[]>();
   for (const q of live) {
@@ -269,6 +373,23 @@ export function QuotaStrip({
         </span>
       }
     >
+      {guide ? (
+        <div className="quota-notify" role="status">
+          <IconBell size={13} />
+          <span className="q-note">{guide === "denied" ? t("quota.notify.denied") : t("quota.notify.ask")}</span>
+          <button type="button" className="btn-quiet" onClick={enableNotify}>
+            {guide === "denied" ? t("quota.notify.settings") : t("quota.notify.enable")}
+          </button>
+          <button
+            type="button"
+            className="sheet-close quota-notify-x"
+            aria-label={t("quota.notify.dismiss")}
+            onClick={dismissGuide}
+          >
+            <IconClose size={10} />
+          </button>
+        </div>
+      ) : null}
       <div
         className="quota-list"
         ref={listRef}

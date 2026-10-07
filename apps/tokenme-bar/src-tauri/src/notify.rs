@@ -274,8 +274,140 @@ pub fn observe(quotas: &[QuotaView], displays: &HashMap<String, String>, lang: L
 
 /// Post a test banner through the same gate a real one walks (permission
 /// request included), for `TOKENME_TEST_NOTIFY=1` QA runs.
+///
+/// Delayed a beat: the delivery wait needs the main thread's run loop pumping,
+/// and setup runs before `app.run()` starts it — firing there failed with
+/// "Mainthread not running" the moment permission was actually granted (it had
+/// only looked fine before because a denial short-circuits before the post).
 pub fn send_test() {
-    let _ = channel().send(Msg::Test);
+    thread::spawn(|| {
+        thread::sleep(Duration::from_secs(4));
+        let _ = channel().send(Msg::Test);
+    });
+}
+
+/// The panel's whole view of the permission: whether the OS will deliver a
+/// banner at all, as one word — `granted` / `denied` / `not_determined`, or
+/// `unknown` where the platform has no answer (Windows). `TOKENME_NOTIFY_STATE`
+/// forces an answer for QA screenshots, same family as `TOKENME_SHOW_PANEL`.
+pub fn permission_state() -> String {
+    if let Some(forced) = std::env::var("TOKENME_NOTIFY_STATE")
+        .ok()
+        .and_then(|v| parse_override(&v))
+    {
+        static NOTED: OnceLock<()> = OnceLock::new();
+        NOTED.get_or_init(|| {
+            crate::logging::info(&format!(
+                "notify: permission state forced to {forced} by TOKENME_NOTIFY_STATE (QA)"
+            ));
+        });
+        return forced.to_string();
+    }
+    platform_state()
+}
+
+fn parse_override(raw: &str) -> Option<&'static str> {
+    match raw {
+        "granted" => Some("granted"),
+        "denied" => Some("denied"),
+        "not_determined" => Some("not_determined"),
+        "unknown" => Some("unknown"),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_state() -> String {
+    match mac_usernotifications::blocking::get_notification_settings() {
+        Ok(s) => map_authorization(s.authorization_status).to_string(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_state() -> String {
+    "unknown".to_string()
+}
+
+/// The panel's vocabulary for what the OS reports. Granted is granted whether
+/// it is full, provisional or ephemeral — a banner can post under all three.
+#[cfg(target_os = "macos")]
+fn map_authorization(status: mac_usernotifications::AuthorizationStatus) -> &'static str {
+    use mac_usernotifications::AuthorizationStatus as S;
+    match status {
+        S::Authorized | S::Provisional | S::Ephemeral => "granted",
+        S::Denied => "denied",
+        S::NotDetermined => "not_determined",
+        S::Unknown => "unknown",
+    }
+}
+
+/// The permission, for the quota section's guide.
+#[tauri::command]
+pub async fn notify_status() -> String {
+    tauri::async_runtime::spawn_blocking(permission_state)
+        .await
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// The guide's one button: an undecided permission raises the system prompt
+/// (the prompt itself is the decision UI, and macOS never re-prompts a denial),
+/// a denial opens the settings pane that can undo it, anything else is a no-op.
+/// Returns the state the click was routed on; the panel watches for the answer.
+#[tauri::command]
+pub async fn notify_enable(app: tauri::AppHandle) -> Result<String, String> {
+    let state = tauri::async_runtime::spawn_blocking(permission_state)
+        .await
+        .map_err(|e| e.to_string())?;
+    match state.as_str() {
+        "not_determined" => {
+            ask_permission()?;
+            Ok(state)
+        }
+        "denied" => {
+            open_notification_settings(app.config().identifier.clone())?;
+            Ok(state)
+        }
+        other => Ok(other.to_string()),
+    }
+}
+
+/// The request blocks until the user answers — on its own thread, so the
+/// command (and the panel) is free while the prompt is up.
+#[cfg(target_os = "macos")]
+fn ask_permission() -> Result<(), String> {
+    crate::logging::info("notify: the panel asked; raising the system permission prompt");
+    thread::spawn(|| match mac_usernotifications::blocking::request_auth() {
+        Ok(true) => crate::logging::info("notify: permission granted by the user"),
+        Ok(false) => crate::logging::info("notify: permission denied by the user"),
+        Err(e) => crate::logging::error(&format!("notify: permission request failed — {e}")),
+    });
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ask_permission() -> Result<(), String> {
+    Err("the system permission prompt is only wired on macOS".into())
+}
+
+/// macOS deep-links the app's own notification pane; the identifier rides in
+/// `?id=` so the user lands on TokenMe, not the list.
+#[cfg(target_os = "macos")]
+fn open_notification_settings(identifier: String) -> Result<(), String> {
+    let url = format!(
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={identifier}"
+    );
+    crate::logging::info("notify: opening the system notification settings pane");
+    std::process::Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_notification_settings(_identifier: String) -> Result<(), String> {
+    Err("the notification settings pane is only reachable on macOS".into())
 }
 
 fn worker(rx: Receiver<Msg>) {
@@ -742,5 +874,29 @@ mod tests {
         prune_at(&mut state, NOW);
         assert!(state.entries.contains_key("fresh"));
         assert!(!state.entries.contains_key("stale"), "a window gone for a month is gone");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn authorization_status_maps_onto_the_panels_vocabulary() {
+        use mac_usernotifications::AuthorizationStatus as S;
+        // Any flavour of allowed means a banner can post.
+        assert_eq!(map_authorization(S::Authorized), "granted");
+        assert_eq!(map_authorization(S::Provisional), "granted");
+        assert_eq!(map_authorization(S::Ephemeral), "granted");
+        assert_eq!(map_authorization(S::Denied), "denied");
+        assert_eq!(map_authorization(S::NotDetermined), "not_determined");
+        assert_eq!(map_authorization(S::Unknown), "unknown");
+    }
+
+    #[test]
+    fn the_qa_override_only_accepts_the_vocabulary() {
+        for ok in ["granted", "denied", "not_determined", "unknown"] {
+            assert_eq!(parse_override(ok), Some(ok));
+        }
+        // Anything else is a typo, not a state — the real query must answer.
+        assert_eq!(parse_override("Granted"), None);
+        assert_eq!(parse_override(""), None);
+        assert_eq!(parse_override("yes"), None);
     }
 }
