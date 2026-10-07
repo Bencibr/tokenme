@@ -295,7 +295,7 @@ const BOOT_NOTE_TAG: isize = 0x746b_426f;
 
 #[cfg(target_os = "macos")]
 fn set_boot_note(app: &AppHandle, text: Option<&str>) {
-    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::cocoa::base::{id, nil};
     use tauri_nspanel::cocoa::foundation::{NSPoint, NSRect, NSSize};
     use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
 
@@ -313,11 +313,37 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
         for index in 0..count {
             let view: id = msg_send![subviews, objectAtIndex: index];
             let tag: isize = msg_send![view, tag];
-            if tag == BOOT_NOTE_TAG {
+            // The spinner is reclaimed by class, not tag: NSProgressIndicator is an
+            // NSView, and NSView's `tag` is read-only — `setTag:` belongs to
+            // NSControl (the label below has it, the spinner does not). Sending it
+            // anyway is an unrecognized selector; objc's msg_send does not verify
+            // selectors by default, so the ObjC exception unwinds into this
+            // main-thread callback — tao's `did_finish_launching`, a frame that
+            // cannot unwind — and aborts the whole app, logged only as "panic in a
+            // function that cannot unwind" (build 98 died this way on first open).
+            let view_class: id = msg_send![view, class];
+            let spinner_class: id = msg_send![class!(NSProgressIndicator), class];
+            if tag == BOOT_NOTE_TAG || view_class == spinner_class {
                 let _: () = msg_send![view, removeFromSuperview];
             }
         }
         let Some(text) = text else { return };
+        let bounds: NSRect = msg_send![content, bounds];
+
+        // Motion, not just words. A static line on an empty sheet reads as a dead
+        // panel — which is exactly what this was reported as on 2026-10-07, in the
+        // ~3 s between the window's first frame and the page painting. The system
+        // spinner is the part that says work is happening; the label names the work.
+        let spinner_side = 16.0;
+        let spinner: id = msg_send![class!(NSProgressIndicator), alloc];
+        let _: () = msg_send![spinner, initWithFrame: NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize { width: spinner_side, height: spinner_side },
+        }];
+        let _: () = msg_send![spinner, setStyle: 1isize]; // NSProgressIndicatorStyleSpinning
+        let _: () = msg_send![spinner, setIndeterminate: true];
+        let _: () = msg_send![spinner, setControlSize: 2usize]; // small
+        let _: () = msg_send![spinner, startAnimation: nil];
 
         let c_text = match std::ffi::CString::new(text) {
             Ok(value) => value,
@@ -342,18 +368,31 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
         let _: () = msg_send![label, setFont: font];
         let _: () = msg_send![label, setTag: BOOT_NOTE_TAG];
 
+        // The pair is centred as a group, spinner above, the same 10 pt apart as
+        // the page's own loading card — the handover between the two layers should
+        // not move the words.
         let size: NSSize = msg_send![label, fittingSize];
-        let bounds: NSRect = msg_send![content, bounds];
-        let frame = NSRect {
+        let gap = 10.0;
+        let group_top = (bounds.size.height + spinner_side + gap + size.height) / 2.0;
+        let spinner_frame = NSRect {
+            origin: NSPoint {
+                x: (bounds.size.width - spinner_side) / 2.0,
+                y: group_top - spinner_side,
+            },
+            size: NSSize { width: spinner_side, height: spinner_side },
+        };
+        let _: () = msg_send![spinner, setFrame: spinner_frame];
+        let label_frame = NSRect {
             origin: NSPoint {
                 x: (bounds.size.width - size.width) / 2.0,
-                y: (bounds.size.height - size.height) / 2.0,
+                y: group_top - spinner_side - gap - size.height,
             },
             size,
         };
-        let _: () = msg_send![label, setFrame: frame];
-        // Last subview, so it sits above the web view: the page is transparent
+        let _: () = msg_send![label, setFrame: label_frame];
+        // Last subviews, so they sit above the web view: the page is transparent
         // until it paints, and the note has to survive exactly that interval.
+        let _: () = msg_send![content, addSubview: spinner];
         let _: () = msg_send![content, addSubview: label];
     }
 }
