@@ -18,6 +18,7 @@ use usage_core::{DateFilter, DetectedSource, MachineScope, PricingMap, Report, S
 use usage_index::{Index, IngestOptions, Watcher, RETENTION_DAYS};
 
 use crate::settings::Settings;
+use crate::snapshot;
 use crate::tray;
 
 /// Emitted on every recomputed report; the payload is a serialised `Report`.
@@ -226,6 +227,13 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
     // is measured rather than guessed: this clock is what the "boot:" line
     // below breaks down, and it is where a slow open gets attributed.
     let boot = Instant::now();
+    // Last-known numbers from the previous run, before anything is read. The
+    // whole boot path below (detect, pricing, the aggregation) costs 6.8–24.9 s
+    // measured on this machine, and every number it produces was already on disk
+    // when the process started; a file read costs milliseconds. The panel labels
+    // this report as restored, so the first frame is faster rather than younger.
+    publish_restored(&app);
+    let at_restore = boot.elapsed();
     let adapters: Vec<Box<dyn SourceAdapter>> = usage_adapter_all::builtin_adapters();
     let detected: Vec<DetectedSource> = usage_adapter_all::detect_all();
     let at_detect = boot.elapsed();
@@ -267,25 +275,26 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
             .ok();
     }
 
-    // The index persists across launches, so last-known numbers are already on
-    // disk: publish them before the scan touches anything and the panel renders
-    // instantly — the boot screen only shows when there is genuinely no index
-    // yet (fresh install). The quota probes are skipped here on purpose; they
-    // land with the post-scan publish a moment later.
+    // The second frame: this run's own fold over the index, before the scan has
+    // read a single source file. The snapshot above may already have covered it;
+    // this is what replaces it, and on a fresh install (no snapshot, empty index)
+    // it is the boot screen's job until the scan lands. The quota probes are
+    // skipped here on purpose — they come with the post-scan publish.
     if let Some(index) = index.as_mut() {
-        let events = index.event_count().unwrap_or(0);
+        let events = index.has_events().unwrap_or(false);
         let at_count = boot.elapsed();
-        if events > 0 {
+        if events {
             let sources =
                 index.source_statuses(&detected).unwrap_or_else(|_| fallback_sources(&detected));
             let at_sources = boot.elapsed();
             publish_with_quota(&app, index, &sources, &pricing, &adapters, false);
             let ms = |d: Duration| d.as_millis();
             crate::logging::info(&format!(
-                "boot: published last-known report before the scan — detect {} ms, pricing {} ms, \
-                 index open {} ms, count {} ms, sources {} ms, report {} ms ({} ms of engine \
-                 startup spent before the panel could render)",
-                ms(at_detect),
+                "boot: published the index fold before the scan — restore {} ms, detect {} ms, \
+                 pricing {} ms, index open {} ms, has-events {} ms, sources {} ms, report {} ms \
+                 ({} ms of engine startup spent before the panel could render)",
+                ms(at_restore),
+                ms(at_detect - at_restore),
                 ms(at_pricing - at_detect),
                 ms(at_index - at_pricing),
                 ms(at_count - at_index),
@@ -691,6 +700,38 @@ fn publish<R: Runtime>(
     publish_with_quota(app, index, sources, pricing, adapters, true)
 }
 
+/// The first frame: the previous run's own published report, read off disk
+/// before this run has touched a source file, a price table or a vendor.
+///
+/// Restoring it is the difference between a first report at milliseconds and one
+/// at 6.8–24.9 s measured on this machine, and every number in it was true when
+/// it was folded. What it cannot claim is freshness, so `from_previous_run` is set
+/// for the panel to label, and the quota strip goes back to pending — a vendor
+/// window sampled an hour ago is not this run's answer, and the panel already has
+/// an honest state for "not yet". Anything [`snapshot::read`] refuses leaves the
+/// panel exactly where it was: the boot note until the index fold lands.
+fn publish_restored<R: Runtime>(app: &AppHandle<R>) {
+    let scope = app.state::<Shared>().scope();
+    let Some(mut report) = snapshot::read(&scope) else {
+        crate::logging::info("boot: nothing to restore — the panel waits for the index fold");
+        return;
+    };
+    let published_at = report.generated_at_ms;
+    report.from_previous_run = true;
+    report.quotas.clear();
+    report.quotas_pending = true;
+    if let Ok(mut slot) = app.state::<Shared>().report.lock() {
+        *slot = Some(report.clone());
+    }
+    let _ = app.emit(REPORT_EVENT, &report);
+    let mode = app.state::<Shared>().settings().tray_mode;
+    tray::refresh(app, &report, mode);
+    crate::logging::info(&format!(
+        "boot: restored last-known report folded {} ms ago",
+        now_ms() - published_at
+    ));
+}
+
 /// `poll_quota = false` publishes without waiting on the vendor probes — the
 /// boot path uses it to put last-known numbers on screen instantly; the probes
 /// land with the post-scan publish a moment later.
@@ -746,6 +787,10 @@ fn publish_with_quota<R: Runtime>(
     if let Ok(mut slot) = app.state::<Shared>().report.lock() {
         *slot = Some(report.clone());
     }
+    // The next launch's first frame. Written here rather than on the boot paths so
+    // that whatever the panel has been shown is also what gets remembered — a
+    // snapshot of a report nobody saw would make "last known" mean two things.
+    snapshot::write(&report);
     let _ = app.emit(REPORT_EVENT, &report);
     // Re-read the mode AFTER the slow quota probes: a switch made while
     // polling ran must not be painted back to the old display (the stale-read
@@ -814,7 +859,7 @@ fn fallback_sources(detected: &[DetectedSource]) -> Vec<SourceStatus> {
 }
 
 /// `Index::default_path()` wins; a missing platform dir falls back to cache.
-fn index_path() -> PathBuf {
+pub(crate) fn index_path() -> PathBuf {
     Index::default_path().unwrap_or_else(|| {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))

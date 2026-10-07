@@ -638,6 +638,22 @@ impl Index {
             .map_err(sql_err)
     }
 
+    /// Whether the index holds anything at all. `event_count` scans the whole
+    /// table, which is fine when the number is the answer and wrong when only
+    /// "is it empty" is — the boot path asks the second question.
+    pub fn has_events(&self) -> Result<bool> {
+        match self
+            .conn
+            .query_row("SELECT 1 FROM event LIMIT 1", [], |_| Ok(()))
+        {
+            Ok(()) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            // A broken schema is not "empty": saying so keeps the boot publish
+            // honest instead of quietly skipping it.
+            Err(e) => Err(sql_err(e)),
+        }
+    }
+
     /// Event totals per tool, currently in the index.
     pub fn per_tool_counts(&self) -> Result<BTreeMap<String, u64>> {
         let mut stmt = self

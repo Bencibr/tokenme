@@ -7,6 +7,7 @@ mod scan_log;
 mod panel;
 mod servers;
 mod settings;
+mod snapshot;
 mod tray;
 mod updater;
 

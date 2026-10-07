@@ -20,7 +20,7 @@ pub const HEATMAP_DAYS: i64 = 371;
 /// panel after its last mention.
 pub const LOG_ROW_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
     pub counts: TokenCounts,
     pub total_tokens: f64,
@@ -37,7 +37,7 @@ pub struct Summary {
     pub unpriced: Vec<UnpricedModel>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnpricedModel {
     pub tool: String,
     pub model: String,
@@ -45,7 +45,7 @@ pub struct UnpricedModel {
     pub requests: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub key: String,
     pub label: String,
@@ -58,7 +58,7 @@ pub struct Item {
     pub priced: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Breakdown {
     pub tools: Vec<Item>,
     pub models: Vec<Item>,
@@ -67,7 +67,7 @@ pub struct Breakdown {
     pub skills: Vec<Item>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Window {
     /// `2026-09-23`, `2026-W39`, `2026-09`.
     pub key: String,
@@ -83,7 +83,7 @@ pub struct Window {
     pub breakdown: Breakdown,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeatCell {
     pub date: String,
     pub total_tokens: f64,
@@ -94,7 +94,7 @@ pub struct HeatCell {
 /// One local-hour bucket of today, for the panel's 今日 chart. The hour is the
 /// vec index (0..24 always present), so the frontend never guesses which slots
 /// exist and an hour that has not happened yet is a zero, not a gap.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HourCell {
     pub total_tokens: f64,
     pub cost: f64,
@@ -116,7 +116,7 @@ pub enum QuotaOrigin {
     Budget,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaView {
     pub tool: String,
     pub used_percent: f64,
@@ -131,7 +131,7 @@ pub struct QuotaView {
     pub origin: QuotaOrigin,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceStatus {
     pub id: String,
     pub display: String,
@@ -173,13 +173,13 @@ impl MachineScope {
 /// this machine. Every origin with any indexed row appears (a remote that has
 /// not synced today still gets a row, with 0); the panel joins ages from
 /// [`Report::syncs`] and hides the whole control when no remote exists.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MachineView {
     pub origin: String,
     pub today_tokens: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRow {
     pub tool: String,
     pub session: String,
@@ -192,7 +192,7 @@ pub struct SessionRow {
     pub requests: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub generated_at_ms: i64,
     /// Local UTC offset, e.g. `+08:00`. All period boundaries are local time.
@@ -214,6 +214,12 @@ pub struct Report {
     /// snapshots, the browser preview) read as "already settled".
     #[serde(default)]
     pub quotas_pending: bool,
+    /// This payload is last-known numbers restored from disk, not a fresh fold
+    /// over the index: the previous run published them and this run is still
+    /// scanning. The panel labels them as such and must not read them as a
+    /// stalled engine. Defaults off — a report without the field is live.
+    #[serde(default)]
+    pub from_previous_run: bool,
     pub sources: Vec<SourceStatus>,
     /// One record per origin whose Linux bundle was successfully merged into
     /// this index, newest first — the panel's sync-health badge reads this.
@@ -948,6 +954,9 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         // The caller (the panel engine) flips this when its boot publish
         // skipped the probes; summarize itself has no opinion.
         quotas_pending: false,
+        // A fold built here is this run's own. Only the panel's boot restore
+        // marks a report as last-known, and it sets the flag itself.
+        from_previous_run: false,
         sources: opts.sources.clone(),
         syncs: Vec::new(),
         pricing: opts.pricing.meta().clone(),
@@ -1588,6 +1597,9 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
         hourly,
         quotas,
         quotas_pending: false,
+        // A fold built here is this run's own. Only the panel's boot restore
+        // marks a report as last-known, and it sets the flag itself.
+        from_previous_run: false,
         sources: opts.sources.clone(),
         syncs: facts.syncs.clone(),
         pricing: opts.pricing.meta().clone(),
