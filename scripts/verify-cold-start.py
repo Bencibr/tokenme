@@ -96,9 +96,19 @@ def launch(app):
     `TOKENME_SHOW_PANEL` is the app's own QA hook (see lib.rs): the window is
     ordered front as early as the process can manage, which is the worst case for
     the page and therefore the case worth measuring. The bundle's binary is exec'd
-    directly because `open -a` does not pass the environment through.
+    directly because `open -a` does not pass the environment through. It is found
+    by listing `Contents/MacOS`, not by guessing its name: `mainBinaryName` has
+    been `tokenme`, `TokenMe`, and `tokenme-bar` across this product's life, and a
+    hardcoded name here would silently measure nothing after a rename.
     """
-    binary = Path(app) / "Contents" / "MacOS" / "tokenme"
+    binaries = sorted(
+        p for p in (Path(app) / "Contents" / "MacOS").glob("*") if p.is_file()
+    )
+    if not binaries:
+        sys.exit(f"verify-cold-start: {app} is not a built app bundle")
+    if len(binaries) > 1:
+        sys.exit(f"verify-cold-start: {app} has more than one executable: {binaries}")
+    binary = binaries[0]
     if not binary.exists():
         sys.exit(f"verify-cold-start: {binary} is not a built app bundle")
     env = dict(os.environ, TOKENME_SHOW_PANEL="1")
