@@ -11,9 +11,12 @@
 //!
 //! The token is the file the CLI writes: `~/.kimi-code/credentials/<name>.json`,
 //! mode 0600, snake_case wire (`packages/oauth/src/storage.ts`), field
-//! `access_token`. **The refresh token is never used** — refreshing would rotate a
-//! credential the CLI holds open and can invalidate its own session; an expired
-//! access token simply yields 401 and no rows, which is the honest answer.
+//! `access_token`. That token lives 15 minutes, so a bar that never renewed would
+//! be blank most of the day: when `/usages` declines the current one, the probe
+//! exchanges the file's `refresh_token` through the vendor's own contract and
+//! writes the rotated pair back atomically — see [`refresh_credentials`]. The
+//! refresh is a last resort, never a first move, and a failed exchange leaves the
+//! file untouched.
 //!
 //! ## When no CLI credential exists: the desktop client's own key
 //!
@@ -141,10 +144,9 @@ fn refresh_credentials() -> Option<String> {
         std::time::Duration::from_secs(20),
     ) {
         Some(pair) => pair,
-        None => { eprintln!("[kimi] DBG refresh transport failed"); return None }
+        None => return None,
     };
     if body.get("access_token").and_then(Value::as_str).is_none() {
-        eprintln!("[kimi] DBG refresh rejected: {}", body);
         return None;
     }
     let access = body.get("access_token").and_then(Value::as_str)?.trim().to_string();

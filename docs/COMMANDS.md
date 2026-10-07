@@ -66,7 +66,33 @@ Newest live quota sample each source reported: rolling 5-hour pools, weekly wind
 tokenme quota
 ```
 
-Probes are read-only and cached per vendor TTL. Cline's probe rotates its OAuth token in place on refresh.
+Answers are cached under one shared 5-minute TTL (`crates/usage-quota/src/lib.rs::TTL`; one JSON file per tool under the OS config directory). This command waits up to 30 seconds for a live probe — the panel waits 5 — and a probe that overruns the wait still contributes its previous answer inside a 6-hour grace window. Pausing a probe whose host app has quit is the panel's `host_exit_pause` setting, not something the CLI does.
+
+Most probes only read credentials. Exactly three write a rotated one back, each into the tool's own store, atomically: **MiniMax Code** (exchanges the refresh token in its `auth.json` when the stored access token is within 2 minutes of expiry, under the vendor's own lock), **Kimi Code** (exchanges it only after `/usages` declines the stored token), and **Cline** (rotates its gateway token ahead of expiry). Every other probe writes nothing — the WorkBuddy credential on disk comes from `tokenme workbuddy-login`, a command you ran, not from a probe.
+
+## dsh-doctor
+
+DSH accuracy audit: the desktop app's own projection ledger (`tokenUsage`) printed next to what the index holds, per session, with a `status` of `ok`, `MISMATCH`, `v3 stream`, `not indexed` or `indexed but no projection`. Notes carry the structural reasons for honest drift — inherited pre-v4 events, subagent spend that lives outside `tokenUsage`. No flags.
+
+```bash
+tokenme dsh-doctor
+```
+
+## codex-doctor
+
+Codex accuracy audit: every rollout re-parsed from scratch (cursor 0, no manifest, no dedupe) and aggregated per session, next to the indexed totals. Codex keeps no vendor-side ledger, so the replay is the independent truth — a `MISMATCH` row means the indexer dropped a call or counted it twice. No flags.
+
+```bash
+tokenme codex-doctor
+```
+
+## workbuddy-login
+
+Log in to WorkBuddy for the quota probe: asks the vendor for a state, opens Tencent SSO in your browser, then polls up to 5 minutes for the token. What it saves lands in `workbuddy-auth.json` under the OS config directory (the probe reads it, and never refreshes it); nothing is stored when the window elapses. No flags.
+
+```bash
+tokenme workbuddy-login
+```
 
 ## pricing
 
@@ -99,6 +125,8 @@ tokenme index --rebuild             # drop and re-read the retention window
 tokenme index --prune               # drop events older than retention
 tokenme index --force               # steal the ingest lease from a dead process
 ```
+
+Every command verifies the index image when it opens it (`PRAGMA quick_check`). A damaged image is not an error you have to act on: it is moved aside as `index.db.corrupt-<timestamp>` (with its `-wal` / `-shm`, so the rebuild cannot inherit them), a fresh empty index takes its place, a `warning:` line says so on stderr, and the next ingest refills everything from the tools' own logs. A file that cannot be opened at all is quarantined the same way, silently, before the command starts.
 
 ## icons
 
@@ -136,4 +164,4 @@ Limits and trust: payload rows are capped (the manifest's count plus slack) so a
 | :--- | :--- | :--- | :--- |
 | SQLite index | `~/Library/Application Support/tokenme/index.db` | `~/.local/share/tokenme/index.db` | `%LOCALAPPDATA%\tokenme\index.db` |
 | Settings | `~/Library/Application Support/tokenme/settings.json` | `~/.config/tokenme/settings.json` | `%APPDATA%\tokenme\settings.json` |
-| Quota cache | `<data dir>/tokenme/quota/*.json` | same pattern | same pattern |
+| Quota cache | `<config dir>/tokenme/quota/*.json` | same pattern | same pattern |
