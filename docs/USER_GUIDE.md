@@ -1,6 +1,6 @@
 # TokenMe User Guide
 
-> Version: 0.1.5 · Updated: 2026-10-05 · Audience: daily users · Covers both the CLI and the menu-bar panel
+> Version: 0.1.5 · Updated: 2026-10-07 · Audience: daily users · Covers both the CLI and the menu-bar panel
 
 ## 1. Install
 
@@ -25,7 +25,7 @@ macOS menu-bar panel (optional, ad-hoc signed — right-click → Open on first 
 ./scripts/build-macos.sh          # produces TokenMe.app + a drag-install DMG
 ```
 
-The panel is not macOS-only: on Windows `pnpm tauri build --bundles nsis` in `apps/tokenme-bar` lands `TokenMe_<v>_x64-setup.exe` (released as `tokenme-windows-x64-setup.exe`), and `scripts/build-windows.ps1` builds the `tokenme.exe` CLI there.
+The panel is not macOS-only: on Windows `pnpm tauri build --bundles nsis` in `apps/tokenme-bar` lands `TokenMe_<v>_x64-setup.exe`, and `scripts/build-windows.ps1` builds the `tokenme.exe` CLI there.
 
 ## 2. First run
 
