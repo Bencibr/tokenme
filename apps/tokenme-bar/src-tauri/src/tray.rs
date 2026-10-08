@@ -428,7 +428,8 @@ fn promote_taskbar_icon_once(exe: &std::path::Path, attempt: u32) -> bool {
                 let entry = &entry[..entry.iter().position(|&c| c == 0).unwrap_or(entry.len())];
                 let resolved = resolve_known_folder(entry);
                 if let Some(entry) = resolved {
-                    if eq_ignore_ascii(&entry, &want[..want.len() - 1]) {
+                    // `want` carries no terminator: the whole string compares.
+                    if eq_ignore_ascii(&entry, &want) {
                     let mut current: u32 = 0;
                     let mut cur_len = std::mem::size_of::<u32>() as u32;
                     let present = RegGetValueW(
