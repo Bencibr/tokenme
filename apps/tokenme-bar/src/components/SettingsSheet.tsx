@@ -321,13 +321,6 @@ export function SettingsSheet({
       const locked = probing ? probeLocked : muteLocked;
       return (
         <>
-          <div className="sheet-subhd">
-            <button type="button" className="sheet-back" onClick={() => setList(null)}>
-              <span aria-hidden="true">‹</span>
-              {t("set.back")}
-            </button>
-            <h2 className="sec-label">{probing ? t("set.perprobe") : t("set.muted")}</h2>
-          </div>
           {/* The count is this page's live state — under a lock nothing is live, and
               a "0 polling" line would contradict the greyed switches below it. */}
           {locked ? (
@@ -564,7 +557,21 @@ export function SettingsSheet({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sheet-hd">
-          <h2 className="sec-label">{t("set.title")}</h2>
+          {/* A subpage promotes its back button into the title slot: one row
+              instead of two, and "设置" was never information. */}
+          <div className="sheet-hd-main">
+            {list ? (
+              <>
+                <button type="button" className="sheet-back" onClick={() => setList(null)}>
+                  <span aria-hidden="true">‹</span>
+                  {t("set.back")}
+                </button>
+                <h2 className="sec-label">{list === "probe" ? t("set.perprobe") : t("set.muted")}</h2>
+              </>
+            ) : (
+              <h2 className="sec-label">{t("set.title")}</h2>
+            )}
+          </div>
           <button type="button" className="sheet-close" aria-label={t("set.close.a11y")} onClick={onClose}>
             <IconClose size={12} />
           </button>

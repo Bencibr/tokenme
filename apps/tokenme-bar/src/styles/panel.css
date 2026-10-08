@@ -2323,24 +2323,29 @@
   text-align: center;
 }
 
-/* Locked is honest, not merely dimmed: the switches stay readable so the page
-   still says what it would do, and the note above says why nothing happens. */
-.sheet-row-locked,
-.sheet-list-locked {
-  opacity: 0.5;
+/* Locked is honest, not merely dimmed: dimming the whole list washed every
+   label into grey-on-grey. Instead the hierarchy does the work — labels step
+   down to secondary ink, and only the switches (the actually-dead part) go
+   translucent, so the page still says what it would do and the note above
+   says why nothing happens. */
+.sheet-row-locked .sheet-label,
+.sheet-list-locked .sheet-label {
+  color: var(--ink-3);
 }
 
 .sheet-row-locked .switch,
 .sheet-list-locked .switch {
+  opacity: 0.4;
   pointer-events: none;
 }
 
-.sheet-subhd {
+/* The header's left group: back button + subpage title share the title slot,
+   so a subpage costs no extra row. */
+.sheet-hd-main {
   display: flex;
-  flex: none;
   align-items: center;
-  gap: var(--s2);
-  padding: var(--s1) 0;
+  gap: var(--s1);
+  min-width: 0;
 }
 
 .sheet-back {
@@ -2372,20 +2377,39 @@
   color: var(--ink-3);
 }
 
+/* The locked note takes the summary's exact slot and rhythm (same padding,
+   same hairline underneath) so flipping between the two states doesn't
+   reflow the page — only the slab of the old warn box is gone. */
 .sheet-locknote {
   flex: none;
-  margin: var(--s2) 0 0;
-  padding: 6px 8px;
+  margin: 0;
+  padding: 6px 0 7px;
+  border-bottom: 1px solid var(--hair);
   font-size: var(--t-meta);
   line-height: 1.5;
   color: var(--warn);
-  background: var(--warn-soft);
-  border-radius: var(--r-md);
+}
+
+.sheet-locknote::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 1px;
 }
 
 /* Tool rows carry no hint line, which is what buys ~10 rows per screen here. */
 .sheet-list .sheet-row {
   padding: 8px 0;
+}
+
+/* The note above the list already ends in the hairline; the first row's own
+   border-top would stack right under it and read as one thick rule. */
+.sheet-list .sheet-row:first-child {
+  border-top: 0;
 }
 
 .sheet-list .sheet-label {
@@ -2552,6 +2576,14 @@
   overflow-y: auto;
   min-height: 0;
   padding: 4px 16px 16px;
+  /* no scrollbar: the wheel/trackpad is the affordance, the panel is narrow
+     (same call `.scroll` made) — the bar sat inside the sheet's 16px inset
+     and read as a stray rule down an already hairline-heavy page */
+  scrollbar-width: none;
+}
+
+.sheet-body::-webkit-scrollbar {
+  display: none;
 }
 
 .sheet-srv .sheet-foot {
