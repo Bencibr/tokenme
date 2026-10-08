@@ -188,7 +188,10 @@ fn fetch_release() -> Option<Release> {
     })
 }
 
-/// Compare x.y.z; a non-release current version (dev) never updates.
+/// Compare x.y.z; a non-release current version (dev) never updates. The higher
+/// digit has to dominate: the flat `a[0] > b[0] || a[1] > b[1] || …` this
+/// replaced let the patch digit alone decide, so 0.1.6 counted as newer than
+/// 0.2.0. Tuple order is exactly the componentwise rule.
 fn is_newer(latest: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
         v.trim().trim_start_matches('v').split('.').map(|n| n.parse().unwrap_or(0)).collect()
@@ -197,28 +200,41 @@ fn is_newer(latest: &str, current: &str) -> bool {
     if a.len() != 3 || b.len() != 3 {
         return false;
     }
-    a[0] != b[0] && a[0] > b[0] || a[1] != b[1] && a[1] > b[1] || a[2] > b[2]
+    (a[0], a[1], a[2]) > (b[0], b[1], b[2])
+}
+
+/// The "nothing to do" answer, carrying the version the panel already runs.
+fn uptodate_status() -> UpdateStatus {
+    let current = env!("CARGO_PKG_VERSION");
+    UpdateStatus {
+        phase: "uptodate".into(),
+        message: match crate::lang::get() {
+            crate::lang::Lang::Zh => format!("已是最新版本 v{current}"),
+            crate::lang::Lang::En => format!("Already up to date (v{current})"),
+        },
+        version: None,
+    }
 }
 
 /// Phase 1: compare the installed version with GitHub's latest release.
 #[tauri::command]
 pub async fn check_update(_app: AppHandle) -> Result<UpdateStatus, String> {
-    let current = env!("CARGO_PKG_VERSION").to_string();
     let Some(release) = fetch_release() else {
-        // 网络不通/清单不可读是常态（离线、公司网），静默——不给用户一行无行动的错误。
-        return Ok(UpdateStatus { phase: "quiet".into(), message: String::new(), version: None });
-    };
-    let l = crate::lang::get();
-    if !is_newer(&release.version, &current) {
+        // 网络不通/清单不可读是常态（离线、公司网）。后台路径（启动自检、开关
+        // 开启）按 phase 过滤，这一行渲染不出来；手动点“立即检查”的用户需要一句
+        // 解释，所以 message 带上——静默与否留给调用方决定。
         return Ok(UpdateStatus {
-            phase: "uptodate".into(),
-            message: match l {
-                crate::lang::Lang::Zh => format!("已是最新版本 v{current}"),
-                crate::lang::Lang::En => format!("Already up to date (v{current})"),
-            },
+            phase: "quiet".into(),
+            message: crate::lang::get()
+                .str("检查失败：无法连接更新源", "Check failed — cannot reach the update source")
+                .into(),
             version: None,
         });
+    };
+    if !is_newer(&release.version, env!("CARGO_PKG_VERSION")) {
+        return Ok(uptodate_status());
     }
+    let l = crate::lang::get();
     // 底部一行已经紧挨着正在运行的版本号，这里再报一遍就是重复。
     Ok(UpdateStatus {
         phase: "available".into(),
@@ -253,6 +269,11 @@ pub async fn download_update(app: AppHandle) -> Result<UpdateStatus, String> {
         let Some(release) = fetch_release() else {
             return Err(crate::lang::get().str("下载失败：无法连接 GitHub", "Download failed: cannot reach GitHub").into());
         };
+        // 检查是这一步的闸门，但重新拉取可能又落回已装的版本（tag 被重指、或调用
+        // 方跳过了检查）：拿同版本换包只会让面板白白退出、重启一次。
+        if !is_newer(&release.version, env!("CARGO_PKG_VERSION")) {
+            return Ok(uptodate_status());
+        }
         let resp: ureq_client::http::Response<ureq_client::Body> = agent()
             .get(&release.zip_url)
             .call()
@@ -495,6 +516,11 @@ mod tests {
         assert!(is_newer("1.0.0", "0.9.9"));
         // A dev build never self-updates.
         assert!(!is_newer("0.1.3", "0.0.0.0-dev"));
+        // A higher digit only speaks once the ones above it are equal: a bigger
+        // patch must not outrank a bigger minor (the flat-or form did).
+        assert!(!is_newer("0.1.6", "0.2.0"));
+        assert!(!is_newer("0.1.10", "0.2.0"));
+        assert!(is_newer("0.1.10", "0.1.9"), "patch digits compare numerically, not lexically");
     }
 
     /// The script is plain sh (the only interpreter guaranteed on a fresh
