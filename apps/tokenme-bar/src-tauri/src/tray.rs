@@ -275,7 +275,136 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(on_menu_event)
         .on_tray_icon_event(on_tray_event)
         .build(app)?;
+    #[cfg(target_os = "windows")]
+    promote_taskbar_icon();
     Ok(())
+}
+
+/// Win11 files every tray icon under HKCU\Control Panel\NotifyIconSettings,
+/// keyed by a hash of the exe path, and a fresh entry starts hidden inside the
+/// overflow flyout (IsPromoted absent) — every new install path would surface
+/// its tray icon only after a manual trip through taskbar settings. The tray
+/// is this app's whole interface, so an absent value is flipped to promoted;
+/// a value that is present was set by the user (shown or hidden) and is never
+/// touched. Explorer creates the entry only after the icon is first shown, so
+/// the lookup retries on its own thread and stops at the first decision.
+#[cfg(target_os = "windows")]
+fn promote_taskbar_icon() {
+    std::thread::Builder::new()
+        .name("tokenme-tray-promote".into())
+        .spawn(|| {
+            let exe = match std::env::current_exe() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            for _ in 0..24 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if promote_taskbar_icon_once(&exe) {
+                    return;
+                }
+            }
+        })
+        .ok();
+}
+
+/// One lookup pass. `true` = decided (promoted, or the user already chose).
+#[cfg(target_os = "windows")]
+fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
+        HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    unsafe {
+        let mut root = std::ptr::null_mut();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            wide("Control Panel\\NotifyIconSettings").as_ptr(),
+            0,
+            KEY_READ | KEY_SET_VALUE,
+            &mut root,
+        ) != 0
+        {
+            return false;
+        }
+        let want: Vec<u16> = exe.to_string_lossy().encode_utf16().collect();
+        let mut decided = false;
+        let mut index: u32 = 0;
+        loop {
+            let mut name = [0u16; 256];
+            let mut len = 256u32;
+            if RegEnumKeyExW(
+                root,
+                index,
+                name.as_mut_ptr(),
+                &mut len,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
+            {
+                break;
+            }
+            index += 1;
+            let mut sub = std::ptr::null_mut();
+            if RegOpenKeyExW(root, name.as_ptr(), 0, KEY_READ | KEY_SET_VALUE, &mut sub) != 0 {
+                continue;
+            }
+            let mut path = [0u16; 520];
+            let mut path_len = std::mem::size_of_val(&path) as u32;
+            let mut vtype: u32 = 0;
+            let got = RegGetValueW(
+                sub,
+                std::ptr::null(),
+                wide("ExecutablePath").as_ptr(),
+                RRF_RT_REG_SZ,
+                &mut vtype,
+                path.as_mut_ptr() as _,
+                &mut path_len,
+            );
+            if got == 0 {
+                let entry = &path[..path.len() >> 1];
+                let entry = &entry[..entry.iter().position(|&c| c == 0).unwrap_or(entry.len())];
+                if entry.eq_ignore_ascii_case(&want[..want.len() - 1]) {
+                    let mut current: u32 = 0;
+                    let mut cur_len = std::mem::size_of::<u32>() as u32;
+                    let present = RegGetValueW(
+                        sub,
+                        std::ptr::null(),
+                        wide("IsPromoted").as_ptr(),
+                        RRF_RT_REG_DWORD,
+                        std::ptr::null_mut(),
+                        &mut current as *mut u32 as _,
+                        &mut cur_len,
+                    ) == 0;
+                    if !present {
+                        let one: u32 = 1;
+                        RegSetValueExW(
+                            sub,
+                            wide("IsPromoted").as_ptr(),
+                            0,
+                            REG_DWORD,
+                            &one as *const u32 as _,
+                            4,
+                        );
+                        crate::logging::info("tray: promoted the taskbar icon (fresh entry)");
+                    }
+                    decided = true;
+                }
+            }
+            RegCloseKey(sub);
+            if decided {
+                break;
+            }
+        }
+        RegCloseKey(root);
+        decided
+    }
 }
 
 fn on_tray_event(tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent) {
