@@ -21,6 +21,14 @@ Usage:
   scripts/verify-cold-start.py                       # whole display, auto bbox
   scripts/verify-cold-start.py --app dist/TokenMe.app --duration 10
   scripts/verify-cold-start.py --region 1500,30,420,700   # points, top-left origin
+  scripts/verify-cold-start.py --movie old.mov       # re-read a recording, no relaunch
+
+Exit codes: 0 measured and the note moved; 1 measured and the note was frozen (the
+loading animation is missing); 2 no measurement (locked or sleeping display).
+
+`--movie` analyses a recording this script already made — which is how the motion
+gate got its negative control: build 113's own movie, the one that started the
+complaint, must come back "frozen".
 
 `--region` is in POINTS with a top-left origin (what `screencapture -R` takes) and
 only narrows the recording; the panel is still located by its pixels. A Retina
@@ -48,6 +56,16 @@ ACCENT_V_MIN = 60
 CHANGED_DELTA = 28  # per-channel mean-abs difference that counts as "not wallpaper"
 BLANK_INK = 1.5  # % of the panel's own area that differs from its background
 REPORT_INK = 4.5  # measured here: a loading card sits near 1 %, a full report 6–10 %
+MOTION_DELTA = 24  # per-pixel change between two note frames that counts as movement
+MOTION_PAIR_S = 0.3  # note frames this far apart are compared (a ring must have swept)
+MOTION_PIXELS = 40  # the frozen note's own noise floor measured here is 12 (build 113's
+# movie, the recording that started this: label pixels, no ring, 127 note frames, and
+# 12 teal pixels still "moved" from video encoding on the translucent sheet). A turning
+# ring is not near that floor: the drawn control gives 332. So the gate sits at 40 —
+# above the floor by 3×, below a real sweep by 8×.
+
+FAINT_S_MIN = 35  # the ring's inner arc is stroked at 28 % alpha, so the strict accent
+FAINT_V_MIN = 45  # gate (ACCENT_S/V_MIN) never sees it; motion needs the loose one
 
 
 def run(cmd):
@@ -244,6 +262,124 @@ def accent_count(crop):
     return int(m.sum())
 
 
+def tealish(crop):
+    """The loose teal gate: hue only, plus a floor low enough for 28 %-alpha strokes.
+
+    `accent_count` asks for a saturated, bright teal, which is right for the shell
+    mark and the chart bars and wrong for the ring's faint inner arc — that arc is
+    drawn at 0.28 alpha over a translucent sheet and lands near hue 84, sat 40. The
+    motion gate wants every pixel the ring touches, so it asks loosely and leans on
+    the *change* test to reject the wallpaper, which never changes.
+    """
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    lo, hi = ACCENT_HUE_RANGE
+    return (
+        (hsv[..., 0] >= lo) & (hsv[..., 0] <= hi)
+        & (hsv[..., 1] >= FAINT_S_MIN) & (hsv[..., 2] >= FAINT_V_MIN)
+    )
+
+
+def note_rect(bbox, high=34, low=8, wide=20):
+    """The ring's footprint in *screen* points, from one panel bbox.
+
+    `set_boot_note` centres the ring+label group on the content view's own bounds and
+    the ring is the group's top piece, so the ring occupies roughly the panel centre
+    minus 31 pt to plus 4 pt vertically and ±17 pt horizontally. This rectangle is
+    computed once — from the first note frame — and then sliced out of every frame
+    unchanged, because the blob finder re-derives the panel's edges per frame and
+    they wobble by a point: re-centring on each frame slides a static label through
+    the sample and its teal glyph edges then read as motion. That is how the first
+    version of this gate scored build 113 — the recording with no ring at all — as
+    "animating". The bottom edge stops above the label's own glyphs where it can.
+    If the note stops being centred, or the ring moves within the group, this
+    rectangle has to move with it.
+    """
+    x, y, w, h = bbox
+    cy, cx = y + h // 2, x + w // 2
+    return cy - high, cy + low, cx - wide, cx + wide
+
+
+def swept_pixels(a, b, jitter=2):
+    """Fewest moved teal pixels between two note frames, over ±jitter pt alignment.
+
+    A window that really does nudge — or a blob whose edges the finder re-derives a
+    point apart — carries every static pixel of the label along with it, and those
+    glyph edges count as "moved". So each pair is scored at every candidate offset
+    and the *quietest* offset wins: a frozen note finds one that makes the two frames
+    agree (≈0 pixels), a ring that swept 97° finds none. Skipping this step is how
+    the first version of this gate called build 113 — the recording with no ring at
+    all — "animating", on 15 pixels of label jitter.
+    """
+    h, w = a.shape[:2]
+    base = a[jitter : h - jitter, jitter : w - jitter]
+    base_teal = tealish(base)
+    best = None
+    for dy in range(-jitter, jitter + 1):
+        for dx in range(-jitter, jitter + 1):
+            other = b[jitter + dy : h - jitter + dy, jitter + dx : w - jitter + dx]
+            changed = (
+                np.abs(base.astype(np.int16) - other.astype(np.int16)).mean(axis=2)
+                > MOTION_DELTA
+            )
+            count = int((changed & (base_teal | tealish(other))).sum())
+            best = count if best is None else min(best, count)
+    return best
+
+
+def note_motion(samples, drift=3):
+    """Did the boot note move? Samples are (t, band crop, (panel x, panel y)).
+
+    The complaint this answers is precise: the note *painted* (label pixels, teal
+    hue, ink where a human can read it) and nothing else changed for the whole wait.
+    So presence is not enough, and neither is "some frame differs" — the ring turns
+    once every 1.3 s, which at 60 fps is a ~4.6° step between neighbours: too small
+    to separate from video encoding noise. Frames MOTION_PAIR_S apart are a 97° step
+    on the outer arc, which is ~140 swept pixels against a static label's zero.
+
+    Only the note's own rectangle is compared (see `note_rect`), each pair is allowed
+    to align within ±2 pt (see `swept_pixels`), and a pair whose panel origin moved by
+    more than `drift` points is dropped — past that the screen-fixed rectangle is not
+    looking at the same sheet and says nothing either way.
+    """
+    pairs, best = 0, 0
+    origin = samples[0]
+    for t, band, (px, py) in samples[1:]:
+        if t - origin[0] < MOTION_PAIR_S or band.shape != origin[1].shape:
+            continue
+        if abs(px - origin[2][0]) > drift or abs(py - origin[2][1]) > drift:
+            continue
+        pairs += 1
+        best = max(best, swept_pixels(origin[1], band))
+    return pairs, best
+
+
+def self_test():
+    """The two cases this gate must never get wrong, drawn rather than recorded.
+
+    The real negative control is build 113's own movie, but that needs a display and
+    a recording; these two run anywhere and are what the metric is *for*: a ring that
+    turns must read as motion, and the same ring slid one point sideways — the exact
+    artefact that fooled the first version — must read as frozen.
+    """
+    teal = (170, 217, 48)  # #30d9aa in BGR
+    def ring(angle):
+        img = np.zeros((42, 40, 3), np.uint8)
+        cv2.ellipse(img, (20, 21), (14, 14), angle, 0, 200, teal, 3)
+        return img
+    frames = [ring(0), ring(97), ring(194)]
+    turned = note_motion([(i * (MOTION_PAIR_S + 0.1), f, (0, 0)) for i, f in enumerate(frames)])
+    nudged = note_motion(
+        [(i * (MOTION_PAIR_S + 0.1), np.roll(frames[0], (i, i), (0, 1)), (0, 0)) for i in range(3)]
+    )
+    ok = turned[1] >= MOTION_PIXELS and nudged[1] < MOTION_PIXELS
+    print(
+        f"self-test: turning ring → {turned[0]} pair(s), {turned[1]} swept px (want "
+        f"≥{MOTION_PIXELS}); same ring shifted 1 pt → {nudged[1]} swept px "
+        f"(want <{MOTION_PIXELS}): {'PASS' if ok else 'FAIL'}"
+    )
+    sys.exit(0 if ok else 1)
+
+
 def session_guard():
     """Refuse to measure a locked or sleeping display, and say why.
 
@@ -284,13 +420,26 @@ def main():
     ap.add_argument("--panel-size", help="override the panel's WxH in points (default: tauri.conf.json)")
     ap.add_argument("--out-dir", default="/tmp/tokenme-coldstart")
     ap.add_argument("--no-quit", action="store_true")
+    ap.add_argument(
+        "--movie",
+        help="re-analyse a recording this script already made; no relaunch, no capture",
+    )
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the motion gate on two drawn frames and exit (no display needed)",
+    )
     args = ap.parse_args()
+    if args.self_test:
+        self_test()
 
     out_dir = Path(args.out_dir)
-    session_guard()
+    if not args.movie:
+        session_guard()
     out_dir.mkdir(parents=True, exist_ok=True)
-    for stale in glob.glob(str(out_dir / "*.png")) + glob.glob(str(out_dir / "*.mov")):
-        os.remove(stale)
+    if not args.movie:
+        for stale in glob.glob(str(out_dir / "*.png")) + glob.glob(str(out_dir / "*.mov")):
+            os.remove(stale)
 
     if args.panel_size:
         w, h = [float(v) for v in args.panel_size.lower().split("x")]
@@ -299,7 +448,7 @@ def main():
         want = panel_size_from_config()
     print(f"verify-cold-start: looking for the panel at {want[0]:.0f}×{want[1]:.0f} points")
 
-    if not args.no_quit:
+    if not (args.no_quit or args.movie):
         # Kill by the names this bundle can actually produce, not by one hardcoded
         # spelling: `mainBinaryName` has been tokenme-bar, tokenme and TokenMe, and a
         # case-insensitive copy-over keeps the old one running. A surviving instance
@@ -326,12 +475,17 @@ def main():
         time.sleep(1.5)
 
     mov = str(out_dir / "cold.mov")
-    proc = start_movie(args.region, mov)
     preroll = 0.8  # frames must be flowing before anything moves
-    time.sleep(preroll)
-    launch(args.app)
-    time.sleep(max(0.2, args.duration - preroll))
-    stop_movie(proc, mov)
+    if args.movie:
+        if not Path(args.movie).exists():
+            sys.exit(f"verify-cold-start: no recording at {args.movie}")
+        mov = args.movie
+    else:
+        proc = start_movie(args.region, mov)
+        time.sleep(preroll)
+        launch(args.app)
+        time.sleep(max(0.2, args.duration - preroll))
+        stop_movie(proc, mov)
 
     cap = cv2.VideoCapture(mov)
     fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
@@ -339,15 +493,18 @@ def main():
         sys.exit(f"verify-cold-start: cannot read {mov} (empty recording? screen-recording permission?)")
     got = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
-    session_guard()
-    if got < args.duration * fps * 0.7:
-        # The display went to sleep mid-run: the recorder stops writing and the
-        # remaining seconds simply are not there. Reading that as "the panel never
-        # appeared" is how a measurement becomes a fiction.
-        sys.exit(
-            f"verify-cold-start: the recording covers {got / fps:.1f}s of the {args.duration:.1f}s "
-            "asked for — the display slept or locked mid-run. No verdict."
-        )
+    if not args.movie:
+        # Only a capture that is still running can lose frames to a sleeping display;
+        # a recording already on disk is a fixed object and gets judged as one.
+        session_guard()
+        if got < args.duration * fps * 0.7:
+            # The display went to sleep mid-run: the recorder stops writing and the
+            # remaining seconds simply are not there. Reading that as "the panel never
+            # appeared" is how a measurement becomes a fiction.
+            sys.exit(
+                f"verify-cold-start: the recording covers {got / fps:.1f}s of the {args.duration:.1f}s "
+                "asked for — the display slept or locked mid-run. No verdict."
+            )
     baseline, pre = movie_baseline(mov, args.region, args.native_width, preroll, fps)
     cap.release()
     frames = int(cv2.VideoCapture(mov).get(cv2.CAP_PROP_FRAME_COUNT))
@@ -359,6 +516,12 @@ def main():
 
     cap = cv2.VideoCapture(mov)
     prev_state, index, anchors, first, rejected = None, -1, [], {}, []
+    note_frames = []
+    rect = None  # the screen-fixed note rectangle, taken from the first note frame
+    # A re-analysis must not overwrite the frames that were the evidence for the run
+    # it re-reads, so its pictures land beside them under a different name.
+    shots = out_dir if not args.movie else out_dir / "recheck"
+    shots.mkdir(parents=True, exist_ok=True)
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -391,11 +554,17 @@ def main():
                 state = "shell"
             else:
                 state = "blank"
+            if state == "note":
+                if rect is None:
+                    rect = note_rect(bbox)
+                note_frames.append(
+                    (t, frame[rect[0] : rect[1], rect[2] : rect[3]], (x, y))
+                )
             anchors.append((t, x, y, w, h, ink))
         first.setdefault(state, (index, t, ink, acc, bbox))
         if state != prev_state:
             name = f"{index:04d}-{t:+.2f}s-{state}.png"
-            cv2.imwrite(str(out_dir / name), frame)
+            cv2.imwrite(str(shots / name), frame)
             print(
                 f"  frame {index:4d} t={t:+6.2f}s  {state:7s}  ink={ink:5.1f}%  accent={acc:6d}  "
                 f"bbox={bbox if bbox else '— panel not on screen'}  [saved {name}]"
@@ -403,7 +572,7 @@ def main():
             prev_state = state
     cap.release()
 
-    print(f"\nverify-cold-start: {index + 1} frames analysed, pictures in {out_dir}")
+    print(f"\nverify-cold-start: {index + 1} frames analysed, pictures in {shots}")
     print("  ink = the share of the panel's own area that differs from its background")
     for state in ("gone", "blank", "note", "shell", "content"):
         if state in first:
@@ -427,6 +596,36 @@ def main():
             f"  {len(rejected)} same-size blob(s) were rejected for not hanging off the menu "
             f"bar: {rejected[:4]} — another window, not the panel"
         )
+
+    # The animation gate. Ink and accent counts prove the note *painted*; they said
+    # nothing about build 113, whose recorded frames carry the label and a dead
+    # spinner — which is precisely the defect the user reported by eye and no number
+    # on this page could see. So the note is now also measured for motion, and a
+    # frozen note fails the run.
+    pairs, swept = note_motion(note_frames) if len(note_frames) > 1 else (0, 0)
+    span = (
+        f"{note_frames[0][0]:+.2f}s…{note_frames[-1][0]:+.2f}s"
+        if note_frames
+        else "—"
+    )
+    print(f"  boot note: {len(note_frames)} frame(s) over {span}, {pairs} pair(s) "
+          f"≥{MOTION_PAIR_S}s apart")
+    frozen = bool(note_frames) and pairs > 0 and swept < MOTION_PIXELS
+    if not note_frames:
+        print("  note motion: not measured — the native note never appeared as a frame "
+              "state (the page may have painted inside one frame interval)")
+    elif pairs == 0:
+        print(f"  note motion: inconclusive — the note was on screen for under "
+              f"{MOTION_PAIR_S}s, too short to tell a sweep from a still")
+    elif frozen:
+        print(f"  note motion: FROZEN — the largest sweep between any two note frames is "
+              f"{swept} moved teal pixel(s) in the note band, under the {MOTION_PIXELS} a "
+              "turning ring gives. The label painted and nothing spun.")
+    else:
+        print(f"  note motion: ANIMATING — {swept} teal pixel(s) changed place between "
+              f"note frames {MOTION_PAIR_S}s apart; that is the ring sweeping, not noise")
+    if frozen:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

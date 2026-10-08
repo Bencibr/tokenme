@@ -295,7 +295,7 @@ const BOOT_NOTE_TAG: isize = 0x746b_426f;
 
 #[cfg(target_os = "macos")]
 fn set_boot_note(app: &AppHandle, text: Option<&str>) {
-    use tauri_nspanel::cocoa::base::{id, nil};
+    use tauri_nspanel::cocoa::base::id;
     use tauri_nspanel::cocoa::foundation::{NSPoint, NSRect, NSSize};
     use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
 
@@ -312,18 +312,15 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
         let count: usize = msg_send![subviews, count];
         for index in 0..count {
             let view: id = msg_send![subviews, objectAtIndex: index];
+            // `tag` reads on every NSView; only NSControl can be *given* one, which
+            // is why both pieces of the note are controls (the label, and the ring's
+            // host). Sending `setTag:` to a plain NSView is an unrecognized selector,
+            // and objc's msg_send does not verify selectors: the exception unwinds
+            // into this main-thread callback — tao's `did_finish_launching`, a frame
+            // that cannot unwind — and aborts the whole app, logged only as "panic in
+            // a function that cannot unwind" (build 98 died this way on first open).
             let tag: isize = msg_send![view, tag];
-            // The spinner is reclaimed by class, not tag: NSProgressIndicator is an
-            // NSView, and NSView's `tag` is read-only — `setTag:` belongs to
-            // NSControl (the label below has it, the spinner does not). Sending it
-            // anyway is an unrecognized selector; objc's msg_send does not verify
-            // selectors by default, so the ObjC exception unwinds into this
-            // main-thread callback — tao's `did_finish_launching`, a frame that
-            // cannot unwind — and aborts the whole app, logged only as "panic in a
-            // function that cannot unwind" (build 98 died this way on first open).
-            let view_class: id = msg_send![view, class];
-            let spinner_class: id = msg_send![class!(NSProgressIndicator), class];
-            if tag == BOOT_NOTE_TAG || view_class == spinner_class {
+            if tag == BOOT_NOTE_TAG {
                 let _: () = msg_send![view, removeFromSuperview];
             }
         }
@@ -331,19 +328,27 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
         let bounds: NSRect = msg_send![content, bounds];
 
         // Motion, not just words. A static line on an empty sheet reads as a dead
-        // panel — which is exactly what this was reported as on 2026-10-07, in the
-        // ~3 s between the window's first frame and the page painting. The system
-        // spinner is the part that says work is happening; the label names the work.
-        let spinner_side = 16.0;
-        let spinner: id = msg_send![class!(NSProgressIndicator), alloc];
-        let _: () = msg_send![spinner, initWithFrame: NSRect {
+        // panel — reported that way on 2026-10-07, and again on 2026-10-08 with the
+        // system spinner already in the code: a spinning NSProgressIndicator paints
+        // nothing until its animation runs, and on a non-activating panel belonging
+        // to an accessory app (no dock icon, never active) it never runs. The
+        // recorded frame settled it — label pixels, no ring. So the motion is
+        // CoreAnimation, which composites whether or not the app is active, and it
+        // draws the panel's own dual half-ring: the same mark `index.html`'s shell
+        // and React's loading card spin, so native → page hands over one object
+        // keeping time rather than swapping one spinner for another.
+        let ring_side = 34.0;
+        let ring: id = msg_send![class!(NSControl), alloc];
+        let ring: id = msg_send![ring, initWithFrame: NSRect {
             origin: NSPoint { x: 0.0, y: 0.0 },
-            size: NSSize { width: spinner_side, height: spinner_side },
+            size: NSSize { width: ring_side, height: ring_side },
         }];
-        let _: () = msg_send![spinner, setStyle: 1isize]; // NSProgressIndicatorStyleSpinning
-        let _: () = msg_send![spinner, setIndeterminate: true];
-        let _: () = msg_send![spinner, setControlSize: 2usize]; // small
-        let _: () = msg_send![spinner, startAnimation: nil];
+        let _: () = msg_send![ring, setTag: BOOT_NOTE_TAG];
+        if boot_ring(ring, ring_side).is_err() {
+            // No ring beats a crash: the label still names the wait, and the page
+            // paints within seconds either way.
+            let _: () = msg_send![ring, removeFromSuperview];
+        }
 
         let c_text = match std::ffi::CString::new(text) {
             Ok(value) => value,
@@ -373,32 +378,163 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
         // not move the words.
         let size: NSSize = msg_send![label, fittingSize];
         let gap = 10.0;
-        let group_top = (bounds.size.height + spinner_side + gap + size.height) / 2.0;
-        let spinner_frame = NSRect {
+        let group_top = (bounds.size.height + ring_side + gap + size.height) / 2.0;
+        let ring_frame = NSRect {
             origin: NSPoint {
-                x: (bounds.size.width - spinner_side) / 2.0,
-                y: group_top - spinner_side,
+                x: (bounds.size.width - ring_side) / 2.0,
+                y: group_top - ring_side,
             },
-            size: NSSize { width: spinner_side, height: spinner_side },
+            size: NSSize { width: ring_side, height: ring_side },
         };
-        let _: () = msg_send![spinner, setFrame: spinner_frame];
+        let _: () = msg_send![ring, setFrame: ring_frame];
         let label_frame = NSRect {
             origin: NSPoint {
                 x: (bounds.size.width - size.width) / 2.0,
-                y: group_top - spinner_side - gap - size.height,
+                y: group_top - ring_side - gap - size.height,
             },
             size,
         };
         let _: () = msg_send![label, setFrame: label_frame];
         // Last subviews, so they sit above the web view: the page is transparent
         // until it paints, and the note has to survive exactly that interval.
-        let _: () = msg_send![content, addSubview: spinner];
+        let _: () = msg_send![content, addSubview: ring];
         let _: () = msg_send![content, addSubview: label];
     }
 }
 
-/// When this process came up — the clock the cold-start latencies are read on.
-/// `mark_launch` must be called at startup: a lazily initialised clock would
+/// The brand's two half-rings, stroked from bezier paths on CoreAnimation layers
+/// and counter-rotated: outer 160° counter-clockwise in 1.3 s, inner 160° (offset
+/// half a turn) clockwise in 0.9 s — the same geometry and cadence as
+/// `.loading-arc-hi` / `.loading-arc-lo` in panel.css and the boot shell's copy.
+///
+/// Every selector is asked before it is sent, and the first one this OS does not
+/// answer ends the attempt with its name: an unrecognized selector here would
+/// unwind through `did_finish_launching`, a frame that cannot unwind, and abort the
+/// app with no class name in the log. `NSBezierPath`'s `CGPath` is the young API in
+/// this list (macOS 14+), which is exactly the kind of thing not to assume.
+#[cfg(target_os = "macos")]
+unsafe fn boot_ring(host: tauri_nspanel::cocoa::base::id, side: f64) -> Result<(), &'static str> {
+    use std::ffi::c_char;
+    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use tauri_nspanel::objc::runtime::Sel;
+    use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
+
+    let can = |target: id, selector: Sel| -> bool {
+        let answered: bool = msg_send![target, respondsToSelector: selector];
+        answered
+    };
+    // Each guard takes a whole `sel!(…)` expression: a selector is not a single
+    // `tt` in macro input (`setPath:` lexes as two tokens), and `$sel:expr` is how
+    // `sel!`'s own declaration accepts it.
+    macro_rules! need {
+        ($target:expr, $($selector:expr => $name:literal),+ $(,)?) => {
+            $( if !can($target, $selector) { return Err($name); } )+
+        };
+    }
+    let text = |bytes: &[u8]| -> id {
+        let value: id = msg_send![class!(NSString), stringWithUTF8String: bytes.as_ptr() as *const c_char];
+        value
+    };
+
+    let path_class = class!(NSBezierPath);
+    let shape_class = class!(CAShapeLayer);
+    let anim_class = class!(CABasicAnimation);
+    need!(host, sel!(setWantsLayer:) => "NSView.setWantsLayer:");
+    let _: () = msg_send![host, setWantsLayer: true];
+    let layer: id = msg_send![host, layer];
+    if layer.is_null() {
+        return Err("NSView.layer");
+    }
+    need!(layer, sel!(addSublayer:) => "CALayer.addSublayer:");
+    // `respondsToSelector:` on a class answers for instance methods, which is what
+    // is being asked here; the constructors (`bezierPath`, `layer`) are class
+    // methods and are checked by trying them.
+    let path_probe: id = msg_send![path_class, bezierPath];
+    if path_probe.is_null() {
+        return Err("NSBezierPath.bezierPath");
+    }
+    need!(
+        path_probe,
+        sel!(appendArcWithCenter:radius:startAngle:endAngle:) =>
+            "NSBezierPath.appendArcWithCenter:radius:startAngle:endAngle:",
+        sel!(CGColor) => "NSBezierPath.CGPath"
+    );
+    let shape_probe: id = msg_send![shape_class, layer];
+    if shape_probe.is_null() {
+        return Err("CAShapeLayer.layer");
+    }
+    need!(
+        shape_probe,
+        sel!(setPath:) => "CAShapeLayer.setPath:",
+        sel!(setStrokeColor:) => "CAShapeLayer.setStrokeColor:",
+        sel!(setFillColor:) => "CAShapeLayer.setFillColor:",
+        sel!(setLineWidth:) => "CAShapeLayer.setLineWidth:",
+        sel!(setLineCap:) => "CAShapeLayer.setLineCap:",
+        sel!(setFrame:) => "CALayer.setFrame:",
+        sel!(addAnimation:forKey:) => "CALayer.addAnimation:forKey:"
+    );
+    let anim_probe: id = msg_send![anim_class, alloc];
+    let anim_probe: id = msg_send![anim_probe, init];
+    need!(
+        anim_probe,
+        sel!(setFromValue:) => "CABasicAnimation.setFromValue:",
+        sel!(setToValue:) => "CABasicAnimation.setToValue:",
+        sel!(setDuration:) => "CABasicAnimation.setDuration:",
+        sel!(setRepeatCount:) => "CABasicAnimation.setRepeatCount:"
+    );
+
+    let teal: id = msg_send![class!(NSColor), colorWithSRGBRed: 0.19 green: 0.85 blue: 0.66 alpha: 1.0];
+    let faint: id = msg_send![class!(NSColor), colorWithSRGBRed: 0.19 green: 0.85 blue: 0.66 alpha: 0.28];
+    let clear: id = msg_send![class!(NSColor), clearColor];
+    need!(teal, sel!(CGColor) => "NSColor.CGColor");
+    let teal_cg: id = msg_send![teal, CGColor];
+    let faint_cg: id = msg_send![faint, CGColor];
+    let clear_cg: id = msg_send![clear, CGColor];
+
+    // viewBox 48 scaled to the host: the web card's r=20 outer and r=11 inner arcs,
+    // each 160° and offset half a turn, at the same 4 / 3.5 stroke widths.
+    let scale = side / 48.0;
+    let center = NSPoint { x: side / 2.0, y: side / 2.0 };
+    let arc = |radius: f64, from: f64, to: f64| -> id {
+        let path: id = msg_send![path_class, bezierPath];
+        let sweep = radius * scale;
+        let _: () = msg_send![path, appendArcWithCenter: center radius: sweep startAngle: from endAngle: to];
+        msg_send![path, CGPath]
+    };
+    let frame = NSRect { origin: NSPoint { x: 0.0, y: 0.0 }, size: NSSize { width: side, height: side } };
+    let turn = std::f64::consts::TAU;
+    for (cg_path, stroke, width, seconds, direction) in
+        [(arc(20.0, 20.0, 200.0), teal_cg, 4.0 * scale, 1.3, -turn), (arc(11.0, 200.0, 380.0), faint_cg, 3.5 * scale, 0.9, turn)]
+    {
+        if cg_path.is_null() {
+            return Err("NSBezierPath.CGPath answered NULL");
+        }
+        let shape: id = msg_send![shape_class, layer];
+        let _: () = msg_send![shape, setPath: cg_path];
+        let _: () = msg_send![shape, setFillColor: clear_cg];
+        let _: () = msg_send![shape, setStrokeColor: stroke];
+        let _: () = msg_send![shape, setLineWidth: width];
+        // kCALineCapRound is the string @"round"; the constant is not a symbol to
+        // link against from here.
+        let round = text(b"round\0");
+        let _: () = msg_send![shape, setLineCap: round];
+        let _: () = msg_send![shape, setFrame: frame];
+        let _: () = msg_send![layer, addSublayer: shape];
+
+        let key_path = text(b"transform.rotation.z\0");
+        let anim: id = msg_send![anim_class, animationWithKeyPath: key_path];
+        let zero: id = msg_send![class!(NSNumber), numberWithDouble: 0.0];
+        let end: id = msg_send![class!(NSNumber), numberWithDouble: direction];
+        let _: () = msg_send![anim, setFromValue: zero];
+        let _: () = msg_send![anim, setToValue: end];
+        let _: () = msg_send![anim, setDuration: seconds];
+        let _: () = msg_send![anim, setRepeatCount: f64::INFINITY];
+        let name = text(b"boot-spin\0");
+        let _: () = msg_send![shape, addAnimation: anim forKey: name];
+    }
+    Ok(())
+}
 /// start at its first use and report every latency as 0 ms.
 fn launch_instant() -> std::time::Instant {
     static CELL: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
