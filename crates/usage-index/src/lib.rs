@@ -424,6 +424,123 @@ impl Index {
             conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('index_id', ?1)", params![id])
                 .map_err(sql_err)?;
         }
+        // One-shot repair for rows first-written before replace-on-grow landed
+        // (77f8d95, v0.1.5 build 105): a cumulative session indexed mid-flight
+        // back then kept its first-write snapshot forever — the finished
+        // projection never changes again, so the replace path never sees a
+        // re-emit to lift it. Dropping the read cursors of the cumulative
+        // adapters makes the next pass re-read every projection from byte 0
+        // and re-emit its final totals; replace-on-grow raises the frozen rows
+        // to truth, a ledger that shrank meanwhile simply stays, and
+        // single-shot re-emits dedupe away. The list is exactly the adapters
+        // whose audit pinned this shape AND whose dedupe-key space is
+        // unchanged since 77f8d95 — a changed key space would leave the old
+        // rows stranded beside the new ones (double-count), which is why
+        // antigravity is NOT here: 61c4f96 redrew its buckets. This is
+        // deliberately not a SCHEMA_VERSION bump: the `sync:` memos in meta
+        // survive a wipe and would strand every merged bundle as "already
+        // imported" (see that constant).
+        const REPAIR_CUMULATIVE_RESCAN: &str = "repair:cumulative-rescan-1";
+        let repaired: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_CUMULATIVE_RESCAN],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if repaired.is_none() {
+            conn.execute(
+                "DELETE FROM file_state WHERE tool IN \
+                 ('dsh', 'hermes', 'funide', 'joycode', 'claude', 'atomcode')",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_CUMULATIVE_RESCAN],
+            )
+            .map_err(sql_err)?;
+        }
+        // One-shot re-seed for antigravity, which the cursor drop above cannot
+        // fix: 61c4f96 redrew its buckets (retry boxes no longer sum into their
+        // parent), so pre-61c4f96 rows hold inflated totals the replace path
+        // will never accept (a redrawn key strands the old rows beside the new
+        // ones; a same-key total only ever shrinks and loses to grow-on-write).
+        // The local rows go and the next pass re-reads the conversation
+        // databases wholesale under the new semantics. Merged rows are
+        // another machine's truth and stay — `source NOT LIKE 'linux:%'` — as
+        // does their rollup (`origin = ''` is this machine).
+        const REPAIR_ANTIGRAVITY_RESEED: &str = "repair:antigravity-reseed-1";
+        let reseeded: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_ANTIGRAVITY_RESEED],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if reseeded.is_none() {
+            conn.execute(
+                "DELETE FROM call WHERE event_id IN \
+                 (SELECT id FROM event WHERE tool = 'antigravity' AND source NOT LIKE 'linux:%')",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM quota WHERE event_id IN \
+                 (SELECT id FROM event WHERE tool = 'antigravity' AND source NOT LIKE 'linux:%')",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM event WHERE tool = 'antigravity' AND source NOT LIKE 'linux:%'",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM event_rollup WHERE tool = 'antigravity' AND origin = ''",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute("DELETE FROM file_state WHERE tool = 'antigravity'", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_ANTIGRAVITY_RESEED],
+            )
+            .map_err(sql_err)?;
+        }
+        // One-shot re-homing for the Trae split: rows read from a CN edition's
+        // store used to land under `trae` with a `trae#<turn>` key; they are
+        // their own tool now. The rollup is wiped wholesale — the moved rows
+        // cannot be un-summed from their day groups in place, and the cache
+        // rebuilds lazily from `event` on the next report read.
+        const REPAIR_TRAE_SPLIT: &str = "repair:trae-split-1";
+        let split: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_TRAE_SPLIT],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if split.is_none() {
+            conn.execute(
+                "UPDATE event SET tool = 'trae_cn', \
+                     dedupe_key = 'trae_cn#' || substr(dedupe_key, 6) \
+                 WHERE tool = 'trae' \
+                   AND (source LIKE '%/Trae CN/%' OR source LIKE '%/TRAE SOLO CN/%')",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_TRAE_SPLIT],
+            )
+            .map_err(sql_err)?;
+        }
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);

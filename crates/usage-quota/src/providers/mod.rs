@@ -70,6 +70,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(CatpawQuota),
         Box::new(ZcodeQuota),
         Box::new(DshQuota),
-        Box::new(TraeQuota),
+        Box::new(TraeQuota { cn: false }),
+        Box::new(TraeQuota { cn: true }),
     ]
 }

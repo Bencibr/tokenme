@@ -197,6 +197,37 @@ pub trait SourceAdapter: Send + Sync {
     }
 }
 
+/// A diagnostic note emitted by an adapter while it reads, drained by the
+/// indexer into the pass report and from there into scan.log / panel.log.
+///
+/// Exists because the loudest failures are the ones that answer "no data": a
+/// decrypt that returns an empty image and a recorded cursor looks identical
+/// to a quiet day, on every later pass. An adapter that swallows an error
+/// (transient or permanent) says so here instead — the note is the only trace
+/// a remote log reader gets.
+///
+/// Storage is thread-local because reads fan out across the indexer's worker
+/// threads; each read drains its own thread's notes (capped, so a per-row
+/// pusher cannot grow it without bound).
+pub fn read_note(msg: impl Into<String>) {
+    NOTES.with(|n| {
+        let mut n = n.borrow_mut();
+        if n.len() < 64 {
+            n.push(msg.into());
+        }
+    });
+}
+
+/// Take this thread's notes since the last drain. Indexer-internal: called
+/// once per file read, on the same thread that read ran on.
+pub fn drain_read_notes() -> Vec<String> {
+    NOTES.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
+thread_local! {
+    static NOTES: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +356,17 @@ mod tests {
         let refreshed = One.discover_cached(&DateFilter::default(), Some(snapshot));
         assert_eq!(refreshed.len(), 1);
         assert_eq!(refreshed[0].size, 5, "the stale snapshot numbers were restatted fresh");
+    }
+
+    #[test]
+    fn notes_drain_in_order_and_stop_at_the_cap() {
+        for i in 0..70 {
+            read_note(format!("note {i}"));
+        }
+        let drained = drain_read_notes();
+        assert_eq!(drained.len(), 64, "capped, so a per-row pusher cannot grow it");
+        assert_eq!(drained[0], "note 0");
+        assert_eq!(drained[63], "note 63");
+        assert!(drain_read_notes().is_empty(), "a drain empties the thread's notes");
     }
 }

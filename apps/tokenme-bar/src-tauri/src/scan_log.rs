@@ -9,6 +9,15 @@
 //!   classic double-scan, and `overlap_suspect` names the pair automatically
 //! - the pass counters (`scanned/changed/new/deduped/purged`) — a `new` spike
 //!   repeating over the same data is a cursor or dedupe failure
+//! - `new_by_tool` / `deduped_by_tool` / `scanned_by_tool`: the same counters
+//!   split per tool for this pass — a tool whose changed store re-read as zero
+//!   events shows bare maps here, and a root contributing zero files is a
+//!   missing store rather than an empty one
+//! - `errors`: reads that failed outright (their files are re-read next pass)
+//! - `notes`: what the adapters said while reading — a decrypt that answered
+//!   "no data" names its stage here, so "the user had a quiet day" and "the
+//!   store could not be read" are told apart from the file alone
+//! - `ver`/`build`/`os`/`arch`: which binary wrote the line
 //! - `dsh_sessions`: the per-session figures the index holds — a v4 session
 //!   must show exactly one event with monotonically growing totals
 //! - `dsh_audit`: those same sessions reconciled against DSH's own projection
@@ -174,6 +183,12 @@ pub fn pass(
     let line = json!({
         "ts": Local::now().to_rfc3339(),
         "proc": "panel",
+        // Which binary wrote this line: a scan.log arrives without panel.log
+        // often enough that its pass counters mean nothing without the build.
+        "ver": env!("CARGO_PKG_VERSION"),
+        "build": env!("TOKENME_BUILD_ID"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
         "reason": reason,
         "scanned": report.files_scanned,
         "changed": report.files_changed,
@@ -184,6 +199,14 @@ pub fn pass(
         "roots": roots,
         "overlap_suspect": overlap_suspect,
         "tools": tools,
+        // This pass's delta per tool: a healthy full-rescan re-read shows as
+        // deduped-by-tool ≈ the tool's whole history, an empty read as both
+        // maps bare.
+        "new_by_tool": report.per_tool_new,
+        "deduped_by_tool": report.per_tool_deduped,
+        "scanned_by_tool": report.scanned_by_tool,
+        "errors": report.errors,
+        "notes": report.notes,
         "dsh_regressions": dsh_regressions,
         "dsh_sessions": dsh_sessions,
         "codex_audit": codex_audit,

@@ -42,23 +42,70 @@ use usage_core::{
 };
 
 pub const TOOL_ID: &str = "trae";
+/// The CN builds are a separate host with a separate fleet, separate quotas
+/// and a separate account system — the panel carries them as their own tool.
+pub const TOOL_ID_CN: &str = "trae_cn";
 
 /// Path to a `database.db` (or a directory holding one), replacing every
 /// discovered install — the fixture and relocated-install escape hatch.
 pub const ENV_TRAE_AGENT_DB: &str = "TRAE_AGENT_DB";
+pub const ENV_TRAE_CN_AGENT_DB: &str = "TRAE_CN_AGENT_DB";
 
-/// `ModularData/ai-agent/database.db` under each edition's data dir. The
-/// international build uses `Trae`; the CN builds document theirs as
-/// `Trae CN` and `TRAE SOLO CN` — same store, same constant key.
-const EDITIONS: [&str; 3] = ["Trae", "Trae CN", "TRAE SOLO CN"];
+/// Which installs an instance reads. The international build stores under
+/// `Trae`; the CN builds document theirs as `Trae CN` and `TRAE SOLO CN` —
+/// same store, same constant key, but different fleets and different quotas.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum Edition {
+    #[default]
+    International,
+    China,
+}
+
+impl Edition {
+    fn dirs(self) -> &'static [&'static str] {
+        match self {
+            Edition::International => &["Trae"],
+            Edition::China => &["Trae CN", "TRAE SOLO CN"],
+        }
+    }
+
+    fn tool_id(self) -> &'static str {
+        match self {
+            Edition::International => TOOL_ID,
+            Edition::China => TOOL_ID_CN,
+        }
+    }
+
+    fn env_db(self) -> &'static str {
+        match self {
+            Edition::International => ENV_TRAE_AGENT_DB,
+            Edition::China => ENV_TRAE_CN_AGENT_DB,
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct TraeAdapter;
+pub struct TraeAdapter {
+    pub edition: Edition,
+}
 
-/// The agent database of every installed edition. `TRAE_AGENT_DB` replaces the
-/// list with one path (a file, or a directory that holds `database.db`).
-fn agent_dbs() -> Vec<PathBuf> {
-    if let Some(over) = std::env::var_os(ENV_TRAE_AGENT_DB) {
+impl TraeAdapter {
+    /// The international edition, under `Trae/`.
+    pub fn international() -> Self {
+        Self { edition: Edition::International }
+    }
+
+    /// The CN editions, under `Trae CN/` and `TRAE SOLO CN/`.
+    pub fn china() -> Self {
+        Self { edition: Edition::China }
+    }
+}
+
+/// The agent databases of one edition. `TRAE_AGENT_DB` / `TRAE_CN_AGENT_DB`
+/// replace the list with one path (a file, or a directory that holds
+/// `database.db`).
+fn agent_dbs(edition: Edition) -> Vec<PathBuf> {
+    if let Some(over) = std::env::var_os(edition.env_db()) {
         let path = PathBuf::from(&over);
         if over.is_empty() {
             return Vec::new();
@@ -69,9 +116,10 @@ fn agent_dbs() -> Vec<PathBuf> {
             .collect();
     }
     let Some(base) = dirs::data_dir() else { return Vec::new() };
-    EDITIONS
+    edition
+        .dirs()
         .iter()
-        .map(|edition| base.join(edition).join("ModularData").join("ai-agent").join("database.db"))
+        .map(|dir| base.join(dir).join("ModularData").join("ai-agent").join("database.db"))
         .filter(|p| p.is_file())
         .collect()
 }
@@ -85,11 +133,11 @@ fn wal_of(db: &PathBuf) -> Option<PathBuf> {
 
 impl SourceAdapter for TraeAdapter {
     fn id(&self) -> &'static str {
-        TOOL_ID
+        self.edition.tool_id()
     }
 
     fn display_name(&self) -> &'static str {
-        "Trae"
+        self.edition.dirs()[0]
     }
 
     fn semantics(&self) -> Semantics {
@@ -103,10 +151,10 @@ impl SourceAdapter for TraeAdapter {
     }
 
     fn probe(&self) -> Option<DetectedSource> {
-        let dbs = agent_dbs();
+        let dbs = agent_dbs(self.edition);
         dbs.first()?;
         Some(DetectedSource {
-            id: TOOL_ID.to_string(),
+            id: self.edition.tool_id().to_string(),
             display: self.display_name().to_string(),
             roots: dbs,
             hint: Some("agent database".into()),
@@ -114,7 +162,7 @@ impl SourceAdapter for TraeAdapter {
     }
 
     fn discover(&self, _filter: &DateFilter) -> Vec<SourceFile> {
-        agent_dbs()
+        agent_dbs(self.edition)
             .into_iter()
             .filter_map(|path| {
                 let meta = std::fs::metadata(&path).ok()?;
@@ -136,16 +184,52 @@ impl SourceAdapter for TraeAdapter {
         // dedupe keys make the rescan idempotent.
         let done = ReadCursor(file.size as u64);
         let wal = wal_of(&file.path);
-        let Some(image) = crypto::database_image(&file.path, wal.as_deref()) else {
-            return Ok(ReadOutcome { events: Vec::new(), cursor: done });
+        let name = file.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+        if wal.is_none() {
+            usage_core::read_note(format!(
+                "{name}: no -wal sidecar — turns finished since the last checkpoint are invisible"
+            ));
+        }
+        // Every failure below is silence, not an error — the engine would
+        // record a failed read and retry, which is right for a transient
+        // torn read and useless for a rotated key. The note is what lets a
+        // scan.log tell "nothing new" from "could not read the store".
+        let image = match crypto::decrypt_report(&file.path, wal.as_deref()) {
+            Ok(image) => image,
+            Err(reason) => {
+                usage_core::read_note(format!("{name}: decrypt failed — {reason}"));
+                return Ok(ReadOutcome { events: Vec::new(), cursor: done });
+            }
         };
-        let Some((conn, temp)) = crypto::open_image(&image) else {
-            return Ok(ReadOutcome { events: Vec::new(), cursor: done });
+        let (conn, temp) = match crypto::open_image_checked(&image) {
+            Ok(opened) => opened,
+            Err(reason) => {
+                usage_core::read_note(format!("{name}: {reason}"));
+                return Ok(ReadOutcome { events: Vec::new(), cursor: done });
+            }
         };
-        let events = read_turns(&conn);
+        let outcome = read_turns(&conn, self.edition.tool_id());
         drop(conn);
         let _ = std::fs::remove_file(temp);
-        Ok(ReadOutcome { events, cursor: done })
+        match outcome {
+            Ok((events, stats)) => {
+                usage_core::read_note(format!(
+                    "{name}: {} pages rebuilt, {} turns read → {} events \
+                     ({} zero-dropped, {} no-id, {} row-errors)",
+                    image.len() / crypto::PAGE,
+                    stats.rows,
+                    events.len(),
+                    stats.zero_dropped,
+                    stats.bad_id,
+                    stats.row_errors,
+                ));
+                Ok(ReadOutcome { events, cursor: done })
+            }
+            Err(reason) => {
+                usage_core::read_note(format!("{name}: {reason}"));
+                Ok(ReadOutcome { events: Vec::new(), cursor: done })
+            }
+        }
     }
 }
 
@@ -164,14 +248,26 @@ LEFT JOIN history_v2 ho
        ON ho.session_id = t.session_id AND ho.message_id = t.response_message_id AND ho.deleted_at = 0
 WHERE t.deleted_at = 0 AND t.turn_status = 'completed'";
 
-fn read_turns(conn: &rusqlite::Connection) -> Vec<UsageEvent> {
-    let mut stmt = match conn.prepare(TURN_QUERY) {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
-    };
+/// What one pass over `chat_turn` saw, so the read can say "I looked at N
+/// turns" instead of a bare event count — a store whose N is zero reads
+/// nothing like a store whose turns all failed the zero gate.
+#[derive(Default)]
+struct TurnStats {
+    rows: usize,
+    zero_dropped: usize,
+    bad_id: usize,
+    row_errors: usize,
+}
+
+fn read_turns(
+    conn: &rusqlite::Connection,
+    tool_id: &'static str,
+) -> Result<(Vec<UsageEvent>, TurnStats), String> {
+    let mut stmt = conn.prepare(TURN_QUERY).map_err(|e| format!("usage query failed: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
             Ok(TurnRow {
+                tool_id,
                 turn_id: row.get::<_, String>(0).unwrap_or_default(),
                 created_at: row.get::<_, i64>(1).unwrap_or(0),
                 context: row.get::<_, String>(2).unwrap_or_default(),
@@ -181,12 +277,32 @@ fn read_turns(conn: &rusqlite::Connection) -> Vec<UsageEvent> {
                 project_name: row.get::<_, Option<String>>(6).ok().flatten(),
             })
         })
-        .ok();
-    let Some(rows) = rows else { return Vec::new() };
-    rows.flatten().filter_map(|row| row.event()).collect()
+        .map_err(|e| format!("usage query failed: {e}"))?;
+    let mut events = Vec::new();
+    let mut stats = TurnStats::default();
+    for row in rows {
+        let row = match row {
+            Ok(row) => row,
+            Err(_) => {
+                stats.row_errors += 1;
+                continue;
+            }
+        };
+        stats.rows += 1;
+        if row.turn_id.is_empty() {
+            stats.bad_id += 1;
+            continue;
+        }
+        match row.event(tool_id) {
+            Some(event) => events.push(event),
+            None => stats.zero_dropped += 1,
+        }
+    }
+    Ok((events, stats))
 }
 
 struct TurnRow {
+    tool_id: &'static str,
     turn_id: String,
     created_at: i64,
     context: String,
@@ -199,7 +315,7 @@ struct TurnRow {
 }
 
 impl TurnRow {
-    fn event(self) -> Option<UsageEvent> {
+    fn event(self, tool_id: &'static str) -> Option<UsageEvent> {
         if self.turn_id.is_empty() {
             return None;
         }
@@ -208,7 +324,7 @@ impl TurnRow {
         if counts.is_zero() {
             return None;
         }
-        let mut event = UsageEvent::new(TOOL_ID, self.created_at.saturating_mul(1000), &self.turn_id);
+        let mut event = UsageEvent::new(tool_id, self.created_at.saturating_mul(1000), &self.turn_id);
         event.counts = counts;
         event.meter = Meter::Tokens;
         event.model = model_from(&ctx);
@@ -218,7 +334,10 @@ impl TurnRow {
             .and_then(basename)
             .or(self.project_name)
             .filter(|p| !p.is_empty());
-        event.dedupe_key = Some(format!("trae#{}", self.turn_id));
+        // `trae#<turn-id>` / `trae_cn#<turn-id>`: the full rescan each pass
+        // stays idempotent, and the CN turns never collide with the
+        // international ones.
+        event.dedupe_key = Some(format!("{tool_id}#{}", self.turn_id));
         Some(event)
     }
 }
@@ -318,7 +437,7 @@ mod tests {
         let db = dir.path().join("database.db");
         std::fs::write(&db, encrypt_image(&plain)).unwrap();
         std::env::set_var(ENV_TRAE_AGENT_DB, &db);
-        let adapter = TraeAdapter;
+        let adapter = TraeAdapter::default();
         let sources = adapter.discover(&DateFilter::default());
         assert_eq!(sources.len(), 1, "{sources:?}");
         assert_eq!(sources[0].kind, FileKind::Sqlite);
@@ -332,6 +451,15 @@ mod tests {
         assert_eq!(e.dedupe_key.as_deref(), Some("trae#t1"));
         assert_eq!(e.project.as_deref(), Some("bug-hunter"));
         assert_eq!(e.meter, Meter::Tokens);
+        // The read said what it saw: scan.log can tell "one turn read" from a
+        // bare count when a remote user's numbers look wrong.
+        let notes = usage_core::drain_read_notes();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("1 turns read → 1 events") && n.contains("0 zero-dropped")),
+            "{notes:?}"
+        );
         // Re-read re-emits the same key: the indexer replaces, never doubles.
         let again = adapter.read(&sources[0], ReadCursor(0)).unwrap();
         assert_eq!(again.events[0].dedupe_key, e.dedupe_key);
@@ -355,7 +483,7 @@ mod tests {
         let db = dir.path().join("database.db");
         std::fs::write(&db, encrypt_image(&plain)).unwrap();
         std::env::set_var(ENV_TRAE_AGENT_DB, &db);
-        let out = TraeAdapter.read(
+        let out = TraeAdapter::default().read(
             &SourceFile {
                 path: db.clone(),
                 kind: FileKind::Sqlite,
@@ -395,11 +523,44 @@ mod tests {
         let db = dir.path().join("database.db");
         std::fs::write(&db, b"not a database at all").unwrap();
         std::env::set_var(ENV_TRAE_AGENT_DB, &db);
-        let adapter = TraeAdapter;
+        let adapter = TraeAdapter::default();
         let sources = adapter.discover(&DateFilter::default());
         assert_eq!(sources.len(), 1);
         let out = adapter.read(&sources[0], ReadCursor(0)).unwrap();
         assert!(out.events.is_empty());
+        // …and the silence names itself: this note is the only difference, in
+        // a scan.log, between a quiet day and a store that cannot be read.
+        let notes = usage_core::drain_read_notes();
+        assert!(
+            notes.iter().any(|n| n.contains("decrypt failed") && n.contains("4096-byte pages")),
+            "{notes:?}"
+        );
+        std::env::remove_var(ENV_TRAE_AGENT_DB);
+    }
+
+    /// The wrong-key shape: pages decrypt to garbage, so the rebuilt header
+    /// misses the gate. This is the reason a store whose edition rotated its
+    /// constant reads as zero events forever — and now says so.
+    #[test]
+    fn a_wrong_key_fails_the_header_gate_by_name() {
+        let _env = crate::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("database.db");
+        std::fs::write(&db, vec![0u8; crypto::PAGE * 2]).unwrap();
+        std::env::set_var(ENV_TRAE_AGENT_DB, &db);
+        let out = TraeAdapter::default().read(
+            &SourceFile {
+                path: db.clone(),
+                kind: FileKind::Sqlite,
+                size: std::fs::metadata(&db).unwrap().len(),
+                mtime_ms: 0,
+            },
+            ReadCursor(0),
+        )
+        .unwrap();
+        assert!(out.events.is_empty());
+        let notes = usage_core::drain_read_notes();
+        assert!(notes.iter().any(|n| n.contains("header gate mismatch")), "{notes:?}");
         std::env::remove_var(ENV_TRAE_AGENT_DB);
     }
 }
@@ -418,7 +579,7 @@ mod live {
     #[ignore = "reads the real Trae database on this machine"]
     fn the_live_store_round_trips_through_wal() {
         std::env::remove_var(ENV_TRAE_AGENT_DB);
-        let adapter = TraeAdapter;
+        let adapter = TraeAdapter::default();
         let sources = adapter.discover(&DateFilter::default());
         let f = &sources[0];
         println!("source: {}", f.path.display());

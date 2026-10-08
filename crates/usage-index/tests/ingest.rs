@@ -393,3 +393,234 @@ fn a_better_label_repairs_the_row_and_its_rollup_bucket_without_moving_the_money
     assert_eq!(third.relabeled, 0, "a steady-state pass has nothing to repair");
 }
 
+
+/// Rows first-written before replace-on-grow (77f8d95) are frozen at their
+/// first-write snapshot: the finished projection never changes again, so no
+/// re-emit ever reaches the replace path. `setup`'s one-shot repair drops the
+/// cumulative adapters' read cursors so the next pass re-reads every
+/// projection from byte 0 and re-emits the final totals.
+#[test]
+fn the_cumulative_rescan_repair_drops_stale_cursors_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    // An index from the frozen-first-write era: cursors at EOF, marker absent.
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:cumulative-rescan-1'", [])
+            .unwrap();
+        for tool in ["dsh", "hermes", "funide", "joycode", "claude", "atomcode", "codex"] {
+            idx.conn()
+                .execute(
+                    &format!(
+                        "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                         VALUES('{t}:{f}', '{t}', 10, 1, 10, 1, 1)",
+                        t = tool,
+                        f = tool,
+                    ),
+                    [],
+                )
+                .unwrap();
+        }
+    }
+    let idx = Index::open(&db).unwrap();
+    for tool in ["dsh", "hermes", "funide", "joycode", "claude", "atomcode"] {
+        let left: i64 = idx
+            .conn()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM file_state WHERE tool = '{tool}'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{tool} cursor must be dropped for the rescan");
+    }
+    let codex: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM file_state WHERE tool = 'codex'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(codex, 1, "cursor-idempotent adapters keep their cursors");
+    assert_eq!(idx.meta_value("repair:cumulative-rescan-1").unwrap().as_deref(), Some("1"));
+
+    // One-shot: cursors earned after the repair survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+             VALUES('dsh:back', 'dsh', 10, 1, 10, 1, 1)",
+            [],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM file_state WHERE tool = 'dsh'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 1, "the repair never runs twice");
+}
+
+/// The repair's end-to-end shape: cursor dropped, projection unchanged since
+/// its final write, re-emit lifts the frozen row through replace-on-grow and
+/// the rollup lands on the same totals without double-counting.
+#[test]
+fn a_dropped_cursor_reemits_and_replace_on_grow_lands_the_final_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("live.jsonl");
+    // Mid-flight snapshot, the shape a pre-77f8d95 index froze in place.
+    std::fs::write(
+        &file,
+        b"{\"id\":\"cum-2\",\"ts\":1789172800000,\"session\":\"s1\",\"in\":100,\"out\":20}\n",
+    )
+    .unwrap();
+    let adapter = Mock::new("mockb", dir.path());
+    let (mut idx, first) = ingest(&adapter, DateFilter::default());
+    assert_eq!(first.new_events, 1);
+
+    // The session finished; the projection now holds the final totals. The
+    // repair drops the cursor, so the unchanged file is re-read from byte 0.
+    std::fs::write(
+        &file,
+        b"{\"id\":\"cum-2\",\"ts\":1789172810000,\"session\":\"s1\",\"in\":250,\"out\":60}\n",
+    )
+    .unwrap();
+    idx.conn().execute("DELETE FROM file_state WHERE tool = 'mockb'", []).unwrap();
+    let second = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(second.files_scanned, 1, "a cursor-less file is re-read whole");
+    assert_eq!(idx.event_count().unwrap(), 1, "still one event row");
+    let ev = &idx.all_events().unwrap()[0];
+    assert_eq!(ev.counts.input, 250.0);
+    assert_eq!(ev.counts.output, 60.0);
+
+    let (in_tok, out_tok, n): (f64, f64, i64) = idx
+        .conn()
+        .query_row(
+            "SELECT sum(in_tok), sum(out_tok), sum(n) FROM event_rollup WHERE tool = 'mockb'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(in_tok, 250.0, "the rollup holds the final total, not first + final");
+    assert_eq!(out_tok, 60.0);
+    assert_eq!(n, 1);
+
+    // The cursor is re-earned: an unchanged projection costs nothing again.
+    let third = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(third.new_events, 0);
+    assert_eq!(idx.event_count().unwrap(), 1);
+}
+
+/// antigravity's buckets were redrawn by 61c4f96, so its pre-redraw local rows
+/// hold inflated totals no re-emit can lift: grow-on-write refuses the smaller
+/// same-key total, and a redrawn key strands the old rows beside the new ones.
+/// The re-seed drops exactly the local rows — merged rows are another
+/// machine's truth — with their calls, quotas and rollup, and lets the next
+/// wholesale read re-write them under the new semantics.
+#[test]
+fn the_antigravity_reseed_drops_local_rows_and_keeps_merged_ones_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        // Undo the repair a fresh open already ran, to stage the pre-shape.
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:antigravity-reseed-1'", [])
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+                 VALUES(1, 'antigravity', 10, 's', 'tokens', 100.0, 'agy-a', '/u/x/agy.db')",
+                [],
+            )
+            .unwrap();
+        idx.conn().execute("INSERT INTO call(event_id, kind, name) VALUES(1, 'tool', 't1')", []).unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO quota(event_id, used_percent, window_minutes, resets_at_ms, label) \
+                 VALUES(1, 5.0, 300, 20, 'w')",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                 VALUES('2026-10-01', '', 'antigravity', 's', '', '', 'tokens', \
+                     0, 0, 100, 0, 0, 0, 1, 1, 10, 10)",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+                 VALUES(2, 'antigravity', 11, 's', 'tokens', 250.0, 'agy-b', 'linux:o1:/h/agy.db')",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                 VALUES('2026-10-01', 'o1', 'antigravity', 's', '', '', 'tokens', \
+                     0, 0, 250, 0, 0, 0, 1, 1, 11, 11)",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                 VALUES('agy', 'antigravity', 10, 1, 10, 1, 1)",
+                [],
+            )
+            .unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE tool='antigravity' AND source NOT LIKE 'linux:%'"),
+        0,
+        "local rows go for the re-seed"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE source LIKE 'linux:%'"),
+        1,
+        "merged rows are another machine's truth and stay"
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM call"), 0, "the local row's call goes with it");
+    assert_eq!(count("SELECT COUNT(*) FROM quota"), 0, "the local row's quota goes with it");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE tool='antigravity' AND origin=''"),
+        0,
+        "the local rollup group goes"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE tool='antigravity' AND origin='o1'"),
+        1,
+        "the merged rollup group stays"
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM file_state WHERE tool='antigravity'"), 0);
+    assert_eq!(idx.meta_value("repair:antigravity-reseed-1").unwrap().as_deref(), Some("1"));
+
+    // One-shot: rows written after the re-seed survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+             VALUES(3, 'antigravity', 12, 's2', 'tokens', 7.0, 'agy-c', '/u/x/agy.db')",
+            [],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM event WHERE tool='antigravity' AND source NOT LIKE 'linux:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(back, 1, "the re-seed never runs twice");
+}

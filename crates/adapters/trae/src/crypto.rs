@@ -37,7 +37,7 @@ const KDF_SALT: [u8; 16] = [
     0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
 ];
 const KDF_ITERS: u32 = 100_000;
-const PAGE: usize = 4096;
+pub(crate) const PAGE: usize = 4096;
 /// Per-page reserve: IV (16) + HMAC-SHA512 (64). Also the plaintext pages' own
 /// declared reserved-space (header byte 20), which the rebuilt image keeps.
 const RESERVE: usize = 80;
@@ -79,9 +79,19 @@ fn page_content(key: &[u8; 32], page: &[u8], salted: bool) -> Option<Vec<u8>> {
 /// newest committed frame per page. `None` when anything fails to decrypt or
 /// the rebuilt header does not check out — a wrong key is silence, not an error.
 pub fn database_image(db: &Path, wal: Option<&Path>) -> Option<Vec<u8>> {
-    let data = std::fs::read(db).ok()?;
+    decrypt_report(db, wal).ok()
+}
+
+/// [`database_image`] with the failure stage spelled out. The adapter notes
+/// the reason on a silent read: "no events" and "could not read the store"
+/// are indistinguishable downstream unless the reason travels with the read.
+pub fn decrypt_report(db: &Path, wal: Option<&Path>) -> Result<Vec<u8>, String> {
+    let data = std::fs::read(db).map_err(|e| format!("main file unreadable: {e}"))?;
     if data.is_empty() || data.len() % PAGE != 0 {
-        return None;
+        return Err(format!(
+            "size {} is not whole {PAGE}-byte pages — a torn read while the IDE writes, or not a store at all",
+            data.len()
+        ));
     }
     let key = derived_key();
 
@@ -90,7 +100,10 @@ pub fn database_image(db: &Path, wal: Option<&Path>) -> Option<Vec<u8>> {
     let mut pages: Vec<Option<Vec<u8>>> = Vec::with_capacity(count);
     for p in 0..count {
         let raw = &data[p * PAGE..(p + 1) * PAGE];
-        pages.push(Some(page_content(&key, raw, p == 0)?));
+        let content = page_content(&key, raw, p == 0).ok_or(format!(
+            "main page {p} failed to decrypt (wrong key, or a torn page mid-checkpoint)"
+        ))?;
+        pages.push(Some(content));
     }
 
     // The sidecar, if readable: newest committed frame per page wins. Frames
@@ -102,16 +115,16 @@ pub fn database_image(db: &Path, wal: Option<&Path>) -> Option<Vec<u8>> {
                 && (w[0..4] == [0x37, 0x7f, 0x06, 0x82] || w[0..4] == [0x37, 0x7f, 0x06, 0x83]);
             if magic_ok {
                 let (salt1, salt2) = (
-                    u32::from_be_bytes(w[16..20].try_into().ok()?),
-                    u32::from_be_bytes(w[20..24].try_into().ok()?),
+                    u32::from_be_bytes(w[16..20].try_into().expect("len checked above")),
+                    u32::from_be_bytes(w[20..24].try_into().expect("len checked above")),
                 );
                 let mut off = 32;
                 while off + 24 + PAGE <= w.len() {
                     let hdr = &w[off..off + 24];
-                    let pgno = u32::from_be_bytes(hdr[0..4].try_into().ok()?);
-                    let commit = u32::from_be_bytes(hdr[4..8].try_into().ok()?);
-                    if u32::from_be_bytes(hdr[8..12].try_into().ok()?) != salt1
-                        || u32::from_be_bytes(hdr[12..16].try_into().ok()?) != salt2
+                    let pgno = u32::from_be_bytes(hdr[0..4].try_into().expect("24-byte header"));
+                    let commit = u32::from_be_bytes(hdr[4..8].try_into().expect("24-byte header"));
+                    if u32::from_be_bytes(hdr[8..12].try_into().expect("24-byte header")) != salt1
+                        || u32::from_be_bytes(hdr[12..16].try_into().expect("24-byte header")) != salt2
                     {
                         break;
                     }
@@ -148,7 +161,7 @@ pub fn database_image(db: &Path, wal: Option<&Path>) -> Option<Vec<u8>> {
     // gate is page 1's own plaintext: it starts where the magic stops, with
     // page size, journal versions, reserved count and the payload fractions —
     // measured `1000 02 02 50 40 20 20` on the real store.
-    let first = pages.first().and_then(|p| p.as_ref())?;
+    let first = pages.first().and_then(|p| p.as_ref()).ok_or("page 1 missing — nothing to open")?;
     let header_ok = first.len() >= 8
         && first[0..2] == 4096u16.to_be_bytes()
         && (first[2] == 1 || first[2] == 2)
@@ -158,37 +171,48 @@ pub fn database_image(db: &Path, wal: Option<&Path>) -> Option<Vec<u8>> {
         && first[6] == 32
         && first[7] == 32;
     if !header_ok {
-        return None;
+        return Err(format!(
+            "header gate mismatch at {:02x?} — wrong key or an unsupported store layout",
+            &first[0..8.min(first.len())]
+        ));
     }
     let mut out = Vec::with_capacity(pages.len() * PAGE);
     for (i, page) in pages.iter().enumerate() {
-        let content = page.as_ref()?;
+        let content = page.as_ref().ok_or(format!(
+            "page {i} missing after the wal was applied — a torn or undecryptable wal frame \
+             replaced a page the main file may have carried"
+        ))?;
         if i == 0 {
             out.extend_from_slice(MAGIC);
         }
         out.extend_from_slice(content);
         out.extend_from_slice(&[0u8; RESERVE]);
     }
-    Some(out)
+    Ok(out)
 }
 
 /// Open a decrypted image for querying. The image is materialized to a temp
 /// file because `rusqlite` here builds without the deserialize feature; the
 /// caller closes the connection before dropping the path.
 pub fn open_image(image: &[u8]) -> Option<(rusqlite::Connection, std::path::PathBuf)> {
+    open_image_checked(image).ok()
+}
+
+/// [`open_image`] with the failure spelled out, same trade as `decrypt_report`.
+pub fn open_image_checked(image: &[u8]) -> Result<(rusqlite::Connection, std::path::PathBuf), String> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
         "tokenme-trae-{}-{}.db",
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    std::fs::write(&path, image).ok()?;
-    let conn = rusqlite::Connection::open_with_flags(
+    std::fs::write(&path, image).map_err(|e| format!("temp image write failed: {e}"))?;
+    rusqlite::Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .ok()?;
-    Some((conn, path))
+    .map(|conn| (conn, path))
+    .map_err(|e| format!("the decrypted image would not open as sqlite: {e}"))
 }
 
 #[cfg(test)]

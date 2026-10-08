@@ -352,6 +352,13 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
     ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan", &mut last_publish,
         &mut snapshot, &mut snapshot_at, &mut wake_roots);
     let mut last_pass = Instant::now();
+    // The cadence clock runs on its own: a machine whose tools log every
+    // second would otherwise reset `recv_timeout` with every wake and starve
+    // the timer — measured here, a 15s setting drifted to 30-60s between
+    // publishes, which is exactly the "set 15s, data still moves every
+    // minute" report. `remaining` shrinks across intervening passes, so the
+    // cadence pass lands on schedule however many wakes cut in line.
+    let mut last_cadence = Instant::now();
 
     loop {
         // Read per pass, so a cadence change from the panel applies on the next
@@ -360,8 +367,14 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
             let secs = app.state::<Shared>().settings().refresh_secs;
             Duration::from_secs(secs.clamp(10, 3600))
         };
-        match wait_for_work(rx, &mut pricing, fallback, &mut wake_roots) {
+        let remaining = fallback.saturating_sub(last_cadence.elapsed());
+        match wait_for_work(rx, &mut pricing, remaining, &mut wake_roots) {
             Work::Ingest(reason) => {
+                // A manual refresh just published fresh numbers too; the next
+                // cadence pass is due a full period after it, not sooner.
+                if reason == "cadence timer" || reason == "manual refresh" {
+                    last_cadence = Instant::now();
+                }
                 if reason != "manual refresh" {
                     let since = last_pass.elapsed();
                     if since < MIN_PASS_GAP {
@@ -554,6 +567,15 @@ fn ingest<R: Runtime>(
             if r.new_events > 0 {
                 let per_tool: Vec<String> = r.per_tool.iter().map(|(t, n)| format!("{t}:{n}")).collect();
                 crate::logging::info(&format!("ingest indexed per tool: {}", per_tool.join(", ")));
+            }
+            // The pass's own diagnostics: a failed read (the errors also mark
+            // their file for a re-read) and the adapters' silent-failure notes.
+            // Rare by design — their presence is the signal.
+            if !r.errors.is_empty() {
+                crate::logging::error(&format!("ingest({reason}) errors: {}", r.errors.join(" | ")));
+            }
+            if !r.notes.is_empty() {
+                crate::logging::info(&format!("ingest({reason}) notes: {}", r.notes.join(" | ")));
             }
             Some(r)
         }
@@ -838,12 +860,18 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
         .host_exit_pause
         .then(usage_quota::host::running_process_names);
     let polling_off = !settings.quota_polling;
-    let gate = move |tool: &str| -> bool {
-        settings.probe_allowed(tool)
-            && match &alive {
-                Some(names) => usage_quota::host::any_host_running(tool, names),
-                None => true,
-            }
+    let gate = {
+        // The gate consumes both; the probe list below re-asks the same
+        // questions per tool to say WHICH refusal emptied the windows.
+        let alive = alive.clone();
+        let settings = settings.clone();
+        move |tool: &str| -> bool {
+            settings.probe_allowed(tool)
+                && match &alive {
+                    Some(names) => usage_quota::host::any_host_running(tool, names),
+                    None => true,
+                }
+        }
     };
     q.extend(usage_quota::collect_gated(usage_quota::BUDGET, gate));
     // Edge-triggered, because the gate stays off for hours and a line every 60 s
@@ -860,11 +888,30 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
         .iter()
         .map(|sample| format!("{}:{}%", sample.tool, format_args!("{:.1}", sample.used_percent)))
         .collect();
+    // Why a probe could not answer: its own switch (`off`) or its host process
+    // gone (`host`) — the gate's two refusals, named per tool. The empty
+    // brackets with an empty off-list is the different case: probes ran and
+    // nobody answered, which is the one worth chasing in a user's log.
+    let mut off: Vec<String> = Vec::new();
+    if !polling_off {
+        for probe in usage_quota::inventory() {
+            if !settings.probe_allowed(&probe.tool) {
+                off.push(format!("{}:off", probe.tool));
+            } else if probe.host_gated
+                && matches!(&alive, Some(names) if !usage_quota::host::any_host_running(&probe.tool, names))
+            {
+                off.push(format!("{}:host", probe.tool));
+            }
+        }
+    }
+    let off_note =
+        if off.is_empty() { String::new() } else { format!(" probes-off: [{}]", off.join(", ")) };
     crate::logging::info(&format!(
-        "quota poll: {} windows in {} ms [{}]",
+        "quota poll: {} windows in {} ms [{}]{}",
         q.len(),
         poll_started.elapsed().as_millis(),
-        per_tool.join(", ")
+        per_tool.join(", "),
+        off_note
     ));
     if let Ok(mut slot) = QUOTA_PASS.lock() {
         *slot = Some((Instant::now(), q.clone()));

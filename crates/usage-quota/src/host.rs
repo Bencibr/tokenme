@@ -36,7 +36,20 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("cola", &["Cola", "cola-server"]),
     // Trae's main binary ships as the generic "Electron"; its helpers are the
     // only processes that name the product, and they live and die with it.
-    ("trae", &["Trae Helper", "Trae Helper (GPU)", "Trae Helper (Renderer)", "Trae Helper (Plugin)"]),
+    // The CN build's helpers carry the edition in their name and gate their
+    // own tool — a machine running only Trae CN probes nothing for `trae`.
+    ("trae", &[
+        "Trae Helper",
+        "Trae Helper (GPU)",
+        "Trae Helper (Renderer)",
+        "Trae Helper (Plugin)",
+    ]),
+    ("trae_cn", &[
+        "Trae CN Helper",
+        "Trae CN Helper (GPU)",
+        "Trae CN Helper (Renderer)",
+        "Trae CN Helper (Plugin)",
+    ]),
 ];
 
 /// Whether the tool's host application is running. A tool with no mapping is

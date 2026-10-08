@@ -44,6 +44,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("mimocode", &[]),
     ("cola", &["Cola"]),
     ("trae", &["Trae"]),
+    ("trae_cn", &["Trae CN", "TRAE SOLO CN"]),
     // Kimi Code: the desktop client (Kimi.app) provisions the runtime its
     // usage flows through; the bare CLI on its own has no bundle.
     ("kimicode", &["Kimi"]),
@@ -82,6 +83,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("hermes", include_bytes!("../assets/hermes.png")),
     // Trae: the 128-px layer of the installed Trae.icns.
     ("trae", include_bytes!("../assets/trae.png")),
+    // Trae CN: the installed Trae CN.icns, the same 128-px layer.
+    ("trae_cn", include_bytes!("../assets/trae_cn.png")),
     // MiniMax Code: the 64-px layer of the installed app's own icon.icns, which is
     // also what the live bundle lookup picks (smallest tile ≥ 48 px).
     ("minimaxcode", include_bytes!("../assets/minimaxcode.png")),
