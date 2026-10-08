@@ -310,10 +310,14 @@ fn promote_taskbar_icon() {
 /// One lookup pass. `true` = decided (promoted, or the user already chose).
 #[cfg(target_os = "windows")]
 fn eq_ignore_ascii(a: &[u16], b: &[u16]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x == y || x.to_ascii_lowercase() == y.to_ascii_lowercase())
+    fn lower(c: u16) -> u16 {
+        if (0x41..=0x5A).contains(&c) {
+            c + 0x20
+        } else {
+            c
+        }
+    }
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y || lower(*x) == lower(*y))
 }
 
 #[cfg(target_os = "windows")]
