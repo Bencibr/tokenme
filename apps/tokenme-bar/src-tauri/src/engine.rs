@@ -352,6 +352,13 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
     ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan", &mut last_publish,
         &mut snapshot, &mut snapshot_at, &mut wake_roots);
     let mut last_pass = Instant::now();
+    // The cadence clock runs on its own: a machine whose tools log every
+    // second would otherwise reset `recv_timeout` with every wake and starve
+    // the timer — measured here, a 15s setting drifted to 30-60s between
+    // publishes, which is exactly the "set 15s, data still moves every
+    // minute" report. `remaining` shrinks across intervening passes, so the
+    // cadence pass lands on schedule however many wakes cut in line.
+    let mut last_cadence = Instant::now();
 
     loop {
         // Read per pass, so a cadence change from the panel applies on the next
@@ -360,8 +367,14 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
             let secs = app.state::<Shared>().settings().refresh_secs;
             Duration::from_secs(secs.clamp(10, 3600))
         };
-        match wait_for_work(rx, &mut pricing, fallback, &mut wake_roots) {
+        let remaining = fallback.saturating_sub(last_cadence.elapsed());
+        match wait_for_work(rx, &mut pricing, remaining, &mut wake_roots) {
             Work::Ingest(reason) => {
+                // A manual refresh just published fresh numbers too; the next
+                // cadence pass is due a full period after it, not sooner.
+                if reason == "cadence timer" || reason == "manual refresh" {
+                    last_cadence = Instant::now();
+                }
                 if reason != "manual refresh" {
                     let since = last_pass.elapsed();
                     if since < MIN_PASS_GAP {

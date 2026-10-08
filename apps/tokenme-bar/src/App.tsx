@@ -92,7 +92,10 @@ const [page, setPage] = useState<PageKey>(() => {
   });
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [refreshSecs, setRefreshSecs] = useState(30);
-  const tick = useTicker(30_000);
+  // The tick re-renders the "X 秒前" stamps; its granularity follows the
+  // configured cadence (floored at 5s, capped at 30s) — a 15s setting read
+  // through a 30s tick is how "最后刷新" could look a minute stale.
+  const tick = useTicker(Math.min(30_000, Math.max(5_000, refreshSecs * 1000)));
 
   useEffect(() => {
     // The native chrome (tray menu, tooltip, updater copy) cannot see the
