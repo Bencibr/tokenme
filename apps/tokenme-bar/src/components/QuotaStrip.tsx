@@ -233,9 +233,8 @@ export function QuotaStrip({
     // 而不是让配额区块无声消失。pending 为假且为空 = 真没有配额。
     if (pending) {
       return (
-        // divider={false}: 探测没跑完时下面是空白面板，底线会孤零零悬在
-        // 空白里，看起来像一根多余的横线。
-        <Section label={t("quota.section")} divider={false}>
+        // fill: 探测没跑完时这块替整列配额占位，转圈落在那列行的中间。
+        <Section label={t("quota.section")} fill>
           <div className="quota-loading">
             <Loading size={22} label={t("quota.pending")} />
           </div>

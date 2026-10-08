@@ -57,6 +57,14 @@ python3 scripts/check-no-window-spawns.py
 # even with --fast.
 python3 scripts/check-i18n-parity.py
 
+# A page section used to carry its own bottom hairline, so the last section of
+# all four pages drew one over a screenful of blank panel and it read as a
+# rendering defect. The separator now belongs to the lower section of a pair,
+# which makes the stranded line unrepresentable — but only until someone hands
+# `.sec` a border again, in a file no test compiles. Sub-second, so it runs even
+# with --fast.
+python3 scripts/check-section-dividers.py
+
 # The test gate. A workspace test pass recompiles every crate in debug —
 # minutes that a frontend-only iteration pays for nothing. Hash everything
 # under the crates and the app's Rust tree (sources, fixtures, manifests);

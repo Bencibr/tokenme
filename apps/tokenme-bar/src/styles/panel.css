@@ -3284,7 +3284,7 @@
   max-width: 100%;
   min-width: 0;
   /* A column that is at least one screenful, so a section that wants the
-     leftover height (`.sec-nodiv`) can have it. Content taller than the panel
+     leftover height (`.sec-fill`) can have it. Content taller than the panel
      still grows the page and scrolls: `min-height` is a floor, not a cap. */
   display: flex;
   flex-direction: column;

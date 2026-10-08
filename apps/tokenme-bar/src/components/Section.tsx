@@ -10,16 +10,18 @@ interface SectionProps {
    *  control (the 活动 section's 今日/活动 view seg). */
   head?: React.ReactNode;
   children: React.ReactNode;
-  /** Default true. False drops the section's bottom hairline — for a section
-      whose body is a transient wait, where the line would strand in blank
-      panel space instead of separating two blocks of content. */
-  divider?: boolean;
+  /** Take the page's leftover height instead of the body's own. For a section
+      that stands in for a whole list while it waits: the spinner then sits in
+      the middle of the rows the list would have had. */
+  fill?: boolean;
 }
 
-/** A hairline-separated block. Deliberately not a card: no radius, no shadow. */
-export function Section({ label, meta, trail, head, children, divider = true }: SectionProps) {
+/** A hairline-separated block. Deliberately not a card: no radius, no shadow.
+ *  The hairline belongs to the block below a pair (`.sec + .sec`), so a page's
+ *  last section cannot end in a line stranded over blank panel space. */
+export function Section({ label, meta, trail, head, children, fill }: SectionProps) {
   return (
-    <section className={divider ? "sec" : "sec sec-nodiv"}>
+    <section className={fill ? "sec sec-fill" : "sec"}>
       <div className="sec-hd">
         {head ?? (
           <>
