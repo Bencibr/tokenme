@@ -62,6 +62,7 @@
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "installMode": "both",
+        "installerHooks": "./installer-hooks.nsh",
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": true
       }
