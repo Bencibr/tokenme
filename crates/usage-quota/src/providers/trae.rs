@@ -59,7 +59,7 @@
 //! Trae's main binary ships as the generic "Electron", so the process match is
 //! on its `Trae Helper*` children.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use usage_core::QuotaSample;
@@ -96,6 +96,8 @@ fn storage_jsons(cn: bool) -> Vec<PathBuf> {
 const USAGE_PATH: &str = "/trae/api/v1/pay/ide_user_ent_usage";
 /// Fallback API host, used when the login record carries none.
 const DEFAULT_HOST: &str = "https://growsg-normal.trae.ai";
+const CLAIM_PATH: &str = "/trae/api/v2/ug/checkin_credits/claim";
+const IDE_VERSION: &str = "1.107.1";
 /// The current-entitlement-base listing: where the CN credits packs live
 /// (`credits_limit` sits under `product_extra.package_extra.quota`, a key the
 /// `ide_user_ent_usage` payloads do not carry).
@@ -277,7 +279,8 @@ impl QuotaProbe for TraeQuota {
                 return samples;
             }
             if self.cn {
-                if let Some(credits) = cn_credits_window(&login) {
+                let checkin = cn_daily_checkin(&login);
+                if let Some(credits) = cn_credits_window(&login, checkin) {
                     return vec![credits];
                 }
             }
@@ -295,7 +298,10 @@ impl QuotaProbe for TraeQuota {
 /// the same fields (`total += c`, remaining `c - credits_amount`). The
 /// entitlement payloads read today carry no `credits_amount` yet — the spent
 /// side reads 0 until one appears, exactly as the IDE's own `?? 0` falls back.
-fn cn_credits_window(login: &Login) -> Option<QuotaSample> {
+fn cn_credits_window(
+    login: &Login,
+    checkin: Option<TraeCheckinOutcome>,
+) -> Option<QuotaSample> {
     let url = format!("{}{ENT_BASE_PATH}", login.host);
     let body = crate::http::post_json(
         &url,
@@ -327,6 +333,14 @@ fn cn_credits_window(login: &Login) -> Option<QuotaSample> {
     } else {
         format!("积分 · 已用 0/{}", fmt(total))
     };
+    // The check-in marker is the UI half of the daily claim: 已自动签到 when
+    // the panel claimed today, 可签到 when the day is still open.
+    let label = match checkin {
+        Some(o) if o.done_today && !o.was_already => format!("{label} · 已自动签到"),
+        Some(o) if o.done_today => format!("{label} · 今日已签到"),
+        Some(_) => format!("{label} · 可签到"),
+        None => label,
+    };
     if !seen && !unlimited {
         return None;
     }
@@ -337,6 +351,142 @@ fn cn_credits_window(login: &Login) -> Option<QuotaSample> {
         label: Some(label),
         id: Some("credits".to_string()),
     })
+}
+
+
+// ---- CN daily check-in -----------------------------------------------------
+//
+// The dashboard's check-in endpoint is claimable with the local token once the
+// desktop device headers ride along (`req_source: 1` numeric, x-device-* —
+// without them the server answers code 9004). The panel fires at most ONE
+// claim attempt per local day no matter how often the quota pass runs: the
+// endpoint queues and rate-limits repeat claims (code 9074), and the community
+// scripts converge on exactly that discipline. Success (code 0) and
+// already-checked-in (9095) both count as done for the day.
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct TraeCheckinState {
+    /// Local day of the last attempt — successful or not. The once-a-day lock.
+    last_attempt_day: String,
+    /// Local day of the last success — the 已签到 marker the label reads.
+    last_ok_day: String,
+    /// Credits the last successful claim paid out.
+    last_credits: f64,
+    /// The stable per-install device id the device headers carry.
+    device_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TraeCheckinOutcome {
+    /// Claim answered success today (or had answered earlier today).
+    done_today: bool,
+    /// Already checked in when we tried (9095) rather than claimed now.
+    was_already: bool,
+}
+
+fn checkin_state_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("tokenme").join("quota").join("trae_cn_checkin.json"))
+}
+
+fn load_checkin_state(path: &Path) -> TraeCheckinState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_checkin_state(path: &Path, state: &TraeCheckinState) {
+    if let Ok(text) = serde_json::to_string(state) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// A stable 16-digit device id: generated once, then persisted — a fresh id on
+/// every pass would read as device churn to the queue that rate-limits claims.
+fn device_id_of(state: &mut TraeCheckinState) -> String {
+    if state.device_id.is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seed = (nanos as u64) ^ (std::process::id() as u64);
+        state.device_id = format!("{:016}", seed % 10_000_000_000_000_000);
+    }
+    state.device_id.clone()
+}
+
+fn local_day() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Fire today's claim (unless today is already spent) and report the outcome.
+/// `None` = no state file could be written (a read-only config dir): the probe
+/// then never auto-claims, the window just loses its marker.
+fn cn_daily_checkin(login: &Login) -> Option<TraeCheckinOutcome> {
+    let path = checkin_state_path()?;
+    let mut state = load_checkin_state(&path);
+    let today = local_day();
+    if state.last_attempt_day == today {
+        return Some(TraeCheckinOutcome {
+            done_today: state.last_ok_day == today,
+            was_already: false,
+        });
+    }
+
+    let device = device_id_of(&mut state);
+    let url = format!("{}{CLAIM_PATH}", login.host);
+    let claimed: Option<(i64, f64)> = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .set("x-user-region", "CN")
+        .set("user-agent", &format!("Trae/{IDE_VERSION}"))
+        .set("x-device-type", if cfg!(target_os = "macos") {
+            "Darwin"
+        } else if cfg!(windows) {
+            "Windows"
+        } else {
+            "Linux"
+        })
+        .set("x-app-version", IDE_VERSION)
+        .set("x-device-id", &device)
+        .send_string(&json!({ "req_source": 1 }).to_string())
+        .ok()
+        .and_then(|r| r.into_string().ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            let code = v.get("code").and_then(Value::as_i64)?;
+            let points = v
+                .pointer("/data/points")
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            Some((code, points))
+        });
+
+    state.last_attempt_day = today.clone();
+    let mut outcome = TraeCheckinOutcome { done_today: false, was_already: false };
+    match claimed {
+        // 0 = claimed; 9095 = already checked in earlier today by the IDE or
+        // the dashboard. Both close the day.
+        Some((0, points)) => {
+            state.last_ok_day = today.clone();
+            state.last_credits = points;
+            outcome.done_today = true;
+        }
+        Some((9095, _)) => {
+            state.last_ok_day = today.clone();
+            outcome.done_today = true;
+            outcome.was_already = true;
+        }
+        // 9074 queue/rate-limit, 1001/401/403 token trouble, anything else:
+        // the day is spent either way — retrying is what extends the queue.
+        _ => {}
+    }
+    save_checkin_state(&path, &state);
+    Some(outcome)
 }
 
 /// The CN free tier has no pack with a limit: the IDE maps a packless account
@@ -810,6 +960,9 @@ mod cn_free_tests {
     }
 }
 
+/// `#[ignore]`d: shape-hunt the CN checkin claim — the definition carries
+/// `req_source/Session/Request` and the mock endpoint carries a `did`, so try
+
 /// `#[ignore]`d live check: what the CN probe actually fetches right now.
 #[test]
 #[ignore]
@@ -855,6 +1008,43 @@ fn cn_credits_dump() {
                     println!("[trae-cn] {url}: HTTP {code}: {text}");
                 }
                 Err(e) => println!("[trae-cn] {url}: {e}"),
+            }
+        }
+    }
+}
+
+/// `#[ignore]`d: parameter-shape matrix for the checkin status endpoint, to
+
+/// `#[ignore]`d: dump the field NAMES (never values) of every decrypted
+/// iCubeAuthInfo record, hunting for a device/session id the claim needs.
+#[test]
+#[ignore]
+fn cn_auth_record_fields() {
+    for path in storage_jsons(true) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(all) = serde_json::from_str::<serde_json::Map<String, Value>>(&text) else { continue };
+        for (key, value) in &all {
+            let Some(encoded) = value.as_str() else { continue };
+            if !key.starts_with("iCubeAuthInfo://") { continue; }
+            let Some(plain) = decrypt(encoded) else {
+                println!("[trae-cn] {key}: does not decrypt");
+                continue;
+            };
+            match serde_json::from_str::<Value>(&plain) {
+                Ok(record) => {
+                    let names: Vec<&String> = record.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                    println!("[trae-cn] {key}: fields {names:?}");
+                    for f in ["uid", "did", "device_id", "session", "user_id", "host", "expiredAt"] {
+                        if let Some(v) = record.get(f) {
+                            let shown = match v {
+                                Value::String(sv) if f != "host" && f != "expiredAt" => format!("<{} chars>", sv.len()),
+                                other => format!("{other}"),
+                            };
+                            println!("    {f} = {shown}");
+                        }
+                    }
+                }
+                Err(_) => println!("[trae-cn] {key}: plain text {} bytes", plain.len()),
             }
         }
     }
