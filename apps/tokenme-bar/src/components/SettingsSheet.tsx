@@ -494,17 +494,13 @@ export function SettingsSheet({
         ) : null}
         {tab === "about" ? (
           <>
-            <div className="sheet-row">
-              <div>
-                <div className="sheet-label">{t("set.version")}</div>
-                <div className="sheet-hint">{t("set.version.hint", { b: settings.build })}</div>
-              </div>
-              <span className="sheet-value num">v{settings.version}</span>
-            </div>
+            {/* The footer already signs the sheet "TokenMe v…" on every tab;
+                a version row here said it twice. The build number — the one
+                thing the footer doesn't carry — lives in the check row. */}
             <div className="sheet-row">
               <div>
                 <div className="sheet-label">{t("set.check")}</div>
-                <div className="sheet-hint">{t("set.check.hint")}</div>
+                <div className="sheet-hint">{t("set.check.hint", { b: settings.build })}</div>
               </div>
               <button type="button" className="sheet-action" disabled={updateBusy} onClick={() => void checkNow()}>
                 {updateBusy ? t("set.busy") : t("set.check.now")}
