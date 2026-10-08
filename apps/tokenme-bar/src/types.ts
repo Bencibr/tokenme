@@ -376,6 +376,14 @@ export interface Bridge {
   setShowEmptyTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setHostExitPause: (on: boolean) => Promise<void>;
+  /** The master switch: off, the engine asks no vendor for anything. */
+  setQuotaPolling: (on: boolean) => Promise<void>;
+  /** One probe's own switch — the only lever with no host mapping. */
+  setToolPolling: (tool: string, on: boolean) => Promise<void>;
+  /** The registry's own list, with what this machine has answered. */
+  probeTools: () => Promise<ProbeTool[]>;
+  setNotifyTiers: (tiers: NotifyTierKey) => Promise<void>;
+  setToolMuted: (tool: string, on: boolean) => Promise<void>;
   setAutoUpdateCheck: (on: boolean) => Promise<void>;
   checkUpdate: () => Promise<UpdateStatus>;
   downloadUpdate: () => Promise<UpdateStatus>;
@@ -412,6 +420,9 @@ export interface Bridge {
 /** `system` defers to the OS media query; `light`/`dark` pin the panel. */
 export type ThemeKey = "system" | "light" | "dark";
 
+/** Which banner lines fire: both lines, only exhaustion, or nothing at all. */
+export type NotifyTierKey = "both" | "exhausted" | "off";
+
 export interface PanelSettings {
   autostart: boolean;
   refresh_secs: number;
@@ -420,8 +431,33 @@ export interface PanelSettings {
   show_empty_tools: boolean;
   bubble_enabled: boolean;
   host_exit_pause: boolean;
+  /** The master switch: off, not one vendor request leaves the process. */
+  quota_polling: boolean;
+  /** Tools the user stopped by hand — the only lever for probes with no host. */
+  quota_probes_off: string[];
+  notify_tiers: NotifyTierKey;
+  /** Tools whose windows never post a banner. */
+  notify_muted: string[];
   auto_update_check: boolean;
   version: string;
+  /** The build number the panel logs at startup — the same digits a support
+   *  reply asks for, shown where the user can copy it. */
+  build: string;
+}
+
+/** One row of the 逐工具探测 list: what the registry actually holds, not a
+ *  hand-written list. `answered_here` is the "本机答过" judge the settings
+ *  sub-page filters on — `detected` is true for every source on a full machine,
+ *  so it cannot separate anything. Names come from the report's own
+ *  `sources[].display`, falling back to `toolDisplay` for the probes with no
+ *  adapter (copilot, gemini). */
+export interface ProbeTool {
+  id: string;
+  /** Whether `host_exit_pause` can reach this probe at all. */
+  host_gated: boolean;
+  answered_here: boolean;
+  /** What the composed gate says right now: master switch ∧ not excluded. */
+  polling: boolean;
 }
 
 export interface UpdateStatus {

@@ -46,6 +46,34 @@ pub enum Theme {
     Dark,
 }
 
+/// Which of the two banner lines the tier machine may announce. `Both` is the
+/// shipped behaviour; `Off` silences banners without touching the tier state,
+/// so switching back does not re-announce windows that already crossed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyTier {
+    /// Warn at 80 % and again at 100 %.
+    #[default]
+    Both,
+    /// Only the exhaustion line.
+    Exhausted,
+    /// No banners; the quota section still updates.
+    Off,
+}
+
+impl NotifyTier {
+    /// The lowest tier that may post, or `None` when nothing may. The tier
+    /// machine numbers its lines 1 = 80 % and 2 = 100 %, so the threshold rule
+    /// lives here once and `notify::Gate` only asks it.
+    pub fn min_tier(self) -> Option<u8> {
+        match self {
+            NotifyTier::Both => Some(1),
+            NotifyTier::Exhausted => Some(2),
+            NotifyTier::Off => None,
+        }
+    }
+}
+
 /// Checks run at boot; offering an update the user would otherwise miss is the
 /// point of shipping a latest.json at all.
 fn default_auto_update_check() -> bool {
@@ -73,6 +101,11 @@ fn default_bubble_enabled() -> bool {
 
 /// See the field: pausing an absent host's probes is the polite default.
 fn default_host_exit_pause() -> bool {
+    true
+}
+
+/// Polling is the feature; the switch exists to stop it, not to start it.
+fn default_quota_polling() -> bool {
     true
 }
 
@@ -113,6 +146,25 @@ pub struct Settings {
     /// account traffic. Default on; the last known answer stays on screen.
     #[serde(default = "default_host_exit_pause")]
     pub host_exit_pause: bool,
+    /// The master switch for vendor quota polling. Off means one request fewer:
+    /// no HTTP, and no `gh` / `agy` child process (the Windows console-flash
+    /// family of side effects dies here too). The quota section keeps its last
+    /// answer and says it stopped — a switch that blanks the numbers the user
+    /// was reading is a switch that gets turned back on in annoyance.
+    #[serde(default = "default_quota_polling")]
+    pub quota_polling: bool,
+    /// Tools whose probe the user stopped by hand, while the master switch stays
+    /// on. This is the only lever for the probes with no host mapping
+    /// (`copilot`, `gemini`, `kimicode`, `minimaxcode`): `host_exit_pause`
+    /// cannot see a process that never exists.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub quota_probes_off: Vec<String>,
+    /// Which banner lines fire.
+    #[serde(default)]
+    pub notify_tiers: NotifyTier,
+    /// Tools that never post a banner, whatever their windows do.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub notify_muted: Vec<String>,
     /// Check GitHub's latest.json on boot and offer the update when a newer
     /// release exists. A check is one anonymous GET — nothing is downloaded and
     /// no install runs unless the user clicks the offer in the settings sheet.
@@ -136,6 +188,10 @@ impl Default for Settings {
             show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
             host_exit_pause: default_host_exit_pause(),
+            quota_polling: default_quota_polling(),
+            quota_probes_off: Vec::new(),
+            notify_tiers: NotifyTier::default(),
+            notify_muted: Vec::new(),
             auto_update_check: default_auto_update_check(),
             budgets: BTreeMap::new(),
             quota_tools: Vec::new(),
@@ -145,6 +201,14 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Whether this tool's probe may run this pass: the master switch first, then
+    /// the user's own exclusions. The host-exit test composes on top of this in
+    /// `engine::quota_pass`, because that one is re-decided every pass while
+    /// these two are the user's standing instruction.
+    pub fn probe_allowed(&self, tool: &str) -> bool {
+        self.quota_polling && !self.quota_probes_off.iter().any(|t| t == tool)
+    }
+
     /// The one path both the app and `tokenme budget` use.
     pub fn path() -> Option<PathBuf> {
         usage_core::budget::settings_path()
@@ -166,5 +230,73 @@ impl Settings {
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
         fs::rename(&tmp, &path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a settings.json written before this feature looks like: none of the
+    /// new keys. Loading it must keep polling on and banners at both lines —
+    /// an upgrade that silently stops probing is worse than no switch at all.
+    #[test]
+    fn a_pre_switch_file_keeps_polling_and_both_tiers() {
+        let s: Settings = serde_json::from_str(
+            r#"{"tray_mode":"tray_tokens","autostart":false,"theme":"light","refresh_secs":30,
+                "show_money":false,"show_empty_tools":false,"bubble_enabled":true,
+                "host_exit_pause":true,"auto_update_check":true,"budgets":{}}"#,
+        )
+        .expect("the shipped shape must still parse");
+        assert!(s.quota_polling);
+        assert!(s.quota_probes_off.is_empty());
+        assert_eq!(s.notify_tiers, NotifyTier::Both);
+        assert!(s.notify_muted.is_empty());
+    }
+
+    #[test]
+    fn empty_lists_stay_out_of_the_file() {
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!json.contains("quota_probes_off"), "{json}");
+        assert!(!json.contains("notify_muted"), "{json}");
+        // The two switches that change behaviour are always written, so a
+        // hand-edited file cannot leave them ambiguous.
+        assert!(json.contains("\"quota_polling\":true"), "{json}");
+    }
+
+    #[test]
+    fn the_master_switch_overrides_every_per_tool_choice() {
+        let mut s = Settings::default();
+        assert!(s.probe_allowed("codex"));
+        s.quota_probes_off = vec!["copilot".into()];
+        assert!(!s.probe_allowed("copilot"));
+        assert!(s.probe_allowed("codex"));
+        s.quota_polling = false;
+        assert!(!s.probe_allowed("codex"), "off means not one request leaves");
+        assert!(!s.probe_allowed("copilot"));
+    }
+
+    /// The tier-choice → tier-number map the banner gate reads. Muting and delivery
+    /// live in `notify::Gate`, whose own test covers them; this is the half the
+    /// settings model owns, and the only place the 80 %/100 % pair is spelled.
+    #[test]
+    fn the_tier_choice_names_the_lowest_line_that_may_post() {
+        assert_eq!(NotifyTier::Both.min_tier(), Some(1));
+        assert_eq!(NotifyTier::Exhausted.min_tier(), Some(2));
+        assert_eq!(NotifyTier::Off.min_tier(), None, "off must be quiet for everyone");
+        assert_eq!(NotifyTier::default(), NotifyTier::Both, "the shipped pair stays the default");
+    }
+
+    #[test]
+    fn tiers_round_trip_through_their_serialised_names() {
+        for (json, want) in [
+            (r#""both""#, NotifyTier::Both),
+            (r#""exhausted""#, NotifyTier::Exhausted),
+            (r#""off""#, NotifyTier::Off),
+        ] {
+            let s: Settings =
+                serde_json::from_str(&format!(r#"{{"notify_tiers":{json}}}"#)).unwrap();
+            assert_eq!(s.notify_tiers, want, "{json}");
+        }
     }
 }

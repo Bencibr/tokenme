@@ -9,7 +9,7 @@ use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
-use crate::settings::{Theme, TrayMode};
+use crate::settings::{NotifyTier, Theme, TrayMode};
 use crate::tray;
 
 /// Terminates the tray application, rather than merely hiding its panel.
@@ -154,8 +154,40 @@ pub struct PanelSettings {
     pub show_empty_tools: bool,
     pub bubble_enabled: bool,
     pub host_exit_pause: bool,
+    pub quota_polling: bool,
+    pub quota_probes_off: Vec<String>,
+    pub notify_tiers: NotifyTier,
+    pub notify_muted: Vec<String>,
     pub auto_update_check: bool,
     pub version: String,
+    /// The same number `main.rs` logs at startup ("build N starting"), so the
+    /// 关于 page and the log agree about which artifact is actually running.
+    pub build: &'static str,
+}
+
+/// One row of the settings sheet's per-tool polling page, straight from the
+/// probe registry — the page has no list of its own to fall out of step with.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeRow {
+    pub id: &'static str,
+    pub host_gated: bool,
+    pub answered_here: bool,
+    /// What the composed gate answers right now: master switch ∧ not excluded.
+    pub polling: bool,
+}
+
+#[tauri::command]
+pub async fn probe_tools(app: AppHandle) -> Result<Vec<ProbeRow>, String> {
+    let settings = app.state::<Shared>().settings();
+    Ok(usage_quota::inventory()
+        .into_iter()
+        .map(|p| ProbeRow {
+            polling: settings.probe_allowed(p.tool),
+            id: p.tool,
+            host_gated: p.host_gated,
+            answered_here: p.answered_here,
+        })
+        .collect())
 }
 
 /// Open a release page / mailto link in the user's browser. The scheme
@@ -215,8 +247,13 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
         host_exit_pause: settings.host_exit_pause,
+        quota_polling: settings.quota_polling,
+        quota_probes_off: settings.quota_probes_off.clone(),
+        notify_tiers: settings.notify_tiers,
+        notify_muted: settings.notify_muted.clone(),
         auto_update_check: settings.auto_update_check,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        build: env!("TOKENME_BUILD_ID"),
     })
 }
 
@@ -294,6 +331,67 @@ pub async fn set_host_exit_pause(app: AppHandle, on: bool) -> Result<(), String>
         return Err("settings busy".to_string());
     };
     settings.host_exit_pause = on;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// The master switch: off, no vendor request leaves on the next pass. It is
+/// deliberately *not* wired to the manual refresh — that path clears the quota
+/// cache, and a switch whose promise is "the numbers stay where they were" must
+/// not be the thing that erases them. The pass cache is 60 s at most, so the
+/// stop lands within one cadence tick; the label appears at once because the
+/// frontend reads it from settings, not from the report.
+#[tauri::command]
+pub async fn set_quota_polling(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.quota_polling = on;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// One tool's own switch — the only lever for the probes with no host mapping.
+/// The list is stored as exclusions (an allow-list would have to be rewritten
+/// every time the registry gains a probe).
+#[tauri::command]
+pub async fn set_tool_polling(app: AppHandle, tool: String, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.quota_probes_off.retain(|t| *t != tool);
+    if !on {
+        settings.quota_probes_off.push(tool);
+        settings.quota_probes_off.sort();
+    }
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// Which banner lines fire. Delivery policy only: the tier machine keeps
+/// recording where each window stands, so turning this back on does not
+/// retro-fire a line crossed while it was off.
+#[tauri::command]
+pub async fn set_notify_tiers(app: AppHandle, tiers: NotifyTier) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.notify_tiers = tiers;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// One tool's banner mute, same exclusion-list shape as the polling switches.
+#[tauri::command]
+pub async fn set_tool_muted(app: AppHandle, tool: String, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.notify_muted.retain(|t| *t != tool);
+    if on {
+        settings.notify_muted.push(tool);
+        settings.notify_muted.sort();
+    }
     settings.clone().save().map_err(|e| e.to_string())
 }
 

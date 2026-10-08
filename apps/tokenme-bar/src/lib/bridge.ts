@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
 import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
-import type { Bridge, PanelSettings, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
+import type { Bridge, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -246,6 +246,49 @@ export const bridge: Bridge = {
     await invoke<void>("set_host_exit_pause", { on });
   },
 
+  async setQuotaPolling(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.quota_polling = on;
+      return;
+    }
+    await invoke<void>("set_quota_polling", { on });
+  },
+
+  async setToolPolling(tool: string, on: boolean): Promise<void> {
+    if (!inTauri) {
+      const off = new Set(browserSettings.quota_probes_off);
+      if (on) off.delete(tool);
+      else off.add(tool);
+      browserSettings.quota_probes_off = [...off].sort();
+      return;
+    }
+    await invoke<void>("set_tool_polling", { tool, on });
+  },
+
+  async probeTools(): Promise<ProbeTool[]> {
+    if (!inTauri) return browserProbes.map((p) => ({ ...p, polling: browserSettings.quota_polling && !browserSettings.quota_probes_off.includes(p.id) }));
+    return invoke<ProbeTool[]>("probe_tools");
+  },
+
+  async setNotifyTiers(tiers: NotifyTierKey): Promise<void> {
+    if (!inTauri) {
+      browserSettings.notify_tiers = tiers;
+      return;
+    }
+    await invoke<void>("set_notify_tiers", { tiers });
+  },
+
+  async setToolMuted(tool: string, on: boolean): Promise<void> {
+    if (!inTauri) {
+      const muted = new Set(browserSettings.notify_muted);
+      if (on) muted.add(tool);
+      else muted.delete(tool);
+      browserSettings.notify_muted = [...muted].sort();
+      return;
+    }
+    await invoke<void>("set_tool_muted", { tool, on });
+  },
+
   async setAutoUpdateCheck(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.auto_update_check = on;
@@ -400,6 +443,25 @@ const browserSettings: PanelSettings = {
   show_empty_tools: false,
   bubble_enabled: true,
   host_exit_pause: true,
+  quota_polling: true,
+  quota_probes_off: [],
+  notify_tiers: "both",
+  notify_muted: [],
   auto_update_check: true,
   version: "dev",
+  build: "dev",
 };
+
+/** The same 20 rows the Rust registry answers, so a browser review of the
+ *  settings sheet shows the real page instead of an empty one. `answered_here`
+ *  mirrors the ten tools with a cached answer on this machine. */
+const browserProbes: ProbeTool[] = [
+  "claude", "agnes", "antigravity", "atomcode", "cola", "kimicode", "minimaxcode", "funide",
+  "cline", "opencode", "codex", "copilot", "gemini", "joycode", "qoder", "workbuddy", "catpaw",
+  "zcode", "dsh", "trae",
+].map((id) => ({
+  id,
+  host_gated: !["kimicode", "minimaxcode", "copilot", "gemini"].includes(id),
+  answered_here: ["antigravity", "cline", "codex", "copilot", "gemini", "kimicode", "minimaxcode", "opencode", "qoder", "zcode"].includes(id),
+  polling: true,
+}));

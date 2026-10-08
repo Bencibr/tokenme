@@ -793,10 +793,12 @@ fn publish_with_quota<R: Runtime>(
     // snapshot of a report nobody saw would make "last known" mean two things.
     snapshot::write(&report);
     // Threshold banners: the engine only offers the fresh views; the notify
-    // worker owns the tier state, the permission flow and its own file.
+    // worker owns the tier state, the permission flow and its own file. The
+    // tier lines and the mute list are the user's, read fresh per publish.
     let displays: HashMap<String, String> =
         sources.iter().map(|s| (s.id.clone(), s.display.clone())).collect();
-    notify::observe(&report.quotas, &displays, crate::lang::get());
+    let gate = notify::Gate::from(&app.state::<Shared>().settings());
+    notify::observe(&report.quotas, &displays, crate::lang::get(), gate);
     let _ = app.emit(REPORT_EVENT, &report);
     // Re-read the mode AFTER the slow quota probes: a switch made while
     // polling ran must not be painted back to the old display (the stale-read
@@ -822,17 +824,37 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
         }
     }
     let poll_started = Instant::now();
+    let settings = app.state::<Shared>().settings();
     let mut q = usage_core::report::poll_quota(adapters);
-    // The host-exit pause: a tool whose application has exited stops getting
-    // vendor probes (the number cannot change) but keeps its last known answer
-    // on screen. Unmapped tools always keep probing.
-    if app.state::<Shared>().settings().host_exit_pause {
-        let alive = usage_quota::host::running_process_names();
-        q.extend(usage_quota::collect_gated(usage_quota::BUDGET, move |tool| {
-            usage_quota::host::any_host_running(tool, &alive)
-        }));
+    // Two gates, one pass. The user's own word (`quota_polling`,
+    // `quota_probes_off`) is the standing instruction; the host-exit test is
+    // re-decided every pass because a process comes and goes. Either one
+    // refusing means the same thing: no request leaves, and the last known
+    // answer stays on screen read from the cache however old it is. The four
+    // probes with no host mapping (`copilot`, `gemini`, `kimicode`,
+    // `minimaxcode`) are only reachable through the first — which is the whole
+    // reason the settings sheet grew a per-tool page.
+    let alive = settings
+        .host_exit_pause
+        .then(usage_quota::host::running_process_names);
+    let polling_off = !settings.quota_polling;
+    let gate = move |tool: &str| -> bool {
+        settings.probe_allowed(tool)
+            && match &alive {
+                Some(names) => usage_quota::host::any_host_running(tool, names),
+                None => true,
+            }
+    };
+    q.extend(usage_quota::collect_gated(usage_quota::BUDGET, gate));
+    // Edge-triggered, because the gate stays off for hours and a line every 60 s
+    // would bury the pass timings this log exists to show.
+    static OFF_LOGGED: AtomicBool = AtomicBool::new(false);
+    if polling_off {
+        if !OFF_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::logging::info("quota poll: 总闸已关 · 只读缓存不再探测 / polling off: cache only, no vendor request");
+        }
     } else {
-        q.extend(usage_quota::collect());
+        OFF_LOGGED.store(false, Ordering::Relaxed);
     }
     let per_tool: Vec<String> = q
         .iter()

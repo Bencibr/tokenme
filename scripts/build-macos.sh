@@ -49,6 +49,14 @@ python3 scripts/check-theme-parity.py
 # once per TTL). Sub-second, so it runs even with --fast.
 python3 scripts/check-no-window-spawns.py
 
+# The panel's two dictionaries are pinned against each other by TypeScript, but
+# not in the ways that go wrong quietly: a `{n}` on one side against `{count}` on
+# the other renders a literal brace-token, and a control deleted from the sheet
+# leaves its copy behind unreferenced. tsc cannot see either, and t() answers
+# undefined for a miss, so the symptom is one blank row. Sub-second, so it runs
+# even with --fast.
+python3 scripts/check-i18n-parity.py
+
 # The test gate. A workspace test pass recompiles every crate in debug —
 # minutes that a frontend-only iteration pays for nothing. Hash everything
 # under the crates and the app's Rust tree (sources, fixtures, manifests);

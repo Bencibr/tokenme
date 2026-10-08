@@ -708,17 +708,21 @@
   min-width: 0;
   max-width: 100%;
   padding: 10px var(--s4) var(--s3);
-  border-bottom: 1px solid var(--hair);
 }
 
-/* 等待型区块（配额探测中）不带底线：下面是空白面板，分隔线没有分隔
-   的对象，只会读成一根多余的横线。 */
-.sec-nodiv {
-  border-bottom: none;
-  /* It stands in for a whole list, so it takes the list's footprint: the wait
-     fills the height those rows would have had and the spinner sits in the
-     middle of it. Huddled under the section label it reads as an inline hint
-     rather than as the section's own content. */
+/* A divider separates two blocks, so the *lower* block draws it. A section that
+   owns its own bottom line strands one in the blank under a short list — the
+   工具 page with one tool is the loudest case — and no per-page exception fixes
+   that for every page, present or future. */
+.sec + .sec {
+  border-top: 1px solid var(--hair);
+}
+
+/* The waiting section (quota probe running) stands in for a whole list, so it
+   takes the list's footprint: the wait fills the height those rows would have
+   had and the spinner sits in the middle of it. Huddled under the section label
+   it reads as an inline hint rather than as the section's own content. */
+.sec-fill {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -916,6 +920,17 @@
   color: var(--ink-2);
   background: var(--accent-soft);
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--r-md);
+}
+
+/* 总闸关掉时数字留在原地，但必须说清它是哪一次的：一个没有出处的冻结数字
+   读起来像面板坏了，用户会去找别的开关。 */
+.quota-stopped {
+  margin: 2px 0 6px;
+  padding: 5px 8px;
+  font-size: var(--t-meta);
+  color: var(--warn);
+  background: var(--warn-soft);
   border-radius: var(--r-md);
 }
 
@@ -2148,6 +2163,205 @@
 
 .sheet-foot-update .sheet-action {
   margin-top: 0;
+}
+
+/* The settings sheet is a written height, not a capped one: 65% of 400×660 is
+   429 px, and a row costs 44–46 px, so a page holds about seven rows. With
+   `max-height` the sheet would change height on every tab — the panel jumping
+   under the cursor is exactly what the fixed `.view` heights exist to prevent.
+   Overflow becomes a scroll inside `.sheet-body`, never a clipped top row (the
+   panel itself is `overflow: hidden`, so what used to grow past the top was
+   simply gone, not scrolled). */
+.sheet-paged {
+  height: 65%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sheet-paged .sheet-hd,
+.sheet-paged .sheet-foot {
+  flex: none;
+}
+
+.sheet-paged .sheet-body {
+  padding: 0 0 2px;
+}
+
+/* 底栏右侧的退出：全局动作，跟着底栏常驻，不进任何一个标签。 */
+.sheet-foot .quit-btn {
+  margin-left: auto;
+}
+
+.sheet-tabs {
+  display: flex;
+  flex: none;
+  gap: var(--s1);
+  margin: 0 0 2px;
+  border-bottom: 1px solid var(--hair);
+}
+
+.sheet-tab {
+  padding: 4px var(--s2) 5px;
+  margin-bottom: -1px;
+  font: inherit;
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.sheet-tab:hover {
+  color: var(--ink-2);
+}
+
+.sheet-tab[aria-selected="true"] {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+/* `›` 与 `↗` 的分工：前者在 sheet 内翻页，后者打开另一个 sheet。 */
+.sheet-row-nav {
+  cursor: pointer;
+}
+
+.sheet-row-nav:hover {
+  background: var(--fill-hover);
+}
+
+.sheet-row-nav:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: -2px;
+}
+
+.sheet-nav-end {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.sheet-chev {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--ink-3);
+}
+
+.sheet-row-nav:hover .sheet-chev {
+  color: var(--ink-2);
+}
+
+.sheet-value {
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.sheet-tag {
+  margin-left: 6px;
+  padding: 1px 4px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: 2px;
+  vertical-align: 1px;
+}
+
+.sheet-row-warn {
+  background: var(--warn-soft);
+  border-radius: var(--r-md);
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+/* Locked is honest, not merely dimmed: the switches stay readable so the page
+   still says what it would do, and the note above says why nothing happens. */
+.sheet-row-locked,
+.sheet-list-locked {
+  opacity: 0.5;
+}
+
+.sheet-row-locked .switch,
+.sheet-list-locked .switch {
+  pointer-events: none;
+}
+
+.sheet-subhd {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) 0;
+}
+
+.sheet-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: -4px;
+  padding: 2px var(--s2) 2px 4px;
+  font: inherit;
+  font-size: var(--t-meta);
+  color: var(--ink-2);
+  background: none;
+  border: 0;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.sheet-back:hover {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+.sheet-summary {
+  flex: none;
+  margin: 0;
+  padding: 6px 0 7px;
+  border-bottom: 1px solid var(--hair);
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+}
+
+.sheet-locknote {
+  flex: none;
+  margin: var(--s2) 0 0;
+  padding: 6px 8px;
+  font-size: var(--t-meta);
+  line-height: 1.5;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--r-md);
+}
+
+/* Tool rows carry no hint line, which is what buys ~10 rows per screen here. */
+.sheet-list .sheet-row {
+  padding: 8px 0;
+}
+
+.sheet-list .sheet-label {
+  font-size: var(--t-meta);
+}
+
+.sheet-scope {
+  width: 100%;
+  margin-top: var(--s2);
+  padding: 6px 0;
+  font: inherit;
+  font-size: var(--t-meta);
+  color: var(--accent-ink);
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--hair);
+  cursor: pointer;
+}
+
+.sheet-scope:hover {
+  text-decoration: underline;
 }
 
 .sheet-foot-update .update-error {

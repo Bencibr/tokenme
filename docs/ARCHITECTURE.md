@@ -42,6 +42,7 @@ Cold start is ordered so the panel never waits on work it does not need. The eng
 - **Idempotent ingestion**: events carry stable dedupe keys; replaying a log never double-counts.
 - **One index, many readers**: an ingest lease (claim with TTL, steal with `--force`) keeps concurrent passes serialised.
 - **Money lives in usage-core**: CLI and panel can never disagree about a number.
+- **Gates suppress requests, never answers**: `settings.json` decides which probes fire through `usage_quota::collect_gated(budget, gate)`, and a gated probe is skipped while its cache is still read — switching a vendor off leaves its last answer on screen instead of deleting it, which is why moving one of those switches deliberately does *not* trigger a refresh (a forced pass would discard the answer the user just chose to keep). The same shape holds for banners: `notify::Gate` filters **delivery** only and still advances the window's recorded tier, so re-enabling cannot replay a crossing that happened while the user was quiet. The probe list the settings sheet renders comes from `usage_quota::inventory()` — the registry describing itself (which probes exist, which have a host-process mapping, which have answered on this machine), not a hand-maintained front-end copy.
 - **Retention window** bounds the index; `--prune` drops older events.
 
 ## Testing conventions

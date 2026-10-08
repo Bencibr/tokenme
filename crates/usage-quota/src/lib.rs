@@ -47,6 +47,41 @@ pub fn built_in() -> Vec<Box<dyn QuotaProbe>> {
     out
 }
 
+/// One row of the settings sheet's per-tool polling page. This is the registry
+/// speaking about itself, so the UI never carries a hand-written list that
+/// drifts from it: `built_in()` gains a probe and the page gains a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeInfo {
+    /// The probe's tool id, in `built_in()`'s own order.
+    pub tool: &'static str,
+    /// Whether [`host::HOST_PROCESSES`] can reach this probe. Four cannot
+    /// (`copilot`, `gemini`, `kimicode`, `minimaxcode`): for those, the user's
+    /// own switch is the only lever that exists.
+    pub host_gated: bool,
+    /// Whether this machine holds a cached answer for it — the honest "本机答过"
+    /// judge. A tool's *presence* answers `true` for everything on a machine
+    /// that has all of them installed, which filters nothing.
+    pub answered_here: bool,
+}
+
+/// The registry's own inventory, with the cache read once. Display names are not
+/// here on purpose: the report already ships `sources[].display`, and the two
+/// probes with no adapter are the frontend's to name.
+pub fn inventory() -> Vec<ProbeInfo> {
+    let cache = cache::Cache::open("tokenme/quota", TTL);
+    built_in()
+        .iter()
+        .map(|probe| {
+            let tool = probe.tool();
+            ProbeInfo {
+                tool,
+                host_gated: host::HOST_PROCESSES.iter().any(|(id, _)| *id == tool),
+                answered_here: cache.as_ref().and_then(|c| c.stale(tool)).is_some_and(|v| !v.is_empty()),
+            }
+        })
+        .collect()
+}
+
 /// Quota for every built-in probe, cached across processes.
 ///
 /// Probes run concurrently and the call returns as soon as everything that
@@ -196,6 +231,30 @@ mod tests {
                 || PROBE_ONLY_TOOLS.contains(&probe.tool());
             assert!(known, "probe tool {:?} matches no adapter TOOL_ID or probe-only id", probe.tool());
         }
+    }
+
+    /// The settings sheet's per-tool page is only trustworthy while it is the
+    /// registry's own list. This pins the two claims that page makes: the row set
+    /// and order are `built_in()`'s, and the "no exit gate" badge belongs to
+    /// exactly the probes `HOST_PROCESSES` cannot see. `answered_here` is
+    /// deliberately not asserted — it is this machine's cache, not a fact about
+    /// the code, and a CI box with no vendor answers would make it flaky.
+    #[test]
+    fn the_inventory_is_the_registry_talking_about_itself() {
+        let listed = inventory();
+        let probes: Vec<&str> = built_in().iter().map(|p| p.tool()).collect();
+        assert_eq!(listed.len(), probes.len());
+        assert_eq!(listed.iter().map(|i| i.tool).collect::<Vec<_>>(), probes);
+
+        let ungated: Vec<&str> = listed.iter().filter(|i| !i.host_gated).map(|i| i.tool).collect();
+        assert_eq!(
+            ungated,
+            vec!["kimicode", "minimaxcode", "copilot", "gemini"],
+            "these probes are only stoppable by the user's own switch"
+        );
+        // claude leads the list because built_in() pushes it first; the page's
+        // order is that decision, not an alphabetical one.
+        assert_eq!(listed.first().map(|i| i.tool), Some("claude"));
     }
 
     /// A probe whose vendor needs longer than the caller's budget: without the

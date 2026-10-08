@@ -64,7 +64,12 @@ const [page, setPage] = useState<PageKey>(() => {
     return Number.isFinite(secs) && secs >= 0 ? Date.now() - secs * 1000 : null;
   });
   const [error, setError] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // QA pin, same family as ?page= / ?theme=: open the settings sheet on load so
+  // a headless screenshot can measure the tab strip and the 65% height instead
+  // of a panel that never showed them.
+  const [settingsOpen, setSettingsOpen] = useState(
+    () => new URLSearchParams(location.search).get("sheet") === "settings",
+  );
   // Remote servers: the list powers the footer icon's dot and the scope menu's
   // "manual" tags; the sheet itself only borrows it.
   const [servers, setServers] = useState<ServerView[]>([]);
@@ -76,6 +81,9 @@ const [page, setPage] = useState<PageKey>(() => {
   // only so Escape can dismiss it before the sheet and the panel itself.
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [showMoney, setShowMoney] = useState(false);
+  // The quota section must say when the numbers stopped moving because the user
+  // asked them to — a frozen figure with no explanation reads as a broken panel.
+  const [quotaPolling, setQuotaPolling] = useState(true);
   // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
   // switch without touching persistence.
   const [showEmptyTools, setShowEmptyTools] = useState(() => {
@@ -126,6 +134,7 @@ const [page, setPage] = useState<PageKey>(() => {
       applyTheme(s.theme);
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
+      setQuotaPolling(s.quota_polling);
       // The idle cadence is what the "updates stopped" line measures against.
       setRefreshSecs(s.refresh_secs);
       if (new URLSearchParams(location.search).get("showempty") === null) {
@@ -449,7 +458,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "overview" ? (
                 <>
                   <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} period={period} />
-                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
@@ -488,9 +497,20 @@ const [page, setPage] = useState<PageKey>(() => {
 
         {settingsOpen ? (
           <SettingsSheet
-            onClose={() => setSettingsOpen(false)}
+            onClose={() => {
+              // 从设置里跳去服务器面板时把设置关掉：两张 sheet 叠着，下面那张
+              // 就只是遮罩，Esc 也说不清该退哪一层。
+              setSettingsOpen(false);
+            }}
             onEmptyTools={setShowEmptyTools}
             onRefreshSecs={setRefreshSecs}
+            onMoney={setShowMoney}
+            onPolling={setQuotaPolling}
+            onOpenServers={() => {
+              setSettingsOpen(false);
+              setServersOpen(true);
+            }}
+            displays={Object.fromEntries(report.sources.map((s) => [s.id, s.display]))}
           />
         ) : null}
 

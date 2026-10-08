@@ -44,6 +44,34 @@ use serde::{Deserialize, Serialize};
 use usage_core::report::{QuotaOrigin, QuotaView};
 
 use crate::lang::Lang;
+use crate::settings::{NotifyTier, Settings};
+
+/// What the user's settings say about one crossing: which lines may post, and
+/// which tools stay quiet. Built once per report from [`Settings`] so the tier
+/// machine never reads global state itself.
+///
+/// A crossing that may not post still advances the window's recorded tier: the
+/// delivery policy is not the tier machine's business, and un-muting a tool (or
+/// turning the tiers back on) an hour later must not retro-fire a line it
+/// crossed while it was supposed to be quiet.
+#[derive(Debug, Clone, Default)]
+pub struct Gate {
+    tiers: NotifyTier,
+    muted: Vec<String>,
+}
+
+impl From<&Settings> for Gate {
+    fn from(s: &Settings) -> Self {
+        Self { tiers: s.notify_tiers, muted: s.notify_muted.clone() }
+    }
+}
+
+impl Gate {
+    fn allows(&self, tool: &str, tier: u8) -> bool {
+        !self.muted.iter().any(|m| m == tool)
+            && self.tiers.min_tier().is_some_and(|floor| tier >= floor)
+    }
+}
 
 /// The warning line: used ≥ 80 % of the window.
 const WARN_PCT: f64 = 80.0;
@@ -225,7 +253,7 @@ fn copy_for(
 
 enum Msg {
     /// A fresh report's quota views. `displays` maps tool id → human name.
-    Observe(Vec<QuotaView>, HashMap<String, String>, Lang),
+    Observe(Vec<QuotaView>, HashMap<String, String>, Lang, Gate),
     /// A one-shot banner for manual QA of the permission flow.
     Test,
 }
@@ -260,7 +288,7 @@ pub fn init(app: &tauri::AppHandle) {
 
 /// Offer a fresh report's quota views to the tier machine. Budget views (caps
 /// the user set in tokenme, not vendor quota) are not this feature's business.
-pub fn observe(quotas: &[QuotaView], displays: &HashMap<String, String>, lang: Lang) {
+pub fn observe(quotas: &[QuotaView], displays: &HashMap<String, String>, lang: Lang, gate: Gate) {
     let relevant: Vec<QuotaView> = quotas
         .iter()
         .filter(|q| q.origin != QuotaOrigin::Budget && q.used_percent.is_finite())
@@ -269,7 +297,7 @@ pub fn observe(quotas: &[QuotaView], displays: &HashMap<String, String>, lang: L
     if relevant.is_empty() {
         return;
     }
-    let _ = channel().send(Msg::Observe(relevant, displays.clone(), lang));
+    let _ = channel().send(Msg::Observe(relevant, displays.clone(), lang, gate));
 }
 
 /// Post a test banner through the same gate a real one walks (permission
@@ -422,7 +450,7 @@ fn worker(rx: Receiver<Msg>) {
     let mut w = Worker::new();
     while let Ok(msg) = rx.recv() {
         match msg {
-            Msg::Observe(quotas, displays, lang) => w.observe_views(&quotas, &displays, lang),
+            Msg::Observe(quotas, displays, lang, gate) => w.observe_views(&quotas, &displays, lang, &gate),
             Msg::Test => w.test(),
         }
     }
@@ -469,7 +497,13 @@ impl Worker {
         }
     }
 
-    fn observe_views(&mut self, quotas: &[QuotaView], displays: &HashMap<String, String>, lang: Lang) {
+    fn observe_views(
+        &mut self,
+        quotas: &[QuotaView],
+        displays: &HashMap<String, String>,
+        lang: Lang,
+        gate: &Gate,
+    ) {
         let now = now_ms();
         let mut dirty = false;
         for q in quotas {
@@ -478,7 +512,16 @@ impl Worker {
             let decision = plan(prev.as_ref(), tier_of(q.used_percent), q.resets_at_ms, now);
             let mut entry = decision.entry;
             if let Some(tier) = decision.fire {
-                if self.attempt_due(&key) {
+                if !gate.allows(&q.tool, tier) {
+                    // Quiet, not forgotten: the window moves to where it is.
+                    entry.tier = tier;
+                    dirty = true;
+                    if self.noted_once.insert(format!("{key}:muted")) {
+                        crate::logging::info(&format!(
+                            "notify: 按设置静默 [{key}] tier {tier} / kept quiet by settings, tier recorded"
+                        ));
+                    }
+                } else if self.attempt_due(&key) {
                     let display = displays.get(&q.tool).map(String::as_str).unwrap_or(&q.tool);
                     let (title, body) = copy_for(display, q.label.as_deref(), q.used_percent, tier, lang);
                     match self.deliver(&key, &title, &body) {
@@ -898,5 +941,30 @@ mod tests {
         assert_eq!(parse_override("Granted"), None);
         assert_eq!(parse_override(""), None);
         assert_eq!(parse_override("yes"), None);
+    }
+
+    /// The gate decides who may post. It never decides what the tier machine
+    /// remembers — that distinction is why un-muting a tool does not retro-fire
+    /// the line it crossed while quiet.
+    #[test]
+    fn the_gate_filters_delivery_not_the_tier_state() {
+        let mut s = Settings::default();
+        let g = Gate::from(&s);
+        assert!(g.allows("codex", 1) && g.allows("codex", 2));
+        assert!(!g.allows("codex", 0), "a window below the warning line never posts");
+
+        s.notify_tiers = NotifyTier::Exhausted;
+        let g = Gate::from(&s);
+        assert!(!g.allows("codex", 1), "80 % stays quiet when only exhaustion is kept");
+        assert!(g.allows("codex", 2));
+
+        s.notify_tiers = NotifyTier::Both;
+        s.notify_muted = vec!["qoder".into()];
+        let g = Gate::from(&s);
+        assert!(!g.allows("qoder", 2), "a muted tool never posts");
+        assert!(g.allows("codex", 1), "muting one tool says nothing about the others");
+
+        s.notify_tiers = NotifyTier::Off;
+        assert!(!Gate::from(&s).allows("codex", 2), "off is off for everyone");
     }
 }

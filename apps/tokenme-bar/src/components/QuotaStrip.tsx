@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loading } from "./Loading";
 import type { NotifyState, QuotaOrder, QuotaView } from "../types";
 import { bridge } from "../lib/bridge";
-import { toolColor, toolDisplay, until } from "../lib/format";
+import { toolColor, toolDisplay, until, freshness } from "../lib/format";
 import { t } from "../lib/i18n";
 import { Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
@@ -102,6 +102,7 @@ export function QuotaStrip({
   now,
   pending,
   scoped,
+  polling = true,
 }: {
   quotas: QuotaView[];
   now: number;
@@ -111,6 +112,9 @@ export function QuotaStrip({
    *  on this machine only and never follow the scope, so the section says so
    *  instead of silently mixing calibers. */
   scoped?: boolean;
+  /** False when the user turned vendor polling off: the rows keep their last
+   *  answer and the section says when it was taken. */
+  polling?: boolean;
 }) {
   const live = quotas.filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now);
   const [order, setOrderState] = useState<QuotaOrder>(savedOrder);
@@ -373,6 +377,11 @@ export function QuotaStrip({
         </span>
       }
     >
+      {!polling && live.length ? (
+        <p className="quota-stopped" role="status">
+          {t("quota.stopped", { age: freshness(live.reduce((m, q) => Math.max(m, q.sampled_at_ms), 0), now) })}
+        </p>
+      ) : null}
       {guide ? (
         <div className="quota-notify" role="status">
           <IconBell size={13} />
