@@ -96,6 +96,10 @@ fn storage_jsons(cn: bool) -> Vec<PathBuf> {
 const USAGE_PATH: &str = "/trae/api/v1/pay/ide_user_ent_usage";
 /// Fallback API host, used when the login record carries none.
 const DEFAULT_HOST: &str = "https://growsg-normal.trae.ai";
+/// The current-entitlement-base listing: where the CN credits packs live
+/// (`credits_limit` sits under `product_extra.package_extra.quota`, a key the
+/// `ide_user_ent_usage` payloads do not carry).
+const ENT_BASE_PATH: &str = "/trae/api/v1/pay/user_cur_ent_base";
 
 /// `entitlement_base_info.product_type` values (the bundle's `Vc` enum). The
 /// plan picker reads exactly these five; packs outside them are add-ons.
@@ -272,12 +276,67 @@ impl QuotaProbe for TraeQuota {
             if !samples.is_empty() {
                 return samples;
             }
+            if self.cn {
+                if let Some(credits) = cn_credits_window(&login) {
+                    return vec![credits];
+                }
+            }
             if let Some(free) = cn_free_window(&body) {
                 return vec![free];
             }
         }
         Vec::new()
     }
+}
+
+/// The CN credits window. Credits billing (`is_credits_billing: true`) meters
+/// in credits carried per pack: `user_cur_ent_base` lists each pack's
+/// `credits_limit` under `product_extra.package_extra.quota`, and the IDE sums
+/// the same fields (`total += c`, remaining `c - credits_amount`). The
+/// entitlement payloads read today carry no `credits_amount` yet — the spent
+/// side reads 0 until one appears, exactly as the IDE's own `?? 0` falls back.
+fn cn_credits_window(login: &Login) -> Option<QuotaSample> {
+    let url = format!("{}{ENT_BASE_PATH}", login.host);
+    let body = crate::http::post_json(
+        &url,
+        &[
+            ("content-type", "application/json"),
+            ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
+        ],
+        json!({}),
+    )?;
+    let list = body.get("ent_base_list").and_then(Value::as_array)?;
+    let mut total = 0.0;
+    let mut unlimited = false;
+    let mut seen = false;
+    for pack in list {
+        match pack
+            .pointer("/product_extra/package_extra/quota/credits_limit")
+            .and_then(Value::as_f64)
+        {
+            Some(v) if v < 0.0 => unlimited = true,
+            Some(v) if v > 0.0 => {
+                total += v;
+                seen = true;
+            }
+            _ => {}
+        }
+    }
+    let label = if unlimited {
+        format!("积分 · 已用 0/{}+不限量", fmt(total))
+    } else {
+        format!("积分 · 已用 0/{}", fmt(total))
+    };
+    if !seen && !unlimited {
+        return None;
+    }
+    Some(QuotaSample {
+        used_percent: 0.0,
+        window_minutes: 0,
+        resets_at_ms: 0,
+        label: Some(label),
+        id: Some("credits".to_string()),
+    })
 }
 
 /// The CN free tier has no pack with a limit: the IDE maps a packless account
@@ -761,4 +820,42 @@ fn cn_fetch_live() {
         println!("[trae-cn] fetch: {:>6.2}%  {}", bar.used_percent, bar.label.as_deref().unwrap_or_default());
     }
     assert!(!bars.is_empty(), "the CN probe returned no bars for a running host");
+}
+
+/// `#[ignore]`d: the CN dashboard's credits endpoints against the local token
+/// — status, billing status and the web entitlement (which the dashboard page
+/// itself calls). Dumps shapes, never the token.
+#[test]
+#[ignore]
+fn cn_credits_dump() {
+    for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
+        for (path, payload) in [
+            ("/trae/api/v1/pay/query_user_usage_group_by_session",
+             json!({ "start_time": 1791187200000i64, "end_time": 1791878399000i64, "page_size": 100, "page_num": 1, "usage_type": 0 })),
+            ("/trae/api/v1/pay/query_user_usage_group_by_session",
+             json!({ "start_time": 1791187200000i64, "end_time": 1791878399000i64, "page_size": 100, "page_num": 1, "usage_type": 1 })),
+        ] {
+            let url = format!("{}{path}", login.host);
+            let resp = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(5))
+                .timeout_read(std::time::Duration::from_secs(10))
+                .build()
+                .post(&url)
+                .set("content-type", "application/json")
+                .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+                .send_string(&payload.to_string());
+            match resp {
+                Ok(r) => {
+                    let text = r.into_string().unwrap_or_default();
+                    let pretty: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                    println!("[trae-cn] {url} ({}):\n{}", "2xx", serde_json::to_string_pretty(&pretty).unwrap());
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let text = r.into_string().unwrap_or_default();
+                    println!("[trae-cn] {url}: HTTP {code}: {text}");
+                }
+                Err(e) => println!("[trae-cn] {url}: {e}"),
+            }
+        }
+    }
 }
