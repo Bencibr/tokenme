@@ -281,8 +281,8 @@ impl QuotaProbe for TraeQuota {
                 return samples;
             }
             if self.cn {
-                let checkin = cn_daily_checkin(&login);
-                let windows = cn_credit_windows(&login, checkin);
+                cn_daily_checkin(&login, false);
+                let windows = cn_credit_windows(&login);
                 if !windows.is_empty() {
                     return windows;
                 }
@@ -302,7 +302,7 @@ impl QuotaProbe for TraeQuota {
 /// and `usage.credits_amount` — so the bar is the real spend, and
 /// `end_time` gives each window its own expiry countdown. The checkin pack's
 /// very presence is the 已签到 mark; the daily claim's outcome refines it.
-fn cn_credit_windows(login: &Login, checkin: Option<TraeCheckinOutcome>) -> Vec<QuotaSample> {
+fn cn_credit_windows(login: &Login) -> Vec<QuotaSample> {
     let url = format!("{}{ENT_LIST_V2}", login.host);
     // Browser-shaped, like the dashboard's own call: Chrome UA and platform
     // hints that follow the OS the panel runs on (macOS / Windows / Linux).
@@ -359,29 +359,24 @@ fn cn_credit_windows(login: &Login, checkin: Option<TraeCheckinOutcome>) -> Vec<
             .get("display_desc")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or("积分包");
+            .map(str::to_string)
+            .unwrap_or_else(|| "积分包".to_string());
         let expires_ms = base
             .get("end_time")
             .and_then(Value::as_f64)
             .map(|s| (s * 1000.0) as i64)
             .unwrap_or(0);
-        // The checkin pack only exists for a claimed day — its presence is the
-        // 已签到 mark; the daily claim's own outcome refines it.
-        let checkin_mark = if name == "签到奖励" {
-            match checkin {
-                Some(o) if o.done_today && !o.was_already => " · 已自动签到",
-                Some(o) if o.done_today => " · 今日已签到",
-                Some(_) => " · 已签到",
-                None => " · 已签到",
-            }
-        } else {
-            ""
-        };
+        // The checkin pack only exists for a claimed day — its presence is
+        // what lets the tool header wear the 已签到 badge. The label is the
+        // bare pack name: the gauge column already shows the spent share, and
+        // a long "已用 X/Y" tail both truncates and breaks the reset column's
+        // alignment across rows.
+        let _ = spent;
         out.push(QuotaSample {
-            used_percent: (spent / limit * 100.0).clamp(0.0, 100.0),
+            used_percent: 0.0,
             window_minutes: 0,
             resets_at_ms: expires_ms,
-            label: Some(format!("{name} · 已用 {spent:.0}/{limit:.0} 积分{checkin_mark}")),
+            label: Some(name.clone()),
             id: Some(pack.get("entitlement_id").and_then(Value::as_str).unwrap_or("credits").to_string()),
         });
     }
@@ -456,11 +451,11 @@ fn local_day() -> String {
 /// Fire today's claim (unless today is already spent) and report the outcome.
 /// `None` = no state file could be written (a read-only config dir): the probe
 /// then never auto-claims, the window just loses its marker.
-fn cn_daily_checkin(login: &Login) -> Option<TraeCheckinOutcome> {
+fn cn_daily_checkin(login: &Login, force: bool) -> Option<TraeCheckinOutcome> {
     let path = checkin_state_path()?;
     let mut state = load_checkin_state(&path);
     let today = local_day();
-    if state.last_attempt_day == today {
+    if !force && state.last_attempt_day == today {
         return Some(TraeCheckinOutcome {
             done_today: state.last_ok_day == today,
             was_already: false,
@@ -523,6 +518,62 @@ fn cn_daily_checkin(login: &Login) -> Option<TraeCheckinOutcome> {
     Some(outcome)
 }
 
+
+/// The panel's check-in button: one forced claim right now, whatever the
+/// automatic pass already tried today. The message is user-facing.
+pub fn manual_checkin() -> Result<String, String> {
+    let login = logins(true)
+        .into_iter()
+        .find(|l| l.host.contains("trae.cn"))
+        .ok_or_else(|| "未找到 Trae CN 登录".to_string())?;
+    let today = local_day();
+    let path = checkin_state_path().ok_or_else(|| "无法写入签到状态".to_string())?;
+    let mut state = load_checkin_state(&path);
+    let url = format!("{}{CLAIM_PATH}", login.host);
+    let resp = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .set("x-user-region", "CN")
+        .set("user-agent", &format!("Trae/{IDE_VERSION}"))
+        .set("x-device-type", if cfg!(target_os = "macos") {
+            "Darwin"
+        } else if cfg!(windows) {
+            "Windows"
+        } else {
+            "Linux"
+        })
+        .set("x-app-version", IDE_VERSION)
+        .set("x-device-id", &device_id_of(&mut state))
+        .send_string(&json!({ "req_source": 1 }).to_string())
+        .map_err(|e| format!("签到请求失败: {e}"))?;
+    let body: Value = resp
+        .into_string()
+        .map_err(|e| format!("签到响应读取失败: {e}"))?
+        .parse()
+        .unwrap_or(Value::Null);
+    let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    let points = body
+        .pointer("/data/points")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    state.last_attempt_day = today.clone();
+    let message = match code {
+        0 => {
+            state.last_ok_day = today.clone();
+            state.last_credits = points;
+            format!("签到成功，+{points:.0} 积分")
+        }
+        9095 => "今日已签到".to_string(),
+        9074 => "签到排队中，稍后再试".to_string(),
+        other => format!("签到未成功 (code {other})"),
+    };
+    save_checkin_state(&path, &state);
+    Ok(message)
+}
 
 /// The CN free tier has no pack with a limit: the IDE maps a packless account
 /// to its own Free table (50 basic requests a month — `pD.FreeUser` in the

@@ -1001,6 +1001,34 @@
   letter-spacing: -0.005em;
 }
 
+/* Trae CN 的签到：组头最右——未签是可点按钮（手动补签），签过是只读徽标。
+   放在拖拽手柄里，点击必须拦下 pointer 事件免得带出拖拽。 */
+.quota-checkin {
+  display: inline-flex;
+  margin-left: auto;
+}
+
+.checkin-btn {
+  padding: 1px 8px;
+  font: inherit;
+  font-size: var(--t-meta);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.checkin-btn:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.checkin-badge {
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--ok);
+}
+
 .quota-origins {
   display: flex;
   gap: 3px;
@@ -1133,6 +1161,7 @@
 .quota-reset {
   font-size: 10.5px;
   text-align: right;
+  min-width: 56px;
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
 }

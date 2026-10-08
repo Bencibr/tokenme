@@ -42,6 +42,10 @@ pub use minimaxcode::MiniMaxCodeQuota;
 pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
 pub use trae::TraeQuota;
+/// The panel's check-in button entry (see `trae::manual_checkin`).
+pub fn trae_manual_checkin() -> Result<String, String> {
+    trae::manual_checkin()
+}
 pub use workbuddy::WorkBuddyQuota;
 pub use workbuddy::login as workbuddy_login;
 pub use zcode::ZcodeQuota;

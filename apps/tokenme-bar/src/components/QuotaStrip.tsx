@@ -259,6 +259,17 @@ export function QuotaStrip({
     rows.push(q);
     byTool.set(q.tool, rows);
   }
+  const [checkinBusy, setCheckinBusy] = useState(false);
+  const [checkinClaimed, setCheckinClaimed] = useState(false);
+  const [checkinMsg, setCheckinMsg] = useState<string | null>(null);
+  /** The backend stamps a claimed day into the checkin pack's label; either
+   *  wording counts as done for today. */
+  const groupCheckedIn = (g: { tool: string; rows: QuotaView[] }): boolean =>
+    g.rows.some((r) => {
+      const label = r.label ?? "";
+      return label.includes(t("quota.checkin.mark.auto")) || label.includes(t("quota.checkin.mark.today"));
+    });
+
   const groups = ordered([...byTool.keys()], order.tools, (t) => t).map((tool) => ({
     tool,
     rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
@@ -430,6 +441,37 @@ export function QuotaStrip({
                 <ToolIcon tool={g.tool} size={18} />
                 <span className="quota-tool">{toolDisplay(g.tool)}</span>
                 {plan ? <span className="quota-plan">{plan}</span> : null}
+                {g.tool === "trae_cn" ? (
+                  <span className="quota-checkin">
+                    {groupCheckedIn(g) || checkinClaimed ? (
+                      <span className="checkin-badge">{t("quota.checkin.done")}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="checkin-btn"
+                        disabled={checkinBusy}
+                        title={checkinMsg ?? undefined}
+                        onClick={async (e) => {
+                          // The head is a drag handle; the button must not
+                          // start a drag while it claims.
+                          e.stopPropagation();
+                          setCheckinBusy(true);
+                          try {
+                            const msg = await bridge.traeCnCheckinNow();
+                            setCheckinMsg(msg);
+                            setCheckinClaimed(true);
+                          } catch (err) {
+                            setCheckinMsg(String(err));
+                          } finally {
+                            setCheckinBusy(false);
+                          }
+                        }}
+                      >
+                        {checkinBusy ? t("quota.checkin.busy") : t("quota.checkin.btn")}
+                      </button>
+                    )}
+                  </span>
+                ) : null}
                 <span className="quota-origins">
                   {logged ? (
                     <span className="quota-badge" data-origin="log">
