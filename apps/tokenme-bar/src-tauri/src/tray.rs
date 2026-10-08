@@ -320,6 +320,38 @@ fn eq_ignore_ascii(a: &[u16], b: &[u16]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y || lower(*x) == lower(*y))
 }
 
+/// Explorer records ExecutablePath with an unexpanded known-folder GUID prefix
+/// ("{6D809377-…}\TokenMe\…"), while current_exe() answers the real path —
+/// RegGetValueW expands %vars% but not folder GUIDs, so the raw strings can
+/// never compare equal. Rewrite the prefix through the environment copy of the
+/// same folder; the three GUIDs cover everywhere this product installs. Plain
+/// paths (dev entries) pass through untouched, and an unknown GUID returns
+/// None so the entry is skipped rather than mismatched.
+#[cfg(target_os = "windows")]
+fn resolve_known_folder(entry: &[u16]) -> Option<Vec<u16>> {
+    if entry.first() != Some(&0x7B) {
+        return Some(entry.to_vec());
+    }
+    let close = entry.iter().position(|&c| c == 0x7D)?;
+    let guid: String = entry[1..close]
+        .iter()
+        .map(|c| *c as u8 as char)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let base = match guid.as_str() {
+        // FOLDERID_ProgramFilesX64
+        "6d809377-6af0-444b-8957-a3773f02200e" => std::env::var("ProgramW6432").ok()?,
+        // FOLDERID_ProgramFilesX86
+        "7c5a40ef-a0fb-4b58-944d-503c4ed9d452" => std::env::var("ProgramFiles(x86)").ok()?,
+        // FOLDERID_LocalAppData
+        "f1b32785-6fba-4fcf-9d55-7b8e7f157091" => std::env::var("LOCALAPPDATA").ok()?,
+        _ => return None,
+    };
+    let mut out: Vec<u16> = base.encode_utf16().collect();
+    out.extend_from_slice(&entry[close + 1..]);
+    Some(out)
+}
+
 #[cfg(target_os = "windows")]
 fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
     use windows_sys::Win32::System::Registry::{
@@ -387,10 +419,9 @@ fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
             if got == 0 {
                 let entry = &path[..path.len() >> 1];
                 let entry = &entry[..entry.iter().position(|&c| c == 0).unwrap_or(entry.len())];
-                if eq_ignore_ascii(
-                    entry,
-                    &want[..want.len() - 1],
-                ) {
+                let resolved = resolve_known_folder(entry);
+                if let Some(entry) = resolved {
+                    if eq_ignore_ascii(&entry, &want[..want.len() - 1]) {
                     let mut current: u32 = 0;
                     let mut cur_len = std::mem::size_of::<u32>() as u32;
                     let present = RegGetValueW(
@@ -415,6 +446,7 @@ fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
                         crate::logging::info("tray: promoted the taskbar icon (fresh entry)");
                     }
                     decided = true;
+                    }
                 }
             }
             RegCloseKey(sub);
