@@ -195,6 +195,20 @@ pub struct IngestReport {
     /// Events currently indexed per tool after the pass — the sources list reads
     /// this, so a steady-state pass with nothing new still reports real counts.
     pub per_tool: BTreeMap<String, u64>,
+    /// This pass's inserts per tool. `per_tool` is the standing total; a healthy
+    /// full-rescan re-read shows up here as nothing with its twin in
+    /// `per_tool_deduped`, and a read that arrived empty shows as both nothing.
+    pub per_tool_new: BTreeMap<String, u64>,
+    pub per_tool_deduped: BTreeMap<String, u64>,
+    /// Files walked per tool — a root contributing zero files is a missing
+    /// store, not an empty one.
+    pub scanned_by_tool: BTreeMap<String, u64>,
+    /// Per-file read failures (the human half of the `(0, 0)` file_state marker).
+    pub errors: Vec<String>,
+    /// Adapter-emitted diagnostics: read stats and the silent failures — a
+    /// decrypt that answered "no data" — that would otherwise be invisible
+    /// behind a clean cursor.
+    pub notes: Vec<String>,
 }
 
 #[derive(Default)]
@@ -206,6 +220,10 @@ pub(crate) struct Acc {
     relabeled: u64,
     purged: u64,
     errors: Vec<String>,
+    notes: Vec<String>,
+    new_by_tool: BTreeMap<String, u64>,
+    deduped_by_tool: BTreeMap<String, u64>,
+    scanned_by_tool: BTreeMap<String, u64>,
 }
 
 struct Job {
@@ -221,6 +239,7 @@ struct FileRead {
     prev_events: i64,
     events: Vec<UsageEvent>,
     error: Option<String>,
+    notes: Vec<String>,
 }
 
 /// The slice of `file_state` needed to decide what to re-read.
@@ -313,7 +332,8 @@ fn pass<'a>(
             params![now_ms().to_string()],
         )
         .map_err(sql_err)?;
-    idx.errors = std::mem::take(&mut acc.errors);
+    let errors = std::mem::take(&mut acc.errors);
+    idx.errors = errors.clone();
     let per_tool = idx.per_tool_counts()?;
     Ok(IngestReport {
         files_scanned: acc.files_scanned,
@@ -325,6 +345,11 @@ fn pass<'a>(
         total_events: per_tool.values().sum(),
         took_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
         per_tool,
+        per_tool_new: acc.new_by_tool,
+        per_tool_deduped: acc.deduped_by_tool,
+        scanned_by_tool: acc.scanned_by_tool,
+        errors,
+        notes: acc.notes,
     })
 }
 
@@ -425,6 +450,7 @@ fn one_adapter(
     let mut jobs: Vec<Job> = Vec::new();
     for file in files {
         acc.files_scanned += 1;
+        *acc.scanned_by_tool.entry(tool.to_string()).or_default() += 1;
         let key = file.key();
         let Some(prev) = stored.get(&key) else {
             acc.files_changed += 1;
@@ -456,7 +482,7 @@ fn one_adapter(
     if workers == 1 {
         for job in jobs {
             let read = read_one(adapter, filter, job);
-            persist(idx, tool, read, acc)?;
+            persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id)?;
         }
         return Ok(());
     }
@@ -483,13 +509,14 @@ fn one_adapter(
         }
         drop(tx);
         for read in rx {
-            if let Err(e) = persist(idx, tool, read, acc) {
+            if let Err(e) = persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id) {
                 acc.errors.push(format!("{tool}: {e}"));
             }
         }
         for queue in &queues {
             while let Some(job) = pop(queue) {
-                if let Err(e) = persist(idx, tool, read_one(adapter, filter, job), acc) {
+                let read = read_one(adapter, filter, job);
+                if let Err(e) = persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id) {
                     acc.errors.push(format!("{tool}: {e}"));
                 }
             }
@@ -581,12 +608,36 @@ fn read_one(adapter: &dyn SourceAdapter, filter: &DateFilter, job: Job) -> FileR
             }
         }
     }
-    FileRead { file, cursor: cursor as i64, prev_events, events, error }
+    // The read ran on this thread, so its notes landed here; a panicked or
+    // failed read drains exactly like a clean one.
+    let notes =
+        usage_core::drain_read_notes().into_iter().map(|n| format!("{}: {}", adapter.id(), n)).collect();
+    FileRead { file, cursor: cursor as i64, prev_events, events, error, notes }
 }
 
-fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result<()> {
-    let FileRead { file, cursor, prev_events, events, error } = read;
+fn persist(
+    idx: &mut Index,
+    tool: &str,
+    read: FileRead,
+    acc: &mut Acc,
+    full_rescan: bool,
+) -> Result<()> {
+    let FileRead { file, cursor, prev_events, events, error, notes } = read;
     let key = file.key();
+    for n in notes {
+        if acc.notes.len() < 128 {
+            acc.notes.push(n);
+        }
+    }
+    // A full-rescan source whose changed store now reads as nothing used to be
+    // invisible: dedupe swallows nothing because nothing arrived, the cursor
+    // records a clean read, and every later pass agrees. Name it.
+    if events.is_empty() && error.is_none() && full_rescan && prev_events > 0 {
+        acc.notes.push(format!(
+            "{tool}: {key} changed but read emitted 0 events (previous cursor held {prev_events}) — \
+             a failed decrypt or query would look exactly like this"
+        ));
+    }
     // Read before the transaction: `Transaction` holds `&mut Connection`.
     let claim = idx.claim_value();
     // IMMEDIATE: the write lock is taken up front, so a peer's read-your-writes
@@ -729,6 +780,7 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
                         relabeled_days.push(old_ts);
                     } else {
                         acc.deduped += 1;
+                        *acc.deduped_by_tool.entry(tool.to_string()).or_default() += 1;
                     }
                 }
                 continue;
@@ -757,9 +809,11 @@ fn persist(idx: &mut Index, tool: &str, read: FileRead, acc: &mut Acc) -> Result
             // must not see it twice either, so it is skipped together.
             if changed == 0 {
                 acc.deduped += 1;
+                *acc.deduped_by_tool.entry(tool.to_string()).or_default() += 1;
                 continue;
             }
             acc.new_events += 1;
+            *acc.new_by_tool.entry(tool.to_string()).or_default() += 1;
             inserted += 1;
             let id = tx.last_insert_rowid();
             for call in &ev.calls {
@@ -1084,6 +1138,86 @@ mod hint_tests {
         let report = idx.ingest_with(&adapters, &filter, &opts).unwrap();
         assert_eq!(discovers.load(Ordering::SeqCst), 1, "a None hint falls back to discover");
         assert_eq!(report.new_events, 0, "fresh-stat equivalence holds whoever statted");
+    }
+
+    /// A full-rescan source that says something while it reads, and from the
+    /// second pass on emits nothing — the shape a failed decrypt wears.
+    struct Noting {
+        path: PathBuf,
+        passes: Arc<AtomicUsize>,
+    }
+
+    impl SourceAdapter for Noting {
+        fn id(&self) -> &'static str {
+            "noting"
+        }
+        fn display_name(&self) -> &'static str {
+            "Noting"
+        }
+        fn semantics(&self) -> Semantics {
+            Semantics { dedupes_by_id: true, ..Semantics::TOKENS_PER_CALL_INLINE }
+        }
+        fn probe(&self) -> Option<DetectedSource> {
+            None
+        }
+        fn discover(&self, _filter: &DateFilter) -> Vec<SourceFile> {
+            let meta = std::fs::metadata(&self.path).unwrap();
+            let mtime_ms = meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            vec![SourceFile { path: self.path.clone(), kind: FileKind::Jsonl, size: meta.len(), mtime_ms }]
+        }
+        fn read(&self, _file: &SourceFile, cursor: ReadCursor) -> usage_core::Result<ReadOutcome> {
+            let pass = self.passes.fetch_add(1, Ordering::SeqCst);
+            usage_core::read_note(format!("store read, pass {pass}"));
+            // Cursor unchanged: one read per pass, like a full-rescan source.
+            if pass == 0 {
+                Ok(ReadOutcome {
+                    events: vec![UsageEvent::new("noting", 1_780_000_000_000, "s")],
+                    cursor,
+                })
+            } else {
+                Ok(ReadOutcome { events: Vec::new(), cursor })
+            }
+        }
+    }
+
+    #[test]
+    fn adapter_notes_and_an_empty_full_rescan_surface_in_the_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        std::fs::write(&path, b"data").unwrap();
+        let noting = Noting { path: path.clone(), passes: Arc::new(AtomicUsize::new(0)) };
+        let adapters: Vec<Box<dyn SourceAdapter>> = vec![Box::new(noting)];
+        let mut idx = Index::open_in_memory().unwrap();
+        let filter = DateFilter::default();
+        let opts = IngestOptions::default();
+
+        // Pass 1: a clean read — its note rides the report with the tool's
+        // name attached, and the insert lands in the per-tool map.
+        let report = idx.ingest_with(&adapters, &filter, &opts).unwrap();
+        assert_eq!(report.notes, vec!["noting: store read, pass 0"]);
+        assert_eq!(report.per_tool_new.get("noting"), Some(&1));
+        assert!(report.errors.is_empty());
+
+        // Pass 2: the store changed but read as nothing. Dedupe swallows
+        // nothing because nothing arrived — the report is what says so.
+        std::fs::write(&path, b"data+data").unwrap();
+        let report = idx.ingest_with(&adapters, &filter, &opts).unwrap();
+        assert_eq!(report.notes.len(), 2, "{:?}", report.notes);
+        assert_eq!(report.notes[0], "noting: store read, pass 1");
+        assert!(
+            report.notes[1].contains("changed but read emitted 0 events")
+                && report.notes[1].contains("previous cursor held 1"),
+            "{:?}",
+            report.notes
+        );
+        assert_eq!(report.per_tool_new.get("noting"), None);
+        assert_eq!(report.per_tool_deduped.get("noting"), None, "nothing arrived to dedupe");
+        assert_eq!(report.scanned_by_tool.get("noting"), Some(&1));
     }
 
     #[test]

@@ -511,6 +511,36 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot re-homing for the Trae split: rows read from a CN edition's
+        // store used to land under `trae` with a `trae#<turn>` key; they are
+        // their own tool now. The rollup is wiped wholesale — the moved rows
+        // cannot be un-summed from their day groups in place, and the cache
+        // rebuilds lazily from `event` on the next report read.
+        const REPAIR_TRAE_SPLIT: &str = "repair:trae-split-1";
+        let split: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_TRAE_SPLIT],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if split.is_none() {
+            conn.execute(
+                "UPDATE event SET tool = 'trae_cn', \
+                     dedupe_key = 'trae_cn#' || substr(dedupe_key, 6) \
+                 WHERE tool = 'trae' \
+                   AND (source LIKE '%/Trae CN/%' OR source LIKE '%/TRAE SOLO CN/%')",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_TRAE_SPLIT],
+            )
+            .map_err(sql_err)?;
+        }
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);

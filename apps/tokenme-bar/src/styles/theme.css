@@ -77,6 +77,7 @@
   --cat-20: #8f6fd0;
   /* trae 的品牌薄荷绿 */
   --cat-21: #1f8f6f;
+  --cat-22: #b35574;
 
   /* activity scale, quiet → saturated */
   --heat-1: #d8e7e4;
@@ -208,6 +209,7 @@
     --cat-20: #b09ae0;
     /* trae 的品牌薄荷绿（暗色提亮） */
     --cat-21: #4fd9a3;
+    --cat-22: #e07a9a;
 
     --heat-1: #1a3f36;
     --heat-2: #215c4d;
@@ -298,6 +300,7 @@
   --cat-20: #b09ae0;
   /* trae 的品牌薄荷绿（暗色提亮） */
   --cat-21: #4fd9a3;
+  --cat-22: #e07a9a;
 
   --heat-1: #1a3f36;
   --heat-2: #215c4d;

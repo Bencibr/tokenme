@@ -152,7 +152,7 @@ Or skip the timer and move `~/tokenme-sync` yourself — Syncthing, a shared mou
 
 The quota bars come from each tool's own API or local credentials — probes that read, and never log you in. Three probes are deliberate exceptions, because those tools keep a short-lived access token on disk and the bar goes dead without a renewal: MiniMax Code (~1 h), Kimi Code (the vendor's own 15-minute token) and Cline's gateway token. Each exchanges the refresh token sitting in that same file and writes the rotated pair straight back, in that tool's own format and atomically — a rotation that is not persisted is a rotation consumed, and the app's own next refresh would then find its login dead. A failed exchange changes nothing. Every other probe reads credentials and never writes them. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
 
-Every tool below ships as a built-in adapter — 22 of them, indexed straight from the logs and databases each one writes to disk:
+Every tool below ships as a built-in adapter — 23 of them, indexed straight from the logs and databases each one writes to disk:
 
 | Tool | Live quota | Fixtures | Verified on |
 | :--- | :--- | :--- | :--- |
@@ -176,6 +176,7 @@ Every tool below ships as a built-in adapter — 22 of them, indexed straight fr
 | <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | Plan quota — vendor billing API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE points — reads the IDE's own login state | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | Subscription quota — vendor v1 API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | Subscription quota — the CN fleet's own v1 API and credential store | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | Plan windows — 5h / weekly / monthly via the vendor's `/usages`; usage read from the CLI **or** the desktop app's embedded runtime; an expired access token is renewed in place through the vendor's own refresh contract | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | Plan windows — 5h / weekly — plus the credit balance (purchased + check-in wallets); the ~1 h access token is renewed in place from the app's own refresh token | ✅ | macOS ✅ · Windows ✅ |
 

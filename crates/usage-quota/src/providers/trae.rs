@@ -66,15 +66,30 @@ use usage_core::QuotaSample;
 
 use crate::QuotaProbe;
 
-pub struct TraeQuota;
+/// One probe per edition fleet: the international build and the CN build log
+/// into different fleets, so each gets its own tool and its own windows.
+#[derive(Debug, Clone, Copy)]
+pub struct TraeQuota {
+    /// `true` → tool `trae_cn`, reading the `Trae CN` / `TRAE SOLO CN` stores.
+    pub cn: bool,
+}
 
-/// `globalStorage/storage.json` of the installed IDE. `TRAE_STORAGE_JSON`
-/// overrides it for tests and side-by-side installs.
-fn storage_json() -> Option<PathBuf> {
+/// `globalStorage/storage.json` of every installed edition — the same three
+/// the usage adapter reads. The editions log into different fleets (the CN
+/// build's auth record carries its own host), so each file contributes its own
+/// logins and the probe reports them side by side. `TRAE_STORAGE_JSON`
+/// overrides the list for tests and side-by-side installs.
+fn storage_jsons(cn: bool) -> Vec<PathBuf> {
     if let Some(path) = std::env::var_os("TRAE_STORAGE_JSON") {
-        return (!path.is_empty()).then(|| PathBuf::from(path));
+        return (!path.is_empty()).then(|| PathBuf::from(path)).into_iter().collect();
     }
-    dirs::data_dir().map(|d| d.join("Trae/User/globalStorage/storage.json"))
+    let Some(base) = dirs::data_dir() else { return Vec::new() };
+    let editions: &[&str] = if cn { &["Trae CN", "TRAE SOLO CN"] } else { &["Trae"] };
+    editions
+        .iter()
+        .map(|edition| base.join(edition).join("User").join("globalStorage").join("storage.json"))
+        .filter(|p| p.is_file())
+        .collect()
 }
 
 /// The endpoint path the IDE calls (v1; the v2 variant 404s on this account).
@@ -99,39 +114,44 @@ struct Login {
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Every `iCubeAuthInfo://` record that decrypts to a token-bearing login.
-/// Records for other provider ids hold device key pairs and simply fail the
-/// shape test.
-fn logins() -> Vec<Login> {
-    let Some(path) = storage_json() else { return Vec::new() };
-    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
-    let Ok(all) = serde_json::from_str::<serde_json::Map<String, Value>>(&text) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (key, value) in &all {
-        let Some(encoded) = value.as_str() else { continue };
-        if !key.starts_with("iCubeAuthInfo://") {
-            continue;
-        }
-        let Some(plain) = decrypt(encoded) else { continue };
-        let Ok(record) = serde_json::from_str::<Value>(&plain) else { continue };
-        let Some(token) = record.get("token").and_then(Value::as_str).filter(|t| !t.is_empty()) else {
+/// Every `iCubeAuthInfo://` record across the installed editions that
+/// decrypts to a token-bearing login. Records for other provider ids hold
+/// device key pairs and simply fail the shape test; a token seen twice (the
+/// same account logged into two editions) is probed once.
+fn logins(cn: bool) -> Vec<Login> {
+    let mut out: Vec<Login> = Vec::new();
+    for path in storage_jsons(cn) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(all) = serde_json::from_str::<serde_json::Map<String, Value>>(&text) else {
             continue;
         };
-        let expires_at = record
-            .get("expiredAt")
-            .and_then(Value::as_str)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&chrono::Utc));
-        let host = record
-            .get("host")
-            .and_then(Value::as_str)
-            .filter(|h| h.starts_with("http"))
-            .unwrap_or(DEFAULT_HOST)
-            .trim_end_matches('/')
-            .to_string();
-        out.push(Login { token: token.to_string(), host, expires_at });
+        for (key, value) in &all {
+            let Some(encoded) = value.as_str() else { continue };
+            if !key.starts_with("iCubeAuthInfo://") {
+                continue;
+            }
+            let Some(plain) = decrypt(encoded) else { continue };
+            let Ok(record) = serde_json::from_str::<Value>(&plain) else { continue };
+            let Some(token) = record.get("token").and_then(Value::as_str).filter(|t| !t.is_empty()) else {
+                continue;
+            };
+            if out.iter().any(|l| l.token == token) {
+                continue;
+            }
+            let expires_at = record
+                .get("expiredAt")
+                .and_then(Value::as_str)
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&chrono::Utc));
+            let host = record
+                .get("host")
+                .and_then(Value::as_str)
+                .filter(|h| h.starts_with("http"))
+                .unwrap_or(DEFAULT_HOST)
+                .trim_end_matches('/')
+                .to_string();
+            out.push(Login { token: token.to_string(), host, expires_at });
+        }
     }
     out
 }
@@ -222,12 +242,16 @@ fn decrypt(encoded: &str) -> Option<String> {
 
 impl QuotaProbe for TraeQuota {
     fn tool(&self) -> &'static str {
-        "trae"
+        if self.cn {
+            "trae_cn"
+        } else {
+            "trae"
+        }
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
         let now = chrono::Utc::now();
-        for login in logins() {
+        for login in logins(self.cn) {
             // A past expiry means "no live sample"; the probe never refreshes.
             if login.expires_at.is_some_and(|t| t <= now) {
                 continue;
@@ -248,9 +272,40 @@ impl QuotaProbe for TraeQuota {
             if !samples.is_empty() {
                 return samples;
             }
+            if let Some(free) = cn_free_window(&body) {
+                return vec![free];
+            }
         }
         Vec::new()
     }
+}
+
+/// The CN free tier has no pack with a limit: the IDE maps a packless account
+/// to its own Free table (50 basic requests a month — `pD.FreeUser` in the
+/// workbench bundle) and the entitlement payload's `basic_usage_*` fields stay
+/// at zero. The window is drawn from that table, with the payload's own basic
+/// usage as the spent side, so a CN Free account shows a bar instead of
+/// nothing.
+fn cn_free_window(body: &Value) -> Option<QuotaSample> {
+    let packs = body.get("user_entitlement_pack_list").and_then(Value::as_array)?;
+    let has_limited_pack = packs.iter().any(|p| {
+        num(p.pointer("/entitlement_base_info/quota/basic_usage_limit")).unwrap_or(0.0) > 0.0
+    });
+    if has_limited_pack {
+        return None;
+    }
+    let used: f64 = packs
+        .iter()
+        .map(|p| num(p.get("usage").unwrap_or(&Value::Null).get("basic_usage_amount")).unwrap_or(0.0))
+        .sum();
+    const FREE_BASIC_LIMIT: f64 = 50.0;
+    Some(QuotaSample {
+        used_percent: (used / FREE_BASIC_LIMIT * 100.0).clamp(0.0, 100.0),
+        window_minutes: 0,
+        resets_at_ms: 0,
+        label: Some(format!("Free plan · 已用 {}/50", fmt(used))),
+        id: Some("basic_usage".to_string()),
+    })
 }
 
 /// The wire answer → bars, in the mapper's own order: plan, bonus, fast.
@@ -514,16 +569,22 @@ mod tests {
     #[test]
     #[ignore = "reads the real Trae install and calls the vendor's live quota API"]
     fn the_live_meters_this_account_actually_has() {
-        let Some(path) = storage_json() else {
+        let paths = storage_jsons(false).into_iter().chain(storage_jsons(true)).collect::<Vec<_>>();
+        if paths.is_empty() {
             println!("[trae] no platform data dir");
             return;
-        };
-        println!("[trae] storage: {}", path.display());
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            println!("[trae] storage.json unreadable");
-            return;
-        };
-        let all: serde_json::Map<String, Value> = serde_json::from_str(&text).unwrap();
+        }
+        for path in &paths {
+            println!("[trae] storage: {}", path.display());
+        }
+        let all: serde_json::Map<String, Value> = paths
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .filter_map(|t| serde_json::from_str(&t).ok())
+            .fold(serde_json::Map::new(), |mut acc, m: serde_json::Map<String, Value>| {
+                acc.extend(m);
+                acc
+            });
         let auth_keys: Vec<&String> = all.keys().filter(|k| k.starts_with("iCubeAuthInfo://")).collect();
         println!("[trae] iCubeAuthInfo records: {auth_keys:?}");
         for (key, value) in all.iter().filter(|(k, _)| k.starts_with("iCubeAuthInfo://")) {
@@ -574,10 +635,130 @@ mod tests {
             }
         }
         // The exact production path, closing the loop past the hand-rolled call above.
-        let fetched = TraeQuota.fetch();
+        let fetched = TraeQuota { cn: false }.fetch();
         println!("[trae] fetch() → {} bars", fetched.len());
         for bar in &fetched {
             println!("[trae] fetch: {:>6.2}%  {}", bar.used_percent, bar.label.as_deref().unwrap_or_default());
         }
     }
+}
+
+/// `#[ignore]`d live diagnostic: which editions log in on this machine, and
+/// with what host/expiry — the shape a CN-only install must produce for its
+/// quota windows to appear. Never prints the token.
+#[test]
+#[ignore]
+fn live_logins_report() {
+    for path in storage_jsons(false).into_iter().chain(storage_jsons(true)) {
+        println!("storage: {}", path.display());
+    }
+    for login in logins(false).into_iter().chain(logins(true)) {
+        println!(
+            "[trae] login: host {}  expiredAt {:?}",
+            login.host, login.expires_at
+        );
+    }
+    assert!(!logins(false).is_empty(), "no logins decrypt from the live stores");
+}
+
+/// `#[ignore]`d: dump the CN account's full entitlement payload (no token) so
+/// the Free-plan window's mapping is written against the real shapes.
+#[test]
+#[ignore]
+fn cn_entitlement_dump() {
+    for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
+        let url = format!("{}{USAGE_PATH}", login.host);
+        let Some(body) = crate::http::post_json(
+            &url,
+            &[
+                ("content-type", "application/json"),
+                ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
+            ],
+            json!({}),
+        ) else {
+            println!("[trae-cn] {url}: request failed");
+            continue;
+        };
+        println!("[trae-cn] {url}:\n{}", serde_json::to_string_pretty(&body).unwrap());
+    }
+}
+
+/// `#[ignore]`d: the v2 entitlement endpoint takes `require_usage` and is what
+/// the CN IDE itself calls for the free tier's usage numbers — probe it and
+/// dump the shape.
+#[test]
+#[ignore]
+fn cn_entitlement_v2_dump() {
+    for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
+        for path in ["/trae/api/v2/pay/ide_user_ent_usage", USAGE_PATH] {
+            let url = format!("{}{path}", login.host);
+            let Some(body) = crate::http::post_json(
+                &url,
+                &[
+                    ("content-type", "application/json"),
+                    ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
+                ],
+                json!({ "require_usage": true, "req_source": "IDE" }),
+            ) else {
+                println!("[trae-cn] {url}: request failed");
+                continue;
+            };
+            println!("[trae-cn] {url}:\n{}", serde_json::to_string_pretty(&body).unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod cn_free_tests {
+    use super::*;
+
+    /// The exact shape the live CN account returned (2026-10-08): a freshman
+    /// account whose only pack carries no limits at all.
+    #[test]
+    fn a_packless_freshman_account_draws_the_free_table() {
+        let body: Value = serde_json::json!({
+            "is_dollar_usage_billing": false,
+            "is_pay_freshman": true,
+            "trial_status": {"is_eligible_for_trial": true, "is_in_trial": false, "trial_end_time": 1791627941},
+            "user_entitlement_pack_list": [{
+                "display_desc": "原速通次数兑换",
+                "entitlement_base_info": {
+                    "product_type": 2,
+                    "quota": {"basic_usage_limit": 0, "premium_model_fast_request_limit": 0, "no_bonus_quota": true},
+                    "product_id": 208
+                },
+                "usage": {"basic_usage_amount": 0, "premium_model_fast_amount": 0}
+            }]
+        });
+        assert!(samples_from_entitlement(&body).is_empty(), "the paid-plan mapper has nothing for a 0-limit pack");
+        let bar = cn_free_window(&body).expect("the free table draws instead");
+        assert_eq!(bar.used_percent, 0.0);
+        assert_eq!(bar.label.as_deref(), Some("Free plan · 已用 0/50"));
+    }
+
+    /// An account whose pack carries a real limit belongs to the paid mapper,
+    /// not the free table.
+    #[test]
+    fn an_account_with_a_limited_pack_keeps_the_paid_mapper() {
+        let body: Value = serde_json::json!({
+            "is_dollar_usage_billing": false,
+            "user_entitlement_pack_list": [{
+                "entitlement_base_info": {"product_type": 1, "quota": {"basic_usage_limit": 500}},
+                "usage": {"basic_usage_amount": 150}
+            }]
+        });
+        assert!(cn_free_window(&body).is_none(), "the free table must not shadow a real pack");
+    }
+}
+
+/// `#[ignore]`d live check: what the CN probe actually fetches right now.
+#[test]
+#[ignore]
+fn cn_fetch_live() {
+    let bars = TraeQuota { cn: true }.fetch();
+    println!("[trae-cn] fetch() → {} bars", bars.len());
+    for bar in &bars {
+        println!("[trae-cn] fetch: {:>6.2}%  {}", bar.used_percent, bar.label.as_deref().unwrap_or_default());
+    }
+    assert!(!bars.is_empty(), "the CN probe returned no bars for a running host");
 }

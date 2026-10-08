@@ -12,8 +12,8 @@ pub mod types;
 
 pub use budget::Budget;
 pub use adapter::{
-    DateFilter, DetectedSource, FileKind, ReadCursor, ReadOutcome, Semantics, SourceAdapter,
-    SourceFile,
+    drain_read_notes, read_note, DateFilter, DetectedSource, FileKind, ReadCursor, ReadOutcome,
+    Semantics, SourceAdapter, SourceFile,
 };
 pub use pricing::{Price, PricingMap, PricingMeta, PricingSource};
 pub use report::{

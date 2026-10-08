@@ -177,15 +177,26 @@ fn index_line(ctx: &Ctx, report: Option<&IngestReport>) -> String {
         .map(|ms| render::ago(ctx.now_ms - ms))
         .unwrap_or_else(|| "never".into());
     match report {
-        Some(r) => format!(
-            "index {} · {} events from {files} files · {} new, {} deduped, {} purged in {}ms",
-            render::shorten_path(&ctx.db_path.display().to_string()),
-            render::count(total),
-            r.new_events,
-            r.deduped,
-            r.purged,
-            r.took_ms
-        ),
+        Some(r) => {
+            // The pass's own voice: read failures and the adapters' notes about
+            // silent ones. Empty on a healthy pass, so nothing changes there.
+            let mut extra = String::new();
+            for e in &r.errors {
+                extra.push_str(&format!("\n  error: {e}"));
+            }
+            for n in &r.notes {
+                extra.push_str(&format!("\n  note: {n}"));
+            }
+            format!(
+                "index {} · {} events from {files} files · {} new, {} deduped, {} purged in {}ms{extra}",
+                render::shorten_path(&ctx.db_path.display().to_string()),
+                render::count(total),
+                r.new_events,
+                r.deduped,
+                r.purged,
+                r.took_ms
+            )
+        }
         None => format!(
             "index {} · {} events from {files} files · last ingest {age}",
             render::shorten_path(&ctx.db_path.display().to_string()),
