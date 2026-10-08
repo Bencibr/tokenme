@@ -280,8 +280,9 @@ impl QuotaProbe for TraeQuota {
             }
             if self.cn {
                 let checkin = cn_daily_checkin(&login);
-                if let Some(credits) = cn_credits_window(&login, checkin) {
-                    return vec![credits];
+                let windows = cn_credit_windows(&login, checkin);
+                if !windows.is_empty() {
+                    return windows;
                 }
             }
             if let Some(free) = cn_free_window(&body) {
@@ -292,67 +293,78 @@ impl QuotaProbe for TraeQuota {
     }
 }
 
-/// The CN credits window. Credits billing (`is_credits_billing: true`) meters
-/// in credits carried per pack: `user_cur_ent_base` lists each pack's
-/// `credits_limit` under `product_extra.package_extra.quota`, and the IDE sums
-/// the same fields (`total += c`, remaining `c - credits_amount`). The
-/// entitlement payloads read today carry no `credits_amount` yet — the spent
-/// side reads 0 until one appears, exactly as the IDE's own `?? 0` falls back.
-fn cn_credits_window(
-    login: &Login,
-    checkin: Option<TraeCheckinOutcome>,
-) -> Option<QuotaSample> {
+/// The CN credits windows — one per credits pack: the packs expire
+/// independently (a monthly login grant lapses at month end while the
+/// veteran grant runs weeks longer), so they cannot merge into one bar.
+/// The payloads carry no per-pack spent yet (usage.credits_amount never
+/// appears), so each window shows its credit amount and own expiry; the
+/// checkin pack only exists for a claimed day — its presence is the
+/// 已签到 mark, refined by the daily claim's outcome.
+fn cn_credit_windows(login: &Login, checkin: Option<TraeCheckinOutcome>) -> Vec<QuotaSample> {
     let url = format!("{}{ENT_BASE_PATH}", login.host);
-    let body = crate::http::post_json(
+    let Some(body) = crate::http::post_json(
         &url,
         &[
             ("content-type", "application/json"),
             ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
         ],
-        json!({}),
-    )?;
-    let list = body.get("ent_base_list").and_then(Value::as_array)?;
-    let mut total = 0.0;
-    let mut unlimited = false;
-    let mut seen = false;
+        json!({ "full_data": true }),
+    ) else {
+        return Vec::new();
+    };
+    let Some(list) = body.get("ent_base_list").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
     for pack in list {
-        match pack
-            .pointer("/product_extra/package_extra/quota/credits_limit")
+        let limit = pack
+            .pointer("/quota/credits_limit")
             .and_then(Value::as_f64)
-        {
-            Some(v) if v < 0.0 => unlimited = true,
-            Some(v) if v > 0.0 => {
-                total += v;
-                seen = true;
-            }
-            _ => {}
+            .or_else(|| {
+                pack.pointer("/product_extra/package_extra/quota/credits_limit")
+                    .and_then(Value::as_f64)
+            })
+            .unwrap_or(0.0);
+        if limit <= 0.0 {
+            continue;
         }
+        let ent_id = pack.get("entitlement_id").and_then(Value::as_str).unwrap_or_default();
+        let name = pack
+            .get("display_desc")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| match ent_id {
+                id if id.starts_with("monthly_bonus") => "每月登录赠送".into(),
+                id if id.starts_with("checkin") => "签到奖励".into(),
+                id if id.starts_with("free_") => "免费额度".into(),
+                _ => "积分包".into(),
+            });
+        let expires_ms = pack
+            .get("end_time")
+            .and_then(Value::as_f64)
+            .map(|s| (s * 1000.0) as i64)
+            .unwrap_or(0);
+        let checkin_mark = if ent_id.starts_with("checkin") {
+            match checkin {
+                Some(o) if o.done_today && !o.was_already => " · 已自动签到",
+                Some(o) if o.done_today => " · 今日已签到",
+                Some(_) => " · 已签到",
+                None => " · 已签到",
+            }
+        } else {
+            ""
+        };
+        out.push(QuotaSample {
+            used_percent: 0.0,
+            window_minutes: 0,
+            resets_at_ms: expires_ms,
+            label: Some(format!("{name} · {limit:.0} 积分{checkin_mark}")),
+            id: Some(ent_id.to_string()),
+        });
     }
-    let label = if unlimited {
-        format!("积分 · 已用 0/{}+不限量", fmt(total))
-    } else {
-        format!("积分 · 已用 0/{}", fmt(total))
-    };
-    // The check-in marker is the UI half of the daily claim: 已自动签到 when
-    // the panel claimed today, 可签到 when the day is still open.
-    let label = match checkin {
-        Some(o) if o.done_today && !o.was_already => format!("{label} · 已自动签到"),
-        Some(o) if o.done_today => format!("{label} · 今日已签到"),
-        Some(_) => format!("{label} · 可签到"),
-        None => label,
-    };
-    if !seen && !unlimited {
-        return None;
-    }
-    Some(QuotaSample {
-        used_percent: 0.0,
-        window_minutes: 0,
-        resets_at_ms: 0,
-        label: Some(label),
-        id: Some("credits".to_string()),
-    })
+    out
 }
-
 
 // ---- CN daily check-in -----------------------------------------------------
 //
