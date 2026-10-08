@@ -393,3 +393,120 @@ fn a_better_label_repairs_the_row_and_its_rollup_bucket_without_moving_the_money
     assert_eq!(third.relabeled, 0, "a steady-state pass has nothing to repair");
 }
 
+
+/// Rows first-written before replace-on-grow (77f8d95) are frozen at their
+/// first-write snapshot: the finished projection never changes again, so no
+/// re-emit ever reaches the replace path. `setup`'s one-shot repair drops the
+/// cumulative adapters' read cursors so the next pass re-reads every
+/// projection from byte 0 and re-emits the final totals.
+#[test]
+fn the_cumulative_rescan_repair_drops_stale_cursors_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    // An index from the frozen-first-write era: cursors at EOF, marker absent.
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:cumulative-rescan-1'", [])
+            .unwrap();
+        for tool in ["dsh", "hermes", "funide", "claude"] {
+            idx.conn()
+                .execute(
+                    &format!(
+                        "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                         VALUES('{t}:{f}', '{t}', 10, 1, 10, 1, 1)",
+                        t = tool,
+                        f = tool,
+                    ),
+                    [],
+                )
+                .unwrap();
+        }
+    }
+    let idx = Index::open(&db).unwrap();
+    for tool in ["dsh", "hermes", "funide"] {
+        let left: i64 = idx
+            .conn()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM file_state WHERE tool = '{tool}'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{tool} cursor must be dropped for the rescan");
+    }
+    let claude: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM file_state WHERE tool = 'claude'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(claude, 1, "single-shot adapters keep their cursors");
+    assert_eq!(idx.meta_value("repair:cumulative-rescan-1").unwrap().as_deref(), Some("1"));
+
+    // One-shot: cursors earned after the repair survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+             VALUES('dsh:back', 'dsh', 10, 1, 10, 1, 1)",
+            [],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM file_state WHERE tool = 'dsh'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 1, "the repair never runs twice");
+}
+
+/// The repair's end-to-end shape: cursor dropped, projection unchanged since
+/// its final write, re-emit lifts the frozen row through replace-on-grow and
+/// the rollup lands on the same totals without double-counting.
+#[test]
+fn a_dropped_cursor_reemits_and_replace_on_grow_lands_the_final_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("live.jsonl");
+    // Mid-flight snapshot, the shape a pre-77f8d95 index froze in place.
+    std::fs::write(
+        &file,
+        b"{\"id\":\"cum-2\",\"ts\":1789172800000,\"session\":\"s1\",\"in\":100,\"out\":20}\n",
+    )
+    .unwrap();
+    let adapter = Mock::new("mockb", dir.path());
+    let (mut idx, first) = ingest(&adapter, DateFilter::default());
+    assert_eq!(first.new_events, 1);
+
+    // The session finished; the projection now holds the final totals. The
+    // repair drops the cursor, so the unchanged file is re-read from byte 0.
+    std::fs::write(
+        &file,
+        b"{\"id\":\"cum-2\",\"ts\":1789172810000,\"session\":\"s1\",\"in\":250,\"out\":60}\n",
+    )
+    .unwrap();
+    idx.conn().execute("DELETE FROM file_state WHERE tool = 'mockb'", []).unwrap();
+    let second = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(second.files_scanned, 1, "a cursor-less file is re-read whole");
+    assert_eq!(idx.event_count().unwrap(), 1, "still one event row");
+    let ev = &idx.all_events().unwrap()[0];
+    assert_eq!(ev.counts.input, 250.0);
+    assert_eq!(ev.counts.output, 60.0);
+
+    let (in_tok, out_tok, n): (f64, f64, i64) = idx
+        .conn()
+        .query_row(
+            "SELECT sum(in_tok), sum(out_tok), sum(n) FROM event_rollup WHERE tool = 'mockb'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(in_tok, 250.0, "the rollup holds the final total, not first + final");
+    assert_eq!(out_tok, 60.0);
+    assert_eq!(n, 1);
+
+    // The cursor is re-earned: an unchanged projection costs nothing again.
+    let third = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(third.new_events, 0);
+    assert_eq!(idx.event_count().unwrap(), 1);
+}

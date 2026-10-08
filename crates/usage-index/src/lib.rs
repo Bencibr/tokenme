@@ -424,6 +424,38 @@ impl Index {
             conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('index_id', ?1)", params![id])
                 .map_err(sql_err)?;
         }
+        // One-shot repair for rows first-written before replace-on-grow landed
+        // (77f8d95, v0.1.5 build 105): a cumulative session indexed mid-flight
+        // back then kept its first-write snapshot forever — the finished
+        // projection never changes again, so the replace path never sees a
+        // re-emit to lift it. Dropping the read cursors of the cumulative
+        // adapters makes the next pass re-read every projection from byte 0
+        // and re-emit its final totals; replace-on-grow raises the frozen rows
+        // to truth, and a ledger that shrank meanwhile simply stays. This is
+        // deliberately not a SCHEMA_VERSION bump: the `sync:` memos in meta
+        // survive a wipe and would strand every merged bundle as "already
+        // imported" (see that constant).
+        const REPAIR_CUMULATIVE_RESCAN: &str = "repair:cumulative-rescan-1";
+        let repaired: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_CUMULATIVE_RESCAN],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if repaired.is_none() {
+            conn.execute(
+                "DELETE FROM file_state WHERE tool IN ('dsh', 'hermes', 'funide')",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_CUMULATIVE_RESCAN],
+            )
+            .map_err(sql_err)?;
+        }
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);
