@@ -324,7 +324,8 @@ fn eq_ignore_ascii(a: &[u16], b: &[u16]) -> bool {
 fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
-        HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+        HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, RRF_RT_REG_DWORD,
+        RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
     };
 
     fn wide(s: &str) -> Vec<u16> {
@@ -374,7 +375,11 @@ fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
                 sub,
                 std::ptr::null(),
                 wide("ExecutablePath").as_ptr(),
-                RRF_RT_REG_SZ,
+                // Explorer stores the path as REG_EXPAND_SZ with an unexpanded
+                // known-folder GUID prefix ({6D809377-…}\TokenMe\…); a plain
+                // RRF_RT_REG_SZ rejects the type and every entry would be
+                // silently skipped.
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
                 &mut vtype,
                 path.as_mut_ptr() as _,
                 &mut path_len,
