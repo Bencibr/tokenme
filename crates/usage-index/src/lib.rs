@@ -462,6 +462,55 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot re-seed for antigravity, which the cursor drop above cannot
+        // fix: 61c4f96 redrew its buckets (retry boxes no longer sum into their
+        // parent), so pre-61c4f96 rows hold inflated totals the replace path
+        // will never accept (a redrawn key strands the old rows beside the new
+        // ones; a same-key total only ever shrinks and loses to grow-on-write).
+        // The local rows go and the next pass re-reads the conversation
+        // databases wholesale under the new semantics. Merged rows are
+        // another machine's truth and stay — `source NOT LIKE 'linux:%'` — as
+        // does their rollup (`origin = ''` is this machine).
+        const REPAIR_ANTIGRAVITY_RESEED: &str = "repair:antigravity-reseed-1";
+        let reseeded: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_ANTIGRAVITY_RESEED],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if reseeded.is_none() {
+            conn.execute(
+                "DELETE FROM call WHERE event_id IN \
+                 (SELECT id FROM event WHERE tool = 'antigravity' AND source NOT LIKE 'linux:%')",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM quota WHERE event_id IN \
+                 (SELECT id FROM event WHERE tool = 'antigravity' AND source NOT LIKE 'linux:%')",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM event WHERE tool = 'antigravity' AND source NOT LIKE 'linux:%'",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM event_rollup WHERE tool = 'antigravity' AND origin = ''",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute("DELETE FROM file_state WHERE tool = 'antigravity'", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_ANTIGRAVITY_RESEED],
+            )
+            .map_err(sql_err)?;
+        }
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);
