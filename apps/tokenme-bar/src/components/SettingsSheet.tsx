@@ -60,7 +60,6 @@ export function SettingsSheet({
   onRefreshSecs,
   onMoney,
   onPolling,
-  onOpenServers,
   displays,
 }: {
   onClose: () => void;
@@ -71,8 +70,6 @@ export function SettingsSheet({
   onMoney: (on: boolean) => void;
   /** The master switch, so the quota section can say it stopped immediately. */
   onPolling: (on: boolean) => void;
-  /** `↗` — the server page is its own sheet; the settings sheet only opens it. */
-  onOpenServers: () => void;
   displays: Record<string, string>;
 }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
@@ -476,20 +473,6 @@ export function SettingsSheet({
             {navRow("probe", t("set.perprobe"), t("set.perprobe.hint"), offCount ? t("set.perprobe.off", { n: offCount }) : t("set.perprobe.all"))}
             {switchRow(t("set.autostart"), null, settings.autostart, setAutostart)}
             {switchRow(t("set.autoupdate"), t("set.autoupdate.hint"), settings.auto_update_check, setAutoUpdateCheck)}
-            <div className="sheet-row sheet-row-nav" role="button" tabIndex={0} onClick={onOpenServers} onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onOpenServers();
-              }
-            }}>
-              <div>
-                <div className="sheet-label">{t("set.servers")}</div>
-                <div className="sheet-hint">{t("set.servers.hint")}</div>
-              </div>
-              <span className="sheet-chev" aria-hidden="true">
-                ↗
-              </span>
-            </div>
           </>
         ) : null}
         {tab === "about" ? (

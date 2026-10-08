@@ -497,19 +497,11 @@ const [page, setPage] = useState<PageKey>(() => {
 
         {settingsOpen ? (
           <SettingsSheet
-            onClose={() => {
-              // 从设置里跳去服务器面板时把设置关掉：两张 sheet 叠着，下面那张
-              // 就只是遮罩，Esc 也说不清该退哪一层。
-              setSettingsOpen(false);
-            }}
+            onClose={() => setSettingsOpen(false)}
             onEmptyTools={setShowEmptyTools}
             onRefreshSecs={setRefreshSecs}
             onMoney={setShowMoney}
             onPolling={setQuotaPolling}
-            onOpenServers={() => {
-              setSettingsOpen(false);
-              setServersOpen(true);
-            }}
             displays={Object.fromEntries(report.sources.map((s) => [s.id, s.display]))}
           />
         ) : null}
