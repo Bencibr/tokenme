@@ -43,6 +43,12 @@ echo "==> frontend: $((SECONDS - t))s"
 # the cargo gate below never looks at, so it runs even with --fast.
 python3 scripts/check-theme-parity.py
 
+# A console child of a GUI process gets a visible console window on Windows, and
+# the cargo gate cannot see that class at all: it is a spawn flag, not a type
+# error. The Copilot probe shipped exactly that bug (a black box stealing focus
+# once per TTL). Sub-second, so it runs even with --fast.
+python3 scripts/check-no-window-spawns.py
+
 # The test gate. A workspace test pass recompiles every crate in debug —
 # minutes that a frontend-only iteration pays for nothing. Hash everything
 # under the crates and the app's Rust tree (sources, fixtures, manifests);

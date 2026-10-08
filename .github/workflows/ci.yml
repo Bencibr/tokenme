@@ -11,6 +11,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # A spawn-flag check, not a build one: an unflagged console child of a GUI
+      # process paints a window on Windows, and neither the compiler nor a test
+      # can see it. Runs first because it is instant and names the file.
+      - run: python3 scripts/check-no-window-spawns.py
       - run: cargo test --workspace --all-targets
 
   web:

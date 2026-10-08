@@ -188,9 +188,17 @@ pub fn open_external(url: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let spawned = std::process::Command::new("open").arg(&url).spawn();
     #[cfg(target_os = "windows")]
-    let spawned = std::process::Command::new("cmd")
-        .args(["/c", "start", "", &url])
-        .spawn();
+    let spawned = {
+        // `cmd` is a console binary, so without this every panel link (发邮件 /
+        // Releases / 日志) opens through a visible console window that the default
+        // terminal paints for a moment and steals focus with.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+    };
     #[cfg(all(unix, not(target_os = "macos")))]
     let spawned = std::process::Command::new("xdg-open").arg(&url).spawn();
     spawned.map(|_| ()).map_err(|e| e.to_string())

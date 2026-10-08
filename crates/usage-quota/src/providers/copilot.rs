@@ -11,9 +11,10 @@
 //! bearing — without it the endpoint can answer `account_not_supported`/404. Both
 //! references send `vscode/1.96.2` + `copilot-chat/0.26.7`.
 //!
-//! NOTE: there is no `copilot` adapter yet, so `usage_adapter_all::TOOL_IDS` has no
-//! `"copilot"` id and `lib.rs::every_probe_is_named_after_a_real_tool_id` would fail.
-//! This module is therefore complete but unregistered — see `providers::optional`.
+//! NOTE: there is no `copilot` usage adapter, so the id is not in
+//! `usage_adapter_all::TOOL_IDS`; it rides `PROBE_ONLY_TOOLS` in `lib.rs`'s registry
+//! test instead. The probe is registered (`providers::optional`) and runs everywhere
+//! `gh` answers — which is why its spawn carries CREATE_NO_WINDOW.
 
 use serde_json::Value;
 use usage_core::{parse_ts_ms, QuotaSample};
@@ -123,8 +124,22 @@ fn env_token(name: &str) -> Option<String> {
 
 /// `None` when `gh` is missing or not logged in; its stderr is never surfaced, so
 /// nothing that looks like a token can reach a log.
+///
+/// The console flag is not cosmetic: `gh` is a console binary, so on Windows every
+/// TTL pass would otherwise get a visible console window through the default
+/// terminal — a black box that steals focus once every few minutes, from a tray
+/// app the user never asked to show anything. Same reason `atomcode` and the
+/// Antigravity CLI carry it.
 fn gh_token() -> Option<String> {
-    let out = std::process::Command::new("gh").args(["auth", "token"]).output().ok()?;
+    let mut command = std::process::Command::new("gh");
+    command.args(["auth", "token"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = command.output().ok()?;
     if !out.status.success() {
         return None;
     }
