@@ -101,7 +101,9 @@ const IDE_VERSION: &str = "1.107.1";
 /// The current-entitlement-base listing: where the CN credits packs live
 /// (`credits_limit` sits under `product_extra.package_extra.quota`, a key the
 /// `ide_user_ent_usage` payloads do not carry).
-const ENT_BASE_PATH: &str = "/trae/api/v1/pay/user_cur_ent_base";
+/// The v2 entitlement list: unlike v1 it carries the credits packs, each with
+/// both `quota.credits_limit` and `usage.credits_amount`.
+const ENT_LIST_V2: &str = "/trae/api/v2/pay/user_current_entitlement_list";
 
 /// `entitlement_base_info.product_type` values (the bundle's `Vc` enum). The
 /// plan picker reads exactly these five; packs outside them are add-ons.
@@ -293,59 +295,79 @@ impl QuotaProbe for TraeQuota {
     }
 }
 
-/// The CN credits windows — one per credits pack: the packs expire
-/// independently (a monthly login grant lapses at month end while the
-/// veteran grant runs weeks longer), so they cannot merge into one bar.
-/// The payloads carry no per-pack spent yet (usage.credits_amount never
-/// appears), so each window shows its credit amount and own expiry; the
-/// checkin pack only exists for a claimed day — its presence is the
-/// 已签到 mark, refined by the daily claim's outcome.
+/// The CN credits windows — one per credits pack. The packs expire
+/// independently (a monthly login grant lapses at month end while the veteran
+/// grant runs weeks longer), so they cannot merge into one bar. Source: the
+/// v2 entitlement list, whose packs carry both sides — `quota.credits_limit`
+/// and `usage.credits_amount` — so the bar is the real spend, and
+/// `end_time` gives each window its own expiry countdown. The checkin pack's
+/// very presence is the 已签到 mark; the daily claim's outcome refines it.
 fn cn_credit_windows(login: &Login, checkin: Option<TraeCheckinOutcome>) -> Vec<QuotaSample> {
-    let url = format!("{}{ENT_BASE_PATH}", login.host);
-    let Some(body) = crate::http::post_json(
-        &url,
-        &[
-            ("content-type", "application/json"),
-            ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
-        ],
-        json!({ "full_data": true }),
-    ) else {
+    let url = format!("{}{ENT_LIST_V2}", login.host);
+    // Browser-shaped, like the dashboard's own call: Chrome UA and platform
+    // hints that follow the OS the panel runs on (macOS / Windows / Linux).
+    let ua = if cfg!(target_os = "macos") {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    } else if cfg!(windows) {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    } else {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    };
+    let platform = if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(windows) {
+        "Windows"
+    } else {
+        "Linux"
+    };
+    let Ok(resp) = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("accept", "application/json, text/plain, */*")
+        .set("accept-language", "zh-CN,zh;q=0.9")
+        .set("origin", "https://www.trae.cn")
+        .set("referer", "https://www.trae.cn/")
+        .set("user-agent", ua)
+        .set("sec-ch-ua-platform", &format!("\"{platform}\""))
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .send_string(&json!({ "require_usage": true, "full_data": true }).to_string()) else {
         return Vec::new();
     };
-    let Some(list) = body.get("ent_base_list").and_then(Value::as_array) else {
+    let body: Value = resp
+        .into_string()
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    let Some(list) = body.get("user_entitlement_pack_list").and_then(Value::as_array) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for pack in list {
-        let limit = pack
-            .pointer("/quota/credits_limit")
+        let base = pack.get("entitlement_base_info").unwrap_or(&Value::Null);
+        let limit = base.pointer("/quota/credits_limit").and_then(Value::as_f64);
+        let spent = pack
+            .pointer("/usage/credits_amount")
             .and_then(Value::as_f64)
-            .or_else(|| {
-                pack.pointer("/product_extra/package_extra/quota/credits_limit")
-                    .and_then(Value::as_f64)
-            })
             .unwrap_or(0.0);
-        if limit <= 0.0 {
+        let Some(limit) = limit.filter(|v| *v > 0.0) else {
             continue;
-        }
-        let ent_id = pack.get("entitlement_id").and_then(Value::as_str).unwrap_or_default();
+        };
         let name = pack
             .get("display_desc")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| match ent_id {
-                id if id.starts_with("monthly_bonus") => "每月登录赠送".into(),
-                id if id.starts_with("checkin") => "签到奖励".into(),
-                id if id.starts_with("free_") => "免费额度".into(),
-                _ => "积分包".into(),
-            });
-        let expires_ms = pack
+            .unwrap_or("积分包");
+        let expires_ms = base
             .get("end_time")
             .and_then(Value::as_f64)
             .map(|s| (s * 1000.0) as i64)
             .unwrap_or(0);
-        let checkin_mark = if ent_id.starts_with("checkin") {
+        // The checkin pack only exists for a claimed day — its presence is the
+        // 已签到 mark; the daily claim's own outcome refines it.
+        let checkin_mark = if name == "签到奖励" {
             match checkin {
                 Some(o) if o.done_today && !o.was_already => " · 已自动签到",
                 Some(o) if o.done_today => " · 今日已签到",
@@ -356,11 +378,11 @@ fn cn_credit_windows(login: &Login, checkin: Option<TraeCheckinOutcome>) -> Vec<
             ""
         };
         out.push(QuotaSample {
-            used_percent: 0.0,
+            used_percent: (spent / limit * 100.0).clamp(0.0, 100.0),
             window_minutes: 0,
             resets_at_ms: expires_ms,
-            label: Some(format!("{name} · {limit:.0} 积分{checkin_mark}")),
-            id: Some(ent_id.to_string()),
+            label: Some(format!("{name} · 已用 {spent:.0}/{limit:.0} 积分{checkin_mark}")),
+            id: Some(pack.get("entitlement_id").and_then(Value::as_str).unwrap_or("credits").to_string()),
         });
     }
     out
@@ -500,6 +522,7 @@ fn cn_daily_checkin(login: &Login) -> Option<TraeCheckinOutcome> {
     save_checkin_state(&path, &state);
     Some(outcome)
 }
+
 
 /// The CN free tier has no pack with a limit: the IDE maps a packless account
 /// to its own Free table (50 basic requests a month — `pD.FreeUser` in the
@@ -995,10 +1018,9 @@ fn cn_fetch_live() {
 fn cn_credits_dump() {
     for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
         for (path, payload) in [
-            ("/trae/api/v1/pay/query_user_usage_group_by_session",
-             json!({ "start_time": 1791187200000i64, "end_time": 1791878399000i64, "page_size": 100, "page_num": 1, "usage_type": 0 })),
-            ("/trae/api/v1/pay/query_user_usage_group_by_session",
-             json!({ "start_time": 1791187200000i64, "end_time": 1791878399000i64, "page_size": 100, "page_num": 1, "usage_type": 1 })),
+            ("/trae/api/v2/pay/user_current_entitlement_list", json!({ "require_usage": true, "req_source": "IDE", "full_data": true })),
+            ("/trae/api/v2/pay/web_user_ent_usage", json!({ "require_usage": true, "req_source": "IDE", "full_data": true })),
+            ("/api/v1/commercial/get_session_usage", json!({ "session_id": "" })),
         ] {
             let url = format!("{}{path}", login.host);
             let resp = ureq::AgentBuilder::new()
@@ -1060,4 +1082,17 @@ fn cn_auth_record_fields() {
             }
         }
     }
+}
+
+/// `#[ignore]`d one-shot: write the CN web token to a temp file for browser
+/// session injection. Delete the file right after use.
+#[test]
+#[ignore]
+fn cn_token_to_tmpfile() {
+    let login = logins(true)
+        .into_iter()
+        .find(|l| l.host.contains("trae.cn"))
+        .expect("no CN login");
+    std::fs::write("/tmp/trae-cn-token", &login.token).unwrap();
+    println!("[trae-cn] token written, {} bytes", login.token.len());
 }
