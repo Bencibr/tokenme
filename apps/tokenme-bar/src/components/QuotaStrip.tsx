@@ -18,6 +18,10 @@ function windowName(q: QuotaView): string {
   return q.window_minutes > 0 ? t("quota.win.min", { n: q.window_minutes }) : t("quota.win.unknown");
 }
 
+/** Tools whose quota probe owns a daily check-in: the group header grows the
+ *  badge/button for exactly these. */
+const CHECKIN_TOOLS = ["trae_cn", "qoder"];
+
 const ORIGIN_KEY: Record<string, Parameters<typeof t>[0]> = { probe: "quota.origin.probe", log: "quota.origin.log", budget: "quota.origin.budget" };
 const ORIGIN = (k: string): string => t(ORIGIN_KEY[k] ?? "quota.origin.probe");
 
@@ -122,13 +126,10 @@ export function QuotaStrip({
   const [checkinBusy, setCheckinBusy] = useState(false);
   const [checkinClaimed, setCheckinClaimed] = useState(false);
   const [checkinMsg, setCheckinMsg] = useState<string | null>(null);
-  /** The backend stamps a claimed day into the checkin pack's label; either
-   *  wording counts as done for today. */
+  /** The backend stamps a claimed day into the checkin pack's window: its id
+   *  starts with "checkin" (Trae's entitlement id, Qoder's marker row). */
   const groupCheckedIn = (g: { tool: string; rows: QuotaView[] }): boolean =>
-    g.rows.some((r) => {
-      const label = r.label ?? "";
-      return label.includes(t("quota.checkin.mark.auto")) || label.includes(t("quota.checkin.mark.today"));
-    });
+    g.rows.some((r) => r.id?.startsWith("checkin"));
   const [order, setOrderState] = useState<QuotaOrder>(savedOrder);
   const [drag, setDrag] = useState<Drag | null>(null);
   // Click a truncated window label to read it whole: the native hover title
@@ -443,7 +444,7 @@ export function QuotaStrip({
                 <ToolIcon tool={g.tool} size={18} />
                 <span className="quota-tool">{toolDisplay(g.tool)}</span>
                 {plan ? <span className="quota-plan">{plan}</span> : null}
-                {(g.tool === "trae_cn" || g.tool === "qoder") ? (
+                {CHECKIN_TOOLS.includes(g.tool) ? (
                   <span className="quota-checkin">
                     {groupCheckedIn(g) || checkinClaimed ? (
                       <span className="checkin-badge">{t("quota.checkin.done")}</span>
@@ -459,10 +460,7 @@ export function QuotaStrip({
                           e.stopPropagation();
                           setCheckinBusy(true);
                           try {
-                            const msg =
-                              g.tool === "qoder"
-                                ? await bridge.qoderCheckinNow()
-                                : await bridge.traeCnCheckinNow();
+                            const msg = await bridge.checkinNow(g.tool);
                             setCheckinMsg(msg);
                             setCheckinClaimed(true);
                           } catch (err) {

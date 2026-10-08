@@ -88,12 +88,13 @@ export const bridge: Bridge = {
     return invoke<Report>("get_report", { force });
   },
 
-  /** The Trae CN check-in button: one forced claim right now. Returns a
-   *  user-facing message (签到成功/今日已签到/失败原因). */
-  async traeCnCheckinNow(): Promise<string> {
-    if (!inTauri) return "签到成功，+100 积分";
-    return invoke<string>("trae_cn_checkin_now");
+  /** The check-in button of a checkin-capable tool (Trae CN / Qoder): one
+   *  forced claim right now. Returns a user-facing message. */
+  async checkinNow(tool: string): Promise<string> {
+    if (!inTauri) return "签到成功";
+    return invoke<string>("checkin_now", { tool });
   },
+
 
   async refreshPricing(): Promise<void> {
     if (!inTauri) return;

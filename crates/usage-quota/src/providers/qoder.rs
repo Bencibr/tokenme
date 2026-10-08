@@ -70,6 +70,27 @@ const KEYCHAIN_IDS: [(&str, &str); 2] = [
     ("Qoder Safe Storage", "Qoder Key"),
 ];
 
+/// The login record behind one install's `auth.v1.dat` — platform keepers
+/// first (the Windows DPAPI path reads through its own helper), the macOS
+/// keychain pair second, other platforms unanswered.
+fn discover_login_info(dir: &std::path::Path) -> Option<Value> {
+    #[cfg(windows)]
+    {
+        read_windows_user_info(dir)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        KEYCHAIN_IDS
+            .iter()
+            .find_map(|(service, account)| keychain_pass(service, account).and_then(|p| app_user_info(dir, &p)))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
 impl QuotaProbe for QoderQuota {
     fn tool(&self) -> &'static str {
         "qoder"
@@ -92,8 +113,9 @@ impl QuotaProbe for QoderQuota {
             #[cfg(not(any(windows, target_os = "macos")))]
             let info: Option<Value> = None;
             if let Some(info) = info {
+                let checkin = qoder_daily_checkin(&info, false);
                 if let Some(samples) = live_usage(&info).filter(|s| !s.is_empty()) {
-                    return samples;
+                    return with_checkin_mark(samples, &checkin);
                 }
             }
         }
@@ -109,8 +131,9 @@ impl QuotaProbe for QoderQuota {
                 // one subprocess answer the live meter and its fallback.
                 if let Some(info) = read_secret(&conn, USER_KEY).and_then(|b| decrypt(&pass, &b)).and_then(|p| parse(&p))
                 {
+                    let checkin = qoder_daily_checkin(&info, false);
                     if let Some(samples) = live_usage(&info).filter(|s| !s.is_empty()) {
-                        return samples;
+                        return with_checkin_mark(samples, &checkin);
                     }
                 }
                 if let Some(value) =
@@ -488,10 +511,284 @@ pub(crate) fn samples_from_snapshot(value: &Value) -> Vec<QuotaSample> {
     }]
 }
 
+// ---- daily check-in ---------------------------------------------------------
+//
+// The credits campaign claim rides the same bearer token and base the usage
+// meter already answers (`openapi.qoder.sh`; the CN edition's base is the
+// fallback). Contract cross-checked against the client's own call shape and
+// the community claimers: the campaigns list answers EMPTY without the
+// `cosy-client-type: 10` header, and only `CLAIM_BENEFIT` campaigns still in
+// `CLAIMABLE` are worth a claim. The claim itself is empty-bodied and
+// idempotent server-side (`data.replayed` marks a duplicate), but the panel
+// still fires at most ONE attempt per local day — the state file is the lock,
+// the same discipline the Trae claim follows, because retrying is what
+// extends the server's rate limit. Success (`data.status == "CLAIMED"`) and
+// a campaign list with nothing left claimable both close the day.
+
+const CAMPAIGNS_PATH: &str = "/sash/api/v1/me/campaigns";
+const CHECKIN_BASES: [&str; 2] = ["https://openapi.qoder.sh", "https://openapi.qoder.com.cn"];
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct QoderCheckinState {
+    /// Local day of the last attempt — successful or not. The once-a-day lock.
+    last_attempt_day: String,
+    /// Local day of the last success — the 已签到 marker the label reads.
+    last_ok_day: String,
+    /// Credits the last successful claim paid out.
+    last_credits: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct QoderCheckinOutcome {
+    /// The day is closed: claimed now, or had been claimed earlier today.
+    done_today: bool,
+    /// Already checked in (nothing claimable) rather than claimed now.
+    was_already: bool,
+    credits: f64,
+}
+
+fn checkin_state_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("tokenme").join("quota").join("qoder_checkin.json"))
+}
+
+fn load_checkin_state(path: &std::path::Path) -> QoderCheckinState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_checkin_state(path: &std::path::Path, state: &QoderCheckinState) {
+    if let Ok(text) = serde_json::to_string(state) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+fn checkin_day() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// The benefit campaigns a claim can still win: the client's own filter.
+/// `campaignId` is a number on the wire today; both spellings parse.
+fn claimable_campaigns(body: &Value) -> Vec<(String, f64)> {
+    body.get("campaigns")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|c| {
+                    if c.get("actionType").and_then(Value::as_str) != Some("CLAIM_BENEFIT") {
+                        return None;
+                    }
+                    if c.get("claimStatus").and_then(Value::as_str) != Some("CLAIMABLE") {
+                        return None;
+                    }
+                    let id = match c.get("campaignId") {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(v) => v.to_string(),
+                        None => return None,
+                    };
+                    let amount = c.pointer("/benefit/amount").and_then(Value::as_f64).unwrap_or(0.0);
+                    Some((id, amount))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn checkin_campaigns(base: &str, token: &str) -> Option<Value> {
+    let url = format!("{base}{CAMPAIGNS_PATH}");
+    let resp = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .get(&url)
+        .set("authorization", &format!("Bearer {token}"))
+        .set("cosy-client-type", "10")
+        .set("user-agent", "Qoder")
+        .set("accept", "application/json")
+        .call()
+        .ok()?;
+    resp.into_string().ok().and_then(|t| serde_json::from_str(&t).ok())
+}
+
+/// One claim attempt: `(claimed, credits)` — `data.status == "CLAIMED"` is the
+/// success the client itself checks; a business failure answers unclaimed.
+fn checkin_claim(base: &str, token: &str, campaign: &str) -> Option<(bool, f64)> {
+    let url = format!("{base}{CAMPAIGNS_PATH}/{campaign}/claim");
+    let resp = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("authorization", &format!("Bearer {token}"))
+        .set("cosy-client-type", "10")
+        .set("user-agent", "Qoder")
+        .set("accept", "application/json")
+        .send_string("")
+        .ok()?;
+    let body: Value = resp.into_string().ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let claimed = body.pointer("/data/status").and_then(Value::as_str) == Some("CLAIMED");
+    let credits = body.pointer("/data/benefit/amount").and_then(Value::as_f64).unwrap_or(0.0);
+    Some((claimed, credits))
+}
+
+/// Fire today's claim (unless today is already spent) and report the outcome.
+/// `None` = no usable token or no state file: the probe then never claims.
+fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome> {
+    let path = checkin_state_path()?;
+    let token = info.get("token").and_then(Value::as_str).filter(|t| !t.is_empty())?;
+    let mut state = load_checkin_state(&path);
+    let today = checkin_day();
+    // The day's campaign opens at 10:00 local: before that there is nothing
+    // claimable, and an empty campaign list must not close the day — the next
+    // pass after ten retries on its own.
+    if !force && chrono::Timelike::hour(&chrono::Local::now()) < 10 {
+        return None;
+    }
+    if !force && state.last_attempt_day == today {
+        return Some(QoderCheckinOutcome {
+            done_today: state.last_ok_day == today,
+            was_already: false,
+            credits: state.last_credits,
+        });
+    }
+
+    state.last_attempt_day = today.clone();
+    let mut outcome = QoderCheckinOutcome { done_today: false, was_already: false, credits: 0.0 };
+    'bases: for base in CHECKIN_BASES {
+        let Some(body) = checkin_campaigns(base, token) else { continue };
+        for (id, amount) in claimable_campaigns(&body) {
+            if let Some((true, credits)) = checkin_claim(base, token, &id) {
+                state.last_ok_day = today.clone();
+                state.last_credits = if credits > 0.0 { credits } else { amount };
+                outcome = QoderCheckinOutcome {
+                    done_today: true,
+                    was_already: false,
+                    credits: state.last_credits,
+                };
+                break 'bases;
+            }
+        }
+        // A base that answered with claimable rows all already CLAIMED has
+        // paid today's benefit. An empty list (nothing opened yet — before
+        // 10:00, or no campaign today) must NOT close the day.
+        let rows = body.get("campaigns").and_then(Value::as_array);
+        let all_claimed = rows.is_some_and(|a| {
+            !a.is_empty()
+                && a.iter().all(|r| {
+                    r.get("claimStatus").and_then(Value::as_str) == Some("CLAIMED")
+                        || r.get("actionType").and_then(Value::as_str) != Some("CLAIM_BENEFIT")
+                })
+        });
+        if all_claimed {
+            state.last_ok_day = today.clone();
+            outcome = QoderCheckinOutcome { done_today: true, was_already: true, credits: 0.0 };
+            break 'bases;
+        }
+    }
+    save_checkin_state(&path, &state);
+    Some(outcome)
+}
+
+/// The panel's check-in button: one forced claim right now, past the 10:00
+/// gate and the day lock (a manual click is the user asking again).
+pub fn qoder_manual_checkin() -> Result<String, String> {
+    let info = app_dirs()
+        .iter()
+        .find(|d| d.join(AUTH_FILE).is_file())
+        .and_then(|dir| discover_login_info(dir))
+        .ok_or_else(|| "未找到 Qoder 登录".to_string())?;
+    match qoder_daily_checkin(&info, true) {
+        Some(o) if o.done_today && !o.was_already && o.credits > 0.0 => {
+            Ok(format!("签到成功，+{:.0} 积分", o.credits))
+        }
+        Some(o) if o.done_today => Ok("今日已签到".to_string()),
+        _ => Err("签到未成功，稍后再试".to_string()),
+    }
+}
+
+/// The row that carries the 已签到 mark into the strip: it only exists for a
+/// closed day, and the label is the exact wording the frontend's badge reads.
+fn checkin_marker_row(outcome: QoderCheckinOutcome) -> QuotaSample {
+    let label = if outcome.was_already {
+        "今日已签到".to_string()
+    } else if outcome.credits > 0.0 {
+        format!("已自动签到 · +{:.0}", outcome.credits)
+    } else {
+        "已自动签到".to_string()
+    };
+    QuotaSample {
+        used_percent: 0.0,
+        window_minutes: 0,
+        resets_at_ms: 0,
+        label: Some(label),
+        id: Some("checkin".into()),
+    }
+}
+
+/// Append the checkin mark to a live sample set, once the day is closed.
+fn with_checkin_mark(samples: Vec<QuotaSample>, outcome: &Option<QoderCheckinOutcome>) -> Vec<QuotaSample> {
+    match outcome {
+        Some(o) if o.done_today => {
+            let mut out = samples;
+            out.push(checkin_marker_row(*o));
+            out
+        }
+        _ => samples,
+    }
+}
+
+/// The panel's check-in button: one forced claim right now, whatever the
+/// automatic pass already tried today. The message is user-facing.
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The campaigns shape the client acts on: benefit actions only, and only
+    /// while `CLAIMABLE`. `campaignId` is a number on the wire today; a string
+    /// spelling must survive too.
+    #[test]
+    fn claimable_campaigns_filters_to_claimable_benefits() {
+        let body = json!({"campaigns": [
+            {"campaignId": 42, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE",
+             "benefit": {"amount": 100}},
+            {"campaignId": 7, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED",
+             "benefit": {"amount": 100}},
+            {"campaignId": 9, "actionType": "ATTEND_TASK", "claimStatus": "CLAIMABLE"},
+            {"campaignId": "str-id", "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE",
+             "benefit": {"amount": 30}}
+        ]});
+        assert_eq!(claimable_campaigns(&body), vec![("42".to_string(), 100.0), ("str-id".to_string(), 30.0)]);
+        // An empty or malformed list parses to nothing, never panics.
+        assert!(claimable_campaigns(&json!({"campaigns": []})).is_empty());
+        assert!(claimable_campaigns(&Value::Null).is_empty());
+    }
+
+    /// The label is the exact wording the strip's badge reads — a drift here
+    /// silently demotes the row to decoration.
+    #[test]
+    fn the_checkin_marker_label_carries_the_badge_wording() {
+        let already = checkin_marker_row(QoderCheckinOutcome { done_today: true, was_already: true, credits: 0.0 });
+        assert_eq!(already.label.as_deref(), Some("今日已签到"));
+        let claimed = checkin_marker_row(QoderCheckinOutcome { done_today: true, was_already: false, credits: 100.0 });
+        assert_eq!(claimed.label.as_deref(), Some("已自动签到 · +100"));
+        let plain = checkin_marker_row(QoderCheckinOutcome { done_today: true, was_already: false, credits: 0.0 });
+        assert_eq!(plain.label.as_deref(), Some("已自动签到"));
+        // An open day carries no row at all.
+        let none: Vec<QuotaSample> = with_checkin_mark(
+            vec![QuotaSample {
+                used_percent: 1.0,
+                window_minutes: 0,
+                resets_at_ms: 0,
+                label: None,
+                id: Some("credits".into()),
+            }],
+            &None,
+        );
+        assert_eq!(none.len(), 1, "no claim, no marker row");
+    }
 
     /// The response measured live on this machine (2026-09-24, `personal_standard`):
     /// a free plan with **no** plan credits and a resource pack in use. Note what

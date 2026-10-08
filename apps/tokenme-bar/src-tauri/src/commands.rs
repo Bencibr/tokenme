@@ -444,14 +444,19 @@ pub fn begin_bubble_drag(app: AppHandle) {
     bubble::begin_drag(&app);
 }
 
-/// The Trae CN check-in button: one forced claim right now (the automatic
-/// pass already tried today; a manual click is the user asking again).
-/// Returns a user-facing message.
+/// The check-in button of a checkin-capable tool (Trae CN / Qoder): one
+/// forced claim right now — the automatic pass may already have tried and
+/// failed today; a manual click is the user asking again. Returns a
+/// user-facing message.
 #[tauri::command]
-pub async fn trae_cn_checkin_now() -> Result<String, String> {
-    tokio::task::spawn_blocking(|| usage_quota::trae_manual_checkin())
-        .await
-        .map_err(|e| format!("签到任务失败: {e}"))?
+pub async fn checkin_now(tool: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || match tool.as_str() {
+        "trae_cn" => usage_quota::trae_manual_checkin(),
+        "qoder" => usage_quota::qoder_manual_checkin(),
+        other => Err(format!("{other} 没有签到活动")),
+    })
+    .await
+    .map_err(|e| format!("签到任务失败: {e}"))?
 }
 
 /// Persist the new fallback cadence, then wake the engine so the next wait

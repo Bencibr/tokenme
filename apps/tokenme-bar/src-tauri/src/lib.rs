@@ -51,7 +51,7 @@ pub fn run() {
             commands::get_panel_settings,
             commands::set_autostart,
             commands::set_refresh_secs,
-            commands::trae_cn_checkin_now,
+            commands::checkin_now,
             commands::set_theme,
             commands::set_show_money,
             commands::set_show_empty_tools,
