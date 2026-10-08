@@ -22,7 +22,7 @@ pub fn configure(app: &AppHandle) -> tauri::Result<()> {
     let window = match app.get_webview_window(LABEL) {
         Some(window) => window,
         None => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
-            .title("tokenme")
+            .title("TokenMe")
             .inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
             .min_inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
             .max_inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
