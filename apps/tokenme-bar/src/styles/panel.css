@@ -2201,6 +2201,11 @@
   border-bottom: 1px solid var(--hair);
 }
 
+/* tab 栏的下边线就是第一条分隔线；首行自己的 border-top 会和它叠成双线。 */
+.sheet-tabs + .sheet-row {
+  border-top: 0;
+}
+
 .sheet-tab {
   padding: 4px var(--s2) 5px;
   margin-bottom: -1px;
