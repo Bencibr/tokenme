@@ -60,9 +60,21 @@ const RUN_BUDGET: Duration = Duration::from_secs(25);
 /// Consecutive fruitless `agy` runs before the fallback stops being tried.
 const BREAKER_THRESHOLD: usize = 2;
 /// How long the fallback stays switched off after [`BREAKER_THRESHOLD`].
-/// Thirty minutes turns "a browser popup every poll" into "two popups, then
-/// silence the panel recovers from on its own".
-const BREAKER_BACKOFF: Duration = Duration::from_secs(30 * 60);
+/// Two hours turns "a browser popup every poll" into "two popups, then hours
+/// of silence" — thirty minutes re-armed the same login loop four times a day
+/// on a machine whose Antigravity was not logged in.
+const BREAKER_BACKOFF: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Whether the Antigravity IDE is running at all: the spawn fallback only
+/// makes sense while the install is live, since the CLI answers from the same
+/// login the IDE shares and pops its browser otherwise.
+fn ide_running() -> bool {
+    let running = crate::host::running_process_names();
+    crate::host::HOST_PROCESSES
+        .iter()
+        .find(|(id, _)| *id == "antigravity")
+        .is_some_and(|(_, wanted)| wanted.iter().any(|n| crate::host::matches(&running, n)))
+}
 
 /// The local Connect RPC path the language server serves (`CodexBar`
 /// `AntigravityStatusProbe.swift:847-852`).
@@ -89,7 +101,14 @@ impl QuotaProbe for AntigravityQuota {
             }
         }
         // Fallback: the vendor CLI. The one step here that can pop a browser,
-        // so the breaker decides whether it runs at all.
+        // so both the IDE-presence check and the breaker decide whether it
+        // runs at all. Without the IDE there is no live usage to meter — and
+        // poking the CLI's login flow for a machine that never opened
+        // Antigravity is pure harassment (measured 2026-10-09: agy spawned
+        // and popped a browser at 07:37 and 07:43 on an IDE-less morning).
+        if !ide_running() {
+            return Vec::new();
+        }
         if !SPAWN_BREAKER.allows() {
             return Vec::new();
         }
