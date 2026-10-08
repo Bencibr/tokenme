@@ -431,7 +431,12 @@ impl Index {
         // re-emit to lift it. Dropping the read cursors of the cumulative
         // adapters makes the next pass re-read every projection from byte 0
         // and re-emit its final totals; replace-on-grow raises the frozen rows
-        // to truth, and a ledger that shrank meanwhile simply stays. This is
+        // to truth, a ledger that shrank meanwhile simply stays, and
+        // single-shot re-emits dedupe away. The list is exactly the adapters
+        // whose audit pinned this shape AND whose dedupe-key space is
+        // unchanged since 77f8d95 — a changed key space would leave the old
+        // rows stranded beside the new ones (double-count), which is why
+        // antigravity is NOT here: 61c4f96 redrew its buckets. This is
         // deliberately not a SCHEMA_VERSION bump: the `sync:` memos in meta
         // survive a wipe and would strand every merged bundle as "already
         // imported" (see that constant).
@@ -446,7 +451,8 @@ impl Index {
             .map_err(sql_err)?;
         if repaired.is_none() {
             conn.execute(
-                "DELETE FROM file_state WHERE tool IN ('dsh', 'hermes', 'funide')",
+                "DELETE FROM file_state WHERE tool IN \
+                 ('dsh', 'hermes', 'funide', 'joycode', 'claude', 'atomcode')",
                 [],
             )
             .map_err(sql_err)?;

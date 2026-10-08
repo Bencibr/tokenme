@@ -409,7 +409,7 @@ fn the_cumulative_rescan_repair_drops_stale_cursors_exactly_once() {
         idx.conn()
             .execute("DELETE FROM meta WHERE key = 'repair:cumulative-rescan-1'", [])
             .unwrap();
-        for tool in ["dsh", "hermes", "funide", "claude"] {
+        for tool in ["dsh", "hermes", "funide", "joycode", "claude", "atomcode", "codex"] {
             idx.conn()
                 .execute(
                     &format!(
@@ -424,7 +424,7 @@ fn the_cumulative_rescan_repair_drops_stale_cursors_exactly_once() {
         }
     }
     let idx = Index::open(&db).unwrap();
-    for tool in ["dsh", "hermes", "funide"] {
+    for tool in ["dsh", "hermes", "funide", "joycode", "claude", "atomcode"] {
         let left: i64 = idx
             .conn()
             .query_row(
@@ -435,11 +435,11 @@ fn the_cumulative_rescan_repair_drops_stale_cursors_exactly_once() {
             .unwrap();
         assert_eq!(left, 0, "{tool} cursor must be dropped for the rescan");
     }
-    let claude: i64 = idx
+    let codex: i64 = idx
         .conn()
-        .query_row("SELECT COUNT(*) FROM file_state WHERE tool = 'claude'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM file_state WHERE tool = 'codex'", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(claude, 1, "single-shot adapters keep their cursors");
+    assert_eq!(codex, 1, "cursor-idempotent adapters keep their cursors");
     assert_eq!(idx.meta_value("repair:cumulative-rescan-1").unwrap().as_deref(), Some("1"));
 
     // One-shot: cursors earned after the repair survive every reopen.
