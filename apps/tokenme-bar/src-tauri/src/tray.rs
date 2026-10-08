@@ -309,6 +309,14 @@ fn promote_taskbar_icon() {
 
 /// One lookup pass. `true` = decided (promoted, or the user already chose).
 #[cfg(target_os = "windows")]
+fn eq_ignore_ascii(a: &[u16], b: &[u16]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x == y || x.to_ascii_lowercase() == y.to_ascii_lowercase())
+}
+
+#[cfg(target_os = "windows")]
 fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
@@ -370,7 +378,10 @@ fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
             if got == 0 {
                 let entry = &path[..path.len() >> 1];
                 let entry = &entry[..entry.iter().position(|&c| c == 0).unwrap_or(entry.len())];
-                if entry.eq_ignore_ascii_case(&want[..want.len() - 1]) {
+                if eq_ignore_ascii(
+                    entry,
+                    &want[..want.len() - 1],
+                ) {
                     let mut current: u32 = 0;
                     let mut cur_len = std::mem::size_of::<u32>() as u32;
                     let present = RegGetValueW(
