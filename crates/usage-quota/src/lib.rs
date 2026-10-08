@@ -19,6 +19,7 @@ use usage_core::{QuotaSample, QuotaView};
 
 pub use providers::ClaudeQuota;
 pub use providers::workbuddy_login;
+pub use providers::trae_manual_checkin;
 
 /// How long an answer stays trustworthy. Vendor windows reset on the hour at the
 /// earliest, so five minutes is well inside any meaningful resolution.

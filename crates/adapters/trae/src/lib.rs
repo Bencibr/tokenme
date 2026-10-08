@@ -267,7 +267,6 @@ fn read_turns(
     let rows = stmt
         .query_map([], |row| {
             Ok(TurnRow {
-                tool_id,
                 turn_id: row.get::<_, String>(0).unwrap_or_default(),
                 created_at: row.get::<_, i64>(1).unwrap_or(0),
                 context: row.get::<_, String>(2).unwrap_or_default(),
@@ -302,7 +301,6 @@ fn read_turns(
 }
 
 struct TurnRow {
-    tool_id: &'static str,
     turn_id: String,
     created_at: i64,
     context: String,

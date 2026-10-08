@@ -59,7 +59,7 @@
 //! Trae's main binary ships as the generic "Electron", so the process match is
 //! on its `Trae Helper*` children.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use usage_core::QuotaSample;
@@ -96,6 +96,14 @@ fn storage_jsons(cn: bool) -> Vec<PathBuf> {
 const USAGE_PATH: &str = "/trae/api/v1/pay/ide_user_ent_usage";
 /// Fallback API host, used when the login record carries none.
 const DEFAULT_HOST: &str = "https://growsg-normal.trae.ai";
+const CLAIM_PATH: &str = "/trae/api/v2/ug/checkin_credits/claim";
+const IDE_VERSION: &str = "1.107.1";
+/// The current-entitlement-base listing: where the CN credits packs live
+/// (`credits_limit` sits under `product_extra.package_extra.quota`, a key the
+/// `ide_user_ent_usage` payloads do not carry).
+/// The v2 entitlement list: unlike v1 it carries the credits packs, each with
+/// both `quota.credits_limit` and `usage.credits_amount`.
+const ENT_LIST_V2: &str = "/trae/api/v2/pay/user_current_entitlement_list";
 
 /// `entitlement_base_info.product_type` values (the bundle's `Vc` enum). The
 /// plan picker reads exactly these five; packs outside them are add-ons.
@@ -272,12 +280,299 @@ impl QuotaProbe for TraeQuota {
             if !samples.is_empty() {
                 return samples;
             }
+            if self.cn {
+                cn_daily_checkin(&login, false);
+                let windows = cn_credit_windows(&login);
+                if !windows.is_empty() {
+                    return windows;
+                }
+            }
             if let Some(free) = cn_free_window(&body) {
                 return vec![free];
             }
         }
         Vec::new()
     }
+}
+
+/// The CN credits windows — one per credits pack. The packs expire
+/// independently (a monthly login grant lapses at month end while the veteran
+/// grant runs weeks longer), so they cannot merge into one bar. Source: the
+/// v2 entitlement list, whose packs carry both sides — `quota.credits_limit`
+/// and `usage.credits_amount` — so the bar is the real spend, and
+/// `end_time` gives each window its own expiry countdown. The checkin pack's
+/// very presence is the 已签到 mark; the daily claim's outcome refines it.
+fn cn_credit_windows(login: &Login) -> Vec<QuotaSample> {
+    let url = format!("{}{ENT_LIST_V2}", login.host);
+    // Browser-shaped, like the dashboard's own call: Chrome UA and platform
+    // hints that follow the OS the panel runs on (macOS / Windows / Linux).
+    let ua = if cfg!(target_os = "macos") {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    } else if cfg!(windows) {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    } else {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    };
+    let platform = if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(windows) {
+        "Windows"
+    } else {
+        "Linux"
+    };
+    let Ok(resp) = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("accept", "application/json, text/plain, */*")
+        .set("accept-language", "zh-CN,zh;q=0.9")
+        .set("origin", "https://www.trae.cn")
+        .set("referer", "https://www.trae.cn/")
+        .set("user-agent", ua)
+        .set("sec-ch-ua-platform", &format!("\"{platform}\""))
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .send_string(&json!({ "require_usage": true, "full_data": true }).to_string()) else {
+        return Vec::new();
+    };
+    let body: Value = resp
+        .into_string()
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    let Some(list) = body.get("user_entitlement_pack_list").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for pack in list {
+        let base = pack.get("entitlement_base_info").unwrap_or(&Value::Null);
+        let limit = base.pointer("/quota/credits_limit").and_then(Value::as_f64);
+        let spent = pack
+            .pointer("/usage/credits_amount")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let Some(limit) = limit.filter(|v| *v > 0.0) else {
+            continue;
+        };
+        let name = pack
+            .get("display_desc")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "积分包".to_string());
+        let expires_ms = base
+            .get("end_time")
+            .and_then(Value::as_f64)
+            .map(|s| (s * 1000.0) as i64)
+            .unwrap_or(0);
+        // The checkin pack only exists for a claimed day — its presence is
+        // what lets the tool header wear the 已签到 badge. The label is the
+        // bare pack name: the gauge column already shows the spent share, and
+        // a long "已用 X/Y" tail both truncates and breaks the reset column's
+        // alignment across rows.
+        let _ = spent;
+        out.push(QuotaSample {
+            used_percent: 0.0,
+            window_minutes: 0,
+            resets_at_ms: expires_ms,
+            label: Some(name.clone()),
+            id: Some(pack.get("entitlement_id").and_then(Value::as_str).unwrap_or("credits").to_string()),
+        });
+    }
+    out
+}
+
+// ---- CN daily check-in -----------------------------------------------------
+//
+// The dashboard's check-in endpoint is claimable with the local token once the
+// desktop device headers ride along (`req_source: 1` numeric, x-device-* —
+// without them the server answers code 9004). The panel fires at most ONE
+// claim attempt per local day no matter how often the quota pass runs: the
+// endpoint queues and rate-limits repeat claims (code 9074), and the community
+// scripts converge on exactly that discipline. Success (code 0) and
+// already-checked-in (9095) both count as done for the day.
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct TraeCheckinState {
+    /// Local day of the last attempt — successful or not. The once-a-day lock.
+    last_attempt_day: String,
+    /// Local day of the last success — the 已签到 marker the label reads.
+    last_ok_day: String,
+    /// Credits the last successful claim paid out.
+    last_credits: f64,
+    /// The stable per-install device id the device headers carry.
+    device_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TraeCheckinOutcome {
+    /// Claim answered success today (or had answered earlier today).
+    done_today: bool,
+    /// Already checked in when we tried (9095) rather than claimed now.
+    was_already: bool,
+}
+
+fn checkin_state_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("tokenme").join("quota").join("trae_cn_checkin.json"))
+}
+
+fn load_checkin_state(path: &Path) -> TraeCheckinState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_checkin_state(path: &Path, state: &TraeCheckinState) {
+    if let Ok(text) = serde_json::to_string(state) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// A stable 16-digit device id: generated once, then persisted — a fresh id on
+/// every pass would read as device churn to the queue that rate-limits claims.
+fn device_id_of(state: &mut TraeCheckinState) -> String {
+    if state.device_id.is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seed = (nanos as u64) ^ (std::process::id() as u64);
+        state.device_id = format!("{:016}", seed % 10_000_000_000_000_000);
+    }
+    state.device_id.clone()
+}
+
+fn local_day() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Fire today's claim (unless today is already spent) and report the outcome.
+/// `None` = no state file could be written (a read-only config dir): the probe
+/// then never auto-claims, the window just loses its marker.
+fn cn_daily_checkin(login: &Login, force: bool) -> Option<TraeCheckinOutcome> {
+    let path = checkin_state_path()?;
+    let mut state = load_checkin_state(&path);
+    let today = local_day();
+    if !force && state.last_attempt_day == today {
+        return Some(TraeCheckinOutcome {
+            done_today: state.last_ok_day == today,
+            was_already: false,
+        });
+    }
+
+    let device = device_id_of(&mut state);
+    let url = format!("{}{CLAIM_PATH}", login.host);
+    let claimed: Option<(i64, f64)> = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .set("x-user-region", "CN")
+        .set("user-agent", &format!("Trae/{IDE_VERSION}"))
+        .set("x-device-type", if cfg!(target_os = "macos") {
+            "Darwin"
+        } else if cfg!(windows) {
+            "Windows"
+        } else {
+            "Linux"
+        })
+        .set("x-app-version", IDE_VERSION)
+        .set("x-device-id", &device)
+        .send_string(&json!({ "req_source": 1 }).to_string())
+        .ok()
+        .and_then(|r| r.into_string().ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            let code = v.get("code").and_then(Value::as_i64)?;
+            let points = v
+                .pointer("/data/points")
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            Some((code, points))
+        });
+
+    state.last_attempt_day = today.clone();
+    let mut outcome = TraeCheckinOutcome { done_today: false, was_already: false };
+    match claimed {
+        // 0 = claimed; 9095 = already checked in earlier today by the IDE or
+        // the dashboard. Both close the day.
+        Some((0, points)) => {
+            state.last_ok_day = today.clone();
+            state.last_credits = points;
+            outcome.done_today = true;
+        }
+        Some((9095, _)) => {
+            state.last_ok_day = today.clone();
+            outcome.done_today = true;
+            outcome.was_already = true;
+        }
+        // 9074 queue/rate-limit, 1001/401/403 token trouble, anything else:
+        // the day is spent either way — retrying is what extends the queue.
+        _ => {}
+    }
+    save_checkin_state(&path, &state);
+    Some(outcome)
+}
+
+
+/// The panel's check-in button: one forced claim right now, whatever the
+/// automatic pass already tried today. The message is user-facing.
+pub fn manual_checkin() -> Result<String, String> {
+    let login = logins(true)
+        .into_iter()
+        .find(|l| l.host.contains("trae.cn"))
+        .ok_or_else(|| "未找到 Trae CN 登录".to_string())?;
+    let today = local_day();
+    let path = checkin_state_path().ok_or_else(|| "无法写入签到状态".to_string())?;
+    let mut state = load_checkin_state(&path);
+    let url = format!("{}{CLAIM_PATH}", login.host);
+    let resp = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .set("x-user-region", "CN")
+        .set("user-agent", &format!("Trae/{IDE_VERSION}"))
+        .set("x-device-type", if cfg!(target_os = "macos") {
+            "Darwin"
+        } else if cfg!(windows) {
+            "Windows"
+        } else {
+            "Linux"
+        })
+        .set("x-app-version", IDE_VERSION)
+        .set("x-device-id", &device_id_of(&mut state))
+        .send_string(&json!({ "req_source": 1 }).to_string())
+        .map_err(|e| format!("签到请求失败: {e}"))?;
+    let body: Value = resp
+        .into_string()
+        .map_err(|e| format!("签到响应读取失败: {e}"))?
+        .parse()
+        .unwrap_or(Value::Null);
+    let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    let points = body
+        .pointer("/data/points")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    state.last_attempt_day = today.clone();
+    let message = match code {
+        0 => {
+            state.last_ok_day = today.clone();
+            state.last_credits = points;
+            format!("签到成功，+{points:.0} 积分")
+        }
+        9095 => "今日已签到".to_string(),
+        9074 => "签到排队中，稍后再试".to_string(),
+        other => format!("签到未成功 (code {other})"),
+    };
+    save_checkin_state(&path, &state);
+    Ok(message)
 }
 
 /// The CN free tier has no pack with a limit: the IDE maps a packless account
@@ -751,6 +1046,9 @@ mod cn_free_tests {
     }
 }
 
+/// `#[ignore]`d: shape-hunt the CN checkin claim — the definition carries
+/// `req_source/Session/Request` and the mock endpoint carries a `did`, so try
+
 /// `#[ignore]`d live check: what the CN probe actually fetches right now.
 #[test]
 #[ignore]
@@ -761,4 +1059,91 @@ fn cn_fetch_live() {
         println!("[trae-cn] fetch: {:>6.2}%  {}", bar.used_percent, bar.label.as_deref().unwrap_or_default());
     }
     assert!(!bars.is_empty(), "the CN probe returned no bars for a running host");
+}
+
+/// `#[ignore]`d: the CN dashboard's credits endpoints against the local token
+/// — status, billing status and the web entitlement (which the dashboard page
+/// itself calls). Dumps shapes, never the token.
+#[test]
+#[ignore]
+fn cn_credits_dump() {
+    for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
+        for (path, payload) in [
+            ("/trae/api/v2/pay/user_current_entitlement_list", json!({ "require_usage": true, "req_source": "IDE", "full_data": true })),
+            ("/trae/api/v2/pay/web_user_ent_usage", json!({ "require_usage": true, "req_source": "IDE", "full_data": true })),
+            ("/api/v1/commercial/get_session_usage", json!({ "session_id": "" })),
+        ] {
+            let url = format!("{}{path}", login.host);
+            let resp = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(5))
+                .timeout_read(std::time::Duration::from_secs(10))
+                .build()
+                .post(&url)
+                .set("content-type", "application/json")
+                .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+                .send_string(&payload.to_string());
+            match resp {
+                Ok(r) => {
+                    let text = r.into_string().unwrap_or_default();
+                    let pretty: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                    println!("[trae-cn] {url} ({}):\n{}", "2xx", serde_json::to_string_pretty(&pretty).unwrap());
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let text = r.into_string().unwrap_or_default();
+                    println!("[trae-cn] {url}: HTTP {code}: {text}");
+                }
+                Err(e) => println!("[trae-cn] {url}: {e}"),
+            }
+        }
+    }
+}
+
+/// `#[ignore]`d: parameter-shape matrix for the checkin status endpoint, to
+
+/// `#[ignore]`d: dump the field NAMES (never values) of every decrypted
+/// iCubeAuthInfo record, hunting for a device/session id the claim needs.
+#[test]
+#[ignore]
+fn cn_auth_record_fields() {
+    for path in storage_jsons(true) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(all) = serde_json::from_str::<serde_json::Map<String, Value>>(&text) else { continue };
+        for (key, value) in &all {
+            let Some(encoded) = value.as_str() else { continue };
+            if !key.starts_with("iCubeAuthInfo://") { continue; }
+            let Some(plain) = decrypt(encoded) else {
+                println!("[trae-cn] {key}: does not decrypt");
+                continue;
+            };
+            match serde_json::from_str::<Value>(&plain) {
+                Ok(record) => {
+                    let names: Vec<&String> = record.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                    println!("[trae-cn] {key}: fields {names:?}");
+                    for f in ["uid", "did", "device_id", "session", "user_id", "host", "expiredAt"] {
+                        if let Some(v) = record.get(f) {
+                            let shown = match v {
+                                Value::String(sv) if f != "host" && f != "expiredAt" => format!("<{} chars>", sv.len()),
+                                other => format!("{other}"),
+                            };
+                            println!("    {f} = {shown}");
+                        }
+                    }
+                }
+                Err(_) => println!("[trae-cn] {key}: plain text {} bytes", plain.len()),
+            }
+        }
+    }
+}
+
+/// `#[ignore]`d one-shot: write the CN web token to a temp file for browser
+/// session injection. Delete the file right after use.
+#[test]
+#[ignore]
+fn cn_token_to_tmpfile() {
+    let login = logins(true)
+        .into_iter()
+        .find(|l| l.host.contains("trae.cn"))
+        .expect("no CN login");
+    std::fs::write("/tmp/trae-cn-token", &login.token).unwrap();
+    println!("[trae-cn] token written, {} bytes", login.token.len());
 }

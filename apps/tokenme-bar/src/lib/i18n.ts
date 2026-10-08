@@ -261,6 +261,11 @@ const zh = {
   "unit.times": "次",
 
   /* 配额 ------------------------------------------------------------------ */
+  "quota.checkin.btn": "签到",
+  "quota.checkin.done": "已签到",
+  "quota.checkin.busy": "签到中…",
+  "quota.checkin.mark.auto": "已自动签到",
+  "quota.checkin.mark.today": "今日已签到",
   "quota.section": "配额",
   "quota.pending": "配额探测中…",
   "quota.meta": "{w} 个窗口 · {g} 个工具",
@@ -680,6 +685,11 @@ const en: Record<StrKey, string> = {
   "legend.more": "More",
   "unit.times": "reqs",
 
+  "quota.checkin.btn": "Check in",
+  "quota.checkin.done": "Checked in",
+  "quota.checkin.busy": "Checking in…",
+  "quota.checkin.mark.auto": "已自动签到",
+  "quota.checkin.mark.today": "今日已签到",
   "quota.section": "Quotas",
   "quota.pending": "Probing quotas…",
   "quota.meta": "{w} windows · {g} tools",
