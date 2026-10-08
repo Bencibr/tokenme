@@ -436,32 +436,30 @@ export function SettingsSheet({
         ) : null}
         {tab === "alert" ? (
           <>
-            <div className={`sheet-row${notify === "granted" ? "" : " sheet-row-warn"}`}>
+            <div className="sheet-row">
               <div>
                 <div className="sheet-label">{t("set.notify")}</div>
                 <div className="sheet-hint">{t("set.notify.hint")}</div>
               </div>
-              <div className="sheet-nav-end">
-                <span className="sheet-value">
-                  {notify === "granted" ? t("set.notify.granted") : t("set.notify.denied")}
+              {notify === "granted" ? (
+                <span className="sheet-status">
+                  <span className="sheet-status-dot" aria-hidden="true" />
+                  {t("set.notify.granted")}
                 </span>
-                {notify === "granted" ? null : (
-                  <button
-                    type="button"
-                    className="sheet-action"
-                    onClick={() => void bridge.notifyEnable().then((s) => setNotify(s))}
-                  >
-                    {t("set.notify.enable")}
-                  </button>
-                )}
-              </div>
+              ) : (
+                <button
+                  type="button"
+                  className="sheet-action sheet-action-warn"
+                  onClick={() => void bridge.notifyEnable().then((s) => setNotify(s))}
+                >
+                  {t("set.notify.enable")}
+                </button>
+              )}
             </div>
-            <div className="sheet-row">
-              <div>
-                <div className="sheet-label">{t("set.tiers")}</div>
-                <div className="sheet-hint">{t("set.tiers.hint")}</div>
-              </div>
-              <div className="seg" role="radiogroup" aria-label={t("set.tiers")}>
+            <div className="sheet-block">
+              <div className="sheet-label">{t("set.tiers")}</div>
+              <div className="sheet-hint">{t("set.tiers.hint")}</div>
+              <div className="seg seg-wide" role="radiogroup" aria-label={t("set.tiers")}>
                 {TIERS.map((tr) => (
                   <button
                     key={tr.key}

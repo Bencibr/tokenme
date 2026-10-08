@@ -441,6 +441,7 @@
   padding: 2px var(--s2); /* the theme seg has word labels, not 日/周/月 */
   font-size: var(--t-meta);
   color: var(--ink-3);
+  white-space: nowrap;
   border-radius: var(--r-sm);
   transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
@@ -2276,11 +2277,50 @@
   vertical-align: 1px;
 }
 
-.sheet-row-warn {
+/* 提醒页的权限状态：一枚安静的绿点。被拒时不写字——琥珀色的「去开启」
+   按钮本身就是状态，再标一遍「已关闭」是同一句话说两遍。 */
+.sheet-status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-meta);
+  color: var(--ink-2);
+}
+
+.sheet-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.sheet-action-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+.sheet-action-warn:hover:not(:disabled) {
   background: var(--warn-soft);
-  border-radius: var(--r-md);
-  padding-left: 8px;
-  padding-right: 8px;
+}
+
+/* 档位选择独占一列：三个词挤在行右侧只会换来难看的换行，
+   整宽三等分后每个词都站得下。 */
+.sheet-block {
+  padding: 10px 0;
+  border-top: 1px solid var(--hair);
+}
+
+.seg-wide {
+  display: flex;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.seg-wide .seg-btn {
+  flex: 1;
+  padding: 5px 0;
+  text-align: center;
 }
 
 /* Locked is honest, not merely dimmed: the switches stay readable so the page
