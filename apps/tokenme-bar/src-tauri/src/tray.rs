@@ -297,9 +297,9 @@ fn promote_taskbar_icon() {
                 Ok(p) => p,
                 Err(_) => return,
             };
-            for _ in 0..24 {
+            for attempt in 0..24 {
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                if promote_taskbar_icon_once(&exe) {
+                if promote_taskbar_icon_once(&exe, attempt) {
                     return;
                 }
             }
@@ -353,7 +353,7 @@ fn resolve_known_folder(entry: &[u16]) -> Option<Vec<u16>> {
 }
 
 #[cfg(target_os = "windows")]
-fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
+fn promote_taskbar_icon_once(exe: &std::path::Path, attempt: u32) -> bool {
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
         HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, RRF_RT_REG_DWORD,
@@ -374,10 +374,16 @@ fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
             &mut root,
         ) != 0
         {
+            if attempt == 23 {
+                crate::logging::error("tray: NotifyIconSettings root would not open");
+            }
             return false;
         }
         let want: Vec<u16> = exe.to_string_lossy().encode_utf16().collect();
         let mut decided = false;
+        let mut scanned: u32 = 0;
+        let mut get_fail: Option<u32> = None;
+        let mut skipped_unknown: u32 = 0;
         let mut index: u32 = 0;
         loop {
             let mut name = [0u16; 256];
@@ -417,6 +423,7 @@ fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
                 &mut path_len,
             );
             if got == 0 {
+                scanned += 1;
                 let entry = &path[..path.len() >> 1];
                 let entry = &entry[..entry.iter().position(|&c| c == 0).unwrap_or(entry.len())];
                 let resolved = resolve_known_folder(entry);
@@ -447,7 +454,11 @@ fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
                     }
                     decided = true;
                     }
+                } else {
+                    skipped_unknown += 1;
                 }
+            } else {
+                get_fail = Some(got);
             }
             RegCloseKey(sub);
             if decided {
@@ -455,6 +466,14 @@ fn promote_taskbar_icon_once(exe: &std::path::Path) -> bool {
             }
         }
         RegCloseKey(root);
+        if !decided && attempt == 23 {
+            crate::logging::error(&format!(
+                "tray: no NotifyIconSettings entry matched {} — scanned {scanned}, value-read failures {}, unknown-guid skips {skipped_unknown}, last read error {:?}",
+                exe.display(),
+                get_fail.iter().count(),
+                get_fail
+            ));
+        }
         decided
     }
 }
