@@ -68,6 +68,8 @@ const zh = {
   "hdr.cache": "缓存 {p}",
   "hdr.sync": "Linux 同步",
   "hdr.sync.tip": "每台机器最后一次成功合并（哈希校验与对账全部通过才会记录）",
+  "hdr.sync.idle": "今日无数据",
+  "hdr.sync.idle.tip": "今天还没有机器合并新数据；最后一次成功见下",
   "hdr.sync.rows": "{n} 行",
   "hdr.sync.more": "+{n} 台",
 
@@ -490,6 +492,8 @@ const en: Record<StrKey, string> = {
   "hdr.cache": "Cache {p}",
   "hdr.sync": "Linux sync",
   "hdr.sync.tip": "Newest successful merge from each machine (recorded only after the hash check and reconciliation pass)",
+  "hdr.sync.idle": "No data today",
+  "hdr.sync.idle.tip": "Nothing merged today yet; the last success is listed below",
   "hdr.sync.rows": "{n} rows",
   "hdr.sync.more": "+{n} more",
 

@@ -356,12 +356,17 @@ const [page, setPage] = useState<PageKey>(() => {
     const records = scope.kind === "origin" ? all.filter((r) => r.origin === scope.name) : scope.kind === "local" ? [] : all;
     if (records.length === 0) return null;
     const importedAt = syncPin === null ? records[0].imported_at_ms : now - syncPin * 3_600_000;
+    // The badge is read as "did today's pull land", not "when was the last
+    // success" — a yesterday stamp reads as idle the moment the local day
+    // rolls over, whatever the 24h clock would say.
+    const mergedToday = localDate(importedAt) === localDate(now);
     return {
       latest: records[0],
       importedAt,
       age: relativeTime(importedAt, now),
       more: records.length - 1,
-      stale: now - importedAt > 24 * 3_600_000,
+      mergedToday,
+      stale: !mergedToday,
       rows: records.map((r, i) => ({
         origin: r.origin,
         file: r.file,

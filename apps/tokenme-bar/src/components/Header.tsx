@@ -41,7 +41,10 @@ interface Props {
     latest: { origin: string; rows: number };
     age: string;
     more: number;
+    /** Warn hue: the newest merge is not from today. */
     stale: boolean;
+    /** Nothing merged today → the badge says so instead of yesterday's rows. */
+    mergedToday: boolean;
     rows: { origin: string; file: string; rows: number; window: string; age: string }[];
   } | null;
   /** The scope the current report was folded under (its echoed value). */
@@ -75,7 +78,7 @@ function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
 /** One line per origin for the badge tooltip: window and file included so a
  *  wrong or half-transported bundle is identifiable without opening the folder. */
 function syncTip(sync: NonNullable<Props["sync"]>): string {
-  const lines = [t("hdr.sync.tip")];
+  const lines = [sync.mergedToday ? t("hdr.sync.tip") : t("hdr.sync.idle.tip")];
   for (const r of sync.rows) {
     lines.push(
       `${r.origin} · ${r.age} · ${t("hdr.sync.rows", { n: count(r.rows) })} · ${r.window} · ${r.file}`,
@@ -205,12 +208,18 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
             <IconRefresh size={11} />
             {t("hdr.sync")}
             <span className="dot-sep" aria-hidden="true" />
-            <span>{sync.latest.origin}</span>
-            <span className="dot-sep" aria-hidden="true" />
-            <span>{sync.age}</span>
-            <span className="dot-sep" aria-hidden="true" />
-            <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
-            {sync.more > 0 ? <span className="sync-more">{t("hdr.sync.more", { n: sync.more })}</span> : null}
+            {sync.mergedToday ? (
+              <>
+                <span>{sync.latest.origin}</span>
+                <span className="dot-sep" aria-hidden="true" />
+                <span>{sync.age}</span>
+                <span className="dot-sep" aria-hidden="true" />
+                <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
+                {sync.more > 0 ? <span className="sync-more">{t("hdr.sync.more", { n: sync.more })}</span> : null}
+              </>
+            ) : (
+              <span>{t("hdr.sync.idle")}</span>
+            )}
           </span>
         </div>
       ) : null}
