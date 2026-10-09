@@ -447,6 +447,13 @@ pub fn show_panel(app: AppHandle) {
     panel::show(&app, None);
 }
 
+/// Dismisses the panel while keeping the native and Rust visibility state in
+/// sync, so the next tray click opens it again.
+#[tauri::command]
+pub fn hide_panel(app: AppHandle) {
+    panel::hide(&app);
+}
+
 /// While a text field holds focus the frontend asks for a keyboard session —
 /// the non-activating tray panel otherwise never owns the keys on Windows.
 #[tauri::command]
@@ -466,10 +473,16 @@ pub fn begin_bubble_drag(app: AppHandle) {
 /// forced claim right now — the automatic pass may already have tried and
 /// failed today; a manual click is the user asking again. The answer is
 /// structured: `ok` alone flips the button into the done badge, `message`
-/// (the reason it did not — 未到签到时间, 排队中 — or the成功 copy) rides the
-/// button until the next sample refresh.
+/// (the reason it did not — 未到签到时间, 排队中 — or the success copy) rides
+/// the button until the next sample refresh.
+#[derive(serde::Serialize)]
+pub struct CheckinResult {
+    pub ok: bool,
+    pub message: String,
+}
+
 #[tauri::command]
-pub async fn checkin_now(tool: String) -> Result<serde_json::Value, String> {
+pub async fn checkin_now(tool: String) -> Result<CheckinResult, String> {
     // The registry owns the dispatch (usage_quota::CHECKIN_TOOLS): the same
     // table the engine's exemption and the strip's control read, so a claim
     // added there is claimable here without a second list. A tool outside it
@@ -478,7 +491,7 @@ pub async fn checkin_now(tool: String) -> Result<serde_json::Value, String> {
         .await
         .map_err(|e| format!("签到任务失败: {e}"))?;
     let (ok, message) = answer?;
-    Ok(serde_json::json!({ "ok": ok, "message": message }))
+    Ok(CheckinResult { ok, message })
 }
 
 /// Persist the new fallback cadence, then wake the engine so the next wait

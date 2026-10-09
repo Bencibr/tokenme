@@ -275,7 +275,208 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(on_menu_event)
         .on_tray_icon_event(on_tray_event)
         .build(app)?;
+    #[cfg(target_os = "windows")]
+    promote_taskbar_icon();
     Ok(())
+}
+
+/// Win11 files every tray icon under HKCU\Control Panel\NotifyIconSettings,
+/// keyed by a hash of the exe path, and a fresh entry starts hidden inside the
+/// overflow flyout (IsPromoted absent) — every new install path would surface
+/// its tray icon only after a manual trip through taskbar settings. The tray
+/// is this app's whole interface, so an absent value is flipped to promoted;
+/// a value that is present was set by the user (shown or hidden) and is never
+/// touched. Explorer creates the entry only after the icon is first shown, so
+/// the lookup retries on its own thread and stops at the first decision.
+#[cfg(target_os = "windows")]
+fn promote_taskbar_icon() {
+    std::thread::Builder::new()
+        .name("tokenme-tray-promote".into())
+        .spawn(|| {
+            let exe = match std::env::current_exe() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            for attempt in 0..24 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if promote_taskbar_icon_once(&exe, attempt) {
+                    return;
+                }
+            }
+        })
+        .ok();
+}
+
+/// One lookup pass. `true` = decided (promoted, or the user already chose).
+#[cfg(target_os = "windows")]
+fn eq_ignore_ascii(a: &[u16], b: &[u16]) -> bool {
+    fn lower(c: u16) -> u16 {
+        if (0x41..=0x5A).contains(&c) {
+            c + 0x20
+        } else {
+            c
+        }
+    }
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y || lower(*x) == lower(*y))
+}
+
+/// Explorer records ExecutablePath with an unexpanded known-folder GUID prefix
+/// ("{6D809377-…}\TokenMe\…"), while current_exe() answers the real path —
+/// RegGetValueW expands %vars% but not folder GUIDs, so the raw strings can
+/// never compare equal. Rewrite the prefix through the environment copy of the
+/// same folder; the three GUIDs cover everywhere this product installs. Plain
+/// paths (dev entries) pass through untouched, and an unknown GUID returns
+/// None so the entry is skipped rather than mismatched.
+#[cfg(target_os = "windows")]
+fn resolve_known_folder(entry: &[u16]) -> Option<Vec<u16>> {
+    if entry.first() != Some(&0x7B) {
+        return Some(entry.to_vec());
+    }
+    let close = entry.iter().position(|&c| c == 0x7D)?;
+    let guid: String = entry[1..close]
+        .iter()
+        .map(|c| *c as u8 as char)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let base = match guid.as_str() {
+        // FOLDERID_ProgramFilesX64
+        "6d809377-6af0-444b-8957-a3773f02200e" => std::env::var("ProgramW6432").ok()?,
+        // FOLDERID_ProgramFilesX86
+        "7c5a40ef-a0fb-4b58-944d-503c4ed9d452" => std::env::var("ProgramFiles(x86)").ok()?,
+        // FOLDERID_LocalAppData
+        "f1b32785-6fba-4fcf-9d55-7b8e7f157091" => std::env::var("LOCALAPPDATA").ok()?,
+        _ => return None,
+    };
+    let mut out: Vec<u16> = base.encode_utf16().collect();
+    out.extend_from_slice(&entry[close + 1..]);
+    Some(out)
+}
+
+#[cfg(target_os = "windows")]
+fn promote_taskbar_icon_once(exe: &std::path::Path, attempt: u32) -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
+        HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, RRF_RT_REG_DWORD,
+        RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    unsafe {
+        let mut root = std::ptr::null_mut();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            wide("Control Panel\\NotifyIconSettings").as_ptr(),
+            0,
+            KEY_READ | KEY_SET_VALUE,
+            &mut root,
+        ) != 0
+        {
+            if attempt == 23 {
+                crate::logging::error("tray: NotifyIconSettings root would not open");
+            }
+            return false;
+        }
+        let want: Vec<u16> = exe.to_string_lossy().encode_utf16().collect();
+        let mut decided = false;
+        let mut scanned: u32 = 0;
+        let mut get_fail: Option<u32> = None;
+        let mut skipped_unknown: u32 = 0;
+        let mut index: u32 = 0;
+        loop {
+            let mut name = [0u16; 256];
+            let mut len = 256u32;
+            if RegEnumKeyExW(
+                root,
+                index,
+                name.as_mut_ptr(),
+                &mut len,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
+            {
+                break;
+            }
+            index += 1;
+            let mut sub = std::ptr::null_mut();
+            if RegOpenKeyExW(root, name.as_ptr(), 0, KEY_READ | KEY_SET_VALUE, &mut sub) != 0 {
+                continue;
+            }
+            let mut path = [0u16; 520];
+            let mut path_len = std::mem::size_of_val(&path) as u32;
+            let mut vtype: u32 = 0;
+            let got = RegGetValueW(
+                sub,
+                std::ptr::null(),
+                wide("ExecutablePath").as_ptr(),
+                // Explorer stores the path as REG_EXPAND_SZ with an unexpanded
+                // known-folder GUID prefix ({6D809377-…}\TokenMe\…); a plain
+                // RRF_RT_REG_SZ rejects the type and every entry would be
+                // silently skipped.
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                &mut vtype,
+                path.as_mut_ptr() as _,
+                &mut path_len,
+            );
+            if got == 0 {
+                scanned += 1;
+                let entry = &path[..path.len() >> 1];
+                let entry = &entry[..entry.iter().position(|&c| c == 0).unwrap_or(entry.len())];
+                let resolved = resolve_known_folder(entry);
+                if let Some(entry) = resolved {
+                    // `want` carries no terminator: the whole string compares.
+                    if eq_ignore_ascii(&entry, &want) {
+                    let mut current: u32 = 0;
+                    let mut cur_len = std::mem::size_of::<u32>() as u32;
+                    let present = RegGetValueW(
+                        sub,
+                        std::ptr::null(),
+                        wide("IsPromoted").as_ptr(),
+                        RRF_RT_REG_DWORD,
+                        std::ptr::null_mut(),
+                        &mut current as *mut u32 as _,
+                        &mut cur_len,
+                    ) == 0;
+                    if !present {
+                        let one: u32 = 1;
+                        RegSetValueExW(
+                            sub,
+                            wide("IsPromoted").as_ptr(),
+                            0,
+                            REG_DWORD,
+                            &one as *const u32 as _,
+                            4,
+                        );
+                        crate::logging::info("tray: promoted the taskbar icon (fresh entry)");
+                    }
+                    decided = true;
+                    }
+                } else {
+                    skipped_unknown += 1;
+                }
+            } else {
+                get_fail = Some(got);
+            }
+            RegCloseKey(sub);
+            if decided {
+                break;
+            }
+        }
+        RegCloseKey(root);
+        if !decided && attempt == 23 {
+            crate::logging::error(&format!(
+                "tray: no NotifyIconSettings entry matched {} — scanned {scanned}, value-read failures {}, unknown-guid skips {skipped_unknown}, last read error {:?}",
+                exe.display(),
+                get_fail.iter().count(),
+                get_fail
+            ));
+        }
+        decided
+    }
 }
 
 fn on_tray_event(tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent) {

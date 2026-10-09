@@ -81,6 +81,7 @@ pub fn run() {
             notify::notify_enable,
             commands::begin_bubble_drag,
             commands::show_panel,
+            commands::hide_panel,
             commands::panel_keyboard,
             commands::quit_app,
             commands::open_external,
@@ -102,6 +103,11 @@ pub fn run() {
             let handle = app.handle().clone();
             tray::build(&handle)?;
             panel::configure(&handle);
+            // The panel is created hidden (visible: false in tauri.conf.json)
+            // and is only ever revealed through panel::show / panel::toggle, so
+            // setup has nothing to hide: a hide here would bypass
+            // request_visibility and leave the native window and panel_hidden()
+            // telling different stories.
             bubble::configure(&handle)?;
             engine_start(handle.clone(), rx);
             servers::hub::start(

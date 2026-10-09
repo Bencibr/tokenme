@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
 import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
-import type { Bridge, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
+import type { Bridge, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -92,9 +92,9 @@ export const bridge: Bridge = {
    *  forced claim right now. `ok` alone turns the button into the done
    *  badge; `message` is the reason (未到签到时间 / 排队中) or the success
    *  copy, and the button shows it until the next sample refresh. */
-  async checkinNow(tool: string): Promise<{ ok: boolean; message: string }> {
+  async checkinNow(tool: string): Promise<CheckinResult> {
     if (!inTauri) return { ok: true, message: "签到成功" };
-    return invoke<{ ok: boolean; message: string }>("checkin_now", { tool });
+    return invoke<CheckinResult>("checkin_now", { tool });
   },
 
 
@@ -363,6 +363,11 @@ export const bridge: Bridge = {
   async showPanel(): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("show_panel");
+  },
+
+  async hidePanel(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("hide_panel");
   },
 
   async setKeyboardMode(on: boolean): Promise<void> {

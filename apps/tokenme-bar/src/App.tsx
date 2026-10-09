@@ -212,7 +212,7 @@ const [page, setPage] = useState<PageKey>(() => {
 
   const goPage = useCallback((next: PageKey) => setPage(next), []);
   const closePanel = useCallback(() => {
-    if (inTauri) void getCurrentWindow().hide();
+    if (inTauri) void bridge.hidePanel();
   }, []);
   // Ask the engine to re-fold; the panel keeps rendering the last report until
   // the new one arrives, and that report's own `scope` echo is what the UI
@@ -249,7 +249,7 @@ const [page, setPage] = useState<PageKey>(() => {
       serverCloseRef.current();
       return;
     }
-    if (inTauri) void getCurrentWindow().hide();
+    if (inTauri) void bridge.hidePanel();
   }, [settingsOpen, scopeMenuOpen, serversOpen]));
 
   // A text field can only receive keys while the window owns the keyboard, and

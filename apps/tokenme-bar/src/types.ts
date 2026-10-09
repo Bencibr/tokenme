@@ -336,8 +336,13 @@ export interface TrayState {
   mode: TrayMode;
 }
 
+export interface CheckinResult {
+  ok: boolean;
+  message: string;
+}
+
 export interface Bridge {
-  checkinNow: (tool: string) => Promise<{ ok: boolean; message: string }>;
+  checkinNow: (tool: string) => Promise<CheckinResult>;
   /** `window.__TAURI_INTERNALS__` present ⇒ real app; otherwise the dev fixture. */
   live: boolean;
   fetchReport: (force: boolean) => Promise<Report>;
@@ -394,6 +399,7 @@ export interface Bridge {
   installUpdate: () => Promise<void>;
   onUpdateProgress: (handler: (progress: DownloadProgress) => void) => () => void;
   showPanel: () => Promise<void>;
+  hidePanel: () => Promise<void>;
   /** Windows only: a text field can only receive keys while the window owns
    *  the keyboard, and the non-activating tray panel never does. No-op in the
    *  browser fixture and on macOS. */

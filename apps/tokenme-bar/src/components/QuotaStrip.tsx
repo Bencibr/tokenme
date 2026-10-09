@@ -297,7 +297,6 @@ export function QuotaStrip({
     rows.push(q);
     byTool.set(q.tool, rows);
   }
-
   const groups = ordered([...byTool.keys()], order.tools, (t) => t).map((tool) => ({
     tool,
     rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
