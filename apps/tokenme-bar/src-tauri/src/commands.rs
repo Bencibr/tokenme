@@ -429,6 +429,13 @@ pub fn show_panel(app: AppHandle) {
     panel::show(&app, None);
 }
 
+/// Dismisses the panel while keeping the native and Rust visibility state in
+/// sync, so the next tray click opens it again.
+#[tauri::command]
+pub fn hide_panel(app: AppHandle) {
+    panel::hide(&app);
+}
+
 /// While a text field holds focus the frontend asks for a keyboard session —
 /// the non-activating tray panel otherwise never owns the keys on Windows.
 #[tauri::command]

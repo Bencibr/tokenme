@@ -391,6 +391,7 @@ export interface Bridge {
   installUpdate: () => Promise<void>;
   onUpdateProgress: (handler: (progress: DownloadProgress) => void) => () => void;
   showPanel: () => Promise<void>;
+  hidePanel: () => Promise<void>;
   /** Windows only: a text field can only receive keys while the window owns
    *  the keyboard, and the non-activating tray panel never does. No-op in the
    *  browser fixture and on macOS. */

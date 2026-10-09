@@ -354,6 +354,11 @@ export const bridge: Bridge = {
     await invoke<void>("show_panel");
   },
 
+  async hidePanel(): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("hide_panel");
+  },
+
   async setKeyboardMode(on: boolean): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("panel_keyboard", { on });

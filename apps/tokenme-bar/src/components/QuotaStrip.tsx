@@ -154,6 +154,9 @@ export function QuotaStrip({
   const [notify, setNotify] = useState<NotifyState | null>(null);
   const [dismissedFor, setDismissedFor] = useState<NotifyState | null>(readDismissed);
   const guideWatch = useRef<number | null>(null);
+  const [checkinBusy, setCheckinBusy] = useState(false);
+  const [checkinClaimed, setCheckinClaimed] = useState(false);
+  const [checkinMsg, setCheckinMsg] = useState<string | null>(null);
 
   const stopGuideWatch = () => {
     if (guideWatch.current !== null) {
@@ -259,9 +262,6 @@ export function QuotaStrip({
     rows.push(q);
     byTool.set(q.tool, rows);
   }
-  const [checkinBusy, setCheckinBusy] = useState(false);
-  const [checkinClaimed, setCheckinClaimed] = useState(false);
-  const [checkinMsg, setCheckinMsg] = useState<string | null>(null);
   /** The backend stamps a claimed day into the checkin pack's label; either
    *  wording counts as done for today. */
   const groupCheckedIn = (g: { tool: string; rows: QuotaView[] }): boolean =>

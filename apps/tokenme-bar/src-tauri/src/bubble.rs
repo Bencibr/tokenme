@@ -45,6 +45,7 @@ pub fn configure(app: &AppHandle) -> tauri::Result<()> {
 
     if app.state::<crate::engine::Shared>().settings().bubble_enabled {
         let _ = window.show();
+        crate::panel::set_webview_visible(&window, true);
     }
     Ok(())
 }
@@ -59,7 +60,9 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) {
     let Some(window) = app.get_webview_window(LABEL) else { return };
     if enabled {
         let _ = window.show();
+        crate::panel::set_webview_visible(&window, true);
     } else {
+        crate::panel::set_webview_visible(&window, false);
         let _ = window.hide();
     }
 }

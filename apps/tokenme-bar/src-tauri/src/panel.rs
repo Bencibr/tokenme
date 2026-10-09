@@ -98,10 +98,20 @@ pub fn toggle(app: &AppHandle, rect: Option<Rect>) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
-    // The flag, not tauri's cache: the cache lags for the non-activating
-    // panel, and a stale "visible" after a hide would send this toggle into
-    // the hide branch, eating the user's click.
-    if panel_hidden().load(Ordering::Acquire) {
+    // On Windows the native surface is the source of truth. The WebView2 child
+    // can be hidden while the Tauri host HWND still reports visible, so use
+    // both the native state and our visibility flag before choosing a branch.
+    let hidden = {
+        #[cfg(target_os = "windows")]
+        {
+            panel_hidden().load(Ordering::Acquire) || !native_window_visible(&window)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            panel_hidden().load(Ordering::Acquire)
+        }
+    };
+    if hidden {
         if accept_visibility_request(true) {
             show_window(&window, rect.or_else(|| tray::last_rect(app)));
         }
@@ -123,12 +133,24 @@ pub fn show(app: &AppHandle, rect: Option<Rect>) {
     show_window(&window, rect.or_else(|| tray::last_rect(app)));
 }
 
+/// Hide the panel through the same state path as click-away dismissal. The
+/// frontend must not call `WebviewWindow::hide` directly: that leaves the
+/// Windows native visibility and `panel_hidden()` disagreeing.
+pub fn hide(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
+    };
+    hide_window(&window);
+}
+
 fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     let was_hidden = panel_hidden().swap(false, Ordering::Release);
     // `set_focusable` is Windows-only, so on macOS and Linux nothing reads the
     // flag this swap returns — the warning is the proof, not the bug.
     #[cfg(not(target_os = "windows"))]
     let _ = was_hidden;
+    #[cfg(target_os = "windows")]
+    let was_hidden = was_hidden || !native_window_visible(window);
     #[cfg(target_os = "windows")]
     if was_hidden {
         // A keyboard session can outlive the panel's hide path (the webview
@@ -162,6 +184,12 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
                 let w = WIDTH * scale;
                 let h = height * scale;
                 let (x, y) = clamp_in_bounds(ax - w / 2.0, ay + GAP, (w, h), area.work, GAP);
+                // Do not add SWP_NOACTIVATE here: on WebView2 Runtime 154 it
+                // leaves this transparent DirectComposition surface unpainted
+                // even though every HWND reports visible. The panel is made
+                // non-focusable above, and Windows dismissal no longer treats
+                // Focused(false) as a close signal; those are the safeguards
+                // for the tray surface's focus behavior.
                 let ok = unsafe {
                     SetWindowPos(
                         hwnd.0,
@@ -173,8 +201,6 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
                         SWP_SHOWWINDOW | SWP_NOCOPYBITS,
                     )
                 };
-                let was_hidden = panel_hidden().swap(false, Ordering::Release);
-                let _ = was_hidden;
                 crate::logging::info(&format!(
                     "panel: native show — SetWindowPos({x}, {y}, {w}x{h}) ok={ok}"
                 ));
@@ -205,27 +231,7 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
 
     #[cfg(target_os = "windows")]
     {
-        // The WebView2 controller's visibility is a switch separate from the
-        // host window's: a panel created hidden carries an invisible
-        // controller, and WebView2 Runtime 154 (2026-10-08) stopped
-        // compositing invisible controllers even after the host shows — the
-        // bubble, shown at startup, kept rendering while this panel went
-        // pixel-less. Re-assert the controller so the content recomposes.
-        // The WebView2 controller's visibility is a switch separate from the
-        // host window's: a panel created hidden carries an invisible
-        // controller (wry seeds it from the window's visibility at creation,
-        // webview2/mod.rs:544), and WebView2 Runtime 154 (2026-10-08) stopped
-        // compositing invisible controllers even after the host shows — the
-        // bubble, shown at startup, kept rendering while this panel went
-        // pixel-less. Tauri never flips the controller back — WindowMessage::
-        // Show only touches the window — but its Webview type grew show/hide,
-        // which route to wry's set_visible: ShowWindow on the webview's own
-        // child HWND plus controller.SetIsVisible. Toggle it so the content
-        // recomposes against the freshly shown window.
-        if let Some(webview) = window.app_handle().webview_windows().get(LABEL) {
-            webview.hide();
-            webview.show();
-        }
+        set_webview_visible(window, true);
         if let Ok(hwnd) = window.hwnd() {
             let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd.0) };
             let native = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
@@ -265,6 +271,31 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     );
 }
 
+/// Keeps the WebView2 controller in sync with the host window.
+///
+/// The panel is created hidden, so Runtime 154 can retain an invisible
+/// controller after the host HWND is shown. Re-asserting the controller on the
+/// UI thread restores the DirectComposition surface before the first frame.
+#[cfg(target_os = "windows")]
+pub(crate) fn set_webview_visible(window: &WebviewWindow, visible: bool) {
+    let label = window.label().to_string();
+    let _ = window.with_webview(move |webview| {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            match webview.controller().SetIsVisible(visible) {
+                Ok(()) => format!("visible={visible} ok"),
+                Err(error) if visible => {
+                    let hidden = webview.controller().SetIsVisible(false).is_ok();
+                    let shown = webview.controller().SetIsVisible(true).is_ok();
+                    format!("visible=true failed ({error}) — forced false→true: hidden={hidden} shown={shown}")
+                }
+                Err(error) => format!("visible=false failed ({error})"),
+            }
+        }))
+        .unwrap_or_else(|_| "panicked".to_string());
+        crate::logging::info(&format!("panel: controller re-assert — {outcome} ({label})"));
+    });
+}
+
 /// Text entry needs real keyboard focus, which the non-activating panel never
 /// has: `WS_EX_NOACTIVATE` keeps the tray flyout off the foreground, and with
 /// it the WebView receives no key events at all. The frontend turns this on
@@ -301,8 +332,19 @@ fn request_visibility(window: &WebviewWindow, visible: bool) {
         if panel_hidden().swap(true, Ordering::AcqRel) {
             return; // already hidden — nothing to orderOut
         }
+        #[cfg(target_os = "windows")]
+        set_webview_visible(window, false);
         let _ = window.hide();
     }
+}
+
+fn hide_window(window: &WebviewWindow) {
+    if panel_hidden().swap(true, Ordering::AcqRel) {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    set_webview_visible(window, false);
+    let _ = window.hide();
 }
 
 /// The panel's real visibility, recorded here because neither tauri's cached
@@ -1075,15 +1117,22 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         }
     }
 
-    // Focus loss is the only reliable "clicked elsewhere" signal for a panel
-    // that never activates the app.
-    if !matches!(event, WindowEvent::Focused(false)) {
-        return;
-    }
-    let app = window.app_handle().clone();
-    if let Some(panel) = app.get_webview_window(LABEL) {
-        if panel.is_visible().unwrap_or(false) {
-            request_visibility(&panel, false);
+    // Windows panels are deliberately non-activating. Their Focused(false)
+    // notification is therefore also emitted while the panel is being shown,
+    // not only when the user clicks elsewhere; treating it as dismissal makes
+    // the tray popup disappear immediately after a successful show. The
+    // Windows click-away monitor above uses the actual HWND and pointer state,
+    // so it remains the authoritative outside-click path there.
+    #[cfg(not(target_os = "windows"))]
+    {
+        if !matches!(event, WindowEvent::Focused(false)) {
+            return;
+        }
+        let app = window.app_handle().clone();
+        if let Some(panel) = app.get_webview_window(LABEL) {
+            if panel.is_visible().unwrap_or(false) {
+                request_visibility(&panel, false);
+            }
         }
     }
 }
@@ -1191,9 +1240,18 @@ fn window_contains_point(window: &WebviewWindow, x: i32, y: i32) -> bool {
 
 #[cfg(target_os = "windows")]
 fn native_window_visible(window: &WebviewWindow) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindow, IsWindowVisible, GW_CHILD};
     let Ok(hwnd) = window.hwnd() else { return false };
-    unsafe { IsWindowVisible(hwnd.0) != 0 }
+    unsafe {
+        if IsWindowVisible(hwnd.0) == 0 {
+            return false;
+        }
+        // `WebviewWindow::hide` can leave the Tauri host visible while tao's
+        // WebView2 controller hides the WRY child. Treat that state as hidden
+        // so the next tray click opens the panel instead of hiding it again.
+        let child = GetWindow(hwnd.0, GW_CHILD);
+        child.is_null() || IsWindowVisible(child) != 0
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1645,6 +1703,13 @@ pub fn configure(app: &AppHandle) {
         // maps a non-focusable window to WS_EX_NOACTIVATE, while mouse clicks
         // still reach the WebView controls.
         let _ = window.set_focusable(false);
+        // The panel is created with `visible: false`. On current WebView2
+        // Runtime builds, a controller created invisible can remain
+        // pixel-less after the host HWND is later shown, even though a direct
+        // SetIsVisible(true) succeeds. Keep the controller's compositor alive
+        // while the parent stays hidden; show_window still controls the native
+        // surface and the Rust visibility flag.
+        set_webview_visible(&window, true);
         apply_windows_round_clip(&window);
         start_click_away_monitor(app);
     }
