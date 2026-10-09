@@ -91,6 +91,8 @@ The tap is bumped automatically on every release, so `brew upgrade` keeps you cu
 
 **Installers**: grab one from [Releases](https://github.com/Bencibr/tokenme/releases/latest) — the macOS menu-bar app (drag to Applications), a Windows setup, and the static Linux collector tarballs (`x86_64` / `aarch64`, each with `install-linux.sh` beside it).
 
+**Windows installation**: the setup supports an all-users install for shared machines. Choose **All users** in the installer when TokenMe should be available to every Windows account; use the same mode for upgrades so the machine-wide installation is replaced in place.
+
 > **First launch on macOS** (manual DMG only): the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in. Right-click → Open works, or clear the quarantine flag:
 >
 > ```bash
@@ -160,9 +162,9 @@ Every tool below ships as a built-in adapter — 23 of them, indexed straight fr
 | <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT rate windows — official backend | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Go subscription, three dollar windows | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | Account window limits — Cline account API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | Account window limits — Cline account API | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour/cycle windows + session budgets — the IDE's own quota API + local cookie decryption | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | Subscription windows — vendor usage API, local encrypted snapshot fallback | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | Subscription windows — vendor usage API, local encrypted snapshot fallback; daily check-in state | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | Self-computed — runs the CLI's `/usage` | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | Membership points — needs a one-time token (see below) | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota — local daemon | ✅ | macOS ✅ · Windows ⏳ |
@@ -175,8 +177,8 @@ Every tool below ships as a built-in adapter — 23 of them, indexed straight fr
 | **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | Plan quota — vendor billing API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE points — reads the IDE's own login state | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | Subscription quota — vendor v1 API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | Subscription quota — the CN fleet's own v1 API and credential store | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | Subscription quota — vendor v1 API, local credential decryption; daily check-in | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | Subscription quota — the CN fleet's own API and credential store, split credit windows and daily check-in | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | Plan windows — 5h / weekly / monthly via the vendor's `/usages`; usage read from the CLI **or** the desktop app's embedded runtime; an expired access token is renewed in place through the vendor's own refresh contract | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | Plan windows — 5h / weekly — plus the credit balance (purchased + check-in wallets); the ~1 h access token is renewed in place from the app's own refresh token | ✅ | macOS ✅ · Windows ✅ |
 
@@ -189,6 +191,17 @@ Every tool below ships as a built-in adapter — 23 of them, indexed straight fr
 > **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
 
 Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · Adapter notes: [docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
+
+## Windows updates
+
+The current Windows build includes the following verified and shipped changes:
+
+- **Windows adapter verification** — WorkBuddy and Cline have been exercised on Windows and are usable there. Their local discovery paths and quota reads are kept separate from the macOS paths.
+- **Daily check-in** — Trae and Qoder expose a check-in action in the quota header. The badge changes to checked-in only after the vendor reports a successful claim or an already-claimed result; Qoder's client-gated campaign state is shown honestly instead of being reported as a false success.
+- **Trae CN support** — Trae CN is a separate adapter and credential/API fleet, with Windows-aware storage and headers, per-credit-pack windows, expiry countdowns, and its own daily check-in state.
+- **Windows desktop pet** — the floating bubble supports the waterdrop and animated kitten skins. The kitten includes blinking, pointer-following pupils, left/right/top edge poses, and a token badge on hover. The skin is switched from Settings without recreating the native window.
+- **Settings refresh** — Settings is split into General, Alerts, Advanced, and About tabs. It includes the global and per-tool quota switches, pause-on-host-exit behavior, auto check-in, update controls, and a theme-aware custom dropdown that works in light, dark, and system modes.
+- **Tray and panel reliability** — Windows tray clicks, panel show/hide, borderless surface handling, and the bubble's native window lifecycle were tightened to prevent the earlier invisible-panel and residual-surface regressions.
 
 ## Data & privacy
 

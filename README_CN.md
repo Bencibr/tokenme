@@ -91,6 +91,8 @@ tap 随每次发布自动更新，`brew upgrade` 即可升级；cask 安装不�
 
 **安装包**：到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载，里面有 macOS 菜单栏应用（拖入 Applications）、Windows 安装程序，以及 Linux 静态采集端压缩包（`x86_64` / `aarch64`，包内已附 `install-linux.sh`）。
 
+**Windows 安装**：安装器支持“所有用户”模式。共享电脑上请选择“所有用户”，升级时也保持同一模式，这样会原地替换机器级安装，并对所有 Windows 账户生效。
+
 > **macOS 首次打开**（仅手动装 DMG 时）：安装包是 ad-hoc 签名（没有开发者证书），Gatekeeper 可能拦一下——右键打开即可，或者清掉隔离标记后正常启动：
 >
 > ```bash
@@ -160,9 +162,9 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 | <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT 速率窗口 — 官方后端 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Go 订阅三窗口（美元额度） | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 — Cline 账号 API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 — Cline 账号 API | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 — IDE 同款配额接口 + cookie 本地解密 | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 — 官方用量接口，本地加密快照兜底 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 — 官方用量接口，本地加密快照兜底；支持每日签到状态 | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算配额 — 调用其 CLI 的 `/usage` | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | 会员点数 — 需注入一次令牌（见下） | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan 配额 — 本地守护进程 | ✅ | macOS ✅ · Windows ⏳ |
@@ -175,8 +177,8 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 | **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | 套餐配额 — 官方 billing 接口，本地凭据解密 | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE 点数 — 读取 IDE 自身登录态 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | 订阅配额 — 官方 v1 接口，本地凭据解密 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | 订阅配额 — CN 舰队自己的 v1 接口与凭据存储 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | 订阅配额 — 官方 v1 接口，本地凭据解密；支持每日签到 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | 订阅配额 — CN 独立接口与凭据存储，按积分包拆分额度并支持每日签到 | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | 套餐额度 — 5 小时 / 每周 / 每月，走官方 `/usages`；用量读 CLI 或桌面端内嵌 runtime 的日志；访问令牌过期时按官方刷新契约就地续期 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | 套餐额度 — 5 小时 / 每周 — 外加积分余额（购买与签到两种钱包）；约 1 小时过期的访问令牌由 tokenme 用应用自己的刷新令牌原地续期 | ✅ | macOS ✅ · Windows ✅ |
 
@@ -189,6 +191,17 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 > **AgnesCode 令牌注入**：其登录令牌只存在于应用内存，无法静默读取。登录 agnescode.agnes-ai.cn 后从请求头取 `access_token`，写入 tokenme 系统配置目录下的 `agnes.token`（macOS 为 `~/Library/Application Support/tokenme/agnes.token`，Linux 为 `~/.config/tokenme/agnes.token`，Windows 为 `%APPDATA%\tokenme\agnes.token`），或设置 `AGNES_TOKEN` 即可启用。
 
 完整参考：**[docs/COMMANDS.md](docs/COMMANDS.md)** · 场景指南：**[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · 架构总览：**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · 适配器逆向备忘：[docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
+
+## Windows 版本更新
+
+当前 Windows 版本已经包含以下已落地功能和验证结果：
+
+- **Windows 适配器验证**：WorkBuddy 和 Cline 已在 Windows 实机验证，可以正常使用；本地发现路径和配额读取与 macOS 路径分开处理。
+- **每日签到**：Trae 和 Qoder 的配额标题提供签到入口。只有供应商返回签到成功或“今日已签到”才显示完成；Qoder 需要在客户端完成的活动会明确提示，不再误报成功。
+- **Trae CN 适配**：Trae CN 使用独立适配器、凭据存储和接口，并适配 Windows 路径与请求头；积分包按独立窗口显示，分别提供有效期倒计时和签到状态。
+- **Windows 宠物更新**：悬浮水滴支持水滴和动态小猫皮肤。小猫支持眨眼、瞳孔跟随鼠标、左/右/顶部贴边姿态，悬停时显示 token 徽标；在设置中切换皮肤不会重建原生窗口。
+- **设置功能优化**：设置拆分为“通用、提醒、高级、关于”四页，支持总配额开关、逐工具开关、宿主退出后暂停、自动签到、更新控制；自定义下拉框与当前风格统一，并适配浅色、深色和跟随系统模式。
+- **托盘与面板稳定性**：收紧 Windows 托盘点击、面板显示/隐藏、无边框窗口和悬浮气泡的原生窗口生命周期，修复此前面板不可见和残留表面的问题。
 
 ## 数据与隐私
 
