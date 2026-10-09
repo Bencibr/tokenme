@@ -33,10 +33,25 @@ jobs:
           path: notes.md
 
   macos:
-    needs: [notes]
+    needs: [notes, cli-linux]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-linux-*
+          path: collector
+          merge-multiple: true
+      - name: Stage collectors
+        shell: bash
+        run: |
+          # tauri bundle resources (untracked build inputs — see tauri.conf.json);
+          # built by the cli-linux job, consumed here so a mirrored checkout builds
+          mkdir -p apps/tokenme-bar/src-tauri/resources/collector
+          for a in x86_64 aarch64; do
+            cp "collector/tokenme-$a" "apps/tokenme-bar/src-tauri/resources/collector/tokenme-$a"
+            chmod +x "apps/tokenme-bar/src-tauri/resources/collector/tokenme-$a"
+          done
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v4
         with:
@@ -75,12 +90,26 @@ jobs:
           path: dist/*
 
   macos-universal:
-    needs: [notes]
+    needs: [notes, cli-linux]
     # The Intel+Apple Silicon joint bundle: one DMG runs on every Mac. The
     # arm64 build above stays the smaller download for the common case.
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-linux-*
+          path: collector
+          merge-multiple: true
+      - name: Stage collectors
+        shell: bash
+        run: |
+          # tauri bundle resources (untracked build inputs — see tauri.conf.json)
+          mkdir -p apps/tokenme-bar/src-tauri/resources/collector
+          for a in x86_64 aarch64; do
+            cp "collector/tokenme-$a" "apps/tokenme-bar/src-tauri/resources/collector/tokenme-$a"
+            chmod +x "apps/tokenme-bar/src-tauri/resources/collector/tokenme-$a"
+          done
       # universal-apple-darwin is not a rust target: cargo compiles BOTH sides
       # and tauri lipos them, so both toolchains must be installed up front —
       # the host-only default dies the moment x86_64 is requested.
@@ -213,19 +242,36 @@ jobs:
           chmod +x "dist/$PKG/tokenme" "dist/$PKG/install-linux.sh"
           tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
           rm -rf "dist/$PKG"
+          # raw binary rides the artifact too: the panel packaging jobs stage
+          # it as tauri bundle resources (a mirrored checkout has none)
+          cp "target/${{ matrix.arch }}-unknown-linux-musl/release/tokenme" "dist/tokenme-${{ matrix.arch }}"
       - uses: actions/upload-artifact@v4
         with:
           name: cli-linux-${{ matrix.arch }}
           path: dist/*
 
   windows-panel:
-    needs: [notes]
+    needs: [notes, cli-linux]
     # The NSIS setup exe for the Windows menu-bar panel. No cross-compile:
     # the runner IS the platform, Tauri's Windows bundling needs WebView2
     # tooling that only exists there.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-linux-*
+          path: collector
+          merge-multiple: true
+      - name: Stage collectors
+        shell: bash
+        run: |
+          # tauri bundle resources (untracked build inputs — see tauri.conf.json)
+          mkdir -p apps/tokenme-bar/src-tauri/resources/collector
+          for a in x86_64 aarch64; do
+            cp "collector/tokenme-$a" "apps/tokenme-bar/src-tauri/resources/collector/tokenme-$a"
+            chmod +x "apps/tokenme-bar/src-tauri/resources/collector/tokenme-$a"
+          done
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v4
         with:
