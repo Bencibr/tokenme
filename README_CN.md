@@ -192,16 +192,11 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 
 完整参考：**[docs/COMMANDS.md](docs/COMMANDS.md)** · 场景指南：**[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · 架构总览：**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · 适配器逆向备忘：[docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
 
-## Windows 版本更新
+## 0.1.6 更新内容
 
-当前 Windows 版本已经包含以下已落地功能和验证结果：
-
-- **Windows 适配器验证**：WorkBuddy 和 Cline 已在 Windows 实机验证，可以正常使用；本地发现路径和配额读取与 macOS 路径分开处理。
-- **每日签到**：Trae 和 Qoder 的配额标题提供签到入口。只有供应商返回签到成功或“今日已签到”才显示完成；Qoder 需要在客户端完成的活动会明确提示，不再误报成功。
-- **Trae CN 适配**：Trae CN 使用独立适配器、凭据存储和接口，并适配 Windows 路径与请求头；积分包按独立窗口显示，分别提供有效期倒计时和签到状态。
-- **Windows 宠物更新**：悬浮水滴支持水滴和动态小猫皮肤。小猫支持眨眼、瞳孔跟随鼠标、左/右/顶部贴边姿态，悬停时显示 token 徽标；在设置中切换皮肤不会重建原生窗口。
-- **设置功能优化**：设置拆分为“通用、提醒、高级、关于”四页，支持总配额开关、逐工具开关、宿主退出后暂停、自动签到、更新控制；自定义下拉框与当前风格统一，并适配浅色、深色和跟随系统模式。
-- **托盘与面板稳定性**：收紧 Windows 托盘点击、面板显示/隐藏、无边框窗口和悬浮气泡的原生窗口生命周期，修复此前面板不可见和残留表面的问题。
+- **新增**：桌面宠物皮肤（水滴 / 动态小猫——眨眼、瞳孔跟随、贴边姿态，悬停显示 token 徽标）；Trae、Trae CN、Qoder 每日签到，厂商确认成功才算完成；Trae CN 独立适配器与积分包窗口；设置拆分为通用 / 提醒 / 高级 / 关于四页，支持逐工具配额开关与自动签到。
+- **验证**：WorkBuddy、Cline 通过 Windows 实机验证。
+- **修复**：Windows 托盘点击、面板显示/隐藏、无边框窗口与悬浮气泡的生命周期，修复面板不可见与残留表面。
 
 ## 数据与隐私
 

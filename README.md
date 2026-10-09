@@ -192,16 +192,11 @@ Every tool below ships as a built-in adapter — 23 of them, indexed straight fr
 
 Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · Adapter notes: [docs/internal/ADAPTERS_DESIGN.md](docs/internal/ADAPTERS_DESIGN.md)
 
-## Windows updates
+## What's new in 0.1.6
 
-The current Windows build includes the following verified and shipped changes:
-
-- **Windows adapter verification** — WorkBuddy and Cline have been exercised on Windows and are usable there. Their local discovery paths and quota reads are kept separate from the macOS paths.
-- **Daily check-in** — Trae and Qoder expose a check-in action in the quota header. The badge changes to checked-in only after the vendor reports a successful claim or an already-claimed result; Qoder's client-gated campaign state is shown honestly instead of being reported as a false success.
-- **Trae CN support** — Trae CN is a separate adapter and credential/API fleet, with Windows-aware storage and headers, per-credit-pack windows, expiry countdowns, and its own daily check-in state.
-- **Windows desktop pet** — the floating bubble supports the waterdrop and animated kitten skins. The kitten includes blinking, pointer-following pupils, left/right/top edge poses, and a token badge on hover. The skin is switched from Settings without recreating the native window.
-- **Settings refresh** — Settings is split into General, Alerts, Advanced, and About tabs. It includes the global and per-tool quota switches, pause-on-host-exit behavior, auto check-in, update controls, and a theme-aware custom dropdown that works in light, dark, and system modes.
-- **Tray and panel reliability** — Windows tray clicks, panel show/hide, borderless surface handling, and the bubble's native window lifecycle were tightened to prevent the earlier invisible-panel and residual-surface regressions.
+- **New**: desktop pet skins (water drop / animated kitten — blinking, pointer-following pupils, edge poses, token badge on hover); daily check-in for Trae, Trae CN and Qoder, done only after the vendor confirms; a separate Trae CN adapter with per-credit-pack windows; settings split into General / Alerts / Advanced / About with per-tool quota switches and auto check-in.
+- **Verified**: WorkBuddy and Cline on real Windows machines.
+- **Fixed**: Windows tray clicks, panel show/hide, borderless surface and bubble lifecycle — the invisible-panel and residual-surface regressions.
 
 ## Data & privacy
 
