@@ -22,6 +22,12 @@ function windowName(q: QuotaView): string {
  *  badge/button for exactly these. */
 const CHECKIN_TOOLS = ["trae_cn", "qoder"];
 
+/** The check-in state rides the report as zero-window marker rows. They are
+ *  control channel, not data: the badge and the button read them off the raw
+ *  report, the row list never shows them. Trae's entitlement window
+ *  (`checkin_…`, a real gauge) is not one of these and stays visible. */
+const CHECKIN_STATE_IDS = ["checkin", "checkin-wait", "checkin-gated"];
+
 const ORIGIN_KEY: Record<string, Parameters<typeof t>[0]> = { probe: "quota.origin.probe", log: "quota.origin.log", budget: "quota.origin.budget" };
 const ORIGIN = (k: string): string => t(ORIGIN_KEY[k] ?? "quota.origin.probe");
 
@@ -120,7 +126,12 @@ export function QuotaStrip({
    *  answer and the section says when it was taken. */
   polling?: boolean;
 }) {
-  const live = quotas.filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now);
+  // The check-in marker rows are state, not data (CHECKIN_STATE_IDS): every
+  // count and row on screen reads this filtered list; the badge and button
+  // below read the raw report instead.
+  const live = quotas
+    .filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now)
+    .filter((q) => !CHECKIN_STATE_IDS.includes(q.id ?? ""));
   // Trae CN / Qoder 的每日签到：状态按工具各管各的——busy/claimed/msg 都是
   // 以工具 id 为键，点 Trae 的按钮不能把 Qoder 的按钮带成"签到中"，更不能把
   // 另一个工具误标成已签。状态与点击都在这里，而不是配额分组之后——那一段
@@ -129,19 +140,21 @@ export function QuotaStrip({
   const [checkinClaimed, setCheckinClaimed] = useState<Set<string>>(new Set());
   const [checkinMsg, setCheckinMsg] = useState<Record<string, string | undefined>>({});
   /** The backend stamps a claimed day into the checkin pack's window: its id
-   *  starts with "checkin" (Trae's entitlement id, Qoder's marker row) — the
+   *  starts with "checkin" (Trae's entitlement row, Qoder's marker row) — the
    *  wait row (`checkin-wait`, the day's window not open yet) and the gate row
-   *  (`checkin-gated`, Qoder's device-identity refusal) are not claims. */
-  const groupCheckedIn = (g: { tool: string; rows: QuotaView[] }): boolean =>
-    g.rows.some((r) => r.id?.startsWith("checkin") && r.id !== "checkin-wait" && r.id !== "checkin-gated");
+   *  (`checkin-gated`, Qoder's device-identity refusal) are not claims. These
+   *  read the raw report: the marker rows are filtered out of the visible
+   *  list, so a group's rendered rows cannot answer for them. */
+  const groupCheckedIn = (tool: string): boolean =>
+    quotas.some((q) => q.tool === tool && q.id?.startsWith("checkin") && q.id !== "checkin-wait" && q.id !== "checkin-gated");
   /** The backend says this tool's day has not opened yet (Qoder 10:00): the
    *  button greys and names the hour instead of claiming into the void. */
-  const checkinWaiting = (g: { tool: string; rows: QuotaView[] }): boolean =>
-    g.rows.some((r) => r.id === "checkin-wait");
+  const checkinWaiting = (tool: string): boolean =>
+    quotas.some((q) => q.tool === tool && q.id === "checkin-wait");
   /** The vendor refuses third-party claims for this row (Qoder's SAME_PERSON
    *  device gate): the button greys and names the client that can claim it. */
-  const checkinGated = (g: { tool: string; rows: QuotaView[] }): boolean =>
-    g.rows.some((r) => r.id === "checkin-gated");
+  const checkinGated = (tool: string): boolean =>
+    quotas.some((q) => q.tool === tool && q.id === "checkin-gated");
   const [order, setOrderState] = useState<QuotaOrder>(savedOrder);
   const [drag, setDrag] = useState<Drag | null>(null);
   // Click a truncated window label to read it whole: the native hover title
@@ -465,13 +478,13 @@ export function QuotaStrip({
                 </span>
                 {CHECKIN_TOOLS.includes(g.tool) ? (
                   <span className="quota-checkin">
-                    {groupCheckedIn(g) || checkinClaimed.has(g.tool) ? (
+                    {groupCheckedIn(g.tool) || checkinClaimed.has(g.tool) ? (
                       <span className="checkin-badge">{t("quota.checkin.done")}</span>
                     ) : (
                       <button
                         type="button"
                         className="checkin-btn"
-                        disabled={checkinBusy === g.tool || checkinWaiting(g) || checkinGated(g)}
+                        disabled={checkinBusy === g.tool || checkinWaiting(g.tool) || checkinGated(g.tool)}
                         title={checkinMsg[g.tool]}
                         onClick={async (e) => {
                           // The head is a drag handle; the button must not
@@ -499,9 +512,9 @@ export function QuotaStrip({
                       >
                         {checkinBusy === g.tool
                           ? t("quota.checkin.busy")
-                          : checkinGated(g)
+                          : checkinGated(g.tool)
                             ? t("quota.checkin.gated")
-                            : checkinWaiting(g)
+                            : checkinWaiting(g.tool)
                               ? t("quota.checkin.wait")
                               : (checkinMsg[g.tool] ?? t("quota.checkin.btn"))}
                       </button>
