@@ -198,10 +198,19 @@ fn collect_probes_gated(
             .stack_size(256 * 1024)
             .spawn(move || {
                 let cached: Option<&cache::Cache> = (*cache).as_ref();
-                let views = match (gated_off, cached) {
-                    // The host is gone: serve the last known answer untouched.
-                    (true, Some(c)) => c.stale(probe.tool()).unwrap_or_default(),
-                    _ => cache::probe(cached, probe.as_ref()),
+                // A refused probe never reaches its vendor, whether or not the
+                // cache could be opened: its last known answer stays on screen
+                // when there is one, and the row simply stays absent when there
+                // is not. Falling through to `cache::probe` here would re-arm a
+                // host-paused or switched-off probe (and fire a claim POST for a
+                // check-in tool the user disabled) whenever the cache dir was
+                // unavailable — the exact opposite of the gate's promise.
+                let views = if gated_off {
+                    cached
+                        .map(|c| c.stale(probe.tool()).unwrap_or_default())
+                        .unwrap_or_default()
+                } else {
+                    cache::probe(cached, probe.as_ref())
                 };
                 if let Ok(mut slot) = shared.lock() {
                     slot.extend(views);
@@ -370,6 +379,46 @@ mod tests {
         assert_eq!(out.len(), 2, "both rows stay on screen");
         assert_eq!(calls_dsh.load(Ordering::SeqCst), 1, "the gated-off probe is never asked");
         assert_eq!(calls_qoder.load(Ordering::SeqCst), 1, "a fresh cached answer is reused");
+    }
+
+    /// The gate's promise (engine comment + this module's docstring) is that a
+    /// refused probe never reaches its vendor — "either gate refusing means no
+    /// request leaves". A refused probe whose cache file cannot be read is the
+    /// case that used to run it anyway: `(gated_off, None)` fell through to
+    /// `cache::probe`, so a read-only or missing app-support dir turned every
+    /// host-paused / user-switched-off probe back on — and for a check-in tool
+    /// that means a live claim POST against the account the user disabled.
+    #[test]
+    fn a_gated_off_probe_is_never_asked_even_without_a_cache_dir() {
+        struct Counting {
+            calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl QuotaProbe for Counting {
+            fn tool(&self) -> &'static str {
+                "qoder"
+            }
+            fn fetch(&self) -> Vec<QuotaSample> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                vec![QuotaSample {
+                    used_percent: 1.0,
+                    window_minutes: 0,
+                    resets_at_ms: 0,
+                    label: None,
+                    id: None,
+                }]
+            }
+        }
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probes: Vec<Box<dyn QuotaProbe>> = vec![Box::new(Counting { calls: calls.clone() })];
+        // `cache: None` is the missing/unwritable app-support dir; the gate
+        // refuses this tool (host gone, or the user's own switch).
+        let out = collect_probes_gated(BUDGET, probes, None, &|_tool| false);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a refused probe never reaches its vendor, cache or no cache"
+        );
+        assert!(out.is_empty(), "no cache to serve means the row stays absent, not live-probed");
     }
 
     #[test]
