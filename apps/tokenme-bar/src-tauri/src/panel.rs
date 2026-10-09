@@ -137,18 +137,53 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
         // focusable, tao's post-first-show `SW_SHOW` would foreground it.
         let _ = window.set_focusable(false);
     }
+    // Windows shows first and anchors second: geometry calls on a hidden
+    // window silently no-op at the native layer (measured: tauri recorded a
+    // 600×990 move to 3147,1090 while GetWindowRect kept 400×660 at the OS
+    // default spot — WebView2 composed against bounds that intersect nothing,
+    // and the panel "opened" invisible; other apps and the bubble webview
+    // were unaffected). Once WS_VISIBLE is set the same calls land, and the
+    // un-anchored first frame is never seen — the OS default position sits
+    // outside the work area.
+    #[cfg(target_os = "windows")]
+    let _ = window.show();
     anchor(window, rect);
     let anchored_at = window.outer_position().ok();
-    // Re-sync the native backing with the persisted theme on every open: a
-    // theme switch the app missed (label typo'd away once) or an OS
-    // appearance change while hidden otherwise leaves a stale layer under
-    // the translucent page until relaunch.
-    #[cfg(target_os = "macos")]
-    apply_window_background(window.app_handle(), None);
+    #[cfg(not(target_os = "windows"))]
     let _ = window.show();
+    #[cfg(target_os = "macos")]
+    {
+        // Re-sync the native backing with the persisted theme on every open: a
+        // theme switch the app missed (label typo'd away once) or an OS
+        // appearance change while hidden otherwise leaves a stale layer under
+        // the translucent page until relaunch.
+        apply_window_background(window.app_handle(), None);
+        let _ = window.show();
+    }
 
     #[cfg(target_os = "windows")]
     {
+        // The WebView2 controller's visibility is a switch separate from the
+        // host window's: a panel created hidden carries an invisible
+        // controller, and WebView2 Runtime 154 (2026-10-08) stopped
+        // compositing invisible controllers even after the host shows — the
+        // bubble, shown at startup, kept rendering while this panel went
+        // pixel-less. Re-assert the controller so the content recomposes.
+        window.with_webview(move |webview| {
+            let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                webview.controller().SetIsVisible(true).is_ok()
+            }))
+            .unwrap_or(false);
+            crate::logging::info(&format!(
+                "panel: controller SetIsVisible(true) applied = {applied}"
+            ));
+        });
+        if let Ok(hwnd) = window.hwnd() {
+            let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd.0) };
+            crate::logging::info(&format!(
+                "panel: window dpi = {dpi} (96 = virtualized/unaware, 144 = 150%)"
+            ));
+        }
         let pos = window
             .outer_position()
             .map(|p| format!("{}x{}", p.x, p.y))
