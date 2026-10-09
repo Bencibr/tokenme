@@ -4,7 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <title>TokenMe</title>
+    <!-- Utility windows must not provide a native title for WebView2 to repaint. -->
+    <title></title>
     <script>
       // Platform-scoped styling lives on <html data-platform> (see theme.css).
       // Only the native Tauri windows need it — the web preview keeps its

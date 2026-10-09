@@ -56,6 +56,35 @@ struct Bounds {
     bottom: f64,
 }
 
+#[cfg(target_os = "windows")]
+fn last_tray_bounds() -> &'static std::sync::Mutex<Option<Bounds>> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<Bounds>>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Keep the exact physical tray rectangle from the click event. The Windows
+/// click-away poll runs on mouse-down, before Tauri delivers the tray
+/// mouse-up event, and `TrayIcon::rect()` can still be stale or empty there.
+/// Without this cache one tray click is misclassified as an outside click and
+/// toggles the panel twice.
+#[cfg(target_os = "windows")]
+pub(crate) fn remember_tray_rect(rect: &Rect) {
+    let (left, top) = rect_origin(rect);
+    let (width, height) = rect_size(rect);
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    if let Ok(mut slot) = last_tray_bounds().lock() {
+        *slot = Some(Bounds {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+        });
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ScreenArea {
     monitor: Bounds,
@@ -144,6 +173,16 @@ pub fn hide(app: &AppHandle) {
 }
 
 fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
+    #[cfg(target_os = "windows")]
+    {
+        let surface = window.clone();
+        let _ = window.run_on_main_thread(move || show_window_on_ui(&surface, rect));
+    }
+    #[cfg(not(target_os = "windows"))]
+    show_window_on_ui(window, rect);
+}
+
+fn show_window_on_ui(window: &WebviewWindow, rect: Option<Rect>) {
     let was_hidden = panel_hidden().swap(false, Ordering::Release);
     // `set_focusable` is Windows-only, so on macOS and Linux nothing reads the
     // flag this swap returns — the warning is the proof, not the bug.
@@ -159,20 +198,20 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
         // focusable, tao's post-first-show `SW_SHOW` would foreground it.
         let _ = window.set_focusable(false);
     }
-    // Windows bypasses tao's geometry entirely: tao's scale factor at window
-    // creation has measured 1.0 while the live window reports 144 DPI, so
-    // every tao-layer move/resize desyncs from the native window by exactly
-    // the scale factor (tauri recorded 600×990 at 3195,1090 while
-    // GetWindowRect kept 400×660 at the OS default) and the WebView2 composed
-    // against bounds that intersect nothing — the panel "opened" invisible.
-    // SetWindowPos in true physical pixels from GetDpiForWindow, topmost, is
-    // the path that cannot desync; the tray-less anchor point is the cursor,
-    // which GetCursorPos always knows and a tray click leaves at the icon.
+    // Tauri owns both visibility transitions. A native SWP_SHOWWINDOW used to
+    // leave tao's VISIBLE flag false, so window.hide() became a no-op and only
+    // the WebView disappeared. Native positioning is geometry-only: it keeps
+    // the verified physical-pixel placement without creating a second owner.
     #[cfg(target_os = "windows")]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_TOPMOST, SWP_NOCOPYBITS, SWP_SHOWWINDOW,
+            SetWindowPos, HWND_TOPMOST, SWP_NOCOPYBITS, SWP_NOACTIVATE,
         };
+        if let Err(error) = window.show() {
+            panel_hidden().store(true, Ordering::Release);
+            crate::logging::error(&format!("panel: host show failed: {error}"));
+            return;
+        }
         match window.hwnd() {
             Ok(hwnd) => {
                 let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd.0) }
@@ -184,12 +223,6 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
                 let w = WIDTH * scale;
                 let h = height * scale;
                 let (x, y) = clamp_in_bounds(ax - w / 2.0, ay + GAP, (w, h), area.work, GAP);
-                // Do not add SWP_NOACTIVATE here: on WebView2 Runtime 154 it
-                // leaves this transparent DirectComposition surface unpainted
-                // even though every HWND reports visible. The panel is made
-                // non-focusable above, and Windows dismissal no longer treats
-                // Focused(false) as a close signal; those are the safeguards
-                // for the tray surface's focus behavior.
                 let ok = unsafe {
                     SetWindowPos(
                         hwnd.0,
@@ -198,11 +231,11 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
                         y.round() as i32,
                         w.round() as i32,
                         h.round() as i32,
-                        SWP_SHOWWINDOW | SWP_NOCOPYBITS,
+                        SWP_NOACTIVATE | SWP_NOCOPYBITS,
                     )
                 };
                 crate::logging::info(&format!(
-                    "panel: native show — SetWindowPos({x}, {y}, {w}x{h}) ok={ok}"
+                    "panel: native position — SetWindowPos({x}, {y}, {w}x{h}) ok={ok}"
                 ));
             }
             Err(_) => {
@@ -281,14 +314,35 @@ pub(crate) fn set_webview_visible(window: &WebviewWindow, visible: bool) {
     let label = window.label().to_string();
     let _ = window.with_webview(move |webview| {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            match webview.controller().SetIsVisible(visible) {
-                Ok(()) => format!("visible={visible} ok"),
+            // The panel and the edge bubble are utility surfaces, not browser
+            // documents. Disable WebView2's native context menu at the
+            // controller level as well as in the page: the non-activating
+            // bubble can bypass the DOM `contextmenu` event and otherwise
+            // expose Save As / Print / Refresh on a right-click.
+            let context_menu = webview
+                .controller()
+                .CoreWebView2()
+                .and_then(|core| core.Settings())
+                .and_then(|settings| settings.SetAreDefaultContextMenusEnabled(false));
+            // Keep the controller in sync with the host without navigating the
+            // page. A reload here races Wry's initial navigation and can leave
+            // the native boot note up forever before the content milestone.
+            let visibility = webview.controller().SetIsVisible(visible);
+            match visibility {
+                Ok(()) => match context_menu {
+                    Ok(()) => format!("visible={visible} ok, context-menu=off"),
+                    Err(error) => format!("visible={visible} ok, context-menu failed ({error})"),
+                },
                 Err(error) if visible => {
                     let hidden = webview.controller().SetIsVisible(false).is_ok();
                     let shown = webview.controller().SetIsVisible(true).is_ok();
-                    format!("visible=true failed ({error}) — forced false→true: hidden={hidden} shown={shown}")
+                    let menu = if context_menu.is_ok() { "off" } else { "failed" };
+                    format!("visible=true failed ({error}) — forced false→true: hidden={hidden} shown={shown}, context-menu={menu}")
                 }
-                Err(error) => format!("visible=false failed ({error})"),
+                Err(error) => {
+                    let menu = if context_menu.is_ok() { "off" } else { "failed" };
+                    format!("visible=false failed ({error}), context-menu={menu}")
+                }
             }
         }))
         .unwrap_or_else(|_| "panicked".to_string());
@@ -319,32 +373,36 @@ fn request_visibility(window: &WebviewWindow, visible: bool) {
         return;
     }
     if visible {
-        panel_hidden().store(false, Ordering::Release);
-        let _ = window.show();
+        show_window(window, None);
     } else {
-        // The panel's visibility cache lags (tauri `is_visible`), and asking
-        // the converted NSPanel itself is not an option — RawNSPanel does not
-        // answer `isHidden`, and that NSException took build 27 down. Our own
-        // record is the single truth: two hide requests in one event pass
-        // (focus loss + NSWorkspace activation of another app, e.g. clicking
-        // the panel's log button) coalesce into one orderOut — a double
-        // orderOut is the pool-drain SIGBUS path.
-        if panel_hidden().swap(true, Ordering::AcqRel) {
-            return; // already hidden — nothing to orderOut
-        }
-        #[cfg(target_os = "windows")]
-        set_webview_visible(window, false);
-        let _ = window.hide();
+        hide_window(window);
     }
 }
 
 fn hide_window(window: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let surface = window.clone();
+        let _ = window.run_on_main_thread(move || hide_window_on_ui(&surface));
+    }
+    #[cfg(not(target_os = "windows"))]
+    hide_window_on_ui(window);
+}
+
+fn hide_window_on_ui(window: &WebviewWindow) {
     if panel_hidden().swap(true, Ordering::AcqRel) {
         return;
     }
+    if let Err(error) = window.hide() {
+        panel_hidden().store(false, Ordering::Release);
+        crate::logging::error(&format!("panel: host hide failed: {error}"));
+        return;
+    }
     #[cfg(target_os = "windows")]
-    set_webview_visible(window, false);
-    let _ = window.hide();
+    {
+        set_webview_visible(window, false);
+        crate::logging::info(&format!("panel: host hide complete — visible={}", native_window_visible(window)));
+    }
 }
 
 /// The panel's real visibility, recorded here because neither tauri's cached
@@ -753,7 +811,14 @@ mod boot_note_windows {
             return; // an open note is recycled by the hide/show pair, never stacked
         }
         let Ok(scale) = window.scale_factor() else { return };
-        let dark = !matches!(window.theme(), Ok(tauri::Theme::Light));
+        let dark = match app.try_state::<crate::engine::Shared>() {
+            Some(shared) => match shared.settings().theme {
+                crate::settings::Theme::Dark => true,
+                crate::settings::Theme::Light => false,
+                crate::settings::Theme::System => !matches!(window.theme(), Ok(tauri::Theme::Light)),
+            },
+            None => !matches!(window.theme(), Ok(tauri::Theme::Light)),
+        };
         ensure_class();
 
         let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -1542,27 +1607,29 @@ fn window_contains_point(window: &WebviewWindow, x: i32, y: i32) -> bool {
 
 #[cfg(target_os = "windows")]
 fn native_window_visible(window: &WebviewWindow) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindow, IsWindowVisible, GW_CHILD};
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
     let Ok(hwnd) = window.hwnd() else { return false };
-    unsafe {
-        if IsWindowVisible(hwnd.0) == 0 {
-            return false;
-        }
-        // `WebviewWindow::hide` can leave the Tauri host visible while tao's
-        // WebView2 controller hides the WRY child. Treat that state as hidden
-        // so the next tray click opens the panel instead of hiding it again.
-        let child = GetWindow(hwnd.0, GW_CHILD);
-        child.is_null() || IsWindowVisible(child) != 0
-    }
+    unsafe { IsWindowVisible(hwnd.0) != 0 }
 }
 
 #[cfg(target_os = "windows")]
 fn tray_contains_point(app: &AppHandle, x: i32, y: i32) -> bool {
-    let Some(rect) = tray::last_rect(app) else { return false };
-    let (left, top) = rect_origin(&rect);
-    let (width, height) = rect_size(&rect);
-    let right = left + width;
-    let bottom = top + height;
+    let bounds = last_tray_bounds()
+        .lock()
+        .ok()
+        .and_then(|slot| *slot)
+        .or_else(|| {
+            let rect = tray::last_rect(app)?;
+            let (left, top) = rect_origin(&rect);
+            let (width, height) = rect_size(&rect);
+            (width > 0.0 && height > 0.0).then_some(Bounds {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            })
+        });
+    let Some(Bounds { left, top, right, bottom }) = bounds else { return false };
     let x = x as f64;
     let y = y as f64;
     x >= left && x < right && y >= top && y < bottom
@@ -2005,6 +2072,7 @@ pub fn configure(app: &AppHandle) {
         // maps a non-focusable window to WS_EX_NOACTIVATE, while mouse clicks
         // still reach the WebView controls.
         let _ = window.set_focusable(false);
+        crate::windows_surface::configure(&window);
         // The panel is created with `visible: false`. On current WebView2
         // Runtime builds, a controller created invisible can remain
         // pixel-less after the host HWND is later shown, even though a direct

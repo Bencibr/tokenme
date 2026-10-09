@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
 import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
-import type { Bridge, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
+import type { Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -75,6 +75,8 @@ function once<T>(event: string, handler: (payload: T) => void): () => void {
     unlisten?.();
   };
 }
+
+const browserBubbleSkinHandlers = new Set<(skin: BubbleSkin) => void>();
 
 /**
  * The only seam between the UI and Rust. Commands are exactly the four the
@@ -360,6 +362,23 @@ export const bridge: Bridge = {
     await invoke<void>("set_bubble_enabled", { on });
   },
 
+  async setBubbleSkin(skin: BubbleSkin): Promise<void> {
+    if (!inTauri) {
+      browserSettings.bubble_skin = skin;
+      browserBubbleSkinHandlers.forEach((handler) => handler(skin));
+      return;
+    }
+    await invoke<void>("set_bubble_skin", { skin });
+  },
+
+  onBubbleSkin(handler: (skin: BubbleSkin) => void): () => void {
+    if (!inTauri) {
+      browserBubbleSkinHandlers.add(handler);
+      return () => { browserBubbleSkinHandlers.delete(handler); };
+    }
+    return once<BubbleSkin>("bubble-skin-changed", handler);
+  },
+
   async showPanel(): Promise<void> {
     if (!inTauri) return;
     await invoke<void>("show_panel");
@@ -461,10 +480,11 @@ function pinnedNotifyState(): NotifyState {
 const browserSettings: PanelSettings = {
   autostart: false,
   refresh_secs: 30,
-  theme: "system",
+  theme: "dark",
   show_money: false,
   show_empty_tools: false,
   bubble_enabled: true,
+  bubble_skin: "waterdrop",
   host_exit_pause: true,
   auto_checkin: false,
   quota_polling: true,

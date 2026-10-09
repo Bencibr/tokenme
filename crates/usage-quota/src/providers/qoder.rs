@@ -560,6 +560,10 @@ struct QoderCheckinState {
     last_ok_day: String,
     /// Credits the last successful claim paid out.
     last_credits: f64,
+    /// Whether `last_ok_day` was confirmed by a live campaigns response under
+    /// the current reader. Older state files default to false so a stale
+    /// zero-credit marker is rechecked instead of trusted as success.
+    confirmed: bool,
     /// Local day a claim last hit the SAME_PERSON device gate. The auto pass
     /// skips the POST for the rest of that day — retrying the same refused
     /// request is what probes into a rate limit — and reports `claim_gated`
@@ -602,6 +606,10 @@ fn load_checkin_state(path: &std::path::Path) -> QoderCheckinState {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
+}
+
+fn cached_checkin_is_confirmed(state: &QoderCheckinState, today: &str, force: bool) -> bool {
+    !force && state.last_attempt_day == today && state.last_ok_day == today && state.confirmed
 }
 
 fn save_checkin_state(path: &std::path::Path, state: &QoderCheckinState) {
@@ -744,16 +752,153 @@ fn umid_candidates() -> Vec<std::path::PathBuf> {
 }
 
 #[cfg(windows)]
+fn registry_string(key: windows_sys::Win32::System::Registry::HKEY, name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
+
+    let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut value = [0u16; 1024];
+    let mut bytes = std::mem::size_of_val(&value) as u32;
+    let mut kind = 0;
+    let result = unsafe {
+        RegGetValueW(
+            key,
+            std::ptr::null(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+            &mut kind,
+            value.as_mut_ptr() as _,
+            &mut bytes,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    let chars = (bytes as usize / std::mem::size_of::<u16>()).min(value.len());
+    let value = String::from_utf16_lossy(&value[..chars])
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(windows)]
+fn registry_install_root(value: &str, value_name: &str) -> Option<std::path::PathBuf> {
+    let value = value.trim();
+    let path = if value_name == "InstallLocation" {
+        value.trim_matches('"').trim().to_string()
+    } else if let Some(rest) = value.strip_prefix('"') {
+        rest.split('"').next()?.to_string()
+    } else {
+        value.split_whitespace().next()?.to_string()
+    };
+    let path = std::path::PathBuf::from(path);
+    let root = if value_name == "InstallLocation" {
+        path
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    root.to_string_lossy().to_ascii_lowercase().contains("qoder").then_some(root)
+}
+
+#[cfg(windows)]
+fn registry_qoder_roots() -> Vec<std::path::PathBuf> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
+        KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+    };
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let uninstall = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall");
+    let views = [0, KEY_WOW64_32KEY, KEY_WOW64_64KEY];
+    let mut roots = Vec::new();
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        for view in views {
+            let mut key = std::ptr::null_mut();
+            if unsafe { RegOpenKeyExW(hive, uninstall.as_ptr(), 0, KEY_READ | view, &mut key) } != 0 {
+                continue;
+            }
+            let mut index = 0;
+            loop {
+                let mut name = [0u16; 256];
+                let mut length = (name.len() - 1) as u32;
+                let result = unsafe {
+                    RegEnumKeyExW(
+                        key,
+                        index,
+                        name.as_mut_ptr(),
+                        &mut length,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                if result != 0 {
+                    break;
+                }
+                index += 1;
+                let mut entry = std::ptr::null_mut();
+                if unsafe { RegOpenKeyExW(key, name.as_ptr(), 0, KEY_READ | view, &mut entry) } != 0 {
+                    continue;
+                }
+                let display = registry_string(entry, "DisplayName").unwrap_or_default();
+                let values: Vec<_> = ["InstallLocation", "UninstallString", "DisplayIcon"]
+                    .iter()
+                    .filter_map(|name| registry_string(entry, name).map(|value| (*name, value)))
+                    .collect();
+                let is_qoder = display.to_ascii_lowercase().contains("qoder")
+                    || values.iter().any(|(_, value)| value.to_ascii_lowercase().contains("qoder"));
+                if is_qoder {
+                    for (name, value) in values {
+                        if let Some(root) = registry_install_root(&value, name) {
+                            if !roots.iter().any(|known| known == &root) {
+                                roots.push(root);
+                            }
+                        }
+                    }
+                }
+                unsafe { RegCloseKey(entry) };
+            }
+            unsafe { RegCloseKey(key) };
+        }
+    }
+    roots
+}
+
+#[cfg(windows)]
+fn add_umid_root(out: &mut Vec<std::path::PathBuf>, root: std::path::PathBuf) {
+    let rel = std::path::Path::new("resources").join("umid").join("runtime-info.exe");
+    let push = |out: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf| {
+        if !out.iter().any(|known| known == &path) {
+            out.push(path);
+        }
+    };
+    push(out, root.join(&rel));
+    let versions = root.join(".qoder-versions");
+    let Ok(entries) = std::fs::read_dir(versions) else { return };
+    for entry in entries.flatten() {
+        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            push(out, entry.path().join(&rel));
+        }
+    }
+}
+
+#[cfg(windows)]
 fn umid_candidates() -> Vec<std::path::PathBuf> {
-    let rel = "resources\\umid\\runtime-info.exe";
     let mut out = Vec::new();
     if let Some(p) = std::env::var_os("LOCALAPPDATA") {
-        out.push(std::path::PathBuf::from(p).join("Programs").join("Qoder").join(rel));
+        add_umid_root(&mut out, std::path::PathBuf::from(p).join("Programs").join("Qoder"));
     }
     for var in ["ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(p) = std::env::var_os(var) {
-            out.push(std::path::PathBuf::from(p).join("Qoder").join(rel));
+            add_umid_root(&mut out, std::path::PathBuf::from(p).join("Qoder"));
         }
+    }
+    for root in registry_qoder_roots() {
+        add_umid_root(&mut out, root);
     }
     out
 }
@@ -966,12 +1111,12 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     let token = info.get("token").and_then(Value::as_str).filter(|t| !t.is_empty())?;
     let mut state = load_checkin_state(&path);
     let today = checkin_day();
-    // A day that was already attempted keeps its recorded outcome, before any
-    // other gate: the 已签到 marker must survive restarts, rebuilds and the
-    // whole morning after a nine-o'clock claim, whatever the clock says now.
-    if !force && state.last_attempt_day == today {
+    // Only a result confirmed by this reader may skip today's live check. Old
+    // state files have `confirmed=false`, so a stale zero-credit marker is
+    // revalidated against the vendor instead of hiding a still-claimable row.
+    if cached_checkin_is_confirmed(&state, &today, force) {
         return Some(QoderCheckinOutcome {
-            done_today: state.last_ok_day == today,
+            done_today: true,
             was_already: false,
             too_early: false,
             no_campaign: false,
@@ -1008,7 +1153,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         // nothing claimable and nothing closed is re-asked with the minted
         // identity before the day is read as closed or empty. The mint is
         // cached for 30 min, so this costs one bridge run per half hour.
-        let mut ident = if claimable_campaigns(&body).is_empty() && !today_benefits_all_claimed(&body) {
+        let ident = if claimable_campaigns(&body).is_empty() && !today_benefits_all_claimed(&body) {
             body.get("uid").and_then(Value::as_str).and_then(claim_identity)
         } else {
             None
@@ -1037,9 +1182,14 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
             let ident = ident.clone().or_else(|| body.get("uid").and_then(Value::as_str).and_then(claim_identity));
             match checkin_claim(base, token, &id, ident.as_ref()) {
                 Some((true, credits, _)) => {
+                    let credits = if credits > 0.0 { credits } else { amount };
+                    if credits <= 0.0 {
+                        continue;
+                    }
                     state.last_attempt_day = today.clone();
                     state.last_ok_day = today.clone();
-                    state.last_credits = if credits > 0.0 { credits } else { amount };
+                    state.last_credits = credits;
+                    state.confirmed = true;
                     outcome = QoderCheckinOutcome {
                         done_today: true,
                         was_already: false,
@@ -1074,6 +1224,8 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         if today_benefits_all_claimed(&body) {
             state.last_attempt_day = today.clone();
             state.last_ok_day = today.clone();
+            state.last_credits = 0.0;
+            state.confirmed = true;
             outcome = QoderCheckinOutcome {
                 done_today: true,
                 was_already: true,
@@ -1092,6 +1244,12 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         } else {
             outcome.no_campaign = true; // the server spoke and had nothing to claim
         }
+    }
+    if answered && !outcome.done_today {
+        state.last_attempt_day.clear();
+        state.last_ok_day.clear();
+        state.last_credits = 0.0;
+        state.confirmed = false;
     }
     save_checkin_state(&path, &state);
     Some(outcome)
@@ -1366,6 +1524,43 @@ mod tests {
         assert!(parse_machine_identity(r#"{"machineToken":"","machineType":"x","machineCode":"y"}"#).is_none());
         assert!(parse_machine_identity("").is_none());
         assert!(parse_machine_identity("not json").is_none());
+    }
+
+    #[test]
+    fn an_old_zero_credit_marker_must_be_revalidated() {
+        let mut state = QoderCheckinState {
+            last_attempt_day: "2026-10-09".into(),
+            last_ok_day: "2026-10-09".into(),
+            ..Default::default()
+        };
+        assert!(!cached_checkin_is_confirmed(&state, "2026-10-09", false));
+        state.confirmed = true;
+        assert!(cached_checkin_is_confirmed(&state, "2026-10-09", false));
+        assert!(!cached_checkin_is_confirmed(&state, "2026-10-09", true));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn qoder_registry_install_string_resolves_its_root() {
+        assert_eq!(
+            registry_install_root(
+                r#""D:\Program Files\Qoder\Uninstall Qoder.exe" /currentuser"#,
+                "UninstallString"
+            ),
+            Some(std::path::PathBuf::from(r#"D:\Program Files\Qoder"#))
+        );
+        assert_eq!(
+            registry_install_root(r#"D:\Program Files\Qoder"#, "InstallLocation"),
+            Some(std::path::PathBuf::from(r#"D:\Program Files\Qoder"#))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "reads the installed Qoder UMID bridge"]
+    fn the_installed_windows_qoder_umid_bridge_is_discoverable() {
+        let path = umid_binary().expect("the installed Qoder UMID bridge is discoverable");
+        println!("[qoder] UMID bridge discovered at {}", path.display());
     }
 
     /// `Cosy-MachineOS` rides the client's arch_os shape; the community

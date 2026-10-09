@@ -228,3 +228,205 @@
     animation: none;
   }
 }
+
+/* Pet art lives inside the same 144px host and uses the waterdrop's 76px
+   anchor. No circular clip: ears, paws and tail keep their alpha silhouette. */
+.pet-skin {
+  position: relative;
+  width: 76px;
+  height: 76px;
+  cursor: pointer;
+}
+
+.pet-pose {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 88%;
+  animation: pet-breathe 3.8s ease-in-out infinite;
+}
+
+.pet-art {
+  position: absolute;
+  width: 96px;
+  height: 96px;
+  left: -10px;
+  top: -10px;
+}
+
+.pet-sprite, .pet-edge-art {
+  position: absolute;
+  inset: 0;
+  width: 96px;
+  height: 96px;
+  filter: drop-shadow(0 3px 3px rgba(33, 21, 12, .2));
+}
+
+.pet-sprite {
+  /* The generated 1254px atlas has four tiles with different alpha padding.
+     Align each frame by its head center and paw baseline; percentage grid
+     positions would make the kitten jump sideways when blinking. */
+  background-size: 192px 192px;
+  background-position: -4.823px -3.254px;
+  background-repeat: no-repeat;
+  animation: pet-blink 6.2s steps(1, end) infinite;
+}
+
+.pet-skin[data-motion="happy"] .pet-sprite {
+  animation: none;
+  background-position: -90.794px -94.967px;
+}
+
+.pet-skin[data-motion="happy"] .pet-pose {
+  animation: pet-greet .7s ease-in-out infinite;
+}
+
+.pet-skin[data-motion="drag"] .pet-sprite {
+  animation: none;
+  background-position: -4.823px -3.254px;
+}
+
+.pet-skin[data-motion="drag"] .pet-pose {
+  animation: pet-carried .55s ease-in-out infinite;
+}
+
+/* Bring the face into the visible sliver without moving/resizing the HWND. */
+.pet-skin[data-dock="right"] { transform: translateX(-24px); }
+.pet-skin[data-dock="left"] { transform: translateX(24px); }
+.pet-skin[data-dock="top"] { transform: translateY(29px); }
+
+.pet-eyes {
+  position: absolute;
+  inset: 0;
+  --eye-lx: 35.445px;
+  --eye-ly: 39.541px;
+  --eye-rx: 61.091px;
+  --eye-ry: 39.541px;
+  --eye-size: 13px;
+  --eye-height: 11.5px;
+  --pupil-size: 9px;
+  animation: pet-tracker-blink 6.2s steps(1, end) infinite;
+}
+.pet-eye {
+  position: absolute;
+  left: var(--eye-lx);
+  top: var(--eye-ly);
+  width: var(--eye-size);
+  height: var(--eye-height);
+  transform: translate(-50%, -50%);
+  overflow: hidden;
+  border-radius: 50%;
+  border: 1px solid #57321c;
+  background: #fff9ed;
+}
+.pet-eye + .pet-eye { left: var(--eye-rx); top: var(--eye-ry); }
+.pet-pupil {
+  position: absolute;
+  width: var(--pupil-size);
+  height: var(--pupil-size);
+  left: 50%;
+  top: 50%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 25%, #fff 0 10%, #865327 14%, #311b0d 62%);
+  transform: translate(calc(-50% + var(--pet-gx, 0px)), calc(-50% + var(--pet-gy, 0px)));
+  transition: transform 130ms linear;
+}
+.pet-eyelid { display: none; }
+.pet-skin[data-motion="happy"][data-dock="none"] .pet-eyes { display: none; }
+.pet-skin[data-motion="drag"] .pet-eyes { animation: none; }
+.pet-skin:not([data-dock="none"]) .pet-eyes { animation: none; }
+.pet-skin:not([data-dock="none"]) .pet-eye { border: 0; }
+.pet-skin:not([data-dock="none"]) .pet-eyelid {
+  display: block;
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  background: #ffe6bf;
+  transform-origin: 50% 0;
+  transform: scaleY(0);
+  animation: pet-eye-close 6.2s ease-in-out infinite;
+}
+.pet-eyelid::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 55%;
+  height: 2px;
+  border-radius: 50%;
+  background: #57321c;
+}
+/* Pose-specific eye anchors are relative to the 96px transparent artwork. */
+.pet-skin[data-dock="right"] .pet-eyes {
+  --eye-lx: 35.445px; --eye-ly: 45.282px;
+  --eye-rx: 59.636px; --eye-ry: 40.038px;
+  --eye-size: 11px; --eye-height: 9.5px; --pupil-size: 8px;
+}
+.pet-skin[data-dock="left"] .pet-eyes {
+  --eye-lx: 38.584px; --eye-ly: 41.761px;
+  --eye-rx: 63.847px; --eye-ry: 45.627px;
+  --eye-size: 11.7px; --eye-height: 9.2px; --pupil-size: 7px;
+}
+.pet-skin[data-dock="top"] .pet-eyes {
+  --eye-lx: 32.612px; --eye-ly: 62.699px;
+  --eye-rx: 63.579px; --eye-ry: 65.761px;
+  --eye-size: 13.1px; --eye-height: 9.7px; --pupil-size: 7.5px;
+}
+@keyframes pet-tracker-blink {
+  0%, 88%, 97%, 100% { opacity: 1; }
+  90%, 95% { opacity: 0; }
+}
+@keyframes pet-eye-close {
+  0%, 88%, 96%, 100% { transform: scaleY(0); }
+  92%, 94% { transform: scaleY(1); }
+}
+
+.pet-token-badge {
+  position: absolute;
+  top: 80px;
+  left: 50%;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 7px;
+  width: max-content;
+  max-width: 128px;
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 8px;
+  background: rgba(22, 30, 27, .94);
+  color: #f7fffc;
+  opacity: 0;
+  transform: translate(-50%, 3px);
+  transition: opacity 150ms ease, transform 150ms ease;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.pet-token-badge strong { font-size: 12px; line-height: 16px; }
+.pet-token-badge small { font-size: 8px; line-height: 12px; opacity: .8; }
+.pet-skin[data-motion="happy"][data-dock="none"] .pet-token-badge {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+@keyframes pet-blink {
+  0%, 88%, 100% { background-position: -4.823px -3.254px; }
+  90%, 95% { background-position: -90.794px -3.254px; }
+  92% { background-position: -4.900px -94.967px; }
+  97% { background-position: -4.823px -3.254px; }
+}
+@keyframes pet-breathe {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-1px) scale(1.025, 1.035); }
+}
+@keyframes pet-greet {
+  0%, 100% { transform: translateY(0) rotate(-3deg); }
+  50% { transform: translateY(-3px) rotate(3deg); }
+}
+@keyframes pet-carried {
+  0%, 100% { transform: translateY(-2px) rotate(-6deg); }
+  50% { transform: translateY(-2px) rotate(6deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pet-pose, .pet-sprite, .pet-eyes, .pet-eyelid { animation: none !important; }
+  .pet-token-badge, .pet-pupil { transition: none; }
+}

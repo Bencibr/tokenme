@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "TokenMe",
+    "title": "",
         "width": 400,
         "height": 660,
         "decorations": false,

@@ -3,13 +3,13 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use usage_core::pricing::PricingOptions;
 use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
-use crate::settings::{NotifyTier, Theme, TrayMode};
+use crate::settings::{BubbleSkin, NotifyTier, Theme, TrayMode};
 use crate::tray;
 
 /// Terminates the tray application, rather than merely hiding its panel.
@@ -153,6 +153,7 @@ pub struct PanelSettings {
     pub show_money: bool,
     pub show_empty_tools: bool,
     pub bubble_enabled: bool,
+    pub bubble_skin: BubbleSkin,
     pub host_exit_pause: bool,
     pub auto_checkin: bool,
     pub quota_polling: bool,
@@ -247,6 +248,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         show_money: settings.show_money,
         show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
+        bubble_skin: settings.bubble_skin,
         host_exit_pause: settings.host_exit_pause,
         auto_checkin: settings.auto_checkin,
         quota_polling: settings.quota_polling,
@@ -439,6 +441,22 @@ pub async fn set_bubble_enabled(app: AppHandle, on: bool) -> Result<(), String> 
     }
     bubble::set_enabled(&app, on);
     Ok(())
+}
+
+/// Persist the bubble appearance and switch all listening pages immediately.
+#[tauri::command]
+pub async fn set_bubble_skin(app: AppHandle, skin: BubbleSkin) -> Result<(), String> {
+    {
+        let shared = app.state::<Shared>();
+        let Ok(mut settings) = shared.settings.lock() else {
+            return Err("settings busy".into());
+        };
+        let mut next = settings.clone();
+        next.bubble_skin = skin;
+        next.save().map_err(|e| e.to_string())?;
+        *settings = next;
+    }
+    app.emit("bubble-skin-changed", skin).map_err(|e| e.to_string())
 }
 
 /// Called by the Windows bubble when it is clicked.

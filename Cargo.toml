@@ -78,6 +78,7 @@ clap = { version = "4", features = ["derive"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_Security_Cryptography",
+    "Win32_System_Registry",
 ] }
 
 [profile.release]

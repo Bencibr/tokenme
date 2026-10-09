@@ -359,10 +359,14 @@ const [page, setPage] = useState<PageKey>(() => {
     const records = scope.kind === "origin" ? all.filter((r) => r.origin === scope.name) : scope.kind === "local" ? [] : all;
     if (records.length === 0) return null;
     const importedAt = syncPin === null ? records[0].imported_at_ms : now - syncPin * 3_600_000;
-    // The badge is read as "did today's pull land", not "when was the last
-    // success" — a yesterday stamp reads as idle the moment the local day
-    // rolls over, whatever the 24h clock would say.
-    const mergedToday = localDate(importedAt) === localDate(now);
+    // A bundle can be imported today while containing only historical rows.
+    // Use the report's per-origin total as the source of truth for whether
+    // that machine actually has usage today; the import timestamp alone only
+    // proves that the merge completed.
+    const latestOrigin = records[0].origin;
+    const todayTokens = report?.machines?.find((m) => m.origin === latestOrigin)?.today_tokens;
+    const hasTodayData = todayTokens === undefined ? localDate(importedAt) === localDate(now) : todayTokens > 0;
+    const mergedToday = localDate(importedAt) === localDate(now) && hasTodayData;
     return {
       latest: records[0],
       importedAt,

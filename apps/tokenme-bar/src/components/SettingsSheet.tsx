@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import type { NotifyState, NotifyTierKey, PanelSettings, ProbeTool, ThemeKey, UpdateStatus } from "../types";
+import type { BubbleSkin, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, ThemeKey, UpdateStatus } from "../types";
 import { bridge, isWindows } from "../lib/bridge";
 import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
 import { t } from "../lib/i18n";
 import { toolDisplay } from "../lib/format";
 import { IconClose } from "./Icons";
+import { PetSkinDropdown } from "./PetSkinDropdown";
 
 const INTERVALS: { secs: number; label: () => string }[] = [
   { secs: 15, label: () => t("set.15s") },
@@ -73,6 +74,8 @@ export function SettingsSheet({
   displays: Record<string, string>;
 }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
+  const [skinBusy, setSkinBusy] = useState(false);
+  const [skinError, setSkinError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   // 0–100 while the artifact streams in; the button reads the set.dl label.
@@ -142,6 +145,20 @@ export function SettingsSheet({
   const setBubble = (on: boolean) => {
     patch((s) => ({ ...s, bubble_enabled: on }));
     void bridge.setBubbleEnabled(on);
+  };
+
+  const setBubbleSkin = async (skin: BubbleSkin) => {
+    if (skinBusy || settings?.bubble_skin === skin) return;
+    setSkinBusy(true);
+    setSkinError(null);
+    try {
+      await bridge.setBubbleSkin(skin);
+      patch((s) => ({ ...s, bubble_skin: skin }));
+    } catch (e) {
+      setSkinError(String(e));
+    } finally {
+      setSkinBusy(false);
+    }
   };
 
   const setAutostart = (on: boolean) => {
@@ -426,7 +443,22 @@ export function SettingsSheet({
             </div>
             {switchRow(t("set.money"), t("set.money.hint"), settings.show_money, setMoney)}
             {switchRow(t("set.showempty"), t("set.showempty.hint"), settings.show_empty_tools, setShowEmptyTools)}
-            {isWindows ? switchRow(t("set.bubble"), t("set.bubble.hint"), settings.bubble_enabled, setBubble) : null}
+            {isWindows ? (
+              <>
+                {switchRow(t("set.bubble"), t("set.bubble.hint"), settings.bubble_enabled, setBubble)}
+                <div className="sheet-row">
+                  <div>
+                    <label className="sheet-label" htmlFor="bubble-skin">{t("set.bubble.skin")}</label>
+                    <div className="sheet-hint" id="bubble-skin-hint">{t("set.bubble.skin.hint")}</div>
+                  </div>
+                  <PetSkinDropdown
+                    value={settings.bubble_skin}
+                    disabled={skinBusy}
+                    onChange={(skin) => void setBubbleSkin(skin)}
+                  />
+                </div>
+              </>
+            ) : null}
           </>
         ) : null}
         {tab === "alert" ? (
@@ -564,6 +596,14 @@ export function SettingsSheet({
           </button>
         </div>
         <div className="sheet-body">{body()}</div>
+        {skinError ? (
+          <div className="sheet-notice" role="alert">
+            {skinError}
+            <button type="button" className="sheet-close" aria-label={t("set.close.a11y")} onClick={() => setSkinError(null)}>
+              <IconClose size={10} />
+            </button>
+          </div>
+        ) : null}
         <p className="sheet-foot num">
           <span>TokenMe v{settings?.version ?? "…"}</span>
           {update ? (

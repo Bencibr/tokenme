@@ -381,6 +381,8 @@ export interface Bridge {
   setShowMoney: (on: boolean) => Promise<void>;
   setShowEmptyTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
+  setBubbleSkin: (skin: BubbleSkin) => Promise<void>;
+  onBubbleSkin: (handler: (skin: BubbleSkin) => void) => () => void;
   setHostExitPause: (on: boolean) => Promise<void>;
   /** On, the host-exit pause stops applying to the check-in tools, so their
    *  daily claim fires and their rows stay live with the host app closed. */
@@ -430,6 +432,8 @@ export interface Bridge {
 /** `system` defers to the OS media query; `light`/`dark` pin the panel. */
 export type ThemeKey = "system" | "light" | "dark";
 
+export type BubbleSkin = "waterdrop" | "kitten";
+
 /** Which banner lines fire: both lines, only exhaustion, or nothing at all. */
 export type NotifyTierKey = "both" | "exhausted" | "off";
 
@@ -440,6 +444,7 @@ export interface PanelSettings {
   show_money: boolean;
   show_empty_tools: boolean;
   bubble_enabled: boolean;
+  bubble_skin: BubbleSkin;
   host_exit_pause: boolean;
   /** The check-in guarantee: on, Trae CN / Qoder keep being probed — and
    *  claimed — while their host app is closed. */

@@ -36,14 +36,24 @@ impl TrayMode {
     }
 }
 
-/// Panel appearance. `System` leaves the OS media query in charge.
+/// Panel appearance. New installs use the dark palette; `System` remains
+/// available when the user explicitly wants the OS media query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
     #[default]
-    System,
-    Light,
     Dark,
+    Light,
+    System,
+}
+
+/// The edge bubble's appearance; old settings keep the original waterdrop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BubbleSkin {
+    #[default]
+    Waterdrop,
+    Kitten,
 }
 
 /// Which of the two banner lines the tier machine may announce. `Both` is the
@@ -141,6 +151,8 @@ pub struct Settings {
     pub show_empty_tools: bool,
     #[serde(default = "default_bubble_enabled")]
     pub bubble_enabled: bool,
+    #[serde(default)]
+    pub bubble_skin: BubbleSkin,
     /// Stop asking vendors for a tool's quota once its host application has
     /// exited: the number cannot change, and the calls are the user's own
     /// account traffic. Default on; the last known answer stays on screen.
@@ -196,6 +208,7 @@ impl Default for Settings {
             show_money: default_show_money(),
             show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
+            bubble_skin: BubbleSkin::default(),
             host_exit_pause: default_host_exit_pause(),
             auto_checkin: false,
             quota_polling: default_quota_polling(),
@@ -246,6 +259,42 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bubble_skin_defaults_to_waterdrop_for_old_settings() {
+        let s: Settings = serde_json::from_str(
+            r#"{"tray_mode":"tray_tokens","autostart":false,"theme":"light",
+                "bubble_enabled":false,"quota_polling":false,
+                "quota_probes_off":["copilot"],"budgets":{}}"#,
+        ).expect("a settings file without bubble_skin must still load");
+        assert_eq!(s.bubble_skin, BubbleSkin::Waterdrop);
+        assert_eq!(Settings::default().bubble_skin, BubbleSkin::Waterdrop);
+        assert_eq!(s.theme, Theme::Light);
+        assert!(!s.bubble_enabled);
+        assert!(!s.quota_polling);
+        assert_eq!(s.quota_probes_off, vec!["copilot".to_string()]);
+    }
+
+    #[test]
+    fn bubble_skins_round_trip_with_the_event_and_settings_names() {
+        for (name, skin) in [("waterdrop", BubbleSkin::Waterdrop), ("kitten", BubbleSkin::Kitten)] {
+            let payload = serde_json::to_value(skin).unwrap();
+            assert_eq!(payload, serde_json::json!(name), "event payload must be a string");
+            assert_eq!(serde_json::from_value::<BubbleSkin>(payload).unwrap(), skin);
+            let s = Settings { bubble_skin: skin, ..Settings::default() };
+            let json = serde_json::to_value(&s).unwrap();
+            assert_eq!(json["bubble_skin"], serde_json::json!(name));
+            assert_eq!(serde_json::from_value::<Settings>(json).unwrap().bubble_skin, skin);
+        }
+    }
+
+    #[test]
+    fn bubble_skin_rejects_invalid_names() {
+        for name in ["dog", "water_drop", "Waterdrop", "Kitten", ""] {
+            assert!(serde_json::from_value::<BubbleSkin>(serde_json::json!(name)).is_err(), "{name}");
+            assert!(serde_json::from_value::<Settings>(serde_json::json!({"bubble_skin": name})).is_err(), "{name}");
+        }
+    }
 
     /// What a settings.json written before this feature looks like: none of the
     /// new keys. Loading it must keep polling on and banners at both lines —

@@ -11,8 +11,10 @@ mod settings;
 mod snapshot;
 mod tray;
 mod updater;
+#[cfg(target_os = "windows")]
+mod windows_surface;
 
-pub use settings::{Settings, TrayMode};
+pub use settings::{BubbleSkin, Settings, TrayMode};
 
 use std::sync::mpsc::Receiver;
 
@@ -77,6 +79,7 @@ pub fn run() {
             commands::set_notify_tiers,
             commands::set_tool_muted,
             commands::set_bubble_enabled,
+            commands::set_bubble_skin,
             notify::notify_status,
             notify::notify_enable,
             commands::begin_bubble_drag,

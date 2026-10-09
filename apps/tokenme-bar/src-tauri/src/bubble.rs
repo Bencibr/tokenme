@@ -22,7 +22,7 @@ pub fn configure(app: &AppHandle) -> tauri::Result<()> {
     let window = match app.get_webview_window(LABEL) {
         Some(window) => window,
         None => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
-            .title("TokenMe")
+            .title("")
             .inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
             .min_inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
             .max_inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
@@ -41,6 +41,7 @@ pub fn configure(app: &AppHandle) -> tauri::Result<()> {
 
     // A hoverable utility surface must not become the foreground application.
     let _ = window.set_focusable(false);
+    crate::windows_surface::configure(&window);
     position_initial(&window);
 
     if app.state::<crate::engine::Shared>().settings().bubble_enabled {
@@ -58,13 +59,15 @@ pub fn configure(_app: &tauri::AppHandle) -> tauri::Result<()> {
 #[cfg(target_os = "windows")]
 pub fn set_enabled(app: &AppHandle, enabled: bool) {
     let Some(window) = app.get_webview_window(LABEL) else { return };
-    if enabled {
-        let _ = window.show();
-        crate::panel::set_webview_visible(&window, true);
-    } else {
-        crate::panel::set_webview_visible(&window, false);
-        let _ = window.hide();
-    }
+    let _ = app.run_on_main_thread(move || {
+        if enabled {
+            let _ = window.show();
+            crate::panel::set_webview_visible(&window, true);
+        } else {
+            let _ = window.hide();
+            crate::panel::set_webview_visible(&window, false);
+        }
+    });
 }
 
 #[cfg(not(target_os = "windows"))]

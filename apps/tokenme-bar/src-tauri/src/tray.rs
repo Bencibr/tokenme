@@ -64,6 +64,8 @@ fn live_quota(report: &Report, now_ms: i64) -> Option<&QuotaView> {
 
 /// `(title, tooltip)`. Windows ignores the title, so the tooltip repeats it.
 pub fn label_for(report: &Report, mode: TrayMode) -> (Option<String>, String) {
+    #[cfg(target_os = "windows")]
+    let mode = { let _ = mode; TrayMode::TrayOnly };
     let now_ms = report.generated_at_ms;
     let day = &report.day;
     let quota = live_quota(report, now_ms);
@@ -148,6 +150,10 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) 
 }
 
 fn paint<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
+    // Windows has an icon-only notification area. Old text-only preferences
+    // must never remove the application's only tray entry after an upgrade.
+    #[cfg(target_os = "windows")]
+    let mode = { let _ = mode; TrayMode::TrayOnly };
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
     let (title, tooltip) = label_for(report, mode);
     // Re-setting the image repaints the status item — visible as a flicker on
@@ -486,13 +492,26 @@ fn on_tray_event(tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent) {
     tauri_plugin_positioner::on_tray_event(&app, &event);
 
     match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Down,
+            rect,
+            ..
+        } => {
+            #[cfg(target_os = "windows")]
+            panel::remember_tray_rect(&rect);
+        }
         // Right-click is served by the native context menu attached above.
         TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
             rect,
             ..
-        } => panel::toggle(&app, Some(rect)),
+        } => {
+            #[cfg(target_os = "windows")]
+            panel::remember_tray_rect(&rect);
+            panel::toggle(&app, Some(rect));
+        }
         // On Windows a double click is preceded by the first left-button-up
         // click. Toggling here as well would immediately undo the first toggle.
         TrayIconEvent::DoubleClick { .. } => {}

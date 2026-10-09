@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { PricingMeta, ServerStatus, ServerView, TrayMode } from "../types";
-import { bridge } from "../lib/bridge";
+import { bridge, isWindows } from "../lib/bridge";
 import { clockStamp, freshness, relativeTime, TRAY_MODE_LABEL } from "../lib/format";
 import { useTicker } from "../lib/hooks";
 import { t } from "../lib/i18n";
@@ -165,7 +165,7 @@ export function StatusBar({
             {t("status.update.chip", { v: update.latest })}
           </button>
         ) : null}
-        {tray ? (
+        {tray && !isWindows ? (
           <button type="button" className="tray-mode" onClick={tray.onCycle} title={t("status.tray.tip")}>
             {TRAY_MODE_LABEL[tray.mode]}
           </button>

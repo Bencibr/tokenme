@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { currentMonitor, cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
-import type { Report } from "../types";
+import type { BubbleSkin, Report } from "../types";
 import { bridge, inTauri } from "../lib/bridge";
 import { ballTokens } from "../lib/format";
 import { t } from "../lib/i18n";
+import { PetSkin } from "./PetSkin";
 
 type Dock = "left" | "right" | "top";
 
@@ -28,6 +29,11 @@ export function BubbleApp() {
   const [dock, setDock] = useState<Dock | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [gaze, setGaze] = useState<{ x: number; y: number } | null>(null);
+  const [skin, setSkin] = useState<BubbleSkin>("waterdrop");
+  const [hovered, setHovered] = useState(false);
+  const [petDragging, setPetDragging] = useState(false);
+  const [petAssetFailed, setPetAssetFailed] = useState(false);
+  const onPetAssetError = useCallback(() => setPetAssetFailed(true), []);
   const moved = useRef(false);
   const press = useRef<{ x: number; y: number } | null>(null);
   // After a drop the pet may sit right under the cursor; hover-enter stays
@@ -45,6 +51,19 @@ export function BubbleApp() {
   // Set while a drag is running (whichever side of the bridge drives it) so
   // hover timers and expand can never fight the drag loop for the window.
   const dragging = useRef(false);
+
+  useEffect(() => {
+    let alive = true;
+    let changed = false;
+    const unlisten = bridge.onBubbleSkin((next) => {
+      changed = true;
+      if (alive) setSkin(next);
+    });
+    void bridge.panelSettings().then((settings) => {
+      if (alive && !changed) setSkin(settings.bubble_skin);
+    }).catch(() => {});
+    return () => { alive = false; unlisten(); };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -211,11 +230,13 @@ export function BubbleApp() {
       // The Rust monitor can start a drag without any pointer event reaching
       // this webview; mark it so hover timers stand down until the drop.
       dragging.current = true;
+      setPetDragging(true);
       clearLeaveTimer();
       press.current = null;
     });
     void listen("bubble-drag-ended", () => {
       dragging.current = false;
+      setPetDragging(false);
       press.current = null;
       void dockToEdge(true);
     }).then((fn) => {
@@ -237,6 +258,7 @@ export function BubbleApp() {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     void listen<boolean>("bubble-hover", (event) => {
+      setHovered(event.payload);
       if (event.payload) {
         if (!suppressExpand.current) void expand();
       } else {
@@ -259,18 +281,21 @@ export function BubbleApp() {
   // The docked pet watches the cursor: poll it and point the pupils that way.
   // The window doesn't move while docked, so only the cursor needs polling.
   useEffect(() => {
-    if (!dock || !inTauri) {
+    if ((!dock && skin !== "kitten") || !inTauri) {
       setGaze(null);
       return;
     }
     let alive = true;
     void (async () => {
-      const pos = await window.outerPosition().catch(() => null);
-      const size = await window.outerSize().catch(() => null);
-      if (!pos || !size) return;
-      const centerX = pos.x + size.width / 2;
-      const centerY = pos.y + size.height / 2;
       while (alive) {
+        const pos = await window.outerPosition().catch(() => null);
+        const size = await window.outerSize().catch(() => null);
+        const scale = await window.scaleFactor().catch(() => 1);
+        if (!pos || !size) break;
+        const eyes = Array.from(document.querySelectorAll(".pet-eye"))
+          .map((eye) => eye.getBoundingClientRect()).filter((eye) => eye.width > 0);
+        const centerX = pos.x + (eyes.length ? eyes.reduce((sum, eye) => sum + eye.left + eye.width / 2, 0) / eyes.length * scale : size.width / 2);
+        const centerY = pos.y + (eyes.length ? eyes.reduce((sum, eye) => sum + eye.top + eye.height / 2, 0) / eyes.length * scale : size.height / 2);
         const cursor = await cursorPosition().catch(() => null);
         if (!cursor) break;
         const dx = cursor.x - centerX;
@@ -288,7 +313,7 @@ export function BubbleApp() {
     return () => {
       alive = false;
     };
-  }, [dock]);
+  }, [dock, skin]);
 
   const onPointerDown = async (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -296,6 +321,7 @@ export function BubbleApp() {
     moved.current = false;
     press.current = { x: event.clientX, y: event.clientY };
     dragging.current = true;
+    setPetDragging(true);
     await expand();
     try {
       // Rust owns the move: the native startDragging loop refuses to drag a
@@ -304,6 +330,7 @@ export function BubbleApp() {
       await bridge.beginBubbleDrag();
     } catch {
       dragging.current = false;
+      setPetDragging(false);
     }
   };
 
@@ -318,6 +345,7 @@ export function BubbleApp() {
     if (!dragging.current) return;
     const wasMoved = moved.current;
     dragging.current = false;
+    setPetDragging(false);
     press.current = null;
     if (wasMoved) {
       setTimeout(() => void dockToEdge(true), 80);
@@ -336,8 +364,9 @@ export function BubbleApp() {
       className="bubble-app"
       data-dock={dock ?? "none"}
       data-expanded={expanded}
-      onMouseEnter={() => void expand()}
-      onMouseLeave={scheduleDock}
+      data-skin={skin}
+      onMouseEnter={() => { setHovered(true); void expand(); }}
+      onMouseLeave={() => { setHovered(false); scheduleDock(); }}
       onPointerDown={(event) => void onPointerDown(event)}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -346,6 +375,10 @@ export function BubbleApp() {
       tabIndex={0}
       aria-label={t("bubble.aria", { t: ballTokens(tokens) })}
     >
+      {skin === "kitten" && !petAssetFailed ? (
+        <PetSkin dock={dock} hovered={hovered} dragging={petDragging}
+          tokens={tokens} gaze={gaze} onAssetError={onPetAssetError} />
+      ) : <>
       <span className="bubble-ripple" aria-hidden="true" />
       <span className="bubble-core">
         <span className="bubble-value">{ballTokens(tokens)}</span>
@@ -362,6 +395,7 @@ export function BubbleApp() {
           <span className="bubble-mouth" />
         </span>
       </span>
+      </>}
     </div>
   );
 }
