@@ -523,7 +523,11 @@ pub(crate) fn samples_from_snapshot(value: &Value) -> Vec<QuotaSample> {
 // still fires at most ONE attempt per local day — the state file is the lock,
 // the same discipline the Trae claim follows, because retrying is what
 // extends the server's rate limit. Success (`data.status == "CLAIMED"`) and
-// a campaign list with nothing left claimable both close the day.
+// a list whose rows are all CLAIMED close the day. An EMPTY list is the
+// server saying this account has no activity today (`showCampaign: false,
+// claimable: false` measured live 2026-10-09): the day stays open and the
+// outcome carries `no_campaign`, so the button reports 暂无活动 instead of
+// dressing an absent campaign up as a failure.
 
 const CAMPAIGNS_PATH: &str = "/sash/api/v1/me/campaigns";
 const CHECKIN_BASES: [&str; 2] = ["https://openapi.qoder.sh", "https://openapi.qoder.com.cn"];
@@ -544,6 +548,13 @@ struct QoderCheckinOutcome {
     done_today: bool,
     /// Already checked in (nothing claimable) rather than claimed now.
     was_already: bool,
+    /// Claimable rows exist but the day's window has not opened (before
+    /// 10:00 local): the button greys instead of claiming into the void.
+    too_early: bool,
+    /// The server answered with a campaigns envelope but had nothing claimable
+    /// and nothing already claimed — no activity for this account today. Not
+    /// an error: the day stays open in case a campaign opens later.
+    no_campaign: bool,
     credits: f64,
 }
 
@@ -639,31 +650,43 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     let token = info.get("token").and_then(Value::as_str).filter(|t| !t.is_empty())?;
     let mut state = load_checkin_state(&path);
     let today = checkin_day();
-    // The day's campaign opens at 10:00 local: before that there is nothing
-    // claimable, and an empty campaign list must not close the day — the next
-    // pass after ten retries on its own.
-    if !force && chrono::Timelike::hour(&chrono::Local::now()) < 10 {
-        return None;
-    }
+    // A day that was already attempted keeps its recorded outcome, before any
+    // other gate: the 已签到 marker must survive restarts, rebuilds and the
+    // whole morning after a nine-o'clock claim, whatever the clock says now.
     if !force && state.last_attempt_day == today {
         return Some(QoderCheckinOutcome {
             done_today: state.last_ok_day == today,
             was_already: false,
+            too_early: false,
+            no_campaign: false,
             credits: state.last_credits,
         });
     }
-
-    state.last_attempt_day = today.clone();
-    let mut outcome = QoderCheckinOutcome { done_today: false, was_already: false, credits: 0.0 };
+    // The day's campaign opens at 10:00 local: before that a claimable list
+    // must not be claimed early and an empty list must not close the day —
+    // but the status read below still runs, so a benefit the IDE already paid
+    // (rows all CLAIMED) marks the day at any hour. The next pass after ten
+    // retries an open day on its own.
+    let may_claim = force || chrono::Timelike::hour(&chrono::Local::now()) >= 10;
+    let mut outcome = QoderCheckinOutcome { done_today: false, was_already: false, too_early: false, no_campaign: false, credits: 0.0 };
+    let mut answered = false; // a base returned a parseable campaigns envelope
     'bases: for base in CHECKIN_BASES {
         let Some(body) = checkin_campaigns(base, token) else { continue };
+        answered = true;
         for (id, amount) in claimable_campaigns(&body) {
+            if !may_claim {
+                outcome.too_early = true; // claimable but too early: day open, button greys
+                break 'bases;
+            }
             if let Some((true, credits)) = checkin_claim(base, token, &id) {
+                state.last_attempt_day = today.clone();
                 state.last_ok_day = today.clone();
                 state.last_credits = if credits > 0.0 { credits } else { amount };
                 outcome = QoderCheckinOutcome {
                     done_today: true,
                     was_already: false,
+                    too_early: false,
+                    no_campaign: false,
                     credits: state.last_credits,
                 };
                 break 'bases;
@@ -681,30 +704,49 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
                 })
         });
         if all_claimed {
+            state.last_attempt_day = today.clone();
             state.last_ok_day = today.clone();
-            outcome = QoderCheckinOutcome { done_today: true, was_already: true, credits: 0.0 };
+            outcome = QoderCheckinOutcome { done_today: true, was_already: true, too_early: false, no_campaign: false, credits: 0.0 };
             break 'bases;
         }
+    }
+    if answered && !outcome.done_today && !outcome.too_early {
+        outcome.no_campaign = true; // the server spoke and had nothing to claim
     }
     save_checkin_state(&path, &state);
     Some(outcome)
 }
 
 /// The panel's check-in button: one forced claim right now, past the 10:00
-/// gate and the day lock (a manual click is the user asking again).
-pub fn qoder_manual_checkin() -> Result<String, String> {
+/// gate and the day lock (a manual click is the user asking again). The bool
+/// says whether the day actually closed, so the button only turns into the
+/// done badge for a real claim — "queued" or "too early" stay buttons.
+pub fn qoder_manual_checkin() -> Result<(bool, String), String> {
     let info = app_dirs()
         .iter()
         .find(|d| d.join(AUTH_FILE).is_file())
         .and_then(|dir| discover_login_info(dir))
         .ok_or_else(|| "未找到 Qoder 登录".to_string())?;
+    if chrono::Timelike::hour(&chrono::Local::now()) < 10 && !state_says_done_today() {
+        return Ok((false, "未到签到时间，10:00 后可领".into()));
+    }
     match qoder_daily_checkin(&info, true) {
         Some(o) if o.done_today && !o.was_already && o.credits > 0.0 => {
-            Ok(format!("签到成功，+{:.0} 积分", o.credits))
+            Ok((true, format!("签到成功，+{:.0} 积分", o.credits)))
         }
-        Some(o) if o.done_today => Ok("今日已签到".to_string()),
-        _ => Err("签到未成功，稍后再试".to_string()),
+        Some(o) if o.done_today => Ok((true, "今日已签到".to_string())),
+        Some(o) if o.no_campaign => Ok((false, "今日暂无可领的签到活动".into())),
+        _ => Ok((false, "签到未成功，稍后再试".to_string())),
     }
+}
+
+/// Whether today is already recorded as claimed — a manual click before 10:00
+/// on a morning the panel itself claimed at 09:59 still says 已签到.
+fn state_says_done_today() -> bool {
+    checkin_state_path()
+        .map(|p| load_checkin_state(&p))
+        .map(|s| s.last_ok_day == checkin_day())
+        .unwrap_or(false)
 }
 
 /// The row that carries the 已签到 mark into the strip: it only exists for a
@@ -732,6 +774,19 @@ fn with_checkin_mark(samples: Vec<QuotaSample>, outcome: &Option<QoderCheckinOut
         Some(o) if o.done_today => {
             let mut out = samples;
             out.push(checkin_marker_row(*o));
+            out
+        }
+        // The wait row is what greys the strip's button before the day's
+        // window opens: same channel as the done mark, a different id.
+        Some(o) if o.too_early => {
+            let mut out = samples;
+            out.push(QuotaSample {
+                used_percent: 0.0,
+                window_minutes: 0,
+                resets_at_ms: 0,
+                label: Some("未到签到时间 · 10:00 开领".into()),
+                id: Some("checkin-wait".into()),
+            });
             out
         }
         _ => samples,
@@ -770,11 +825,29 @@ mod tests {
     /// silently demotes the row to decoration.
     #[test]
     fn the_checkin_marker_label_carries_the_badge_wording() {
-        let already = checkin_marker_row(QoderCheckinOutcome { done_today: true, was_already: true, credits: 0.0 });
+        let already = checkin_marker_row(QoderCheckinOutcome {
+            done_today: true,
+            was_already: true,
+            too_early: false,
+            no_campaign: false,
+            credits: 0.0,
+        });
         assert_eq!(already.label.as_deref(), Some("今日已签到"));
-        let claimed = checkin_marker_row(QoderCheckinOutcome { done_today: true, was_already: false, credits: 100.0 });
+        let claimed = checkin_marker_row(QoderCheckinOutcome {
+            done_today: true,
+            was_already: false,
+            too_early: false,
+            no_campaign: false,
+            credits: 100.0,
+        });
         assert_eq!(claimed.label.as_deref(), Some("已自动签到 · +100"));
-        let plain = checkin_marker_row(QoderCheckinOutcome { done_today: true, was_already: false, credits: 0.0 });
+        let plain = checkin_marker_row(QoderCheckinOutcome {
+            done_today: true,
+            was_already: false,
+            too_early: false,
+            no_campaign: false,
+            credits: 0.0,
+        });
         assert_eq!(plain.label.as_deref(), Some("已自动签到"));
         // An open day carries no row at all.
         let none: Vec<QuotaSample> = with_checkin_mark(
