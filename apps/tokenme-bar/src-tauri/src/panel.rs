@@ -111,10 +111,13 @@ pub fn toggle(app: &AppHandle, rect: Option<Rect>) {
 }
 
 pub fn show(app: &AppHandle, rect: Option<Rect>) {
+    crate::logging::info(&format!("panel: show requested (rect present: {})", rect.is_some()));
     if !accept_visibility_request(true) {
+        crate::logging::info("panel: show refused by the visibility debounce");
         return;
     }
     let Some(window) = app.get_webview_window(LABEL) else {
+        crate::logging::error("panel: show has no main window to reveal");
         return;
     };
     show_window(&window, rect.or_else(|| tray::last_rect(app)));
@@ -134,14 +137,111 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
         // focusable, tao's post-first-show `SW_SHOW` would foreground it.
         let _ = window.set_focusable(false);
     }
-    anchor(window, rect);
-    // Re-sync the native backing with the persisted theme on every open: a
-    // theme switch the app missed (label typo'd away once) or an OS
-    // appearance change while hidden otherwise leaves a stale layer under
-    // the translucent page until relaunch.
-    #[cfg(target_os = "macos")]
-    apply_window_background(window.app_handle(), None);
-    let _ = window.show();
+    // Windows bypasses tao's geometry entirely: tao's scale factor at window
+    // creation has measured 1.0 while the live window reports 144 DPI, so
+    // every tao-layer move/resize desyncs from the native window by exactly
+    // the scale factor (tauri recorded 600×990 at 3195,1090 while
+    // GetWindowRect kept 400×660 at the OS default) and the WebView2 composed
+    // against bounds that intersect nothing — the panel "opened" invisible.
+    // SetWindowPos in true physical pixels from GetDpiForWindow, topmost, is
+    // the path that cannot desync; the tray-less anchor point is the cursor,
+    // which GetCursorPos always knows and a tray click leaves at the icon.
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_TOPMOST, SWP_NOCOPYBITS, SWP_SHOWWINDOW,
+        };
+        match window.hwnd() {
+            Ok(hwnd) => {
+                let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd.0) }
+                    .max(96) as f64;
+                let scale = dpi / 96.0;
+                let (ax, ay) = anchor_point_for(rect.or_else(|| tray::last_rect(window.app_handle())), window);
+                let area = windows_screen_area(ax, ay).unwrap_or_else(|| crate::panel::fallback_area());
+                let height = panel_height_for_work_area(area.work.bottom - area.work.top, scale);
+                let w = WIDTH * scale;
+                let h = height * scale;
+                let (x, y) = clamp_in_bounds(ax - w / 2.0, ay + GAP, (w, h), area.work, GAP);
+                let ok = unsafe {
+                    SetWindowPos(
+                        hwnd.0,
+                        HWND_TOPMOST,
+                        x.round() as i32,
+                        y.round() as i32,
+                        w.round() as i32,
+                        h.round() as i32,
+                        SWP_SHOWWINDOW | SWP_NOCOPYBITS,
+                    )
+                };
+                let was_hidden = panel_hidden().swap(false, Ordering::Release);
+                let _ = was_hidden;
+                crate::logging::info(&format!(
+                    "panel: native show — SetWindowPos({x}, {y}, {w}x{h}) ok={ok}"
+                ));
+            }
+            Err(_) => {
+                let _ = window.show();
+                anchor(window, rect);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        anchor(window, rect);
+        let anchored_at = window.outer_position().ok();
+        #[cfg(not(target_os = "windows"))]
+        let _ = window.show();
+        #[cfg(target_os = "macos")]
+        {
+            // Re-sync the native backing with the persisted theme on every open: a
+            // theme switch the app missed (label typo'd away once) or an OS
+            // appearance change while hidden otherwise leaves a stale layer under
+            // the translucent page until relaunch.
+            apply_window_background(window.app_handle(), None);
+            let _ = window.show();
+        }
+        let _ = anchored_at;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // The WebView2 controller's visibility is a switch separate from the
+        // host window's: a panel created hidden carries an invisible
+        // controller, and WebView2 Runtime 154 (2026-10-08) stopped
+        // compositing invisible controllers even after the host shows — the
+        // bubble, shown at startup, kept rendering while this panel went
+        // pixel-less. Re-assert the controller so the content recomposes.
+        // The WebView2 controller's visibility is a switch separate from the
+        // host window's: a panel created hidden carries an invisible
+        // controller (wry seeds it from the window's visibility at creation,
+        // webview2/mod.rs:544), and WebView2 Runtime 154 (2026-10-08) stopped
+        // compositing invisible controllers even after the host shows — the
+        // bubble, shown at startup, kept rendering while this panel went
+        // pixel-less. Tauri never flips the controller back — WindowMessage::
+        // Show only touches the window — but its Webview type grew show/hide,
+        // which route to wry's set_visible: ShowWindow on the webview's own
+        // child HWND plus controller.SetIsVisible. Toggle it so the content
+        // recomposes against the freshly shown window.
+        if let Some(webview) = window.app_handle().webview_windows().get(LABEL) {
+            webview.hide();
+            webview.show();
+        }
+        if let Ok(hwnd) = window.hwnd() {
+            let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd.0) };
+            let native = windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+            let mut rect = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            let got = unsafe { native(hwnd.0, &mut rect) };
+            let native_pos = if got != 0 {
+                format!("{}x{} at {},{}", rect.right - rect.left, rect.bottom - rect.top, rect.left, rect.top)
+            } else {
+                "<err>".into()
+            };
+            let vis = window.is_visible().unwrap_or(false);
+            crate::logging::info(&format!(
+                "panel: show complete — dpi={dpi}, native {native_pos}, visible={vis}"
+            ));
+        }
+    }
 
     // The panel is on screen before its page can paint, and on macOS the only
     // layer that can say something during that stretch is a native one.
@@ -761,16 +861,56 @@ fn windows_anchor_point(tray: Bounds, area: ScreenArea, size: (f64, f64)) -> (f6
     clamp_in_bounds(x, y, size, area.work, GAP)
 }
 
+/// The anchor point for a tray-less open: the cursor, not the window — a
+/// never-shown window answers no reliable position, while GetCursorPos always
+/// knows where the user is, and a tray click leaves the cursor at the icon.
+#[cfg(target_os = "windows")]
+fn anchor_point_for(rect: Option<Rect>, window: &WebviewWindow) -> (f64, f64) {
+    if let Some(rect) = rect {
+        let (x, y) = rect_origin(&rect);
+        let (w, h) = rect_size(&rect);
+        if w > 0.0 && h > 0.0 {
+            return (x + w / 2.0, y + h);
+        }
+    }
+    let _ = window;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut point = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut point) };
+    (point.x as f64, point.y as f64)
+}
+
+/// The primary monitor when the point-based lookup has nothing to work with.
+#[cfg(target_os = "windows")]
+pub fn fallback_area() -> ScreenArea {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    unsafe {
+        let right = GetSystemMetrics(SM_CXSCREEN) as f64;
+        let bottom = GetSystemMetrics(SM_CYSCREEN) as f64;
+        ScreenArea {
+            monitor: Bounds { left: 0.0, top: 0.0, right, bottom },
+            work: Bounds { left: 0.0, top: 0.0, right, bottom },
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn anchor_windows(window: &WebviewWindow, rect: Option<&Rect>) -> bool {
+    // The anchor point for a tray-less open comes from the cursor, not from
+    // the window: a never-shown window answers no reliable position (measured:
+    // it sat at an off-screen OS default while tauri's monitor list came back
+    // empty, and both clamp paths no-op'd — the panel "opened" 1200 px past
+    // the screen edge), while GetCursorPos always knows where the user is,
+    // and a tray click leaves the cursor at the icon.
     let (x, y) = if let Some(rect) = rect {
         let (x, y) = rect_origin(rect);
         let (w, h) = rect_size(rect);
         (x + w / 2.0, y + h / 2.0)
-    } else if let Ok(pos) = window.outer_position() {
-        (pos.x as f64, pos.y as f64)
     } else {
-        return false;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut point = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+        unsafe { GetCursorPos(&mut point) };
+        (point.x as f64, point.y as f64)
     };
     let Some(area) = windows_screen_area(x, y) else {
         return false;
@@ -811,8 +951,8 @@ fn anchor_windows(window: &WebviewWindow, rect: Option<&Rect>) -> bool {
         };
         let (x, y) = windows_anchor_point(tray, area, size);
         let _ = window.set_position(PhysicalPosition::new(x, y));
-    } else if let Ok(pos) = window.outer_position() {
-        let (x, y) = clamp_in_bounds(pos.x as f64, pos.y as f64, size, area.work, GAP);
+    } else {
+        let (x, y) = clamp_in_bounds(x, y, size, area.work, GAP);
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
     true

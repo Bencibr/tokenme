@@ -20,6 +20,10 @@
   ; through shell caches that a renamed shortcut does not invalidate, so the
   ; registration wins where the shortcut spelling loses.
   WriteRegStr SHCTX "Software\Classes\AppUserModelId\${BUNDLEID}" "DisplayName" "${PRODUCTNAME}"
+  ; A toast identity without an IconUri renders the generic blank badge — the
+  ; installer ships the icon next to the exe (tauri.conf.json resources) so the
+  ; registration can point at it.
+  WriteRegStr SHCTX "Software\Classes\AppUserModelId\${BUNDLEID}" "IconUri" "$INSTDIR\icon.ico"
   Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"
   Delete "$SMPROGRAMS\tokenme-bar.lnk"
   Delete "$SMPROGRAMS\tokenme.lnk"
