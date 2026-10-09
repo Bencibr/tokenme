@@ -504,6 +504,19 @@ pub fn hide_boot_note(_app: &AppHandle) {}
 #[cfg(target_os = "macos")]
 const BOOT_NOTE_TAG: isize = 0x746b_426f;
 
+/// The palette the native note paints with — the settings pin first, the OS
+/// appearance for 系统. The same resolution `apply_window_background` uses for
+/// the sheet under it, so the note and its surface can never disagree, and the
+/// same one `index.html`'s shell follows through its `[data-theme]` pin.
+#[cfg(target_os = "macos")]
+fn boot_note_is_dark() -> bool {
+    match crate::settings::Settings::load().theme {
+        crate::settings::Theme::Light => false,
+        crate::settings::Theme::Dark => true,
+        crate::settings::Theme::System => os_appearance_is_dark(),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn set_boot_note(app: &AppHandle, text: Option<&str>) {
     use tauri_nspanel::cocoa::base::id;
@@ -538,6 +551,27 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
         let Some(text) = text else { return };
         let bounds: NSRect = msg_send![content, bounds];
 
+        // The page's own loading card speaks theme.css: label --ink-3, arcs
+        // --accent — light #66748a / #0d8f74 · dark #8a99ad / #30d9aa, the same
+        // values index.html's shell carries. Resolved by the settings pin, not
+        // assumed dark: a hardcoded dark palette on the light sheet washed the
+        // label out and sank the 28 % inner ring into the white (build 155).
+        let dark = boot_note_is_dark();
+        let (ink_rgb, accent_rgb) = if dark {
+            ([0x8a, 0x99, 0xad], [0x30, 0xd9, 0xaa])
+        } else {
+            ([0x66, 0x74, 0x8a], [0x0d, 0x8f, 0x74])
+        };
+        let srgb = |rgb: [u8; 3], alpha: f64| -> id {
+            msg_send![class!(NSColor),
+                colorWithSRGBRed: (rgb[0] as f64) / 255.0
+                green: (rgb[1] as f64) / 255.0
+                blue: (rgb[2] as f64) / 255.0 alpha: alpha]
+        };
+        let ink_ns = srgb(ink_rgb, 1.0);
+        let accent_ns = srgb(accent_rgb, 1.0);
+        let faint_ns = srgb(accent_rgb, 0.28); // color-mix 28 %, the .loading-arc-lo recipe
+
         // Motion, not just words. A static line on an empty sheet reads as a dead
         // panel — reported that way on 2026-10-07, and again on 2026-10-08 with the
         // system spinner already in the code: a spinning NSProgressIndicator paints
@@ -555,9 +589,16 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
             size: NSSize { width: ring_side, height: ring_side },
         }];
         let _: () = msg_send![ring, setTag: BOOT_NOTE_TAG];
-        if boot_ring(ring, ring_side).is_err() {
+        // Attached before boot_ring runs: the ring asks its host for a backing
+        // layer, and a view already in the window's layer tree is the one state
+        // where that layer is guaranteed to exist. Its frame lands below.
+        let _: () = msg_send![content, addSubview: ring];
+        if let Err(step) = boot_ring(ring, ring_side, accent_ns, faint_ns) {
             // No ring beats a crash: the label still names the wait, and the page
-            // paints within seconds either way.
+            // paints within seconds either way. The refusal speaks now — build 155
+            // shipped a bare label because this branch was silent while the guard
+            // refused a selector no AppKit class answers.
+            crate::logging::info(&format!("panel: boot note ring refused at {step}"));
             let _: () = msg_send![ring, removeFromSuperview];
         }
 
@@ -575,11 +616,10 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
         }
         let clear: id = msg_send![class!(NSColor), clearColor];
         let _: () = msg_send![label, setBackgroundColor: clear];
-        // --accent: #30d9aa dark · #0d8f74 light. One teal for both, because the
-        // note only ever lives on the empty sheet, where either reads correctly.
-        let teal: id =
-            msg_send![class!(NSColor), colorWithSRGBRed: 0.19 green: 0.85 blue: 0.66 alpha: 1.0];
-        let _: () = msg_send![label, setTextColor: teal];
+        // --ink-3 for the words (the page's .loading-label colour), resolved by
+        // the settings pin above — the note and the card it hands over to speak
+        // one palette.
+        let _: () = msg_send![label, setTextColor: ink_ns];
         let font: id = msg_send![class!(NSFont), systemFontOfSize: 11.0];
         let _: () = msg_send![label, setFont: font];
         let _: () = msg_send![label, setTag: BOOT_NOTE_TAG];
@@ -608,7 +648,8 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
         let _: () = msg_send![label, setFrame: label_frame];
         // Last subviews, so they sit above the web view: the page is transparent
         // until it paints, and the note has to survive exactly that interval.
-        let _: () = msg_send![content, addSubview: ring];
+        // The ring is already attached (that order is its layer's birthright);
+        // the label lands on top of it here.
         let _: () = msg_send![content, addSubview: label];
     }
 }
@@ -617,6 +658,9 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
 /// and counter-rotated: outer 160° counter-clockwise in 1.3 s, inner 160° (offset
 /// half a turn) clockwise in 0.9 s — the same geometry and cadence as
 /// `.loading-arc-hi` / `.loading-arc-lo` in panel.css and the boot shell's copy.
+/// The stroke colours arrive resolved (`accent` full, `faint` at its 28 % mix —
+/// the palette lives beside the label in `set_boot_note`, so ring and words can
+/// never disagree).
 ///
 /// Every selector is asked before it is sent, and the first one this OS does not
 /// answer ends the attempt with its name: an unrecognized selector here would
@@ -624,7 +668,12 @@ fn set_boot_note(app: &AppHandle, text: Option<&str>) {
 /// app with no class name in the log. `NSBezierPath`'s `CGPath` is the young API in
 /// this list (macOS 14+), which is exactly the kind of thing not to assume.
 #[cfg(target_os = "macos")]
-unsafe fn boot_ring(host: tauri_nspanel::cocoa::base::id, side: f64) -> Result<(), &'static str> {
+unsafe fn boot_ring(
+    host: tauri_nspanel::cocoa::base::id,
+    side: f64,
+    accent: tauri_nspanel::cocoa::base::id,
+    faint: tauri_nspanel::cocoa::base::id,
+) -> Result<(), &'static str> {
     use std::ffi::c_char;
     use tauri_nspanel::cocoa::base::id;
     use tauri_nspanel::cocoa::foundation::{NSPoint, NSRect, NSSize};
@@ -667,9 +716,9 @@ unsafe fn boot_ring(host: tauri_nspanel::cocoa::base::id, side: f64) -> Result<(
     }
     need!(
         path_probe,
-        sel!(appendArcWithCenter:radius:startAngle:endAngle:) =>
-            "NSBezierPath.appendArcWithCenter:radius:startAngle:endAngle:",
-        sel!(CGColor) => "NSBezierPath.CGPath"
+        sel!(appendBezierPathWithArcWithCenter:radius:startAngle:endAngle:) =>
+            "NSBezierPath.appendBezierPathWithArcWithCenter:radius:startAngle:endAngle:",
+        sel!(CGPath) => "NSBezierPath.CGPath"
     );
     let shape_probe: id = msg_send![shape_class, layer];
     if shape_probe.is_null() {
@@ -695,11 +744,10 @@ unsafe fn boot_ring(host: tauri_nspanel::cocoa::base::id, side: f64) -> Result<(
         sel!(setRepeatCount:) => "CABasicAnimation.setRepeatCount:"
     );
 
-    let teal: id = msg_send![class!(NSColor), colorWithSRGBRed: 0.19 green: 0.85 blue: 0.66 alpha: 1.0];
-    let faint: id = msg_send![class!(NSColor), colorWithSRGBRed: 0.19 green: 0.85 blue: 0.66 alpha: 0.28];
     let clear: id = msg_send![class!(NSColor), clearColor];
-    need!(teal, sel!(CGColor) => "NSColor.CGColor");
-    let teal_cg: id = msg_send![teal, CGColor];
+    need!(accent, sel!(CGColor) => "NSColor.CGColor");
+    need!(faint, sel!(CGColor) => "NSColor.CGColor");
+    let accent_cg: id = msg_send![accent, CGColor];
     let faint_cg: id = msg_send![faint, CGColor];
     let clear_cg: id = msg_send![clear, CGColor];
 
@@ -710,13 +758,14 @@ unsafe fn boot_ring(host: tauri_nspanel::cocoa::base::id, side: f64) -> Result<(
     let arc = |radius: f64, from: f64, to: f64| -> id {
         let path: id = msg_send![path_class, bezierPath];
         let sweep = radius * scale;
-        let _: () = msg_send![path, appendArcWithCenter: center radius: sweep startAngle: from endAngle: to];
+        let _: () = msg_send![path,
+            appendBezierPathWithArcWithCenter: center radius: sweep startAngle: from endAngle: to];
         msg_send![path, CGPath]
     };
     let frame = NSRect { origin: NSPoint { x: 0.0, y: 0.0 }, size: NSSize { width: side, height: side } };
     let turn = std::f64::consts::TAU;
     for (cg_path, stroke, width, seconds, direction) in
-        [(arc(20.0, 20.0, 200.0), teal_cg, 4.0 * scale, 1.3, -turn), (arc(11.0, 200.0, 380.0), faint_cg, 3.5 * scale, 0.9, turn)]
+        [(arc(20.0, 20.0, 200.0), accent_cg, 4.0 * scale, 1.3, -turn), (arc(11.0, 200.0, 380.0), faint_cg, 3.5 * scale, 0.9, turn)]
     {
         if cg_path.is_null() {
             return Err("NSBezierPath.CGPath answered NULL");
@@ -925,11 +974,23 @@ mod boot_note_windows {
         GetClientRect(hwnd, &mut rc);
 
         // The opaque sheet the boot shows anyway: pure black under dark, pure
-        // white under light — the panel surface's own two colours.
-        let (bg, teal, faint) = if note.dark {
-            (0x0000_0000, 0x00A8_D931, 0x002F_3D0Eu32) // (49,217,168) and 28 % of it on black
+        // white under light — the panel surface's own two colours. The ring
+        // speaks --accent per theme; the words speak --ink-3 (#8a99ad dark ·
+        // #66748a light), the page's own .loading-label colour.
+        let (bg, teal, faint, ink) = if note.dark {
+            (
+                0x0000_0000,
+                0x00A8_D931, // (49,217,168)
+                0x002F_3D0E, // 28 % of it on black
+                0x00AD_998Au32, // (138,153,173)
+            )
         } else {
-            (0x00FF_FFFF, 0x0074_8F0D, 0x00E7_F4C5u32) // (13,143,116) and 28 % of it on white
+            (
+                0x00FF_FFFF,
+                0x0074_8F0D, // (13,143,116)
+                0x00E7_F4C5, // 28 % of it on white
+                0x008A_7466u32, // (102,116,138)
+            )
         };
         let brush = CreateSolidBrush(bg);
         FillRect(hdc, &rc, brush);
@@ -940,7 +1001,7 @@ mod boot_note_windows {
         let gap = 10.0 * s;
         let old_font = SelectObject(hdc, note.hfont as _);
         SetBkMode(hdc, TRANSPARENT as i32);
-        SetTextColor(hdc, teal);
+        SetTextColor(hdc, ink);
 
         let mut trc =
             RECT { left: (16.0 * s) as i32, top: 0, right: rc.right - (16.0 * s) as i32, bottom: 0 };
