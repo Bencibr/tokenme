@@ -26,3 +26,9 @@ apps/tokenme-bar/src-tauri/resources/collector/
 
 # global gitignore excludes apps/; the panel is product code, keep it here
 !apps/
+
+# internal working notes: deleted from history at the 2026-10-09 switch and
+# untracked on disk since (docs/internal/PUBLIC_DELIVERY.md, "the one-time switch")
+/AGENTS.md
+/docs/internal/
+/.bugx/
