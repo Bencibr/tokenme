@@ -111,10 +111,13 @@ pub fn toggle(app: &AppHandle, rect: Option<Rect>) {
 }
 
 pub fn show(app: &AppHandle, rect: Option<Rect>) {
+    crate::logging::info(&format!("panel: show requested (rect present: {})", rect.is_some()));
     if !accept_visibility_request(true) {
+        crate::logging::info("panel: show refused by the visibility debounce");
         return;
     }
     let Some(window) = app.get_webview_window(LABEL) else {
+        crate::logging::error("panel: show has no main window to reveal");
         return;
     };
     show_window(&window, rect.or_else(|| tray::last_rect(app)));
@@ -135,6 +138,7 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
         let _ = window.set_focusable(false);
     }
     anchor(window, rect);
+    let anchored_at = window.outer_position().ok();
     // Re-sync the native backing with the persisted theme on every open: a
     // theme switch the app missed (label typo'd away once) or an OS
     // appearance change while hidden otherwise leaves a stale layer under
@@ -142,6 +146,19 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     #[cfg(target_os = "macos")]
     apply_window_background(window.app_handle(), None);
     let _ = window.show();
+
+    #[cfg(target_os = "windows")]
+    {
+        let pos = window
+            .outer_position()
+            .map(|p| format!("{}x{}", p.x, p.y))
+            .unwrap_or_else(|_| "<err>".into());
+        let vis = window.is_visible().unwrap_or(false);
+        crate::logging::info(&format!(
+            "panel: show complete — anchored at {:?}, now at {pos}, visible={vis}",
+            anchored_at.map(|p| format!("{}x{}", p.x, p.y)),
+        ));
+    }
 
     // The panel is on screen before its page can paint, and on macOS the only
     // layer that can say something during that stretch is a native one.
@@ -763,14 +780,21 @@ fn windows_anchor_point(tray: Bounds, area: ScreenArea, size: (f64, f64)) -> (f6
 
 #[cfg(target_os = "windows")]
 fn anchor_windows(window: &WebviewWindow, rect: Option<&Rect>) -> bool {
+    // The anchor point for a tray-less open comes from the cursor, not from
+    // the window: a never-shown window answers no reliable position (measured:
+    // it sat at an off-screen OS default while tauri's monitor list came back
+    // empty, and both clamp paths no-op'd — the panel "opened" 1200 px past
+    // the screen edge), while GetCursorPos always knows where the user is,
+    // and a tray click leaves the cursor at the icon.
     let (x, y) = if let Some(rect) = rect {
         let (x, y) = rect_origin(rect);
         let (w, h) = rect_size(rect);
         (x + w / 2.0, y + h / 2.0)
-    } else if let Ok(pos) = window.outer_position() {
-        (pos.x as f64, pos.y as f64)
     } else {
-        return false;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut point = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+        unsafe { GetCursorPos(&mut point) };
+        (point.x as f64, point.y as f64)
     };
     let Some(area) = windows_screen_area(x, y) else {
         return false;
@@ -811,8 +835,8 @@ fn anchor_windows(window: &WebviewWindow, rect: Option<&Rect>) -> bool {
         };
         let (x, y) = windows_anchor_point(tray, area, size);
         let _ = window.set_position(PhysicalPosition::new(x, y));
-    } else if let Ok(pos) = window.outer_position() {
-        let (x, y) = clamp_in_bounds(pos.x as f64, pos.y as f64, size, area.work, GAP);
+    } else {
+        let (x, y) = clamp_in_bounds(x, y, size, area.work, GAP);
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
     true
