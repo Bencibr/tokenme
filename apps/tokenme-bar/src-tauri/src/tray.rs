@@ -260,10 +260,36 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(tauri::menu::Menu<tauri::Wry>, 
     Ok((menu, autostart))
 }
 
+/// The glyph at the size the tray actually paints. Explorer draws a tray icon
+/// at GetSystemMetrics(SM_CXSMICON) physical pixels (16 at 100% scaling, 20 at
+/// 125%, 24 at 150% ...), so the nearest pre-rendered size
+/// (scripts/gen-tray-icons.py, rendered from design/tray-icon.svg) ships
+/// sharp at every DPI — the 44px macOS menu-bar asset squashed down by
+/// Explorer broke the thin arcs into uneven strokes. Read once at startup:
+/// the tray lives on the primary display, and a mid-session scaling change
+/// costs a restart to re-pick.
+#[cfg(target_os = "windows")]
+fn tray_image() -> tauri::image::Image<'static> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+    match unsafe { GetSystemMetrics(SM_CXSMICON) } {
+        0..=17 => tauri::include_image!("icons/tray-icon-16.png"),
+        18..=21 => tauri::include_image!("icons/tray-icon-20.png"),
+        22..=25 => tauri::include_image!("icons/tray-icon-24.png"),
+        26..=29 => tauri::include_image!("icons/tray-icon-28.png"),
+        _ => tauri::include_image!("icons/tray-icon-32.png"),
+    }
+}
+
+/// macOS keeps the 44px menu-bar glyph — that is its native 22pt@2x size.
+#[cfg(not(target_os = "windows"))]
+fn tray_image() -> tauri::image::Image<'static> {
+    tauri::include_image!("icons/tray-icon.png")
+}
+
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let (menu, autostart) = build_menu(app)?;
     app.manage(MenuItems(std::sync::Mutex::new(Some(autostart))));
-    let icon = tauri::include_image!("icons/tray-icon.png");
+    let icon = tray_image();
     app.manage(TrayAssets(icon.clone()));
     // The builder already painted the icon for the startup mode's default;
     // seeding None makes the first publish apply the real mode's imagery.

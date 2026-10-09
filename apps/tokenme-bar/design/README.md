@@ -13,6 +13,11 @@ editor:
   `pathLength`, so the dasharrays collapse into eight dot segments and the
   glyph stops being the logo. A 22×22 bitmap also renders blurry on retina;
   44×44 is the size muda expects and it is sized correctly in the menu bar.
+  The Windows tray sizes (16/20/24/28/32, one per DPI step) come from this
+  same SVG through `scripts/gen-tray-icons.py`, which injects absolute
+  width/height into a temp copy per size — Edge lays an attribute-less SVG
+  document out as if the viewport were wider than the window and clips the
+  right side otherwise.
 
 The teal in `src/styles/theme.css` tracks this gradient: light mode uses the
 deep end `#0c7f6c`, dark mode the bright end `#2fc6a4`.
