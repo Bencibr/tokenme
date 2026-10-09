@@ -192,9 +192,6 @@ export function QuotaStrip({
   const [notify, setNotify] = useState<NotifyState | null>(null);
   const [dismissedFor, setDismissedFor] = useState<NotifyState | null>(readDismissed);
   const guideWatch = useRef<number | null>(null);
-  const [checkinBusy, setCheckinBusy] = useState(false);
-  const [checkinClaimed, setCheckinClaimed] = useState(false);
-  const [checkinMsg, setCheckinMsg] = useState<string | null>(null);
 
   const stopGuideWatch = () => {
     if (guideWatch.current !== null) {
@@ -561,16 +558,7 @@ export function QuotaStrip({
                 if (balance && !figureInPct) {
                   resetNode = figure;
                 } else if (q.resets_at_ms > 0) {
-                  const u = until(q.resets_at_ms, now);
-                  resetNode =
-                    typeof u === "string"
-                      ? u
-                      : u.map(([v, unit], i) => (
-                          <span className="rq" key={i}>
-                            <span className="rq-v">{v}</span>
-                            <span className="rq-u">{unit}</span>
-                          </span>
-                        ));
+                  resetNode = until(q.resets_at_ms, now);
                 } else {
                   // No countdown: a drawn bar, not the "—" glyph — the glyph's
                   // ink sits ~2px inside its advance width and read as an

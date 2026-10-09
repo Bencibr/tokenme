@@ -455,11 +455,20 @@ pub fn begin_bubble_drag(app: AppHandle) {
 /// forced claim right now — the automatic pass may already have tried and
 /// failed today; a manual click is the user asking again. Returns a
 /// user-facing message.
+#[derive(serde::Serialize)]
+pub struct CheckinResult {
+    pub ok: bool,
+    pub message: String,
+}
+
 #[tauri::command]
-pub async fn checkin_now(tool: String) -> Result<String, String> {
+pub async fn checkin_now(tool: String) -> Result<CheckinResult, String> {
     tokio::task::spawn_blocking(move || match tool.as_str() {
-        "trae_cn" => usage_quota::trae_manual_checkin(),
-        "qoder" => usage_quota::qoder_manual_checkin(),
+        "trae_cn" => usage_quota::trae_manual_checkin().map(|message| CheckinResult {
+            ok: message.starts_with("签到成功") || message == "今日已签到",
+            message,
+        }),
+        "qoder" => usage_quota::qoder_manual_checkin().map(|(ok, message)| CheckinResult { ok, message }),
         other => Err(format!("{other} 没有签到活动")),
     })
     .await

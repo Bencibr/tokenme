@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
 import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
-import type { Bridge, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
+import type { Bridge, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -90,9 +90,9 @@ export const bridge: Bridge = {
 
   /** The check-in button of a checkin-capable tool (Trae CN / Qoder): one
    *  forced claim right now. Returns a user-facing message. */
-  async checkinNow(tool: string): Promise<string> {
-    if (!inTauri) return "签到成功";
-    return invoke<string>("checkin_now", { tool });
+  async checkinNow(tool: string): Promise<CheckinResult> {
+    if (!inTauri) return { ok: true, message: "签到成功" };
+    return invoke<CheckinResult>("checkin_now", { tool });
   },
 
 

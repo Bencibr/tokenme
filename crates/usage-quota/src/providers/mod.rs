@@ -47,7 +47,7 @@ pub fn trae_manual_checkin() -> Result<String, String> {
     trae::manual_checkin()
 }
 /// The Qoder check-in button entry (see `qoder::qoder_manual_checkin`).
-pub fn qoder_manual_checkin() -> Result<String, String> {
+pub fn qoder_manual_checkin() -> Result<(bool, String), String> {
     qoder::qoder_manual_checkin()
 }
 pub use workbuddy::WorkBuddyQuota;
