@@ -314,6 +314,25 @@ impl QuotaProbe for TraeQuota {
     }
 }
 
+/// The strip's done-badge (`QuotaStrip.groupCheckedIn`) lights on any window id
+/// starting with `checkin`, and its contract reads that prefix as "claimed
+/// today". Trae's check-in credit packs keep the *grant* date in their
+/// entitlement id (`checkin_20261009_x`) and stay listed until they expire, so
+/// a pack from an earlier day would otherwise hold 今日已签到 on a day the user
+/// never claimed. Return the id verbatim only when a `checkin_YYYYMMDD…` stamp
+/// matches today; a stale one is re-labelled `pack_…` so the row still shows as
+/// the real credit gauge it is, but no longer speaks for today's check-in.
+fn today_scoped_checkin_id(id: &str) -> String {
+    let Some(stamp) = id.strip_prefix("checkin_") else {
+        return id.to_string();
+    };
+    let digits: String = stamp.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 8 && digits != chrono::Local::now().format("%Y%m%d").to_string() {
+        return format!("pack_{id}");
+    }
+    id.to_string()
+}
+
 /// The v2 credits answer, mapped: one summary bar for the account (total vs
 /// consumed — the numbers the subscription page shows), then one row per
 /// entitlement pack with its own spent side in the label
@@ -376,7 +395,7 @@ fn samples_from_ent_usage_v2(body: &Value) -> Vec<QuotaSample> {
                 .map(|s| (s * 1000.0) as i64)
                 .unwrap_or(0),
             label: Some(label),
-            id: Some(id.to_string()),
+            id: Some(today_scoped_checkin_id(id)),
         });
     }
     out
@@ -433,50 +452,60 @@ fn cn_credit_windows(login: &Login) -> Vec<QuotaSample> {
     };
     let mut out = Vec::new();
     for pack in list {
-        let base = pack.get("entitlement_base_info").unwrap_or(&Value::Null);
-        let limit = base.pointer("/quota/credits_limit").and_then(Value::as_f64);
-        let spent = pack
-            .pointer("/usage/credits_amount")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        // Validation only: a pack without a positive limit is not a quota row.
-        let Some(_limit) = limit.filter(|v| *v > 0.0) else {
-            continue;
-        };
-        let name = pack
-            .get("display_desc")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| "积分包".to_string());
-        let expires_ms = base
-            .get("end_time")
-            .and_then(Value::as_f64)
-            .map(|s| (s * 1000.0) as i64)
-            .unwrap_or(0);
-        // The checkin pack only exists for a claimed day — its presence is
-        // what lets the tool header wear the 已签到 badge. The label is the
-        // bare pack name: the gauge column already shows the spent share, and
-        // a long "已用 X/Y" tail both truncates and breaks the reset column's
-        // alignment across rows.
-        let _ = spent;
-        out.push(QuotaSample {
-            used_percent: 0.0,
-            window_minutes: 0,
-            resets_at_ms: expires_ms,
-            label: Some(name.clone()),
-            // Two anonymous packs must not share an id: the window identity is
-            // what keeps one pack's spent state from flapping with another's.
-            id: Some(
-                pack.get("entitlement_id")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("pack:{name}")),
-            ),
-        });
+        if let Some(sample) = cn_window_for_pack(pack) {
+            out.push(sample);
+        }
     }
     out
+}
+
+/// One CN entitlement-list pack, mapped without the transport: a pack with a
+/// positive `credits_limit` becomes a window for the panel; anything else (the
+/// free-plan record, a limit-less carrier) draws no row. Split out of
+/// [`cn_credit_windows`] so the gauge's spent side is testable without the
+/// live list call.
+fn cn_window_for_pack(pack: &Value) -> Option<QuotaSample> {
+    let base = pack.get("entitlement_base_info").unwrap_or(&Value::Null);
+    let limit = base
+        .pointer("/quota/credits_limit")
+        .and_then(Value::as_f64)
+        .filter(|v| *v > 0.0)?;
+    let spent = pack
+        .pointer("/usage/credits_amount")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let name = pack
+        .get("display_desc")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("积分包");
+    let expires_ms = base
+        .get("end_time")
+        .and_then(Value::as_f64)
+        .map(|s| (s * 1000.0) as i64)
+        .unwrap_or(0);
+    // The label stays the bare pack name (the "已用 X/Y" tail truncated and
+    // broke the reset column's alignment across rows), but the *gauge* carries
+    // the spent share — the same `/usage/credits_amount` the primary v2 path
+    // reads. It was parsed and thrown away here, leaving every window at 0 %.
+    Some(QuotaSample {
+        used_percent: (spent / limit * 100.0).clamp(0.0, 100.0),
+        window_minutes: 0,
+        resets_at_ms: expires_ms,
+        label: Some(name.to_string()),
+        // Two anonymous packs must not share an id (the window identity keeps
+        // one pack's spent state from flapping with another's), and a dated
+        // check-in id from an earlier day must not speak for today — the
+        // scoping demotes those to gauge-only rows.
+        id: Some(today_scoped_checkin_id(
+            &pack
+                .get("entitlement_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("pack:{name}")),
+        )),
+    })
 }
 
 // ---- CN daily check-in -----------------------------------------------------
@@ -834,13 +863,67 @@ mod tests {
     use super::*;
     use base64::Engine;
 
-    /// The v2 credits answer measured live 2026-10-09: a usage summary over the
-    /// account's total, packs with their own spent side (the monthly login
-    /// grant), and the checkin packs whose ids the strip's done-badge reads.
-    /// Hidden packs and the free-plan record (no credits limit, no usage —
-    /// nothing to meter) stay out.
+    /// The strip lights the header's 今日已签到 badge on any row whose id
+    /// starts with `checkin` (QuotaStrip `groupCheckedIn`), and its own comment
+    /// reads that prefix as "the backend stamped a claimed day". Trae's check-in
+    /// credit pack carries the *grant* date inside its entitlement id
+    /// (`checkin_20261009_x`) and lives for weeks, so a pack from an earlier
+    /// day must NOT still wear the prefix — otherwise the badge freezes on days
+    /// the user never claimed. Only a `checkin_YYYYMMDD` id stamped today may
+    /// keep the prefix; today's claim is still metered.
+    #[test]
+    fn a_checkin_pack_is_badged_only_for_the_day_it_was_granted() {
+        let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y%m%d");
+        let body = json!({"user_entitlement_pack_list": [
+            {"display_desc": "签到奖励(昨)", "entitlement_base_info": {
+                "entitlement_id": format!("checkin_{yesterday}_x"), "end_time": 4_102_444_800.0,
+                "quota": {"credits_limit": 100}}, "usage": {}},
+            {"display_desc": "签到奖励(今)", "entitlement_base_info": {
+                "entitlement_id": format!("checkin_{}", chrono::Local::now().format("%Y%m%d")),
+                "end_time": 4_102_444_800.0, "quota": {"credits_limit": 100}}, "usage": {}}
+        ]});
+        let out = samples_from_ent_usage_v2(&body);
+        assert_eq!(out.len(), 2);
+        assert!(
+            !out[0].id.as_deref().unwrap_or_default().starts_with("checkin"),
+            "a prior day's check-in pack must not wear the badge prefix, got {:?}",
+            out[0].id
+        );
+        assert!(
+            out[1].id.as_deref().unwrap_or_default().starts_with("checkin"),
+            "today's check-in claim keeps the badge, got {:?}",
+            out[1].id
+        );
+    }
+
+    /// The CN credits windows list maps each pack's real spent side onto the
+    /// gauge, not a forced zero: the request carries `require_usage` and the
+    /// primary v2 path reads the same `/usage/credits_amount` to draw the bar.
+    /// This path used to parse `spent`, drop it and hard-code 0 %, so every
+    /// pack here read empty however much the account had consumed.
+    #[test]
+    fn a_cn_credit_window_carries_its_spent_share() {
+        let pack = json!({
+            "display_desc": "每月登录赠送",
+            "entitlement_base_info": {"entitlement_id": "monthly_bonus_202610_x", "end_time": 1793462399, "quota": {"credits_limit": 500}},
+            "usage": {"credits_amount": 383.9872}
+        });
+        let sample = cn_window_for_pack(&pack).expect("a limited pack draws a row");
+        assert!((sample.used_percent - 76.8).abs() < 0.1, "the gauge shows the real spend, got {}", sample.used_percent);
+        assert_eq!(sample.label.as_deref(), Some("每月登录赠送"));
+        assert_eq!(sample.resets_at_ms, 1793462399000);
+        // No limit, no row (the free-plan record has nothing to meter).
+        assert!(cn_window_for_pack(&json!({"entitlement_base_info": {"quota": {}}, "usage": {}})).is_none());
+    }
+
+    /// A v2 entitlement list that carries the pack's own spent side is
+    /// reproduced verbatim by the mapper.
     #[test]
     fn the_v2_credits_answer_maps_summary_and_packs() {
+        // The check-in pack is stamped with *today* so this fixture keeps the
+        // `checkin` badge prefix (see `today_scoped_checkin_id`): a past-dated
+        // check-in pack is re-labelled so it cannot freeze the badge across days.
+        let checkin_id = format!("checkin_{}", chrono::Local::now().format("%Y%m%d"));
         let body = json!({
             "is_credits_billing": true,
             "usage_summary": {"consumed_amount": 383.99, "consumption_ratio": 0.0817, "total_amount": 4700},
@@ -852,7 +935,7 @@ mod tests {
                  "entitlement_base_info": {"entitlement_id": "monthly_bonus_202610_x", "end_time": 1793462399,
                    "quota": {"credits_limit": 500}}, "usage": {"credits_amount": 383.9872}},
                 {"display_desc": "签到奖励", "is_hide": false,
-                 "entitlement_base_info": {"entitlement_id": "checkin_20261009_x", "end_time": 1794153620,
+                 "entitlement_base_info": {"entitlement_id": checkin_id.as_str(), "end_time": 1794153620,
                    "quota": {"credits_limit": 100}}, "usage": {}},
                 {"display_desc": "隐藏包", "is_hide": true,
                  "entitlement_base_info": {"entitlement_id": "hidden", "quota": {"credits_limit": 9}}, "usage": {}},
@@ -866,7 +949,11 @@ mod tests {
         assert_eq!(out[0].id.as_deref(), Some("credits-summary"));
         assert!((out[0].used_percent - 8.17).abs() < 0.01, "{:?}", out[0].used_percent);
         assert_eq!(out[0].label.as_deref(), Some("积分 · 已用 384/4700"));
-        assert_eq!(out[3].id.as_deref(), Some("checkin_20261009_x"), "the checkin id survives for the badge");
+        assert_eq!(
+            out[3].id.as_deref(),
+            Some(checkin_id.as_str()),
+            "a check-in pack granted today keeps the `checkin` id for the badge"
+        );
         assert_eq!(out[1].label.as_deref(), Some("老用户福利 · 已用 0/4000"));
         assert_eq!(out[2].label.as_deref(), Some("每月登录赠送 · 已用 384/500"));
         assert!((out[2].used_percent - 76.8).abs() < 0.1, "{:?}", out[2].used_percent);
