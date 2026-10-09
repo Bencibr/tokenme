@@ -48,6 +48,15 @@ email=$(git config user.email || true)
   exit 1
 }
 
+echo "==> hero: banner follows the tree (version, tool count, pill layout, PNGs)"
+python scripts/update-hero.py
+if ! git diff --quiet -- assets/tokenme-hero-dark.svg assets/tokenme-hero-light.svg \
+                         assets/tokenme-hero-dark.png assets/tokenme-hero-light.png; then
+  git add assets/tokenme-hero-dark.svg assets/tokenme-hero-light.svg \
+          assets/tokenme-hero-dark.png assets/tokenme-hero-light.png
+  git commit --quiet -m "docs(hero): the banner follows the tree — version from Cargo.toml, tool count from TOOL_IDS, pill layout re-flowed, PNGs re-rendered at 2x"
+fi
+
 echo "==> gate: full-scope scan, every branch and tag"
 python scripts/scan-public.py
 
