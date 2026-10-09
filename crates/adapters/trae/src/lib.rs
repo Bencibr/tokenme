@@ -235,6 +235,13 @@ impl SourceAdapter for TraeAdapter {
 
 /// The completed, alive turns joined to their session's project and their two
 /// history rows (prompt sent / reply produced).
+///
+/// The history sides join a per-message aggregate, not the raw rows: the CN
+/// builds append a row per exchange for the same message id (measured 3–79
+/// rows on one session), and a plain join fans one turn out into that many
+/// events — identical after dedupe, so the totals survived while every pass
+/// burned the decrypt and inflated `deduped`. `MAX` is the same value
+/// grow-on-write would keep of the copies.
 const TURN_QUERY: &str = "\
 SELECT t.turn_id, t.created_at, t.context,
        hu.token_usage, ho.token_usage,
@@ -242,10 +249,12 @@ SELECT t.turn_id, t.created_at, t.context,
 FROM chat_turn t
 JOIN chat_session s ON s.session_id = t.session_id AND s.deleted_at = 0
 LEFT JOIN project p ON p.project_id = s.project_id
-LEFT JOIN history_v2 hu
-       ON hu.session_id = t.session_id AND hu.message_id = t.reply_to_message_id AND hu.deleted_at = 0
-LEFT JOIN history_v2 ho
-       ON ho.session_id = t.session_id AND ho.message_id = t.response_message_id AND ho.deleted_at = 0
+LEFT JOIN (SELECT session_id, message_id, MAX(token_usage) AS token_usage \
+           FROM history_v2 WHERE deleted_at = 0 GROUP BY session_id, message_id) hu
+       ON hu.session_id = t.session_id AND hu.message_id = t.reply_to_message_id
+LEFT JOIN (SELECT session_id, message_id, MAX(token_usage) AS token_usage \
+           FROM history_v2 WHERE deleted_at = 0 GROUP BY session_id, message_id) ho
+       ON ho.session_id = t.session_id AND ho.message_id = t.response_message_id
 WHERE t.deleted_at = 0 AND t.turn_status = 'completed'";
 
 /// What one pass over `chat_turn` saw, so the read can say "I looked at N
@@ -389,8 +398,13 @@ mod tests {
 
     /// The schema subset the adapter reads, in one fixture db: one session in
     /// a project, one completed turn with both history rows, plus a streaming
-    /// and a deleted turn that must stay out.
+    /// and a deleted turn that must stay out. `reply_rows` are extra token
+    /// values appended for the reply message — the CN builds write several.
     fn fixture_plain(turn_context: &str) -> Vec<u8> {
+        fixture_plain_with_reply_rows(turn_context, &[])
+    }
+
+    fn fixture_plain_with_reply_rows(turn_context: &str, reply_rows: &[i64]) -> Vec<u8> {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("plain.db");
         let conn = Connection::open(&db).unwrap();
@@ -411,6 +425,9 @@ mod tests {
              INSERT INTO history_v2 VALUES ('s1', 'm-bot', 29, 0);",
         )
         .unwrap();
+        for v in reply_rows {
+            conn.execute("INSERT INTO history_v2 VALUES ('s1', 'm-bot', ?1, 0)", [v]).unwrap();
+        }
         conn.execute("UPDATE chat_turn SET context = ?1 WHERE turn_id = 't1'", [turn_context])
             .unwrap();
         drop(conn);
@@ -461,6 +478,27 @@ mod tests {
         // Re-read re-emits the same key: the indexer replaces, never doubles.
         let again = adapter.read(&sources[0], ReadCursor(0)).unwrap();
         assert_eq!(again.events[0].dedupe_key, e.dedupe_key);
+        std::env::remove_var(ENV_TRAE_AGENT_DB);
+    }
+
+    /// The CN builds append one history row per exchange under the same
+    /// message id. The read must answer one event per turn at the largest
+    /// value, not one event per row — the fan-out a plain join produced.
+    #[test]
+    fn a_multi_row_history_message_yields_one_event_at_its_largest() {
+        let _env = crate::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let plain = fixture_plain_with_reply_rows("{}", &[150, 7, 150]);
+        let db = dir.path().join("database.db");
+        std::fs::write(&db, encrypt_image(&plain)).unwrap();
+        std::env::set_var(ENV_TRAE_AGENT_DB, &db);
+        let adapter = TraeAdapter::default();
+        let sources = adapter.discover(&DateFilter::default());
+        let out = adapter.read(&sources[0], ReadCursor(0)).unwrap();
+        assert_eq!(out.events.len(), 1, "one turn, not one history row: {:?}", out.events.len());
+        assert_eq!(out.events[0].counts.output, 150.0, "{:?}", out.events[0].counts);
+        let notes = usage_core::drain_read_notes();
+        assert!(notes.iter().any(|n| n.contains("1 turns read → 1 events")), "{notes:?}");
         std::env::remove_var(ENV_TRAE_AGENT_DB);
     }
 

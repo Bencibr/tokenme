@@ -18,6 +18,16 @@ function windowName(q: QuotaView): string {
   return q.window_minutes > 0 ? t("quota.win.min", { n: q.window_minutes }) : t("quota.win.unknown");
 }
 
+/** Tools whose quota probe owns a daily check-in: the group header grows the
+ *  badge/button for exactly these. */
+const CHECKIN_TOOLS = ["trae_cn", "qoder"];
+
+/** The check-in state rides the report as zero-window marker rows. They are
+ *  control channel, not data: the badge and the button read them off the raw
+ *  report, the row list never shows them. Trae's entitlement window
+ *  (`checkin_…`, a real gauge) is not one of these and stays visible. */
+const CHECKIN_STATE_IDS = ["checkin", "checkin-wait", "checkin-gated"];
+
 const ORIGIN_KEY: Record<string, Parameters<typeof t>[0]> = { probe: "quota.origin.probe", log: "quota.origin.log", budget: "quota.origin.budget" };
 const ORIGIN = (k: string): string => t(ORIGIN_KEY[k] ?? "quota.origin.probe");
 
@@ -116,7 +126,35 @@ export function QuotaStrip({
    *  answer and the section says when it was taken. */
   polling?: boolean;
 }) {
-  const live = quotas.filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now);
+  // The check-in marker rows are state, not data (CHECKIN_STATE_IDS): every
+  // count and row on screen reads this filtered list; the badge and button
+  // below read the raw report instead.
+  const live = quotas
+    .filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now)
+    .filter((q) => !CHECKIN_STATE_IDS.includes(q.id ?? ""));
+  // Trae CN / Qoder 的每日签到：状态按工具各管各的——busy/claimed/msg 都是
+  // 以工具 id 为键，点 Trae 的按钮不能把 Qoder 的按钮带成"签到中"，更不能把
+  // 另一个工具误标成已签。状态与点击都在这里，而不是配额分组之后——那一段
+  // 有早退（无窗口时），hooks 挪过去就会条件化调用，首次渲染即崩（白屏）。
+  const [checkinBusy, setCheckinBusy] = useState<string | null>(null);
+  const [checkinClaimed, setCheckinClaimed] = useState<Set<string>>(new Set());
+  const [checkinMsg, setCheckinMsg] = useState<Record<string, string | undefined>>({});
+  /** The backend stamps a claimed day into the checkin pack's window: its id
+   *  starts with "checkin" (Trae's entitlement row, Qoder's marker row) — the
+   *  wait row (`checkin-wait`, the day's window not open yet) and the gate row
+   *  (`checkin-gated`, Qoder's device-identity refusal) are not claims. These
+   *  read the raw report: the marker rows are filtered out of the visible
+   *  list, so a group's rendered rows cannot answer for them. */
+  const groupCheckedIn = (tool: string): boolean =>
+    quotas.some((q) => q.tool === tool && q.id?.startsWith("checkin") && q.id !== "checkin-wait" && q.id !== "checkin-gated");
+  /** The backend says this tool's day has not opened yet (Qoder 10:00): the
+   *  button greys and names the hour instead of claiming into the void. */
+  const checkinWaiting = (tool: string): boolean =>
+    quotas.some((q) => q.tool === tool && q.id === "checkin-wait");
+  /** The vendor refuses third-party claims for this row (Qoder's SAME_PERSON
+   *  device gate): the button greys and names the client that can claim it. */
+  const checkinGated = (tool: string): boolean =>
+    quotas.some((q) => q.tool === tool && q.id === "checkin-gated");
   const [order, setOrderState] = useState<QuotaOrder>(savedOrder);
   const [drag, setDrag] = useState<Drag | null>(null);
   // Click a truncated window label to read it whole: the native hover title
@@ -262,14 +300,6 @@ export function QuotaStrip({
     rows.push(q);
     byTool.set(q.tool, rows);
   }
-  /** The backend stamps a claimed day into the checkin pack's label; either
-   *  wording counts as done for today. */
-  const groupCheckedIn = (g: { tool: string; rows: QuotaView[] }): boolean =>
-    g.rows.some((r) => {
-      const label = r.label ?? "";
-      return label.includes(t("quota.checkin.mark.auto")) || label.includes(t("quota.checkin.mark.today"));
-    });
-
   const groups = ordered([...byTool.keys()], order.tools, (t) => t).map((tool) => ({
     tool,
     rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
@@ -441,37 +471,6 @@ export function QuotaStrip({
                 <ToolIcon tool={g.tool} size={18} />
                 <span className="quota-tool">{toolDisplay(g.tool)}</span>
                 {plan ? <span className="quota-plan">{plan}</span> : null}
-                {g.tool === "trae_cn" ? (
-                  <span className="quota-checkin">
-                    {groupCheckedIn(g) || checkinClaimed ? (
-                      <span className="checkin-badge">{t("quota.checkin.done")}</span>
-                    ) : (
-                      <button
-                        type="button"
-                        className="checkin-btn"
-                        disabled={checkinBusy}
-                        title={checkinMsg ?? undefined}
-                        onClick={async (e) => {
-                          // The head is a drag handle; the button must not
-                          // start a drag while it claims.
-                          e.stopPropagation();
-                          setCheckinBusy(true);
-                          try {
-                            const msg = await bridge.traeCnCheckinNow();
-                            setCheckinMsg(msg);
-                            setCheckinClaimed(true);
-                          } catch (err) {
-                            setCheckinMsg(String(err));
-                          } finally {
-                            setCheckinBusy(false);
-                          }
-                        }}
-                      >
-                        {checkinBusy ? t("quota.checkin.busy") : t("quota.checkin.btn")}
-                      </button>
-                    )}
-                  </span>
-                ) : null}
                 <span className="quota-origins">
                   {logged ? (
                     <span className="quota-badge" data-origin="log">
@@ -479,6 +478,51 @@ export function QuotaStrip({
                     </span>
                   ) : null}
                 </span>
+                {CHECKIN_TOOLS.includes(g.tool) ? (
+                  <span className="quota-checkin">
+                    {groupCheckedIn(g.tool) || checkinClaimed.has(g.tool) ? (
+                      <span className="checkin-badge">{t("quota.checkin.done")}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="checkin-btn"
+                        disabled={checkinBusy === g.tool || checkinWaiting(g.tool) || checkinGated(g.tool)}
+                        title={checkinMsg[g.tool]}
+                        onClick={async (e) => {
+                          // The head is a drag handle; the button must not
+                          // start a drag while it claims.
+                          e.stopPropagation();
+                          setCheckinBusy(g.tool);
+                          try {
+                            const { ok, message } = await bridge.checkinNow(g.tool);
+                            setCheckinMsg((m) => ({ ...m, [g.tool]: message }));
+                            // Only a real claim turns the button into the done
+                            // badge; a reason (未到签到时间, 排队中) flashes on
+                            // the button itself until the next sample refresh.
+                            if (ok) setCheckinClaimed((done) => new Set(done).add(g.tool));
+                            else
+                              window.setTimeout(
+                                () => setCheckinMsg((m) => ({ ...m, [g.tool]: undefined })),
+                                5000,
+                              );
+                          } catch (err) {
+                            setCheckinMsg((m) => ({ ...m, [g.tool]: String(err) }));
+                          } finally {
+                            setCheckinBusy((busy) => (busy === g.tool ? null : busy));
+                          }
+                        }}
+                      >
+                        {checkinBusy === g.tool
+                          ? t("quota.checkin.busy")
+                          : checkinGated(g.tool)
+                            ? t("quota.checkin.gated")
+                            : checkinWaiting(g.tool)
+                              ? t("quota.checkin.wait")
+                              : (checkinMsg[g.tool] ?? t("quota.checkin.btn"))}
+                      </button>
+                    )}
+                  </span>
+                ) : null}
               </div>
               {g.rows.map((q) => {
                 const pct = q.used_percent;
@@ -510,6 +554,30 @@ export function QuotaStrip({
                     ? (q.label ?? "").replace(new RegExp(`^${BALANCE_HEADS[balanceId].mark}\\s*`), "")
                     : null;
                 const mine = (q.origin ?? "probe") === "budget";
+                // The reset slot: value/unit pairs (see `until`) laid into the
+                // column's fixed sub-columns, or a plain string for the two
+                // non-grid shapes (a prepaid figure, the no-reset dash).
+                let resetNode: React.ReactNode;
+                if (balance && !figureInPct) {
+                  resetNode = figure;
+                } else if (q.resets_at_ms > 0) {
+                  const u = until(q.resets_at_ms, now);
+                  resetNode =
+                    typeof u === "string"
+                      ? u
+                      : u.map(([v, unit], i) => (
+                          <span className="rq" key={i}>
+                            <span className="rq-v">{v}</span>
+                            <span className="rq-u">{unit}</span>
+                          </span>
+                        ));
+                } else {
+                  // No countdown: a drawn bar, not the "—" glyph — the glyph's
+                  // ink sits ~2px inside its advance width and read as an
+                  // indent against the flush-right digits, however the cell
+                  // was aligned. An element's edge is exact by construction.
+                  resetNode = <span className="rq-dash" aria-label="无重置时间" />;
+                }
                 // The window name leads at full ink; a plan suffix the source
                 // appended ("5 小时 · GLM Coding Lite") follows dimmed, so ten
                 // rows of the same plan stop shouting it.
@@ -517,7 +585,11 @@ export function QuotaStrip({
                 const cut = label.indexOf(" · ");
                 const head = balance ? t(BALANCE_HEADS[balanceId].key) : cut === -1 ? label : label.slice(0, cut);
                 const tail = balance ? "" : cut === -1 ? "" : label.slice(cut);
-                const rowTail = tail === ` · ${plan}` ? "" : tail;
+                // 已用 X/Y tails (the credit packs' spent side) live in the
+                // tooltip only — rendered on every row they read as clutter
+                // the user already asked to remove; `title={label}` keeps them.
+                const rowTail =
+                    tail === ` · ${plan}` || tail.startsWith(" · 已用") ? "" : tail;
                 return (
                   <div
                     className="quota-row"
@@ -579,13 +651,7 @@ export function QuotaStrip({
                         <em>%</em>
                       </span>
                     )}
-                    <span className="quota-reset num">
-                      {balance && !figureInPct
-                        ? figure
-                        : q.resets_at_ms > 0
-                          ? until(q.resets_at_ms, now)
-                          : "—"}
-                    </span>
+                    <span className="quota-reset num">{resetNode}</span>
                   </div>
                 );
               })}

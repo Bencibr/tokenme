@@ -624,3 +624,95 @@ fn the_antigravity_reseed_drops_local_rows_and_keeps_merged_ones_once() {
         .unwrap();
     assert_eq!(back, 1, "the re-seed never runs twice");
 }
+
+/// The Trae split re-homes rows that were read from a CN edition's store back
+/// when they landed under `trae`. The trap the live index caught: a build that
+/// already re-read the CN store holds `trae_cn#<turn>` beside the old
+/// `trae#<turn>`, so a plain re-key of the old spelling dies on the unique
+/// dedupe index — the twins delete first, the rest re-home in place, and
+/// Windows source keys (backslashes) match too.
+#[test]
+fn the_trae_split_rehomes_cn_rows_without_colliding_on_twins() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:trae-split-1'", [])
+            .unwrap();
+        let ins = |id: i64, key: &str, source: &str| {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+                     VALUES(?1, 'trae', 10, 's', 'tokens', 100.0, ?2, ?3)",
+                    rusqlite::params![id, key, source],
+                )
+                .unwrap();
+        };
+        // Mis-filed CN row whose trae_cn twin already exists — the collision.
+        ins(1, "trae#tw", "/Users/x/Library/Application Support/Trae CN/ModularData/ai-agent/database.db");
+        idx.conn()
+            .execute(
+                "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+                 VALUES(2, 'trae_cn', 10, 's', 'tokens', 100.0, 'trae_cn#tw', \
+                     '/Users/x/Library/Application Support/Trae CN/ModularData/ai-agent/database.db')",
+                [],
+            )
+            .unwrap();
+        // The international store's own rows stay exactly as they are.
+        ins(3, "trae#intl", "/Users/x/Library/Application Support/Trae/ModularData/ai-agent/database.db");
+        // A Windows CN row re-homes too: its source key carries backslashes.
+        ins(4, "trae#win", "C:\\Users\\x\\AppData\\Roaming\\Trae CN\\ModularData\\ai-agent\\database.db");
+        idx.conn()
+            .execute(
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                 VALUES('2026-10-08', '', 'trae', 's', '', '', 'tokens', \
+                     0, 0, 100, 0, 0, 0, 1, 1, 10, 10)",
+                [],
+            )
+            .unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 'trae#tw'"),
+        0,
+        "the old-key twin is a pure duplicate and goes"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 'trae_cn#tw'"),
+        1,
+        "the split tool's own row survives"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 'trae#intl' AND tool = 'trae'"),
+        1,
+        "international rows are untouched"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 'trae_cn#win' AND tool = 'trae_cn'"),
+        1,
+        "a Windows-path CN row re-homes (instr, not a slash-pinned LIKE)"
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM event_rollup"), 0, "the rollup rebuilds lazily");
+    assert_eq!(idx.meta_value("repair:trae-split-1").unwrap().as_deref(), Some("1"));
+
+    // One-shot: rows written after the split survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+             VALUES(9, 'trae', 11, 's2', 'tokens', 7.0, 'trae#later', '/u/Trae/database.db')",
+            [],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM event WHERE dedupe_key = 'trae#later'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 1, "the split never runs twice");
+}

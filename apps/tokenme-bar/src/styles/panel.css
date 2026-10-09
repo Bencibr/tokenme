@@ -1164,6 +1164,10 @@
   min-width: 56px;
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
+  /* The formatter pads every countdown to one character grid (` 3h 23m`);
+   * default whitespace handling would trim the leading pad at line start and
+   * un-align the unit column again. */
+  white-space: pre;
 }
 
 /* The quota bar is a gauge, not a ranking, so it keeps a solid fill. */

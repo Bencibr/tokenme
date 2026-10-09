@@ -526,11 +526,30 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if split.is_none() {
+            // instr, not a slash-pinned LIKE: Windows source keys carry
+            // backslashes, and the split happened on those machines too.
+            // The new-key twins go first: a build that already re-read the CN
+            // store holds `trae_cn#<turn>` beside the old `trae#<turn>`, and
+            // re-keying the old spelling would hit the unique dedupe index —
+            // verified against a live index copy (UNIQUE constraint failed).
+            // Those rows are pure duplicates; the rest re-home in place.
+            const CN_STORE: &str = "(instr(source, 'Trae CN') > 0 OR instr(source, 'TRAE SOLO CN') > 0)";
+            let twin = format!(
+                "SELECT id FROM event e WHERE e.tool = 'trae' AND {CN_STORE} AND EXISTS \
+                 (SELECT 1 FROM event t WHERE t.tool = 'trae_cn' \
+                  AND t.dedupe_key = 'trae_cn#' || substr(e.dedupe_key, 6))"
+            );
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({twin})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({twin})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({twin})"), [])
+                .map_err(sql_err)?;
             conn.execute(
                 "UPDATE event SET tool = 'trae_cn', \
                      dedupe_key = 'trae_cn#' || substr(dedupe_key, 6) \
-                 WHERE tool = 'trae' \
-                   AND (source LIKE '%/Trae CN/%' OR source LIKE '%/TRAE SOLO CN/%')",
+                 WHERE tool = 'trae' AND (instr(source, 'Trae CN') > 0 \
+                   OR instr(source, 'TRAE SOLO CN') > 0)",
                 [],
             )
             .map_err(sql_err)?;

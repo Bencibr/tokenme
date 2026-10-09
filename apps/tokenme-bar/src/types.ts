@@ -337,7 +337,7 @@ export interface TrayState {
 }
 
 export interface Bridge {
-  traeCnCheckinNow: () => Promise<string>;
+  checkinNow: (tool: string) => Promise<string>;
   /** `window.__TAURI_INTERNALS__` present ⇒ real app; otherwise the dev fixture. */
   live: boolean;
   fetchReport: (force: boolean) => Promise<Report>;
