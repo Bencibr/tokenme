@@ -154,6 +154,11 @@ export function SettingsSheet({
     void bridge.setHostExitPause(on);
   };
 
+  const setAutoCheckin = (on: boolean) => {
+    patch((s) => ({ ...s, auto_checkin: on }));
+    void bridge.setAutoCheckin(on);
+  };
+
   /** The master switch also repaints the per-tool page: `polling` is the
    *  composed answer, and a page that kept showing green switches after the
    *  switch above went off would be a page of lies. */
@@ -470,6 +475,9 @@ export function SettingsSheet({
         {tab === "advanced" ? (
           <>
             {switchRow(t("set.polling"), t("set.polling.hint"), settings.quota_polling, setQuotaPolling)}
+            {/* Master off ⇒ no claim can fire at all, so the guarantee would be
+                a promise the app cannot keep; the row locks like set.pause does. */}
+            {switchRow(t("set.checkin"), t("set.checkin.hint"), settings.auto_checkin, setAutoCheckin, !settings.quota_polling)}
             {navRow("probe", t("set.perprobe"), t("set.perprobe.hint"), offCount ? t("set.perprobe.off", { n: offCount }) : t("set.perprobe.all"))}
             {switchRow(t("set.autostart"), null, settings.autostart, setAutostart)}
             {switchRow(t("set.autoupdate"), t("set.autoupdate.hint"), settings.auto_update_check, setAutoUpdateCheck)}

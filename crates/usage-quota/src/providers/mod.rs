@@ -43,11 +43,11 @@ pub use opencode::OpenCodeQuota;
 pub use qoder::QoderQuota;
 pub use trae::TraeQuota;
 /// The panel's check-in button entry (see `trae::manual_checkin`).
-pub fn trae_manual_checkin() -> Result<String, String> {
+pub fn trae_manual_checkin() -> Result<(bool, String), String> {
     trae::manual_checkin()
 }
 /// The Qoder check-in button entry (see `qoder::qoder_manual_checkin`).
-pub fn qoder_manual_checkin() -> Result<String, String> {
+pub fn qoder_manual_checkin() -> Result<(bool, String), String> {
     qoder::qoder_manual_checkin()
 }
 pub use workbuddy::WorkBuddyQuota;

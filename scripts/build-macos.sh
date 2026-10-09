@@ -26,10 +26,24 @@ command -v cargo >/dev/null || { echo "a Rust toolchain is required"; exit 1; }
 
 # The build id: bumped on every full build and printed, so "which build is
 # running" is one glance at the settings footer or the tray tooltip.
+#
+# It counts within one version: the companion BUILD_ID_VERSION file records
+# which version the counter belongs to, and a version bump (release.sh or a
+# hand edit) resets the counter to 0 — the new version's first build is 1.
+# The reset lives here rather than only in release.sh so a hand bump (the
+# 0.1.6 move never touched release.sh) self-heals on the next build too.
 BUILD_ID_FILE="$APP/src-tauri/BUILD_ID"
+BUILD_VERSION_FILE="$APP/src-tauri/BUILD_ID_VERSION"
+VERSION=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)".*/\1/p' "$APP/src-tauri/tauri.conf.json" | head -1)
+RECORDED_VERSION=$(cat "$BUILD_VERSION_FILE" 2>/dev/null || echo "$VERSION")
+if [[ "$RECORDED_VERSION" != "$VERSION" ]]; then
+    echo "==> version moved $RECORDED_VERSION -> $VERSION: build id resets"
+    echo 0 > "$BUILD_ID_FILE"
+    echo "$VERSION" > "$BUILD_VERSION_FILE"
+fi
 BUILD=$(( $(cat "$BUILD_ID_FILE" 2>/dev/null || echo 0) + 1 ))
 echo "$BUILD" > "$BUILD_ID_FILE"
-echo "==> tokenme build id: $BUILD"
+echo "==> tokenme build id: $BUILD (v$VERSION)"
 T0=$SECONDS
 
 # A stale dist/ would be bundled silently, so build it here rather than trusting it.

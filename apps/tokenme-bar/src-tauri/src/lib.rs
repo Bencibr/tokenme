@@ -70,6 +70,7 @@ pub fn run() {
             updater::get_auto_update_check,
             updater::set_auto_update_check,
             commands::set_host_exit_pause,
+            commands::set_auto_checkin,
             commands::set_quota_polling,
             commands::set_tool_polling,
             commands::probe_tools,

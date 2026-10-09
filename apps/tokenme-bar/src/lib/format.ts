@@ -182,17 +182,21 @@ export function clockStamp(ms: number, nowMs: number): string {
   return localDate(ms) === localDate(nowMs) ? time : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
 }
 
-/** "in 3h 12m" style countdown, dropping the unit pair that adds no information. */
-export function until(resetsAtMs: number, nowMs: number): string {
+/** The reset column's countdown as value/unit pairs — `4h 21m` answers as
+ *  `[["4","h"],["21","m"]]` — so the column lays units out on their own fixed
+ *  columns and a growing value eats its own pad, never a neighbour's position
+ *  ("15d" against "4h" keeps `d` and `h` on one line regardless of digit count).
+ *  A bare string only for the non-grid answer (`until.soon`). */
+export function until(resetsAtMs: number, nowMs: number): string | [string, string][] {
   const diff = resetsAtMs - nowMs;
   if (diff <= 0) return t("until.soon");
   const totalMin = Math.floor(diff / 60_000);
   const days = Math.floor(totalMin / 1440);
   const hours = Math.floor((totalMin % 1440) / 60);
   const min = totalMin % 60;
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${String(min).padStart(2, "0")}m`;
-  return `${min}m`;
+  if (days > 0) return [[String(days), "d"], [String(hours).padStart(2, "0"), "h"]];
+  if (hours > 0) return [[String(hours), "h"], [String(min).padStart(2, "0"), "m"]];
+  return [[String(min), "m"]];
 }
 
 export const PERIOD_LABEL: Record<PeriodKey, string> = {

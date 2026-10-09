@@ -631,12 +631,20 @@ fn persist(
     }
     // A full-rescan source whose changed store now reads as nothing used to be
     // invisible: dedupe swallows nothing because nothing arrived, the cursor
-    // records a clean read, and every later pass agrees. Name it.
+    // records a clean read, and every later pass agrees. Name it — but at most
+    // once an hour per source: a busy store whose writes legitimately touch
+    // non-usage tables (an IDE's own state database) changes on every pass,
+    // and the note must not become the log's main content.
     if events.is_empty() && error.is_none() && full_rescan && prev_events > 0 {
-        acc.notes.push(format!(
-            "{tool}: {key} changed but read emitted 0 events (previous cursor held {prev_events}) — \
-             a failed decrypt or query would look exactly like this"
-        ));
+        let now = std::time::Instant::now();
+        let fresh = idx.note_gate.get(&key).is_none_or(|t| now.duration_since(*t).as_secs() >= 3600);
+        if fresh {
+            idx.note_gate.insert(key.clone(), now);
+            acc.notes.push(format!(
+                "{tool}: {key} changed but read emitted 0 events (previous cursor held {prev_events}) — \
+                 a failed decrypt or query would look exactly like this"
+            ));
+        }
     }
     // Read before the transaction: `Transaction` holds `&mut Connection`.
     let claim = idx.claim_value();

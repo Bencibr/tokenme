@@ -146,6 +146,15 @@ pub struct Settings {
     /// account traffic. Default on; the last known answer stays on screen.
     #[serde(default = "default_host_exit_pause")]
     pub host_exit_pause: bool,
+    /// The daily check-in guarantee for the tools that own a claim (Trae CN,
+    /// Qoder): on, the host-exit pause stops applying to them — a claim is an
+    /// HTTPS call against the account, not a read of the host's state, so a
+    /// closed IDE is no reason to miss a day, and their rows stay live in the
+    /// strip. Off keeps the opportunistic claim: it fires only while the host
+    /// runs. The master switch and the per-tool switches stand above this
+    /// either way.
+    #[serde(default)]
+    pub auto_checkin: bool,
     /// The master switch for vendor quota polling. Off means one request fewer:
     /// no HTTP, and no `gh` / `agy` child process (the Windows console-flash
     /// family of side effects dies here too). The quota section keeps its last
@@ -188,6 +197,7 @@ impl Default for Settings {
             show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
             host_exit_pause: default_host_exit_pause(),
+            auto_checkin: false,
             quota_polling: default_quota_polling(),
             quota_probes_off: Vec::new(),
             notify_tiers: NotifyTier::default(),
@@ -252,6 +262,16 @@ mod tests {
         assert!(s.quota_probes_off.is_empty());
         assert_eq!(s.notify_tiers, NotifyTier::Both);
         assert!(s.notify_muted.is_empty());
+        assert!(!s.auto_checkin, "the guarantee is opt-in, never implied by an old file");
+    }
+
+    /// The auto check-in guarantee widens what leaves the machine — claims
+    /// fire with the host closed — so only an explicit `true` turns it on.
+    #[test]
+    fn the_auto_checkin_guarantee_is_opt_in() {
+        assert!(!Settings::default().auto_checkin);
+        let on: Settings = serde_json::from_str(r#"{"auto_checkin":true}"#).unwrap();
+        assert!(on.auto_checkin);
     }
 
     #[test]

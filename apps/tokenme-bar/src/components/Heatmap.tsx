@@ -82,7 +82,7 @@ function monthMarkers(weeks: HeatCell[][]) {
   return out;
 }
 
-export function Heatmap({ cells, today, hours, period }: { cells: HeatCell[]; today: string; hours: HourCell[]; period: PeriodKey }) {
+export function Heatmap({ cells = [], today, hours = [], period }: { cells: HeatCell[]; today: string; hours?: HourCell[]; period: PeriodKey }) {
   const [hover, setHover] = useState<HeatCell | null>(null);
   const [hoverHour, setHoverHour] = useState<number | null>(null);
   const [hoverBar, setHoverBar] = useState<Bar | null>(null);

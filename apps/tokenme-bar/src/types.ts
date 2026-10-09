@@ -337,7 +337,7 @@ export interface TrayState {
 }
 
 export interface Bridge {
-  checkinNow: (tool: string) => Promise<string>;
+  checkinNow: (tool: string) => Promise<{ ok: boolean; message: string }>;
   /** `window.__TAURI_INTERNALS__` present ⇒ real app; otherwise the dev fixture. */
   live: boolean;
   fetchReport: (force: boolean) => Promise<Report>;
@@ -377,6 +377,9 @@ export interface Bridge {
   setShowEmptyTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setHostExitPause: (on: boolean) => Promise<void>;
+  /** On, the host-exit pause stops applying to the check-in tools, so their
+   *  daily claim fires and their rows stay live with the host app closed. */
+  setAutoCheckin: (on: boolean) => Promise<void>;
   /** The master switch: off, the engine asks no vendor for anything. */
   setQuotaPolling: (on: boolean) => Promise<void>;
   /** One probe's own switch — the only lever with no host mapping. */
@@ -432,6 +435,9 @@ export interface PanelSettings {
   show_empty_tools: boolean;
   bubble_enabled: boolean;
   host_exit_pause: boolean;
+  /** The check-in guarantee: on, Trae CN / Qoder keep being probed — and
+   *  claimed — while their host app is closed. */
+  auto_checkin: boolean;
   /** The master switch: off, not one vendor request leaves the process. */
   quota_polling: boolean;
   /** Tools the user stopped by hand — the only lever for probes with no host. */

@@ -519,24 +519,45 @@ pub(crate) fn samples_from_snapshot(value: &Value) -> Vec<QuotaSample> {
 // lines and replayed by hand: the list header is `Cosy-ClientType` — NO dash;
 // the dashed `cosy-client-type` the community claimers pass is an unknown
 // client to the server, which answers an EMPTY list for it. Only
-// `CLAIM_BENEFIT` rows still in `CLAIMABLE` are worth a claim (POST
-// .../{id}/claim, empty body; `data.status == "CLAIMED"` is the success the
-// client itself checks). What a third party CANNOT do is win the daily
-// credits row: the claim route resolves the request through the vendor's
-// device-identity service and answers 503 SAME_PERSON_DEPENDENCY_UNAVAILABLE
-// without the native `Cosy-Machine*` fingerprint the running client mints
-// in-process (measured live 2026-10-09, with and without forged headers) —
-// the daily claim belongs to the Qoder client, which pops its own activity
-// surface at 10:00 (source "automatic" in the same log). So tokenme reports
-// the state honestly: CLAIMED rows mark the day 已签到, a claimable row we
-// cannot claim sets `claim_gated` (marker row + button label point at the
-// client), an empty list is `no_campaign` (the day stays open), and only a
-// claim lost to anything else reads as 签到未成功.
+// `CLAIM_BENEFIT` rows still in `CLAIMABLE` are worth a claim, POSTed to
+// `.../{campaignId}/claim` (the UUID). The answer body is FLAT — `status` at
+// the top level; the `data.status` an earlier reader trusted is the client's
+// own postMessage RPC envelope and never appears on HTTP (measured
+// 2026-10-09, when this machine claimed live: the first two attempts answered
+// 200 `BLOCKED`/`RISK_BLOCKED` — the grant record is created on the first
+// attempt and `claimedAt` sticks — and a 76 s retry answered `CLAIMED` with
+// the row flipped, so BLOCKED is a retry-later risk gate, never a verdict).
+// The claim route resolves the request through the
+// vendor's device-identity service and refuses a bare request with 503
+// SAME_PERSON_DEPENDENCY_UNAVAILABLE — forged machine headers fare no better
+// (measured 2026-10-09) — so the claim goes out with the client's own
+// identity: the persistent machine UUID from the app's `auth.machine-id` plus
+// `Cosy-Machine{Token,Type,Code}` from the app's own UMID bridge, minted
+// lazily (see [`QoderClaimIdentity`]). The same identity also gates what the
+// list itself *shows*: two GETs a second apart, identical but for the
+// Cosy-Machine* set (measured 2026-10-09 13:56), and the bare one hid the
+// day's row entirely while the identity one listed it CLAIMABLE — so a bare
+// answer is trusted for what it shows, never for what it omits, and a bare
+// list with nothing claimable is re-asked with the minted identity before
+// the day is read as closed or empty. Without the app on disk the claim
+// falls back to the bare request, and that refusal reads as `claim_gated` —
+// only it: a 200-BLOCKED row keeps retrying, because measured retries win.
+// So tokenme reports the state honestly: CLAIMED rows mark the day 已签到,
+// a claimable row the device gate refuses sets `claim_gated` (marker row +
+// button label point at the client; recorded for the day so the auto pass
+// stops re-POSTing the refused request), an empty list is `no_campaign`
+// (the day stays open), and only a claim lost to anything else reads as
+// 签到未成功.
 
 const CAMPAIGNS_PATH: &str = "/sash/api/v1/me/campaigns";
 const CHECKIN_BASES: [&str; 2] = ["https://openapi.qoder.sh", "https://openapi.qoder.com.cn"];
+/// How long one minted machine identity stays fresh. The client itself keeps
+/// its spawn result for an hour; 30 minutes matches what the community
+/// bridges field-verified as "briefly stale is still accepted".
+const IDENTITY_TTL_MS: i64 = 30 * 60 * 1000;
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct QoderCheckinState {
     /// Local day of the last attempt — successful or not. The once-a-day lock.
     last_attempt_day: String,
@@ -544,6 +565,11 @@ struct QoderCheckinState {
     last_ok_day: String,
     /// Credits the last successful claim paid out.
     last_credits: f64,
+    /// Local day a claim last hit the SAME_PERSON device gate. The auto pass
+    /// skips the POST for the rest of that day — retrying the same refused
+    /// request is what probes into a rate limit — and reports `claim_gated`
+    /// off this record; a manual click still tries again.
+    last_gated_day: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -560,8 +586,11 @@ struct QoderCheckinOutcome {
     /// an error: the day stays open in case a campaign opens later.
     no_campaign: bool,
     /// A CLAIMABLE row exists but the claim POST was refused by the vendor's
-    /// device-identity gate (503 SAME_PERSON_DEPENDENCY_UNAVAILABLE): only the
-    /// Qoder client can mint that fingerprint, so the UI points there.
+    /// device-identity gate (503 SAME_PERSON_DEPENDENCY_UNAVAILABLE) with
+    /// whatever identity this machine could mint — the app's own bridge when
+    /// the app is installed — so the UI points there. Recorded for the day:
+    /// the auto pass stops re-POSTing the refused request until the record
+    /// falls off, and a manual click forces past it.
     claim_gated: bool,
     /// A claim was attempted and lost to anything else (transport, other 5xx,
     /// business refusal): the plain retry-later failure.
@@ -617,9 +646,44 @@ fn claimable_campaigns(body: &Value) -> Vec<(String, f64)> {
         .unwrap_or_default()
 }
 
-fn checkin_campaigns(base: &str, token: &str) -> Option<Value> {
+/// Whether today's benefit is already paid: at least one `CLAIM_BENEFIT` row
+/// whose window started today (the daily campaign refreshes at 10:00 local,
+/// yesterday's row lingers claimed until 09:59), with every such row
+/// `CLAIMED`. A row that is missing proves nothing — measured 2026-10-09 the
+/// vendor drops today's row for minutes and answers CLAIMABLE again — and
+/// `VIEW_DETAILS` placements sit CLAIMED all their life and prove nothing.
+fn today_benefits_all_claimed(body: &Value) -> bool {
+    let Some(rows) = body.get("campaigns").and_then(Value::as_array) else { return false };
+    let today = chrono::Local::now().date_naive();
+    let mut any_today = false;
+    for r in rows {
+        if r.get("actionType").and_then(Value::as_str) != Some("CLAIM_BENEFIT") {
+            continue;
+        }
+        let started_today = r
+            .get("startAt")
+            .and_then(Value::as_i64)
+            .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+            .map(|dt| dt.with_timezone(&chrono::Local).date_naive() == today)
+            .unwrap_or(false);
+        if !started_today {
+            continue;
+        }
+        any_today = true;
+        if r.get("claimStatus").and_then(Value::as_str) != Some("CLAIMED") {
+            return false;
+        }
+    }
+    any_today
+}
+
+/// The campaigns list. The Cosy-Machine* set is not just the claim's
+/// prerequisite: the same GET answers a *different list* with and without it
+/// (the identity-gated visibility measured 2026-10-09 13:56), so only an
+/// identity-bearing read may be believed about an omission.
+fn checkin_campaigns(base: &str, token: &str, ident: Option<&QoderClaimIdentity>) -> Option<Value> {
     let url = format!("{base}{CAMPAIGNS_PATH}");
-    let resp = ureq::AgentBuilder::new()
+    let mut req = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()
@@ -628,29 +692,253 @@ fn checkin_campaigns(base: &str, token: &str) -> Option<Value> {
         .set("Cosy-ClientType", "10")
         .set("Cosy-Version", "0.4.3")
         .set("user-agent", "Qoder")
-        .set("accept", "application/json")
-        .call()
-        .ok()?;
+        .set("accept", "application/json");
+    if let Some(ident) = ident {
+        req = with_machine_headers(req, ident);
+    }
+    let resp = req.call().ok()?;
     resp.into_string().ok().and_then(|t| serde_json::from_str(&t).ok())
 }
 
-/// One claim answer from wire shape: `(claimed, credits, gated)`. A 503 with
-/// the SAME_PERSON error is the vendor's device-identity gate — measured live
-/// 2026-10-09 with and without forged machine headers, always the same refusal
-/// — not a transient outage, so it reads as "claim in the client", not "retry".
+/// The machine identity the claim route resolves the request through. The
+/// desktop client mints it in-process before every campaigns call: a
+/// persistent UUID it keeps in `auth.machine-id`, plus `machineToken/type/code`
+/// from the UMID security SDK's native bridge the app ships
+/// (`resources/umid/runtime-info`, the Alibaba device-identity half). The
+/// server's `SAME_PERSON` check refuses everything without this set — forged
+/// values included (measured 2026-10-09) — so tokenme runs the app's own
+/// bridge instead of imitating it (cross-checked against the open-source
+/// claimers: mmqz/cpa-multi-plugins, shuishuipingan/qoder2api-hub,
+/// HUIdada1/AgentHub, yetone/magpie).
+#[derive(Clone)]
+struct QoderClaimIdentity {
+    machine_id: String,
+    machine_os: String,
+    hostname: Option<String>,
+    identity: QoderMachineIdentity,
+}
+
+/// The bridge's stdout shape. Extra keys (`vmInfo`, `accountOutcome`) are the
+/// SDK's own and stay ignored.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct QoderMachineIdentity {
+    #[serde(rename = "machineToken")]
+    token: String,
+    #[serde(rename = "machineType")]
+    kind: String,
+    #[serde(rename = "machineCode")]
+    code: String,
+}
+
+/// One bridge answer parsed and complete, or nothing: the server filters a
+/// malformed identity set the same as no set at all, so a partial one is
+/// never worth sending.
+fn parse_machine_identity(out: &str) -> Option<QoderMachineIdentity> {
+    let id: QoderMachineIdentity = serde_json::from_str(out).ok()?;
+    (!id.token.is_empty() && !id.kind.is_empty() && !id.code.is_empty()).then_some(id)
+}
+
+#[cfg(target_os = "macos")]
+fn umid_candidates() -> Vec<std::path::PathBuf> {
+    let rel = "Contents/Resources/umid/runtime-info";
+    let mut out: Vec<_> = ["/Applications/Qoder.app"].iter().map(|r| std::path::Path::new(r).join(rel)).collect();
+    if let Some(home) = dirs::home_dir() {
+        out.push(home.join("Applications").join("Qoder.app").join(rel));
+    }
+    out
+}
+
+#[cfg(windows)]
+fn umid_candidates() -> Vec<std::path::PathBuf> {
+    let rel = "resources\\umid\\runtime-info.exe";
+    let mut out = Vec::new();
+    if let Some(p) = std::env::var_os("LOCALAPPDATA") {
+        out.push(std::path::PathBuf::from(p).join("Programs").join("Qoder").join(rel));
+    }
+    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(p) = std::env::var_os(var) {
+            out.push(std::path::PathBuf::from(p).join("Qoder").join(rel));
+        }
+    }
+    out
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn umid_candidates() -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
+/// The app's own bridge binary; `TOKENME_QODER_UMID_BIN` overrides discovery
+/// (tests), and a missing app just means no identity — never a mock one.
+fn umid_binary() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("TOKENME_QODER_UMID_BIN").map(std::path::PathBuf::from) {
+        return p.is_file().then_some(p);
+    }
+    umid_candidates().into_iter().find(|p| p.is_file())
+}
+
+/// One bridge run (3.1 s measured on this machine): `runtime-info prod
+/// --account-stdin` with `{"account": uid}` on stdin answers the machine-level
+/// identity — identical across account ids on one host. The child is killed
+/// at 25 s; a killed or malformed run mints nothing and the claim falls back
+/// to the gated path.
+fn bridge_identity(uid: &str) -> Option<QoderMachineIdentity> {
+    use std::io::{Read, Write};
+    let exe = umid_binary()?;
+    #[cfg(any(windows, target_os = "macos"))]
+    const ACCOUNT_STDIN: bool = true;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    const ACCOUNT_STDIN: bool = false;
+    let args: &[&str] = if ACCOUNT_STDIN { &["prod", "--account-stdin"] } else { &["prod"] };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
+    {
+        let mut stdin = child.stdin.take()?;
+        if ACCOUNT_STDIN {
+            let _ = stdin.write_all(serde_json::json!({ "account": uid }).to_string().as_bytes());
+        }
+        // Dropping stdin closes the pipe; the bridge reads to EOF.
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    parse_machine_identity(&out)
+}
+
+/// Minted identities are machine-level and accepted briefly stale, so one
+/// process keeps the last answer instead of paying a native run per poll.
+/// Losing the cache to a restart just mints once more.
+static MACHINE_IDENTITY: std::sync::Mutex<Option<(i64, QoderMachineIdentity)>> =
+    std::sync::Mutex::new(None);
+
+fn machine_identity(uid: &str) -> Option<QoderMachineIdentity> {
+    let now = chrono::Local::now().timestamp_millis();
+    let mut cache = MACHINE_IDENTITY.lock().ok()?;
+    if let Some((at, id)) = cache.as_ref() {
+        if now - at < IDENTITY_TTL_MS {
+            return Some(id.clone());
+        }
+    }
+    let id = bridge_identity(uid)?;
+    *cache = Some((now, id.clone()));
+    Some(id)
+}
+
+/// The persistent machine UUID the app writes once. Read only: creating one
+/// here would mint a device identity the real client would then adopt — a
+/// decision that belongs to the app, not this probe.
+fn machine_id_file() -> Option<String> {
+    app_dirs()
+        .iter()
+        .map(|d| d.join("auth.machine-id"))
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// The client's `Cosy-MachineOS` spelling (arch_os; the server checks the
+/// header for presence, and the community cross-check spans "aarch64_darwin"
+/// and "x86_64_win32").
+fn machine_os() -> String {
+    let arch = match std::env::consts::ARCH {
+        "arm64" | "aarch64" => "aarch64",
+        other => other,
+    };
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    format!("{arch}_{os}")
+}
+
+#[cfg(windows)]
+fn machine_hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty())
+}
+
+#[cfg(unix)]
+fn machine_hostname() -> Option<String> {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+}
+
+/// Assemble the full set the claim adds beyond the bearer, or nothing when a
+/// half is missing (no app, no bridge answer, no machine id): the claim then
+/// goes out bare and the vendor's answer decides the outcome as before.
+fn claim_identity(uid: &str) -> Option<QoderClaimIdentity> {
+    Some(QoderClaimIdentity {
+        machine_id: machine_id_file()?,
+        machine_os: machine_os(),
+        hostname: machine_hostname(),
+        identity: machine_identity(uid)?,
+    })
+}
+
+/// One claim answer from wire shape: `(claimed, credits, gated)`. The body is
+/// flat — `status` and `benefit` at the top level; the `{requestId,status,
+/// data}` wrapper lives only in the client's own postMessage RPC and an
+/// earlier reader built from that envelope read every real answer as
+/// "unclaimed" (measured live 2026-10-09). A 503 with the SAME_PERSON error
+/// is the vendor's device-identity gate — measured live it refuses every
+/// identity set this machine can mint without the client app — so it reads as
+/// "claim in the client", not "retry". A 200 whose status is BLOCKED
+/// (failureCode RISK_BLOCKED) is the risk gate on the grant, not a verdict:
+/// measured live the same request answered CLAIMED 76 s later, so it falls
+/// through to the retry-later failure.
 fn claim_answer(status: u16, body: &Value) -> (bool, f64, bool) {
-    let claimed = body.pointer("/data/status").and_then(Value::as_str) == Some("CLAIMED");
-    let credits = body.pointer("/data/benefit/amount").and_then(Value::as_f64).unwrap_or(0.0);
+    let claimed = body.get("status").and_then(Value::as_str) == Some("CLAIMED");
+    let credits = body.pointer("/benefit/amount").and_then(Value::as_f64).unwrap_or(0.0);
     let gated = status == 503
         && body.get("errorCode").and_then(Value::as_str).is_some_and(|c| c.contains("SAME_PERSON"));
     (claimed, credits, gated)
 }
 
-fn checkin_claim(base: &str, token: &str, campaign: &str) -> Option<(bool, f64, bool)> {
+/// The Cosy-Machine* set the client sends once it has minted an identity:
+/// both the claim's SAME_PERSON resolution and the list's visibility read it.
+fn with_machine_headers(req: ureq::Request, ident: &QoderClaimIdentity) -> ureq::Request {
+    let req = req
+        .set("Cosy-MachineId", &ident.machine_id)
+        .set("Cosy-MachineOS", &ident.machine_os)
+        .set("Cosy-MachineToken", &ident.identity.token)
+        .set("Cosy-MachineType", &ident.identity.kind)
+        .set("Cosy-MachineCode", &ident.identity.code);
+    match &ident.hostname {
+        Some(h) => req.set("Cosy-MachineHostname", h),
+        None => req,
+    }
+}
+
+fn checkin_claim(base: &str, token: &str, campaign: &str, ident: Option<&QoderClaimIdentity>) -> Option<(bool, f64, bool)> {
     let url = format!("{base}{CAMPAIGNS_PATH}/{campaign}/claim");
-    // ureq answers non-2xx as Err(Status(code, resp)); the gate is a 503, so
-    // the response body must survive the error path to be recognized.
-    let answer = match ureq::AgentBuilder::new()
+    let mut req = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()
@@ -659,9 +947,13 @@ fn checkin_claim(base: &str, token: &str, campaign: &str) -> Option<(bool, f64, 
         .set("Cosy-ClientType", "10")
         .set("Cosy-Version", "0.4.3")
         .set("user-agent", "Qoder")
-        .set("accept", "application/json")
-        .send_string("")
-    {
+        .set("accept", "application/json");
+    if let Some(ident) = ident {
+        req = with_machine_headers(req, ident);
+    }
+    // ureq answers non-2xx as Err(Status(code, resp)); the gate is a 503, so
+    // the response body must survive the error path to be recognized.
+    let answer = match req.send_string("") {
         Ok(resp) => Some(resp),
         Err(ureq::Error::Status(_, resp)) => Some(resp),
         Err(_) => None,
@@ -696,8 +988,8 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     // The day's campaign opens at 10:00 local: before that a claimable list
     // must not be claimed early and an empty list must not close the day —
     // but the status read below still runs, so a benefit the IDE already paid
-    // (rows all CLAIMED) marks the day at any hour. The next pass after ten
-    // retries an open day on its own.
+    // (today's row CLAIMED) marks the day at any hour. The next pass after
+    // ten retries an open day on its own.
     let may_claim = force || chrono::Timelike::hour(&chrono::Local::now()) >= 10;
     let mut outcome = QoderCheckinOutcome {
         done_today: false,
@@ -711,15 +1003,44 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     let mut answered = false; // a base returned a parseable campaigns envelope
     let mut attempted = false; // a claim POST actually went out
     'bases: for base in CHECKIN_BASES {
-        let Some(body) = checkin_campaigns(base, token) else { continue };
+        // Bare read first: it resolves the uid the mint needs without paying
+        // the bridge run, and it is believed about what it *shows* — a
+        // claimable row, today's row already CLAIMED.
+        let Some(mut body) = checkin_campaigns(base, token, None) else { continue };
         answered = true;
+        // But its omissions prove nothing: the bare list hides the day's row
+        // (the identity-gated visibility above), so a bare answer with
+        // nothing claimable and nothing closed is re-asked with the minted
+        // identity before the day is read as closed or empty. The mint is
+        // cached for 30 min, so this costs one bridge run per half hour.
+        let mut ident = if claimable_campaigns(&body).is_empty() && !today_benefits_all_claimed(&body) {
+            body.get("uid").and_then(Value::as_str).and_then(claim_identity)
+        } else {
+            None
+        };
+        if let Some(minted) = &ident {
+            if let Some(retry) = checkin_campaigns(base, token, Some(minted)) {
+                body = retry;
+            }
+        }
         for (id, amount) in claimable_campaigns(&body) {
             if !may_claim {
                 outcome.too_early = true; // claimable but too early: day open, button greys
                 break 'bases;
             }
+            // A device-gate refusal recorded earlier today stands: the only
+            // identity this machine can mint is already refused, and re-POSTing
+            // it every pass is what probes into a rate limit. A manual click
+            // forces past this.
+            if !force && state.last_gated_day == today {
+                outcome.claim_gated = true;
+                break 'bases;
+            }
             attempted = true;
-            match checkin_claim(base, token, &id) {
+            // The claim reuses the identity the re-list minted; a bare list
+            // that already showed the row mints it here instead.
+            let ident = ident.clone().or_else(|| body.get("uid").and_then(Value::as_str).and_then(claim_identity));
+            match checkin_claim(base, token, &id, ident.as_ref()) {
                 Some((true, credits, _)) => {
                     state.last_attempt_day = today.clone();
                     state.last_ok_day = today.clone();
@@ -736,27 +1057,26 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
                     break 'bases;
                 }
                 // The vendor's device-identity gate: the row is claimable but
-                // only the client can claim it. Say so and stop — retrying a
-                // gated claim is what probes into a rate limit.
+                // only the client can claim it. Say so, record the day, and
+                // stop — retrying a gated claim is what probes into a rate
+                // limit.
                 Some((false, _, true)) => {
+                    state.last_gated_day = today.clone();
                     outcome.claim_gated = true;
                     break 'bases;
                 }
                 _ => {} // this row refused for another reason; try the next
             }
         }
-        // A base that answered with claimable rows all already CLAIMED has
-        // paid today's benefit. An empty list (nothing opened yet — before
-        // 10:00, or no campaign today) must NOT close the day.
-        let rows = body.get("campaigns").and_then(Value::as_array);
-        let all_claimed = rows.is_some_and(|a| {
-            !a.is_empty()
-                && a.iter().all(|r| {
-                    r.get("claimStatus").and_then(Value::as_str) == Some("CLAIMED")
-                        || r.get("actionType").and_then(Value::as_str) != Some("CLAIM_BENEFIT")
-                })
-        });
-        if all_claimed {
+        // Today's daily row already CLAIMED closes the day — and nothing
+        // else does. A row that is *absent* from the list proves nothing:
+        // measured 2026-10-09 the vendor drops the day's row for minutes at
+        // a time (11:16:34 listed only the lingering VIEW_DETAILS row,
+        // 11:16:36 the row was back CLAIMABLE), and the old all-rows-claimed
+        // reading stamped the day paid off that flap — the badge said 已签到
+        // while the client still showed the benefit unclaimed. Only rows
+        // whose window started *today* may speak for today at all.
+        if today_benefits_all_claimed(&body) {
             state.last_attempt_day = today.clone();
             state.last_ok_day = today.clone();
             outcome = QoderCheckinOutcome {
@@ -900,6 +1220,43 @@ mod tests {
         assert!(claimable_campaigns(&Value::Null).is_empty());
     }
 
+    /// Only a today-dated `CLAIM_BENEFIT` row that is CLAIMED may close the
+    /// day. The shape that actually fired the false 已签到 (2026-10-09):
+    /// today's row dropped from the vendor's list for minutes, leaving only
+    /// the VIEW_DETAILS placement that is CLAIMED all its life — the old
+    /// all-rows-claimed reading stamped the day off exactly that flap while
+    /// the client still showed the benefit unclaimed.
+    #[test]
+    fn only_a_today_benefit_row_all_claimed_closes_the_day() {
+        let now = chrono::Local::now().timestamp();
+        // The flap: today's row absent, a VIEW_DETAILS row CLAIMED.
+        let flap = json!({"campaigns": [
+            {"campaignId": 1, "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED"}]});
+        assert!(!today_benefits_all_claimed(&flap));
+        // Nothing listed at all: open, never paid.
+        assert!(!today_benefits_all_claimed(&json!({"campaigns": []})));
+        assert!(!today_benefits_all_claimed(&Value::Null));
+        // Today's row CLAIMED = paid.
+        let paid = json!({"campaigns": [
+            {"campaignId": 2, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED", "startAt": now}]});
+        assert!(today_benefits_all_claimed(&paid));
+        // Claimable, mixed, or without a startAt: still open.
+        let open = json!({"campaigns": [
+            {"campaignId": 2, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE", "startAt": now}]});
+        assert!(!today_benefits_all_claimed(&open));
+        let mixed = json!({"campaigns": [
+            {"campaignId": 2, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED", "startAt": now},
+            {"campaignId": 3, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE", "startAt": now}]});
+        assert!(!today_benefits_all_claimed(&mixed));
+        let no_start = json!({"campaigns": [
+            {"campaignId": 4, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED"}]});
+        assert!(!today_benefits_all_claimed(&no_start));
+        // Yesterday's lingering claimed row says nothing about today.
+        let yesterday = json!({"campaigns": [
+            {"campaignId": 5, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED", "startAt": now - 86_400}]});
+        assert!(!today_benefits_all_claimed(&yesterday));
+    }
+
     /// The label is the exact wording the strip's badge reads — a drift here
     /// silently demotes the row to decoration.
     #[test]
@@ -948,21 +1305,36 @@ mod tests {
         assert_eq!(none.len(), 1, "no claim, no marker row");
     }
 
-    /// The gate answer measured live (2026-10-09, with and without forged
-    /// machine headers): 503 + SAME_PERSON means "claim in the client" — not
-    /// a retry, not an absent campaign.
+    /// The claim answers measured live on this machine (2026-10-09): the body
+    /// is FLAT, the first attempts answered 200 BLOCKED/RISK_BLOCKED off the
+    /// same grant record, and a 76 s retry answered CLAIMED. An earlier reader
+    /// read `/data/status` — the client's postMessage RPC envelope, never on
+    /// the wire — and would have read the win itself as "unclaimed".
     #[test]
-    fn the_same_person_gate_reads_as_gated_not_failed() {
-        let gated = claim_answer(
-            503,
-            &json!({"errorCode":"SAME_PERSON_DEPENDENCY_UNAVAILABLE","errorMessage":"campaign service is temporarily unavailable"}),
+    fn the_claim_answer_is_read_from_the_flat_wire_shape() {
+        let blocked = json!({"grantId":"01a11f4b-8ad7-7303-a3b2-356b6a81e336","status":"BLOCKED",
+            "replayed":false,"benefit":{"kind":"CREDITS","amount":100,"validity":{"mode":"RELATIVE_DAYS","days":30}},
+            "failureCode":"RISK_BLOCKED","campaignId":"01a0f1dc-5da3-7dea-bea3-7cf8f297d276",
+            "campaignKey":"act-20260930-475","campaignVersion":1,"claimedAt":"2026-10-09T06:13:26.828541Z"});
+        // The grant's benefit rides both answers — only `claimed` decides, and
+        // callers read credits off a win alone.
+        assert_eq!(claim_answer(200, &blocked), (false, 100.0, false), "BLOCKED is retry-later, not a gate");
+        let claimed = json!({"grantId":"01a11f4b-8ad7-7303-a3b2-356b6a81e336","status":"CLAIMED",
+            "replayed":false,"benefit":{"kind":"CREDITS","amount":100,"validity":{"mode":"RELATIVE_DAYS","days":30}},
+            "campaignId":"01a0f1dc-5da3-7dea-bea3-7cf8f297d276","campaignKey":"act-20260930-475",
+            "campaignVersion":1,"claimedAt":"2026-10-09T06:13:26.828541Z","grantedAt":"2026-10-09T06:21:39.798898Z",
+            "expiresAt":"2026-11-08T06:13:26.828541Z"});
+        assert_eq!(claim_answer(200, &claimed), (true, 100.0, false));
+        // A replay of that same win is still the win.
+        assert_eq!(claim_answer(200, &json!({"status":"CLAIMED","replayed":true,"benefit":{"amount":100}})), (true, 100.0, false));
+        // The device gate (measured with and without forged machine headers):
+        // 503 + SAME_PERSON means "claim in the client" — not a retry.
+        assert_eq!(
+            claim_answer(503, &json!({"errorCode":"SAME_PERSON_DEPENDENCY_UNAVAILABLE","errorMessage":"campaign service is temporarily unavailable"})),
+            (false, 0.0, true)
         );
-        assert_eq!(gated, (false, 0.0, true));
-        // A plain 503 without the marker stays an ordinary failure.
         assert_eq!(claim_answer(503, &json!({"errorCode":"OTHER"})), (false, 0.0, false));
-        // The success the client itself checks, and its credits.
-        assert_eq!(claim_answer(200, &json!({"code":0,"data":{"status":"CLAIMED","benefit":{"amount":100}}})), (true, 100.0, false));
-        // A business refusal is neither.
+        // A flat business refusal is neither.
         assert_eq!(claim_answer(200, &json!({"code":1,"msg":"queued"})), (false, 0.0, false));
     }
 
@@ -984,6 +1356,63 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id.as_deref(), Some("checkin-gated"));
         assert_eq!(rows[0].label.as_deref(), Some("签到需在 Qoder 内领取"));
+    }
+
+    /// The bridge's real stdout shape (measured 2026-10-09 on this machine:
+    /// `machineToken` 88 chars "P1gA…", 18-hex type/code, plus SDK keys the
+    /// parser must ignore). A partial answer mints nothing — the server
+    /// filters a malformed identity set the same as no set at all.
+    #[test]
+    fn machine_identity_needs_all_three_bridge_values() {
+        let real = r#"{"machineToken":"P1gAbDcEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJK","machineType":"118d1e0191dead8b10","machineCode":"e773c10000123434bc","vmInfo":{"isVm":false,"brand":"None","percentage":0,"vmTypeCode":91},"accountOutcome":"success"}"#;
+        let id = parse_machine_identity(real).expect("the real shape parses");
+        assert_eq!(id.kind, "118d1e0191dead8b10");
+        assert!(parse_machine_identity(r#"{"machineToken":"P1gA","machineType":"x"}"#).is_none());
+        assert!(parse_machine_identity(r#"{"machineToken":"","machineType":"x","machineCode":"y"}"#).is_none());
+        assert!(parse_machine_identity("").is_none());
+        assert!(parse_machine_identity("not json").is_none());
+    }
+
+    /// `Cosy-MachineOS` rides the client's arch_os shape; the community
+    /// cross-check spans "aarch64_darwin" and "x86_64_win32".
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn machine_os_is_the_clients_arch_underscore_os_shape() {
+        let os = machine_os();
+        #[cfg(target_os = "macos")]
+        assert!(os.ends_with("_darwin"), "{os}");
+        #[cfg(windows)]
+        assert!(os.ends_with("_win32"), "{os}");
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(os, "aarch64_darwin");
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        assert_eq!(os, "x86_64_darwin");
+        #[cfg(windows)]
+        assert!(os.starts_with("x86_64_"), "{os}");
+    }
+
+    /// Discovery reaches the app bundle the client is actually installed as.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn umid_candidates_name_the_apps_own_bridge() {
+        let cands = umid_candidates();
+        assert!(cands.iter().any(|p| p.to_string_lossy() == "/Applications/Qoder.app/Contents/Resources/umid/runtime-info"));
+        assert!(cands.len() >= 2, "the per-user Applications folder is a candidate too");
+    }
+
+    /// A `TOKENME_QODER_UMID_BIN` override is a file check, not a fallback
+    /// seed: a broken override must mint nothing instead of quietly running
+    /// whatever the disk happens to hold.
+    #[test]
+    fn umid_binary_env_override_is_a_file_check_not_a_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("runtime-info");
+        std::fs::write(&fake, b"#!/bin/sh\n").unwrap();
+        std::env::set_var("TOKENME_QODER_UMID_BIN", &fake);
+        assert_eq!(umid_binary().as_deref(), Some(fake.as_path()));
+        std::env::set_var("TOKENME_QODER_UMID_BIN", dir.path().join("missing"));
+        assert_eq!(umid_binary(), None, "a broken override must not fall through to discovery");
+        std::env::remove_var("TOKENME_QODER_UMID_BIN");
     }
 
     /// The response measured live on this machine (2026-09-24, `personal_standard`):

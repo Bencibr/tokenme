@@ -829,6 +829,26 @@ fn publish_with_quota<R: Runtime>(
     tray::refresh(app, &report, mode);
 }
 
+/// The host-exit half of the pass gate: whether the host process test lets a
+/// tool through, or the pause is off altogether.
+///
+/// A claim-bearing tool with `auto_checkin` on is never host-paused: its daily
+/// grant is the one number that still moves while the host app is closed, and
+/// the claim itself is an HTTPS call against the account — not a read of the
+/// host's state — so a closed IDE must not silence it, and its rows stay live
+/// in the strip. The user's own switches compose on top in the caller; this
+/// answers the host half alone so the refusal log can ask the same function
+/// and never name a tool the pass actually asked.
+fn host_gate_open(tool: &str, auto_checkin: bool, alive: &Option<HashSet<String>>) -> bool {
+    if auto_checkin && usage_quota::is_checkin_tool(tool) {
+        return true;
+    }
+    match alive {
+        Some(names) => usage_quota::host::any_host_running(tool, names),
+        None => true,
+    }
+}
+
 /// One full quota pass: the per-window adapter probes plus the budget views
 /// (host-exit-paused or not), reused for [`QUOTA_PASS_TTL`].
 fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>]) -> Vec<QuotaView> {
@@ -850,27 +870,26 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
     let mut q = usage_core::report::poll_quota(adapters);
     // Two gates, one pass. The user's own word (`quota_polling`,
     // `quota_probes_off`) is the standing instruction; the host-exit test is
-    // re-decided every pass because a process comes and goes. Either one
-    // refusing means the same thing: no request leaves, and the last known
-    // answer stays on screen read from the cache however old it is. The four
-    // probes with no host mapping (`copilot`, `gemini`, `kimicode`,
+    // re-decided every pass because a process comes and goes — except for the
+    // claim-bearing tools under `auto_checkin`, whose daily grant is the one
+    // number that still moves with the host closed (see `host_gate_open`).
+    // Either gate refusing means the same thing: no request leaves, and the
+    // last known answer stays on screen read from the cache however old it is.
+    // The four probes with no host mapping (`copilot`, `gemini`, `kimicode`,
     // `minimaxcode`) are only reachable through the first — which is the whole
     // reason the settings sheet grew a per-tool page.
     let alive = settings
         .host_exit_pause
         .then(usage_quota::host::running_process_names);
     let polling_off = !settings.quota_polling;
+    let auto_checkin = settings.auto_checkin;
     let gate = {
         // The gate consumes both; the probe list below re-asks the same
         // questions per tool to say WHICH refusal emptied the windows.
         let alive = alive.clone();
         let settings = settings.clone();
         move |tool: &str| -> bool {
-            settings.probe_allowed(tool)
-                && match &alive {
-                    Some(names) => usage_quota::host::any_host_running(tool, names),
-                    None => true,
-                }
+            settings.probe_allowed(tool) && host_gate_open(tool, auto_checkin, &alive)
         }
     };
     q.extend(usage_quota::collect_gated(usage_quota::BUDGET, gate));
@@ -897,9 +916,7 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
         for probe in usage_quota::inventory() {
             if !settings.probe_allowed(&probe.tool) {
                 off.push(format!("{}:off", probe.tool));
-            } else if probe.host_gated
-                && matches!(&alive, Some(names) if !usage_quota::host::any_host_running(&probe.tool, names))
-            {
+            } else if !host_gate_open(probe.tool, auto_checkin, &alive) {
                 off.push(format!("{}:host", probe.tool));
             }
         }
@@ -1054,6 +1071,26 @@ mod tests {
         // A payload nobody can read still has to say that the engine died.
         let opaque: Box<dyn std::any::Any + Send> = Box::new(7u8);
         assert_eq!(panic_text(&*opaque), "panicked: non-string panic payload");
+    }
+
+    /// The `auto_checkin` exemption is exactly as wide as the claim registry:
+    /// with the switch on, a check-in host that is NOT running still passes
+    /// the host gate — the claim is HTTPS and a closed IDE is no reason to
+    /// miss the day — while every other tool keeps following its process.
+    #[test]
+    fn auto_checkin_exempts_only_the_claim_bearers_from_the_host_pause() {
+        let alive = Some(HashSet::new());
+        assert!(!host_gate_open("trae_cn", false, &alive), "off keeps today's rule");
+        assert!(host_gate_open("trae_cn", true, &alive), "on: the claim fires with the IDE closed");
+        assert!(host_gate_open("qoder", true, &alive));
+        assert!(!host_gate_open("claude", true, &alive), "not a claim bearer");
+        assert!(!host_gate_open("zcode", true, &alive));
+        assert!(host_gate_open("copilot", true, &alive), "no host mapping — never paused");
+        assert!(host_gate_open("trae_cn", false, &None), "pause off means everything passes");
+
+        let mut running: HashSet<String> = HashSet::new();
+        running.insert("Trae CN Helper".to_string());
+        assert!(host_gate_open("trae_cn", false, &Some(running)), "a running host passes as before");
     }
 
     #[test]

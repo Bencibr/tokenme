@@ -1001,11 +1001,12 @@
   letter-spacing: -0.005em;
 }
 
-/* Trae CN 的签到：组头最右——未签是可点按钮（手动补签），签过是只读徽标。
+/* Trae CN / Qoder 的签到：组头最右角的最后一个元素——未签是可点按钮（手动
+   补签），签过是只读徽标。位置由 DOM 顺序决定（origins 之后），不再用
+   margin-left:auto，否则两个 auto 平分空白会把签到卡在行中间。
    放在拖拽手柄里，点击必须拦下 pointer 事件免得带出拖拽。 */
 .quota-checkin {
   display: inline-flex;
-  margin-left: auto;
 }
 
 .checkin-btn {
@@ -1021,6 +1022,16 @@
 
 .checkin-btn:hover {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* The day's window not open yet (Qoder 10:00): the reason IS the button —
+   grey, inert, no pointer affordance. */
+.checkin-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  background: transparent;
+  border-color: color-mix(in srgb, var(--ink-3) 35%, transparent);
+  color: var(--ink-3);
 }
 
 .checkin-badge {
@@ -1160,15 +1171,49 @@
 
 .quota-reset {
   font-size: 10.5px;
-  text-align: right;
   min-width: 56px;
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
-  /* The formatter pads every countdown to one character grid (` 3h 23m`);
-   * default whitespace handling would trim the leading pad at line start and
-   * un-align the unit column again. */
-  white-space: pre;
+  /* Value and unit are separate boxes, the whole run right-justified: each
+   * value box is two tabular digits wide, each unit box its own narrow column.
+   * A value that grows ("4"→"15") eats its own pad and never moves a
+   * neighbour — `15d` and `4h` keep their units on one line at any digit
+   * count, which the old padded-string layout could not hold (the unit
+   * glyphs themselves are not tabular). */
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 0.45ch; /* the space between the two segments ("15d ␣ 02h") */
+  white-space: nowrap;
 }
+
+.quota-reset .rq {
+  display: inline-flex;
+}
+
+.quota-reset .rq-v {
+  min-width: 2ch;
+  text-align: right;
+}
+
+.quota-reset .rq-dash {
+  width: 11px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--ink-3);
+  opacity: 0.6;
+  align-self: center;
+  margin-right: 3px; /* optically inset like the digits' own right side bearing */
+}
+
+/* Units CENTERED in a fixed box: "m"(≈1.5ch) is wider than "h"(≈1ch), and a
+   min-width box grows with the glyph — dragging the value column of every
+   m-ending row two pixels sideways. A fixed box keeps the unit column where
+   it is; centering splits the glyph-width difference across both edges. */
+.quota-reset .rq-u {
+  width: 1.6ch;
+  text-align: center;
+}
+
 
 /* The quota bar is a gauge, not a ranking, so it keeps a solid fill. */
 .quota-row .track {

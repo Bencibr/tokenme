@@ -19,8 +19,39 @@ use usage_core::{QuotaSample, QuotaView};
 
 pub use providers::ClaudeQuota;
 pub use providers::workbuddy_login;
-pub use providers::trae_manual_checkin;
-pub use providers::qoder_manual_checkin;
+
+/// The tools whose probe owns a daily check-in claim, and the forced-claim
+/// entry for each. One table, because three call sites must agree about the
+/// same set: the engine exempts exactly these from the host-exit pause when
+/// `auto_checkin` is on (the claim is HTTPS against the account — a closed
+/// host app is no reason to miss a day), the panel's 签到 button dispatches
+/// through here, and the strip renders its control for the same ids.
+pub const CHECKIN_TOOLS: &[(&str, fn() -> Result<(bool, String), String>)] = &[
+    ("trae_cn", providers::trae_manual_checkin),
+    ("qoder", providers::qoder_manual_checkin),
+];
+
+/// The check-in tool ids, in registry order.
+pub fn checkin_tool_ids() -> impl Iterator<Item = &'static str> {
+    CHECKIN_TOOLS.iter().map(|(id, _)| *id)
+}
+
+/// Whether this tool owns a daily claim — the engine's exemption asks exactly
+/// this.
+pub fn is_checkin_tool(tool: &str) -> bool {
+    CHECKIN_TOOLS.iter().any(|(id, _)| *id == tool)
+}
+
+/// One forced claim right now, by tool id — the panel's check-in button.
+/// `(claimed, message)`: the bool is what the button paints, the message is
+/// user-facing; a tool outside the registry never reaches a vendor.
+pub fn manual_checkin(tool: &str) -> Result<(bool, String), String> {
+    CHECKIN_TOOLS
+        .iter()
+        .find(|(id, _)| *id == tool)
+        .map(|(_, claim)| claim())
+        .unwrap_or_else(|| Err(format!("{tool} 没有签到活动")))
+}
 
 /// How long an answer stays trustworthy. Vendor windows reset on the hour at the
 /// earliest, so five minutes is well inside any meaningful resolution.
@@ -233,6 +264,22 @@ mod tests {
                 || PROBE_ONLY_TOOLS.contains(&probe.tool());
             assert!(known, "probe tool {:?} matches no adapter TOOL_ID or probe-only id", probe.tool());
         }
+    }
+
+    /// The check-in registry drives the engine's auto-check-in exemption and
+    /// the panel's button dispatch, so its two entries are pinned: real probes
+    /// behind them, and a stranger refused before any network call.
+    #[test]
+    fn the_checkin_registry_names_real_probes_and_refuses_strangers() {
+        let probes: Vec<&str> = built_in().iter().map(|p| p.tool()).collect();
+        let ids: Vec<&str> = checkin_tool_ids().collect();
+        assert_eq!(ids, vec!["trae_cn", "qoder"], "the two claim-bearing probes");
+        for id in &ids {
+            assert!(probes.contains(id), "check-in tool {id:?} has no probe to run under");
+            assert!(is_checkin_tool(id));
+        }
+        assert!(!is_checkin_tool("trae"), "the international fleet has no claim");
+        assert!(manual_checkin("claude").is_err(), "a stranger must never reach a claim");
     }
 
     /// The settings sheet's per-tool page is only trustworthy while it is the

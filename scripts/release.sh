@@ -9,6 +9,10 @@ V="$1"
 sed -i '' "s/^version = \".*\"/version = \"$V\"/" Cargo.toml
 sed -i '' "s/^version = \".*\"/version = \"$V\"/" apps/tokenme-bar/src-tauri/Cargo.toml
 sed -i '' "s/\"version\": \".*\"/\"version\": \"$V\"/" apps/tokenme-bar/src-tauri/tauri.conf.json
+# The build id counts within one version: a bump resets it (build-macos.sh
+# would self-heal on the next run, but the release path resets explicitly).
+echo 0 > apps/tokenme-bar/src-tauri/BUILD_ID
+echo -n "$V" > apps/tokenme-bar/src-tauri/BUILD_ID_VERSION
 cat > latest.json <<JSON
 {
   "version": "$V",

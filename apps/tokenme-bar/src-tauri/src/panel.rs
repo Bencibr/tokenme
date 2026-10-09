@@ -143,9 +143,9 @@ fn show_window(window: &WebviewWindow, rect: Option<Rect>) {
     apply_window_background(window.app_handle(), None);
     let _ = window.show();
 
-    // The panel is on screen before its page can paint, and on macOS the only
-    // layer that can say something during that stretch is a native one.
-    #[cfg(target_os = "macos")]
+    // The panel is on screen before its page can paint, and the native layer is
+    // the only one that can say something during that stretch — an AppKit note
+    // on macOS, a GDI overlay child on Windows.
     if !content_is_ready() {
         show_boot_note(window.app_handle());
     }
@@ -236,7 +236,6 @@ fn content_ready_flag() -> &'static std::sync::atomic::AtomicBool {
 
 /// Whether the page has ever reported content — the native boot note keys off
 /// this so it never reappears on a panel that is already drawing.
-#[cfg(target_os = "macos")]
 fn content_is_ready() -> bool {
     content_ready_flag().load(Ordering::Acquire)
 }
@@ -263,7 +262,6 @@ pub fn mark_content_ready(app: &AppHandle) {
             launch_instant().elapsed().as_millis()
         ));
     }
-    #[cfg(target_os = "macos")]
     hide_boot_note(app);
 }
 
@@ -271,15 +269,20 @@ pub fn mark_content_ready(app: &AppHandle) {
 /// the window is up at +1.5 s and every frame until the first report (~+8 s) is
 /// the bare native backing — a white sheet under 浅色 — with the web layer
 /// contributing nothing at all. Three builds of markup in `index.html` proved
-/// that interval is unreachable from the page, so the note is drawn by AppKit
-/// and removed the moment the page reports content.
-#[cfg(target_os = "macos")]
+/// that interval is unreachable from the page, so the note is native on both
+/// platforms — AppKit on macOS, a GDI overlay child on Windows — and is
+/// removed the moment the page reports content.
 pub fn show_boot_note(app: &AppHandle) {
     let text = crate::lang::get()
         .str("正在索引本机用量…", "Indexing this machine…")
         .to_string();
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || set_boot_note(&handle, Some(&text)));
+    #[cfg(target_os = "macos")]
+    {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || set_boot_note(&handle, Some(&text)));
+    }
+    #[cfg(target_os = "windows")]
+    boot_note_windows::show(app, &text);
 }
 
 #[cfg(target_os = "macos")]
@@ -287,6 +290,14 @@ pub fn hide_boot_note(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || set_boot_note(&handle, None));
 }
+
+#[cfg(target_os = "windows")]
+pub fn hide_boot_note(app: &AppHandle) {
+    boot_note_windows::hide(app);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn hide_boot_note(_app: &AppHandle) {}
 
 /// The label's tag, so an open finds and replaces its own note instead of
 /// stacking one per click.
@@ -535,6 +546,297 @@ unsafe fn boot_ring(host: tauri_nspanel::cocoa::base::id, side: f64) -> Result<(
     }
     Ok(())
 }
+
+/// Windows: the same note, native. A child HWND covering the panel while its
+/// WebView is still blank — the opaque surface the boot shows anyway, the
+/// brand's dual half-ring (the exact macOS geometry: 34 pt host, outer r=20 of
+/// a 48-box at 4 px counter-clockwise in 1.3 s, inner r=11 at 3.5 px clockwise
+/// in 0.9 s, both 160° and half a turn apart), and the wait's name under it.
+/// A 30 Hz repaint timer drives the phase; the note is destroyed at the content
+/// milestone, exactly like its AppKit sibling. Plain GDI, no exceptions to
+/// unwind — the AppKit selector-verification discipline does not apply here.
+#[cfg(target_os = "windows")]
+mod boot_note_windows {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::time::Instant;
+
+    use tauri::{AppHandle, Manager};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::{
+        Arc, BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
+        ExtCreatePen, FillRect, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
+        DT_CALCRECT, DT_CENTER, DT_WORDBREAK, LOGBRUSH, PS_ENDCAP_ROUND, PS_GEOMETRIC, PS_SOLID,
+        PAINTSTRUCT, TRANSPARENT,
+    };
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
+        KillTimer, RegisterClassW, SetTimer, SetWindowLongPtrW, ShowWindow, GWLP_USERDATA,
+        SW_SHOWNA, WM_ERASEBKGND, WM_NCDESTROY, WM_PAINT, WM_TIMER, WNDCLASSW, WS_CHILD,
+    };
+
+    const LABEL: &str = super::LABEL;
+
+    /// The live overlay's HWND, 0 when none. Main-thread only.
+    static OVERLAY: AtomicIsize = AtomicIsize::new(0);
+
+    struct BootNote {
+        text: Vec<u16>,
+        scale: f64,
+        dark: bool,
+        hfont: isize,
+        start: Instant,
+    }
+
+    pub(super) fn show(app: &AppHandle, text: &str) {
+        let handle = app.clone();
+        let text = text.to_string();
+        let _ = app.run_on_main_thread(move || unsafe { create(&handle, &text) });
+    }
+
+    pub(super) fn hide(app: &AppHandle) {
+        let _ = app.run_on_main_thread(move || unsafe {
+            let hwnd = OVERLAY.swap(0, Ordering::AcqRel);
+            if hwnd != 0 {
+                KillTimer(hwnd as _, 1);
+                DestroyWindow(hwnd as _);
+            }
+        });
+    }
+
+    unsafe fn create(app: &AppHandle, text: &str) {
+        let Some(window) = app.get_webview_window(LABEL) else { return };
+        let Ok(hwnd) = window.hwnd() else { return };
+        if OVERLAY.load(Ordering::Acquire) != 0 {
+            return; // an open note is recycled by the hide/show pair, never stacked
+        }
+        let Ok(scale) = window.scale_factor() else { return };
+        let dark = !matches!(window.theme(), Ok(tauri::Theme::Light));
+        ensure_class();
+
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if GetClientRect(hwnd.0 as _, &mut rc) == 0 {
+            return;
+        }
+        let class = class_name();
+        let mut wide = text.encode_utf16().collect::<Vec<_>>();
+        wide.push(0);
+        let note = Box::new(BootNote {
+            text: wide,
+            scale,
+            dark,
+            hfont: make_font(scale) as isize,
+            start: Instant::now(),
+        });
+        let overlay = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            std::ptr::null(),
+            WS_CHILD, // shown only after the state is attached
+            0,
+            0,
+            rc.right,
+            rc.bottom,
+            hwnd.0 as _,
+            std::ptr::null_mut(),
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null(),
+        );
+        if overlay.is_null() {
+            return;
+        }
+        SetWindowLongPtrW(overlay, GWLP_USERDATA, Box::into_raw(note) as isize);
+        OVERLAY.store(overlay as isize, Ordering::Release);
+        // 30 Hz keeps the ring smooth at a cost a cold boot never notices; the
+        // timer dies with the overlay, so an idle panel schedules nothing.
+        SetTimer(overlay, 1, 33, None);
+        ShowWindow(overlay, SW_SHOWNA);
+        InvalidateRect(overlay, std::ptr::null(), 0);
+    }
+
+    fn class_name() -> &'static [u16] {
+        static CLASS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+        CLASS.get_or_init(|| "TokenMeBootNote\0".encode_utf16().collect())
+    }
+
+    unsafe fn ensure_class() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let wc = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: Some(boot_wndproc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: GetModuleHandleW(std::ptr::null()),
+                hIcon: std::ptr::null_mut(),
+                hCursor: std::ptr::null_mut(),
+                hbrBackground: std::ptr::null_mut(), // the paint fills everything
+                lpszMenuName: std::ptr::null_mut(),
+                lpszClassName: class_name().as_ptr(),
+            };
+            RegisterClassW(&wc);
+        });
+    }
+
+    unsafe extern "system" fn boot_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> isize {
+        match msg {
+            WM_TIMER => {
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+                0
+            }
+            WM_PAINT => {
+                paint(hwnd);
+                0
+            }
+            WM_ERASEBKGND => 1, // the paint fills everything; erasing only flickers
+            WM_NCDESTROY => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+                if ptr != 0 {
+                    let note = Box::from_raw(ptr as *mut BootNote);
+                    DeleteObject(note.hfont as _);
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+
+    unsafe fn paint(hwnd: HWND) {
+        let mut ps: PAINTSTRUCT = std::mem::zeroed();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        if hdc.is_null() {
+            return;
+        }
+        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        if ptr == 0 {
+            EndPaint(hwnd, &ps);
+            return;
+        }
+        let note = &*(ptr as *const BootNote);
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(hwnd, &mut rc);
+
+        // The opaque sheet the boot shows anyway: pure black under dark, pure
+        // white under light — the panel surface's own two colours.
+        let (bg, teal, faint) = if note.dark {
+            (0x0000_0000, 0x00A8_D931, 0x002F_3D0Eu32) // (49,217,168) and 28 % of it on black
+        } else {
+            (0x00FF_FFFF, 0x0074_8F0D, 0x00E7_F4C5u32) // (13,143,116) and 28 % of it on white
+        };
+        let brush = CreateSolidBrush(bg);
+        FillRect(hdc, &rc, brush);
+        DeleteObject(brush as _);
+
+        let s = note.scale;
+        let side = 34.0 * s;
+        let gap = 10.0 * s;
+        let old_font = SelectObject(hdc, note.hfont as _);
+        SetBkMode(hdc, TRANSPARENT as i32);
+        SetTextColor(hdc, teal);
+
+        let mut trc =
+            RECT { left: (16.0 * s) as i32, top: 0, right: rc.right - (16.0 * s) as i32, bottom: 0 };
+        DrawTextW(
+            hdc,
+            note.text.as_ptr(),
+            note.text.len() as i32,
+            &mut trc,
+            DT_CALCRECT | DT_CENTER | DT_WORDBREAK,
+        );
+        let text_h = trc.bottom - trc.top;
+        let total = side + gap + text_h as f64;
+        let top = (rc.bottom as f64 - total) / 2.0;
+        let cx = rc.right as f64 / 2.0;
+        let cy = top + side / 2.0;
+
+        // The dual half-ring. GDI's Arc runs from a start point to an end point
+        // counter-clockwise, so the phases are plain angle offsets: the outer
+        // arc's start drifts forward through its 1.3 s turn, the inner arc's
+        // drifts backward through its 0.9 s one.
+        let ms = note.start.elapsed().as_millis() as f64;
+        let outer_start = 20.0 + (ms % 1300.0) / 1300.0 * 360.0;
+        let inner_start = 200.0 - (ms % 900.0) / 900.0 * 360.0;
+        stroke_arc(hdc, cx, cy, 20.0 / 48.0 * side, outer_start, 160.0, teal, (4.0 * s).round().max(1.0) as u32);
+        stroke_arc(hdc, cx, cy, 11.0 / 48.0 * side, inner_start, 160.0, faint, (3.5 * s).round().max(1.0) as u32);
+
+        let mut tr = RECT {
+            left: trc.left,
+            top: (top + side + gap) as i32,
+            right: trc.right,
+            bottom: (top + side + gap + text_h as f64) as i32,
+        };
+        DrawTextW(hdc, note.text.as_ptr(), note.text.len() as i32, &mut tr, DT_CENTER | DT_WORDBREAK);
+        SelectObject(hdc, old_font);
+        EndPaint(hwnd, &ps);
+    }
+
+    /// One 160° arc, round-capped, centred on (cx, cy). Angles are the AppKit
+    /// convention the brand's mark was measured in: degrees, 0° at 3 o'clock,
+    /// counter-clockwise positive — hence the y negation against GDI's
+    /// downward axis.
+    unsafe fn stroke_arc(
+        hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+        cx: f64,
+        cy: f64,
+        radius: f64,
+        start_deg: f64,
+        sweep_deg: f64,
+        color: u32,
+        width: u32,
+    ) {
+        let brush = LOGBRUSH { lbStyle: PS_SOLID as u32, lbColor: color, lbHatch: 0 };
+        let pen = ExtCreatePen(
+            (PS_GEOMETRIC | PS_ENDCAP_ROUND) as u32,
+            width,
+            &brush,
+            0,
+            std::ptr::null(),
+        );
+        if pen.is_null() {
+            return;
+        }
+        let old = SelectObject(hdc, pen as _);
+        let a0 = start_deg.to_radians();
+        let a1 = (start_deg + sweep_deg).to_radians();
+        let (x1, y1) = (cx + radius * a0.cos(), cy - radius * a0.sin());
+        let (x2, y2) = (cx + radius * a1.cos(), cy - radius * a1.sin());
+        Arc(
+            hdc,
+            (cx - radius).round() as i32,
+            (cy - radius).round() as i32,
+            (cx + radius).round() as i32,
+            (cy + radius).round() as i32,
+            x1.round() as i32,
+            y1.round() as i32,
+            x2.round() as i32,
+            y2.round() as i32,
+        );
+        SelectObject(hdc, old);
+        DeleteObject(pen);
+    }
+
+    unsafe fn make_font(scale: f64) -> windows_sys::Win32::Graphics::Gdi::HFONT {
+        let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+        CreateFontW(
+            (-(12.0 * scale)).round() as i32,
+            0,
+            0,
+            0,
+            400, // FW_NORMAL
+            0,
+            0,
+            0,
+            1, // DEFAULT_CHARSET
+            0,
+            0,
+            4, // ANTIALIASED_QUALITY
+            0,
+            face.as_ptr(),
+        )
+    }
+}
+
 /// start at its first use and report every latency as 0 ms.
 fn launch_instant() -> std::time::Instant {
     static CELL: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();

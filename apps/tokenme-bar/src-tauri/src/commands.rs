@@ -154,6 +154,7 @@ pub struct PanelSettings {
     pub show_empty_tools: bool,
     pub bubble_enabled: bool,
     pub host_exit_pause: bool,
+    pub auto_checkin: bool,
     pub quota_polling: bool,
     pub quota_probes_off: Vec<String>,
     pub notify_tiers: NotifyTier,
@@ -247,6 +248,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
         host_exit_pause: settings.host_exit_pause,
+        auto_checkin: settings.auto_checkin,
         quota_polling: settings.quota_polling,
         quota_probes_off: settings.quota_probes_off.clone(),
         notify_tiers: settings.notify_tiers,
@@ -331,6 +333,22 @@ pub async fn set_host_exit_pause(app: AppHandle, on: bool) -> Result<(), String>
         return Err("settings busy".to_string());
     };
     settings.host_exit_pause = on;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// The auto-check-in guarantee: on, the host-exit pause stops applying to the
+/// check-in tools (Trae CN, Qoder) — their claim is HTTPS against the account,
+/// so a closed host app must not cost a day, and their rows stay live in the
+/// strip. The master and per-tool switches still stand above it; this only
+/// lifts the host half of the gate. The pass cache is 60 s at most, so the
+/// change lands within one cadence tick.
+#[tauri::command]
+pub async fn set_auto_checkin(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".to_string());
+    };
+    settings.auto_checkin = on;
     settings.clone().save().map_err(|e| e.to_string())
 }
 
@@ -446,17 +464,21 @@ pub fn begin_bubble_drag(app: AppHandle) {
 
 /// The check-in button of a checkin-capable tool (Trae CN / Qoder): one
 /// forced claim right now — the automatic pass may already have tried and
-/// failed today; a manual click is the user asking again. Returns a
-/// user-facing message.
+/// failed today; a manual click is the user asking again. The answer is
+/// structured: `ok` alone flips the button into the done badge, `message`
+/// (the reason it did not — 未到签到时间, 排队中 — or the成功 copy) rides the
+/// button until the next sample refresh.
 #[tauri::command]
-pub async fn checkin_now(tool: String) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || match tool.as_str() {
-        "trae_cn" => usage_quota::trae_manual_checkin(),
-        "qoder" => usage_quota::qoder_manual_checkin(),
-        other => Err(format!("{other} 没有签到活动")),
-    })
-    .await
-    .map_err(|e| format!("签到任务失败: {e}"))?
+pub async fn checkin_now(tool: String) -> Result<serde_json::Value, String> {
+    // The registry owns the dispatch (usage_quota::CHECKIN_TOOLS): the same
+    // table the engine's exemption and the strip's control read, so a claim
+    // added there is claimable here without a second list. A tool outside it
+    // is refused before anything touches a vendor.
+    let answer = tokio::task::spawn_blocking(move || usage_quota::manual_checkin(&tool))
+        .await
+        .map_err(|e| format!("签到任务失败: {e}"))?;
+    let (ok, message) = answer?;
+    Ok(serde_json::json!({ "ok": ok, "message": message }))
 }
 
 /// Persist the new fallback cadence, then wake the engine so the next wait

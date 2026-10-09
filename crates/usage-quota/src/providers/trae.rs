@@ -94,6 +94,8 @@ fn storage_jsons(cn: bool) -> Vec<PathBuf> {
 
 /// The endpoint path the IDE calls (v1; the v2 variant 404s on this account).
 const USAGE_PATH: &str = "/trae/api/v1/pay/ide_user_ent_usage";
+/// The credits-billing usage answer: `usage_summary` + the entitlement packs.
+const USAGE_PATH_V2: &str = "/trae/api/v2/pay/ide_user_ent_usage";
 /// Fallback API host, used when the login record carries none.
 const DEFAULT_HOST: &str = "https://growsg-normal.trae.ai";
 const CLAIM_PATH: &str = "/trae/api/v2/ug/checkin_credits/claim";
@@ -264,16 +266,33 @@ impl QuotaProbe for TraeQuota {
             if login.expires_at.is_some_and(|t| t <= now) {
                 continue;
             }
+            let headers = [
+                ("content-type", "application/json"),
+                ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
+                ("accept", "application/json"),
+            ];
+            // v2 first: the credits-billing answer the current IDE itself
+            // reads — `usage_summary` (the account's total vs consumed) plus
+            // the entitlement packs with their own spent sides. The v1 path
+            // below stays for accounts/backends that still answer the old
+            // top-level shape; measured 2026-10-09, v1 no longer carries the
+            // usage fields for a credits-billing account, which is exactly
+            // the "usage vanished" this ladder exists to survive.
+            if self.cn {
+                if let Some(body) =
+                    crate::http::post_json(&format!("{}{USAGE_PATH_V2}", login.host), &headers, json!({"require_usage": true}))
+                {
+                    if body.get("usage_summary").is_some() {
+                        cn_daily_checkin(&login, false);
+                        let out = samples_from_ent_usage_v2(&body);
+                        if !out.is_empty() {
+                            return out;
+                        }
+                    }
+                }
+            }
             let url = format!("{}{USAGE_PATH}", login.host);
-            let Some(body) = crate::http::post_json(
-                &url,
-                &[
-                    ("content-type", "application/json"),
-                    ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
-                    ("accept", "application/json"),
-                ],
-                json!({"require_usage": true}),
-            ) else {
+            let Some(body) = crate::http::post_json(&url, &headers, json!({"require_usage": true})) else {
                 continue;
             };
             let samples = samples_from_entitlement(&body);
@@ -293,6 +312,74 @@ impl QuotaProbe for TraeQuota {
         }
         Vec::new()
     }
+}
+
+/// The v2 credits answer, mapped: one summary bar for the account (total vs
+/// consumed — the numbers the subscription page shows), then one row per
+/// entitlement pack with its own spent side in the label
+/// (`每月登录赠送 · 已用 384/500`). Packs without a credits limit stay as
+/// bare marker rows; the checkin packs keep their `checkin_*` ids, which is
+/// what the strip's done-badge reads.
+fn samples_from_ent_usage_v2(body: &Value) -> Vec<QuotaSample> {
+    let mut out = Vec::new();
+    if let Some(s) = body.get("usage_summary") {
+        let ratio = s.get("consumption_ratio").and_then(Value::as_f64);
+        let consumed = s.get("consumed_amount").and_then(Value::as_f64).unwrap_or(0.0);
+        let total = s.get("total_amount").and_then(Value::as_f64).unwrap_or(0.0);
+        let percent = match ratio {
+            Some(r) if (0.0..=1.0).contains(&r) => r * 100.0,
+            _ => if total > 0.0 { consumed / total * 100.0 } else { 0.0 },
+        };
+        out.push(QuotaSample {
+            used_percent: percent.clamp(0.0, 100.0),
+            window_minutes: 0,
+            resets_at_ms: 0,
+            label: Some(format!("积分 · 已用 {consumed:.0}/{total:.0}")),
+            id: Some("credits-summary".into()),
+        });
+    }
+    for pack in body.get("user_entitlement_pack_list").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+        if pack.get("is_hide").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let name = pack
+            .get("display_desc")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("积分包");
+        let base = pack.get("entitlement_base_info").unwrap_or(&Value::Null);
+        let id = base.get("entitlement_id").and_then(Value::as_str).unwrap_or("credits");
+        let limit = base
+            .pointer("/quota/credits_limit")
+            .or_else(|| base.pointer("/product_extra/package_extra/quota/credits_limit"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let spent = pack.pointer("/usage/credits_amount").and_then(Value::as_f64).unwrap_or(0.0);
+        let label = if limit > 0.0 {
+            format!("{name} · 已用 {spent:.0}/{limit:.0}")
+        } else {
+            name.to_string()
+        };
+        // A pack without a credits limit (the free-plan subscription record,
+        // solo-flag carriers) holds no quota and no usage — as a row it would
+        // only show a meaningless 0 % and the plan period's own renewal date.
+        if limit <= 0.0 {
+            continue;
+        }
+        let percent = (spent / limit * 100.0).clamp(0.0, 100.0);
+        out.push(QuotaSample {
+            used_percent: percent,
+            window_minutes: 0,
+            resets_at_ms: base
+                .get("end_time")
+                .and_then(Value::as_f64)
+                .map(|s| (s * 1000.0) as i64)
+                .unwrap_or(0),
+            label: Some(label),
+            id: Some(id.to_string()),
+        });
+    }
+    out
 }
 
 /// The CN credits windows — one per credits pack. The packs expire
@@ -520,8 +607,10 @@ fn cn_daily_checkin(login: &Login, force: bool) -> Option<TraeCheckinOutcome> {
 
 
 /// The panel's check-in button: one forced claim right now, whatever the
-/// automatic pass already tried today. The message is user-facing.
-pub fn manual_checkin() -> Result<String, String> {
+/// automatic pass already tried today. The bool says whether the day actually
+/// closed, so the button only turns into the done badge for a real claim —
+/// "queued" (9074) stays a button with its reason spelled out.
+pub fn manual_checkin() -> Result<(bool, String), String> {
     let login = logins(true)
         .into_iter()
         .find(|l| l.host.contains("trae.cn"))
@@ -561,18 +650,18 @@ pub fn manual_checkin() -> Result<String, String> {
         .and_then(Value::as_f64)
         .unwrap_or_default();
     state.last_attempt_day = today.clone();
-    let message = match code {
+    let (ok, message) = match code {
         0 => {
             state.last_ok_day = today.clone();
             state.last_credits = points;
-            format!("签到成功，+{points:.0} 积分")
+            (true, format!("签到成功，+{points:.0} 积分"))
         }
-        9095 => "今日已签到".to_string(),
-        9074 => "签到排队中，稍后再试".to_string(),
-        other => format!("签到未成功 (code {other})"),
+        9095 => (true, "今日已签到".to_string()),
+        9074 => (false, "签到排队中，稍后再试".to_string()),
+        other => (false, format!("签到未成功 (code {other})")),
     };
     save_checkin_state(&path, &state);
-    Ok(message)
+    Ok((ok, message))
 }
 
 /// The CN free tier has no pack with a limit: the IDE maps a packless account
@@ -735,6 +824,45 @@ fn fmt(n: f64) -> String {
 mod tests {
     use super::*;
     use base64::Engine;
+
+    /// The v2 credits answer measured live 2026-10-09: a usage summary over the
+    /// account's total, packs with their own spent side (the monthly login
+    /// grant), and the checkin packs whose ids the strip's done-badge reads.
+    /// Hidden packs and the free-plan record (no credits limit, no usage —
+    /// nothing to meter) stay out.
+    #[test]
+    fn the_v2_credits_answer_maps_summary_and_packs() {
+        let body = json!({
+            "is_credits_billing": true,
+            "usage_summary": {"consumed_amount": 383.99, "consumption_ratio": 0.0817, "total_amount": 4700},
+            "user_entitlement_pack_list": [
+                {"display_desc": "老用户福利", "is_hide": false,
+                 "entitlement_base_info": {"entitlement_id": "370200375810", "end_time": 1794133541,
+                   "quota": {"credits_limit": 4000}}, "usage": {}},
+                {"display_desc": "每月登录赠送", "is_hide": false,
+                 "entitlement_base_info": {"entitlement_id": "monthly_bonus_202610_x", "end_time": 1793462399,
+                   "quota": {"credits_limit": 500}}, "usage": {"credits_amount": 383.9872}},
+                {"display_desc": "签到奖励", "is_hide": false,
+                 "entitlement_base_info": {"entitlement_id": "checkin_20261009_x", "end_time": 1794153620,
+                   "quota": {"credits_limit": 100}}, "usage": {}},
+                {"display_desc": "隐藏包", "is_hide": true,
+                 "entitlement_base_info": {"entitlement_id": "hidden", "quota": {"credits_limit": 9}}, "usage": {}},
+                {"display_desc": "免费", "is_hide": false,
+                 "entitlement_base_info": {"entitlement_id": "free_utc202610_x"}, "usage": {}}
+            ]
+        });
+        let out = samples_from_ent_usage_v2(&body);
+        // 五进四出：隐藏包和免费档记录（无 credits_limit，无任何额度语义）都不成行
+        assert_eq!(out.len(), 4, "hidden and limit-less packs stay out: {out:?}");
+        assert_eq!(out[0].id.as_deref(), Some("credits-summary"));
+        assert!((out[0].used_percent - 8.17).abs() < 0.01, "{:?}", out[0].used_percent);
+        assert_eq!(out[0].label.as_deref(), Some("积分 · 已用 384/4700"));
+        assert_eq!(out[3].id.as_deref(), Some("checkin_20261009_x"), "the checkin id survives for the badge");
+        assert_eq!(out[1].label.as_deref(), Some("老用户福利 · 已用 0/4000"));
+        assert_eq!(out[2].label.as_deref(), Some("每月登录赠送 · 已用 384/500"));
+        assert!((out[2].used_percent - 76.8).abs() < 0.1, "{:?}", out[2].used_percent);
+        assert_eq!(out[2].resets_at_ms, 1793462399000, "the pack's own expiry drives the countdown");
+    }
 
     /// Round-trips the envelope: encrypt with the derived scheme, read back —
     /// and refuses a flipped byte, a wrong header.
@@ -1069,8 +1197,10 @@ fn cn_fetch_live() {
 fn cn_credits_dump() {
     for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
         for (path, payload) in [
+            ("/trae/api/v2/pay/ide_user_ent_usage", json!({ "require_usage": true })),
             ("/trae/api/v2/pay/user_current_entitlement_list", json!({ "require_usage": true, "req_source": "IDE", "full_data": true })),
             ("/trae/api/v2/pay/web_user_ent_usage", json!({ "require_usage": true, "req_source": "IDE", "full_data": true })),
+            ("/trae/api/v2/ug/checkin_credits/status", json!({})),
             ("/api/v1/commercial/get_session_usage", json!({ "session_id": "" })),
         ] {
             let url = format!("{}{path}", login.host);

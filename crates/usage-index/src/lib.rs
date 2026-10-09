@@ -292,6 +292,11 @@ pub struct Index {
     pub(crate) errors: Vec<String>,
     /// Identifies *this* connection's row in the ingest-claim protocol.
     pub(crate) claim_token: String,
+    /// Per-source last emission of the "changed but read emitted 0 events"
+    /// note. A busy source whose writes legitimately touch non-usage tables
+    /// would otherwise repeat the note on every pass; one line per hour keeps
+    /// the signal without the flood. In-memory: a restart re-anchors it.
+    pub(crate) note_gate: std::collections::HashMap<String, std::time::Instant>,
 }
 
 impl Index {
@@ -568,7 +573,7 @@ impl Index {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let claim_token = format!("{:x}-{:x}", std::process::id(), nanos);
-        Ok(Self { conn, path, max_workers, errors: Vec::new(), claim_token })
+        Ok(Self { conn, path, max_workers, errors: Vec::new(), claim_token, note_gate: std::collections::HashMap::new() })
     }
 
     /// Caps the read pool; a menu-bar process wants a small number even on a

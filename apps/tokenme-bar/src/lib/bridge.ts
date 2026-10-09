@@ -89,10 +89,12 @@ export const bridge: Bridge = {
   },
 
   /** The check-in button of a checkin-capable tool (Trae CN / Qoder): one
-   *  forced claim right now. Returns a user-facing message. */
-  async checkinNow(tool: string): Promise<string> {
-    if (!inTauri) return "签到成功";
-    return invoke<string>("checkin_now", { tool });
+   *  forced claim right now. `ok` alone turns the button into the done
+   *  badge; `message` is the reason (未到签到时间 / 排队中) or the success
+   *  copy, and the button shows it until the next sample refresh. */
+  async checkinNow(tool: string): Promise<{ ok: boolean; message: string }> {
+    if (!inTauri) return { ok: true, message: "签到成功" };
+    return invoke<{ ok: boolean; message: string }>("checkin_now", { tool });
   },
 
 
@@ -252,6 +254,14 @@ export const bridge: Bridge = {
       return;
     }
     await invoke<void>("set_host_exit_pause", { on });
+  },
+
+  async setAutoCheckin(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.auto_checkin = on;
+      return;
+    }
+    await invoke<void>("set_auto_checkin", { on });
   },
 
   async setQuotaPolling(on: boolean): Promise<void> {
@@ -451,6 +461,7 @@ const browserSettings: PanelSettings = {
   show_empty_tools: false,
   bubble_enabled: true,
   host_exit_pause: true,
+  auto_checkin: false,
   quota_polling: true,
   quota_probes_off: [],
   notify_tiers: "both",

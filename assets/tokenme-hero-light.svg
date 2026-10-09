@@ -58,6 +58,6 @@
     <text x="324" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#0C7F6C">Live Quota</text>
 
     <!-- Right Side Protocol Tag -->
-    <text x="832" y="22" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace" font-size="13" font-weight="500" fill="#64748B">v0.1.5 · MIT License</text>
+    <text x="832" y="22" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace" font-size="13" font-weight="500" fill="#64748B">v0.1.6 · MIT License</text>
   </g>
 </svg>
