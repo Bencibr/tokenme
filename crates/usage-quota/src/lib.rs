@@ -29,6 +29,7 @@ pub use providers::workbuddy_login;
 pub const CHECKIN_TOOLS: &[(&str, fn() -> Result<(bool, String), String>)] = &[
     ("trae_cn", providers::trae_manual_checkin),
     ("qoder", providers::qoder_manual_checkin),
+    ("minimaxcode", providers::minimaxcode_manual_checkin),
 ];
 
 /// The check-in tool ids, in registry order.
@@ -267,13 +268,13 @@ mod tests {
     }
 
     /// The check-in registry drives the engine's auto-check-in exemption and
-    /// the panel's button dispatch, so its two entries are pinned: real probes
+    /// the panel's button dispatch, so its entries are pinned: real probes
     /// behind them, and a stranger refused before any network call.
     #[test]
     fn the_checkin_registry_names_real_probes_and_refuses_strangers() {
         let probes: Vec<&str> = built_in().iter().map(|p| p.tool()).collect();
         let ids: Vec<&str> = checkin_tool_ids().collect();
-        assert_eq!(ids, vec!["trae_cn", "qoder"], "the two claim-bearing probes");
+        assert_eq!(ids, vec!["trae_cn", "qoder", "minimaxcode"], "the claim-bearing probes");
         for id in &ids {
             assert!(probes.contains(id), "check-in tool {id:?} has no probe to run under");
             assert!(is_checkin_tool(id));
