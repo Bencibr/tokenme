@@ -515,19 +515,23 @@ pub(crate) fn samples_from_snapshot(value: &Value) -> Vec<QuotaSample> {
 //
 // The credits campaign claim rides the same bearer token and base the usage
 // meter already answers (`openapi.qoder.sh`; the CN edition's base is the
-// fallback). Contract cross-checked against the client's own call shape and
-// the community claimers: the campaigns list answers EMPTY without the
-// `cosy-client-type: 10` header, and only `CLAIM_BENEFIT` campaigns still in
-// `CLAIMABLE` are worth a claim. The claim itself is empty-bodied and
-// idempotent server-side (`data.replayed` marks a duplicate), but the panel
-// still fires at most ONE attempt per local day — the state file is the lock,
-// the same discipline the Trae claim follows, because retrying is what
-// extends the server's rate limit. Success (`data.status == "CLAIMED"`) and
-// a list whose rows are all CLAIMED close the day. An EMPTY list is the
-// server saying this account has no activity today (`showCampaign: false,
-// claimable: false` measured live 2026-10-09): the day stays open and the
-// outcome carries `no_campaign`, so the button reports 暂无活动 instead of
-// dressing an absent campaign up as a failure.
+// fallback). Contract read out of the Qoder client's own main.log "[Campaign]"
+// lines and replayed by hand: the list header is `Cosy-ClientType` — NO dash;
+// the dashed `cosy-client-type` the community claimers pass is an unknown
+// client to the server, which answers an EMPTY list for it. Only
+// `CLAIM_BENEFIT` rows still in `CLAIMABLE` are worth a claim (POST
+// .../{id}/claim, empty body; `data.status == "CLAIMED"` is the success the
+// client itself checks). What a third party CANNOT do is win the daily
+// credits row: the claim route resolves the request through the vendor's
+// device-identity service and answers 503 SAME_PERSON_DEPENDENCY_UNAVAILABLE
+// without the native `Cosy-Machine*` fingerprint the running client mints
+// in-process (measured live 2026-10-09, with and without forged headers) —
+// the daily claim belongs to the Qoder client, which pops its own activity
+// surface at 10:00 (source "automatic" in the same log). So tokenme reports
+// the state honestly: CLAIMED rows mark the day 已签到, a claimable row we
+// cannot claim sets `claim_gated` (marker row + button label point at the
+// client), an empty list is `no_campaign` (the day stays open), and only a
+// claim lost to anything else reads as 签到未成功.
 
 const CAMPAIGNS_PATH: &str = "/sash/api/v1/me/campaigns";
 const CHECKIN_BASES: [&str; 2] = ["https://openapi.qoder.sh", "https://openapi.qoder.com.cn"];
@@ -555,6 +559,13 @@ struct QoderCheckinOutcome {
     /// and nothing already claimed — no activity for this account today. Not
     /// an error: the day stays open in case a campaign opens later.
     no_campaign: bool,
+    /// A CLAIMABLE row exists but the claim POST was refused by the vendor's
+    /// device-identity gate (503 SAME_PERSON_DEPENDENCY_UNAVAILABLE): only the
+    /// Qoder client can mint that fingerprint, so the UI points there.
+    claim_gated: bool,
+    /// A claim was attempted and lost to anything else (transport, other 5xx,
+    /// business refusal): the plain retry-later failure.
+    claim_failed: bool,
     credits: f64,
 }
 
@@ -614,7 +625,8 @@ fn checkin_campaigns(base: &str, token: &str) -> Option<Value> {
         .build()
         .get(&url)
         .set("authorization", &format!("Bearer {token}"))
-        .set("cosy-client-type", "10")
+        .set("Cosy-ClientType", "10")
+        .set("Cosy-Version", "0.4.3")
         .set("user-agent", "Qoder")
         .set("accept", "application/json")
         .call()
@@ -622,25 +634,42 @@ fn checkin_campaigns(base: &str, token: &str) -> Option<Value> {
     resp.into_string().ok().and_then(|t| serde_json::from_str(&t).ok())
 }
 
-/// One claim attempt: `(claimed, credits)` — `data.status == "CLAIMED"` is the
-/// success the client itself checks; a business failure answers unclaimed.
-fn checkin_claim(base: &str, token: &str, campaign: &str) -> Option<(bool, f64)> {
+/// One claim answer from wire shape: `(claimed, credits, gated)`. A 503 with
+/// the SAME_PERSON error is the vendor's device-identity gate — measured live
+/// 2026-10-09 with and without forged machine headers, always the same refusal
+/// — not a transient outage, so it reads as "claim in the client", not "retry".
+fn claim_answer(status: u16, body: &Value) -> (bool, f64, bool) {
+    let claimed = body.pointer("/data/status").and_then(Value::as_str) == Some("CLAIMED");
+    let credits = body.pointer("/data/benefit/amount").and_then(Value::as_f64).unwrap_or(0.0);
+    let gated = status == 503
+        && body.get("errorCode").and_then(Value::as_str).is_some_and(|c| c.contains("SAME_PERSON"));
+    (claimed, credits, gated)
+}
+
+fn checkin_claim(base: &str, token: &str, campaign: &str) -> Option<(bool, f64, bool)> {
     let url = format!("{base}{CAMPAIGNS_PATH}/{campaign}/claim");
-    let resp = ureq::AgentBuilder::new()
+    // ureq answers non-2xx as Err(Status(code, resp)); the gate is a 503, so
+    // the response body must survive the error path to be recognized.
+    let answer = match ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()
         .post(&url)
         .set("authorization", &format!("Bearer {token}"))
-        .set("cosy-client-type", "10")
+        .set("Cosy-ClientType", "10")
+        .set("Cosy-Version", "0.4.3")
         .set("user-agent", "Qoder")
         .set("accept", "application/json")
         .send_string("")
-        .ok()?;
+    {
+        Ok(resp) => Some(resp),
+        Err(ureq::Error::Status(_, resp)) => Some(resp),
+        Err(_) => None,
+    };
+    let resp = answer?;
+    let status = resp.status();
     let body: Value = resp.into_string().ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-    let claimed = body.pointer("/data/status").and_then(Value::as_str) == Some("CLAIMED");
-    let credits = body.pointer("/data/benefit/amount").and_then(Value::as_f64).unwrap_or(0.0);
-    Some((claimed, credits))
+    Some(claim_answer(status, &body))
 }
 
 /// Fire today's claim (unless today is already spent) and report the outcome.
@@ -659,6 +688,8 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
             was_already: false,
             too_early: false,
             no_campaign: false,
+            claim_gated: false,
+            claim_failed: false,
             credits: state.last_credits,
         });
     }
@@ -668,8 +699,17 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     // (rows all CLAIMED) marks the day at any hour. The next pass after ten
     // retries an open day on its own.
     let may_claim = force || chrono::Timelike::hour(&chrono::Local::now()) >= 10;
-    let mut outcome = QoderCheckinOutcome { done_today: false, was_already: false, too_early: false, no_campaign: false, credits: 0.0 };
+    let mut outcome = QoderCheckinOutcome {
+        done_today: false,
+        was_already: false,
+        too_early: false,
+        no_campaign: false,
+        claim_gated: false,
+        claim_failed: false,
+        credits: 0.0,
+    };
     let mut answered = false; // a base returned a parseable campaigns envelope
+    let mut attempted = false; // a claim POST actually went out
     'bases: for base in CHECKIN_BASES {
         let Some(body) = checkin_campaigns(base, token) else { continue };
         answered = true;
@@ -678,18 +718,31 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
                 outcome.too_early = true; // claimable but too early: day open, button greys
                 break 'bases;
             }
-            if let Some((true, credits)) = checkin_claim(base, token, &id) {
-                state.last_attempt_day = today.clone();
-                state.last_ok_day = today.clone();
-                state.last_credits = if credits > 0.0 { credits } else { amount };
-                outcome = QoderCheckinOutcome {
-                    done_today: true,
-                    was_already: false,
-                    too_early: false,
-                    no_campaign: false,
-                    credits: state.last_credits,
-                };
-                break 'bases;
+            attempted = true;
+            match checkin_claim(base, token, &id) {
+                Some((true, credits, _)) => {
+                    state.last_attempt_day = today.clone();
+                    state.last_ok_day = today.clone();
+                    state.last_credits = if credits > 0.0 { credits } else { amount };
+                    outcome = QoderCheckinOutcome {
+                        done_today: true,
+                        was_already: false,
+                        too_early: false,
+                        no_campaign: false,
+                        claim_gated: false,
+                        claim_failed: false,
+                        credits: state.last_credits,
+                    };
+                    break 'bases;
+                }
+                // The vendor's device-identity gate: the row is claimable but
+                // only the client can claim it. Say so and stop — retrying a
+                // gated claim is what probes into a rate limit.
+                Some((false, _, true)) => {
+                    outcome.claim_gated = true;
+                    break 'bases;
+                }
+                _ => {} // this row refused for another reason; try the next
             }
         }
         // A base that answered with claimable rows all already CLAIMED has
@@ -706,12 +759,24 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         if all_claimed {
             state.last_attempt_day = today.clone();
             state.last_ok_day = today.clone();
-            outcome = QoderCheckinOutcome { done_today: true, was_already: true, too_early: false, no_campaign: false, credits: 0.0 };
+            outcome = QoderCheckinOutcome {
+                done_today: true,
+                was_already: true,
+                too_early: false,
+                no_campaign: false,
+                claim_gated: false,
+                claim_failed: false,
+                credits: 0.0,
+            };
             break 'bases;
         }
     }
-    if answered && !outcome.done_today && !outcome.too_early {
-        outcome.no_campaign = true; // the server spoke and had nothing to claim
+    if answered && !outcome.done_today && !outcome.too_early && !outcome.claim_gated {
+        if attempted {
+            outcome.claim_failed = true; // we asked and were refused for other reasons
+        } else {
+            outcome.no_campaign = true; // the server spoke and had nothing to claim
+        }
     }
     save_checkin_state(&path, &state);
     Some(outcome)
@@ -735,6 +800,7 @@ pub fn qoder_manual_checkin() -> Result<(bool, String), String> {
             Ok((true, format!("签到成功，+{:.0} 积分", o.credits)))
         }
         Some(o) if o.done_today => Ok((true, "今日已签到".to_string())),
+        Some(o) if o.claim_gated => Ok((false, "请在 Qoder 客户端内领取".into())),
         Some(o) if o.no_campaign => Ok((false, "今日暂无可领的签到活动".into())),
         _ => Ok((false, "签到未成功，稍后再试".to_string())),
     }
@@ -789,6 +855,19 @@ fn with_checkin_mark(samples: Vec<QuotaSample>, outcome: &Option<QoderCheckinOut
             });
             out
         }
+        // The gate row names where the claim can actually happen: the client
+        // mints the device fingerprint no third party carries.
+        Some(o) if o.claim_gated => {
+            let mut out = samples;
+            out.push(QuotaSample {
+                used_percent: 0.0,
+                window_minutes: 0,
+                resets_at_ms: 0,
+                label: Some("签到需在 Qoder 内领取".into()),
+                id: Some("checkin-gated".into()),
+            });
+            out
+        }
         _ => samples,
     }
 }
@@ -830,6 +909,8 @@ mod tests {
             was_already: true,
             too_early: false,
             no_campaign: false,
+            claim_gated: false,
+            claim_failed: false,
             credits: 0.0,
         });
         assert_eq!(already.label.as_deref(), Some("今日已签到"));
@@ -838,6 +919,8 @@ mod tests {
             was_already: false,
             too_early: false,
             no_campaign: false,
+            claim_gated: false,
+            claim_failed: false,
             credits: 100.0,
         });
         assert_eq!(claimed.label.as_deref(), Some("已自动签到 · +100"));
@@ -846,6 +929,8 @@ mod tests {
             was_already: false,
             too_early: false,
             no_campaign: false,
+            claim_gated: false,
+            claim_failed: false,
             credits: 0.0,
         });
         assert_eq!(plain.label.as_deref(), Some("已自动签到"));
@@ -861,6 +946,44 @@ mod tests {
             &None,
         );
         assert_eq!(none.len(), 1, "no claim, no marker row");
+    }
+
+    /// The gate answer measured live (2026-10-09, with and without forged
+    /// machine headers): 503 + SAME_PERSON means "claim in the client" — not
+    /// a retry, not an absent campaign.
+    #[test]
+    fn the_same_person_gate_reads_as_gated_not_failed() {
+        let gated = claim_answer(
+            503,
+            &json!({"errorCode":"SAME_PERSON_DEPENDENCY_UNAVAILABLE","errorMessage":"campaign service is temporarily unavailable"}),
+        );
+        assert_eq!(gated, (false, 0.0, true));
+        // A plain 503 without the marker stays an ordinary failure.
+        assert_eq!(claim_answer(503, &json!({"errorCode":"OTHER"})), (false, 0.0, false));
+        // The success the client itself checks, and its credits.
+        assert_eq!(claim_answer(200, &json!({"code":0,"data":{"status":"CLAIMED","benefit":{"amount":100}}})), (true, 100.0, false));
+        // A business refusal is neither.
+        assert_eq!(claim_answer(200, &json!({"code":1,"msg":"queued"})), (false, 0.0, false));
+    }
+
+    /// The gate row's id must not read as a claim: the strip's done badge
+    /// greps ids with an explicit wait/gated exclusion, and this test pins the
+    /// id/label pair it greps against.
+    #[test]
+    fn the_gated_row_names_the_client_without_reading_as_done() {
+        let gated_outcome = QoderCheckinOutcome {
+            done_today: false,
+            was_already: false,
+            too_early: false,
+            no_campaign: false,
+            claim_gated: true,
+            claim_failed: false,
+            credits: 0.0,
+        };
+        let rows: Vec<QuotaSample> = with_checkin_mark(vec![], &Some(gated_outcome));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("checkin-gated"));
+        assert_eq!(rows[0].label.as_deref(), Some("签到需在 Qoder 内领取"));
     }
 
     /// The response measured live on this machine (2026-09-24, `personal_standard`):
