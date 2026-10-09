@@ -119,6 +119,7 @@ fn local_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -127,7 +128,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let first = ensure_keypair_at(&dir).unwrap();
         assert!(first.path.exists());
+        #[cfg(unix)]
         let mode = std::fs::metadata(&first.path).unwrap().permissions().mode() & 0o777;
+        #[cfg(unix)]
         assert_eq!(mode, 0o600, "private key must be 0600");
         assert!(first.path.extension().is_none() || first.path.file_name().unwrap() == KEY_FILE);
         // The `.tmp` staging file must not survive.

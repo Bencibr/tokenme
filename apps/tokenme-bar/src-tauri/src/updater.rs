@@ -525,6 +525,7 @@ mod tests {
 
     /// The script is plain sh (the only interpreter guaranteed on a fresh
     /// macOS), quotes every interpolated path, and fails loudly into the log.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_swap_script_quotes_its_paths_and_never_trusts_the_zip() {
         let script = swap_script(

@@ -154,7 +154,7 @@ tokenme import ~/tokenme-sync/tokenme-build-01.jsonl.gz
 tokenme import bundle.jsonl.gz --dry-run   # parse + reconcile, then roll back
 ```
 
-On the menu-bar side you rarely need this: the panel engine auto-imports `~/tokenme-sync` every pass and shows a **Linux 同步 / Linux sync** badge with the newest merge per machine (warning-hued past 24 h).
+On the menu-bar side you rarely need this: the panel engine auto-imports `~/tokenme-sync` every pass and shows a **多端同步 / Multi-device sync** badge with the newest merge per machine (warning-hued past 24 h).
 
 Limits and trust: payload rows are capped (the manifest's count plus slack) so a corrupt file can't exhaust memory; a bundle can only move a row forward — the growth predicate refuses lower counts — and it never deletes (rows the collector purged later are reported as stale). A bundle is validated, not signed: anyone who can write into the sync folder can add rows, so treat it like the index itself. Task guide: [USER_GUIDE.md](USER_GUIDE.md) §4.
 

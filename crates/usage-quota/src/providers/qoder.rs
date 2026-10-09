@@ -461,16 +461,11 @@ fn meter_sample(meter: Option<&Value>, name: &str, resets_at_ms: i64) -> Option<
         None => used / total * 100.0,
     }
     .clamp(0.0, 100.0);
-    let remaining = meter
-        .get("remaining")
-        .and_then(Value::as_f64)
-        .filter(|n| n.is_finite())
-        .unwrap_or((total - used).max(0.0));
     Some(QuotaSample {
         used_percent: percent,
         window_minutes: 0,
         resets_at_ms,
-        label: Some(format!("{name} · 已用 {}/{}", trim(total - remaining), trim(total))),
+        label: Some(format!("{name} · 已用 {}/{}", trim(used), trim(total))),
         id: Some("credits".into()),
     })
 }
@@ -1456,6 +1451,26 @@ mod tests {
         assert_eq!(pack.label.as_deref(), Some("资源包 · 已用 1500/1500"));
         assert_eq!(pack.used_percent, 100.0, "percentage 1 means a whole, not 1 %");
         assert_eq!(pack.resets_at_ms, 0, "no own reset is advertised for a pack");
+    }
+
+    #[test]
+    fn the_quota_tip_uses_the_vendor_used_value() {
+        // `remaining` can be stale for one response while `used` and the
+        // percentage have already advanced. The tooltip must not reconstruct
+        // a second value from that stale field.
+        let sample = meter_sample(
+            Some(&json!({
+                "total": 100,
+                "used": 23,
+                "remaining": 90,
+                "percentage": 0.23,
+                "unit": "credits"
+            })),
+            "套餐内",
+            0,
+        )
+        .expect("positive quota draws a meter");
+        assert_eq!(sample.label.as_deref(), Some("套餐内 · 已用 23/100"));
     }
 
     #[test]

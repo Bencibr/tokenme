@@ -244,7 +244,7 @@ pub struct Report {
 /// What one `tokenme import` merged from one origin, as written to the index's
 /// `meta` table (`sync:linux:<origin>`) in the same transaction as the merge —
 /// so a record can never describe a batch that was rolled back. The panel
-/// renders it as the "Linux 同步" badge; `imported_at_ms` is what tells a
+/// renders it as the "多端同步" badge; `imported_at_ms` is what tells a
 /// stalled sync apart from a quiet afternoon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncRecord {
