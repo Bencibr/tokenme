@@ -45,6 +45,7 @@ Usage: scripts/scan-public.py [--verbose] [<rev-range>]
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -189,8 +190,18 @@ def batch_check(shas):
 
 def batch_read(shas):
     p = subprocess.Popen(["git", "cat-file", "--batch"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    p.stdin.write(("\n".join(shas) + "\n").encode())
-    p.stdin.close()
+
+    # Feed on a thread: git's stdout fills (blob bodies) and blocks while stdin
+    # is still being written, so a same-thread write-then-read deadlocks once
+    # the request list nears the pipe buffer (hit on Windows, 1450 blobs).
+    def feed():
+        try:
+            p.stdin.write(("\n".join(shas) + "\n").encode())
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+
+    threading.Thread(target=feed, daemon=True).start()
     out = {}
     f = p.stdout
     for _ in shas:
