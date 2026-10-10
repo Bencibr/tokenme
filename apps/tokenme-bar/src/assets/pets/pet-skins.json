@@ -14,23 +14,110 @@
         "art": 96,
         "atlas": 192,
         "artOffset": -10,
-        "dockShift": { "right": -24, "left": 24, "top": 29 }
+        "dockShift": {
+          "right": -24,
+          "left": 24,
+          "top": 29
+        }
       },
       "frames": {
-        "open": [-4.823, -3.254],
-        "half": [-90.794, -3.254],
-        "closed": [-4.9, -94.967],
-        "happy": [-90.794, -94.967]
+        "open": [
+          -4.823,
+          -3.254
+        ],
+        "half": [
+          -90.794,
+          -3.254
+        ],
+        "closed": [
+          -4.9,
+          -94.967
+        ],
+        "happy": [
+          -90.794,
+          -94.967
+        ]
       },
-      "animation": { "blink": "atlas" },
+      "animation": {
+        "blink": "atlas"
+      },
       "eyes": {
-        "none": { "left": [35.445, 39.541], "right": [61.091, 39.541], "size": 13, "height": 11.5, "pupil": 9, "enabled": false },
-        "happy": { "left": [35.445, 39.541], "right": [61.091, 39.541], "size": 13, "height": 11.5, "pupil": 9, "enabled": false },
-        "right": { "left": [35.445, 45.282], "right": [59.636, 40.038], "size": 11, "height": 9.5, "pupil": 8 },
-        "left": { "left": [38.584, 41.761], "right": [63.847, 45.627], "size": 11.7, "height": 9.2, "pupil": 7 },
-        "top": { "left": [41.3, 61.6], "right": [63.8, 67.6], "size": 11.5, "height": 8.6, "pupil": 7.4, "rotation": [32, -22] }
+        "none": {
+          "left": [
+            35.445,
+            39.541
+          ],
+          "right": [
+            61.091,
+            39.541
+          ],
+          "size": 13,
+          "height": 11.5,
+          "pupil": 9,
+          "enabled": false
+        },
+        "happy": {
+          "left": [
+            35.445,
+            39.541
+          ],
+          "right": [
+            61.091,
+            39.541
+          ],
+          "size": 13,
+          "height": 11.5,
+          "pupil": 9,
+          "enabled": false
+        },
+        "right": {
+          "left": [
+            35.445,
+            45.282
+          ],
+          "right": [
+            59.636,
+            40.038
+          ],
+          "size": 11,
+          "height": 9.5,
+          "pupil": 8
+        },
+        "left": {
+          "left": [
+            38.584,
+            41.761
+          ],
+          "right": [
+            63.847,
+            45.627
+          ],
+          "size": 11.7,
+          "height": 9.2,
+          "pupil": 7
+        },
+        "top": {
+          "left": [
+            41.3,
+            61.6
+          ],
+          "right": [
+            63.8,
+            67.6
+          ],
+          "size": 11.5,
+          "height": 8.6,
+          "pupil": 7.4,
+          "rotation": [
+            32,
+            -22
+          ]
+        }
       },
-      "eyelid": { "fill": "#ffe6bf", "stroke": "#57321c" }
+      "eyelid": {
+        "fill": "#ffe6bf",
+        "stroke": "#57321c"
+      }
     },
     "han_girl": {
       "labelKey": "set.bubble.skin.han_girl",
@@ -45,23 +132,105 @@
         "art": 96,
         "atlas": 192,
         "artOffset": -10,
-        "dockShift": { "right": -24, "left": 24, "top": 29 }
+        "dockShift": {
+          "right": -24,
+          "left": 24,
+          "top": 29
+        }
       },
       "frames": {
-        "open": [-4.823, -3.254],
-        "half": [-91.024, -3.408],
-        "closed": [-5.052, -92.977],
-        "happy": [-90.488, -92.977]
+        "open": [
+          -4.823,
+          -3.254
+        ],
+        "half": [
+          -91.024,
+          -3.408
+        ],
+        "closed": [
+          -5.052,
+          -92.977
+        ],
+        "happy": [
+          -90.488,
+          -92.977
+        ]
       },
-      "animation": { "blink": "overlay" },
+      "animation": {
+        "blink": "overlay"
+      },
       "eyes": {
-        "none": { "left": [36.7, 48.3], "right": [60.6, 48.3], "size": 11.2, "height": 8.4, "pupil": 7.4 },
-        "happy": { "left": [36.7, 48.3], "right": [60.6, 48.3], "size": 11.2, "height": 8.4, "pupil": 7.4, "enabled": false },
-        "right": { "left": [44.7, 50.4], "right": [63.2, 45.2], "size": 10.2, "height": 8, "pupil": 7 },
-        "left": { "left": [34.5, 43.1], "right": [53.2, 49.1], "size": 10.2, "height": 8, "pupil": 7 },
-        "top": { "left": [40.5, 63.2], "right": [62.6, 68.4], "size": 10.2, "height": 7.8, "pupil": 7 }
+        "none": {
+          "left": [
+            36.7,
+            48.3
+          ],
+          "right": [
+            60.6,
+            48.3
+          ],
+          "size": 11.2,
+          "height": 8.4,
+          "pupil": 7.4
+        },
+        "happy": {
+          "left": [
+            36.7,
+            48.3
+          ],
+          "right": [
+            60.6,
+            48.3
+          ],
+          "size": 11.2,
+          "height": 8.4,
+          "pupil": 7.4,
+          "enabled": false
+        },
+        "right": {
+          "left": [
+            44.7,
+            50.4
+          ],
+          "right": [
+            63.2,
+            45.2
+          ],
+          "size": 10.2,
+          "height": 8,
+          "pupil": 7
+        },
+        "left": {
+          "left": [
+            34.5,
+            43.1
+          ],
+          "right": [
+            53.2,
+            49.1
+          ],
+          "size": 10.2,
+          "height": 8,
+          "pupil": 7
+        },
+        "top": {
+          "left": [
+            40.5,
+            63.2
+          ],
+          "right": [
+            62.6,
+            68.4
+          ],
+          "size": 10.2,
+          "height": 7.8,
+          "pupil": 7
+        }
       },
-      "eyelid": { "fill": "#ffe9df", "stroke": "#5b3028" }
+      "eyelid": {
+        "fill": "#ffe9df",
+        "stroke": "#5b3028"
+      }
     },
     "han_boy": {
       "labelKey": "set.bubble.skin.han_boy",
@@ -76,23 +245,105 @@
         "art": 96,
         "atlas": 192,
         "artOffset": -10,
-        "dockShift": { "right": -24, "left": 24, "top": 29 }
+        "dockShift": {
+          "right": -24,
+          "left": 24,
+          "top": 29
+        }
       },
       "frames": {
-        "open": [-4.823, -3.254],
-        "half": [-96.153, -3.407],
-        "closed": [-4.746, -98.641],
-        "happy": [-96.23, -98.488]
+        "open": [
+          -4.823,
+          -3.254
+        ],
+        "half": [
+          -96.153,
+          -3.407
+        ],
+        "closed": [
+          -4.746,
+          -98.641
+        ],
+        "happy": [
+          -96.23,
+          -98.488
+        ]
       },
-      "animation": { "blink": "overlay" },
+      "animation": {
+        "blink": "overlay"
+      },
       "eyes": {
-        "none": { "left": [36.7, 47.2], "right": [57.4, 47.1], "size": 11.2, "height": 8.5, "pupil": 7.4 },
-        "happy": { "left": [36.7, 47.2], "right": [57.4, 47.1], "size": 11.2, "height": 8.5, "pupil": 7.4, "enabled": false },
-        "right": { "left": [42.5, 53.5], "right": [61.6, 47.8], "size": 10.2, "height": 8, "pupil": 7 },
-        "left": { "left": [34.8, 46.3], "right": [53.7, 50.8], "size": 10.2, "height": 8, "pupil": 7 },
-        "top": { "left": [40.3, 66.2], "right": [59.2, 71.5], "size": 10.2, "height": 7.8, "pupil": 7 }
+        "none": {
+          "left": [
+            36.7,
+            47.2
+          ],
+          "right": [
+            57.4,
+            47.1
+          ],
+          "size": 11.2,
+          "height": 8.5,
+          "pupil": 7.4
+        },
+        "happy": {
+          "left": [
+            36.7,
+            47.2
+          ],
+          "right": [
+            57.4,
+            47.1
+          ],
+          "size": 11.2,
+          "height": 8.5,
+          "pupil": 7.4,
+          "enabled": false
+        },
+        "right": {
+          "left": [
+            42.5,
+            53.5
+          ],
+          "right": [
+            61.6,
+            47.8
+          ],
+          "size": 10.2,
+          "height": 8,
+          "pupil": 7
+        },
+        "left": {
+          "left": [
+            34.8,
+            46.3
+          ],
+          "right": [
+            53.7,
+            50.8
+          ],
+          "size": 10.2,
+          "height": 8,
+          "pupil": 7
+        },
+        "top": {
+          "left": [
+            40.3,
+            66.2
+          ],
+          "right": [
+            59.2,
+            71.5
+          ],
+          "size": 10.2,
+          "height": 7.8,
+          "pupil": 7
+        }
       },
-      "eyelid": { "fill": "#ffe9df", "stroke": "#5b3028" }
+      "eyelid": {
+        "fill": "#ffe9df",
+        "stroke": "#5b3028"
+      }
     },
     "modern_girl": {
       "labelKey": "set.bubble.skin.modern_girl",
@@ -107,23 +358,116 @@
         "art": 112,
         "atlas": 224,
         "artOffset": 0,
-        "dockShift": { "right": -35, "left": 35, "top": 34 }
+        "dockShift": {
+          "right": -35,
+          "left": 35,
+          "top": 34
+        }
       },
       "frames": {
-        "open": [-11.7, 0],
-        "half": [-112, 0],
-        "closed": [0, -112],
-        "happy": [-102.8, -116]
+        "open": [
+          -11.7,
+          0
+        ],
+        "half": [
+          -112,
+          0
+        ],
+        "closed": [
+          0,
+          -112
+        ],
+        "happy": [
+          -102.8,
+          -116
+        ]
       },
-      "animation": { "blink": "overlay" },
+      "animation": {
+        "blink": "overlay"
+      },
       "eyes": {
-        "none": { "left": [48, 37.7], "right": [64, 37.2], "size": 8.4, "height": 8.4, "pupil": 5.8 },
-        "happy": { "left": [47.7, 34.4], "right": [64.3, 31.8], "size": 8.4, "height": 8.4, "pupil": 5.8 },
-        "right": { "left": [67.5, 40], "right": [81.8, 32.2], "size": 8.4, "height": 8.8, "pupil": 6.4, "rotation": [-25, -25] },
-        "left": { "left": [25.6, 35], "right": [41.5, 41.3], "size": 8.4, "height": 8.8, "pupil": 6.4, "rotation": [25, 25] },
-        "top": { "left": [44.8, 65], "right": [65.2, 58], "size": 10.5, "height": 10.2, "pupil": 7.2, "rotation": [-20, -20] }
+        "none": {
+          "left": [
+            48,
+            37.7
+          ],
+          "right": [
+            64,
+            37.2
+          ],
+          "size": 8.4,
+          "height": 8.4,
+          "pupil": 5.8
+        },
+        "happy": {
+          "left": [
+            47.7,
+            34.4
+          ],
+          "right": [
+            64.3,
+            31.8
+          ],
+          "size": 8.4,
+          "height": 8.4,
+          "pupil": 5.8
+        },
+        "right": {
+          "left": [
+            67.5,
+            40
+          ],
+          "right": [
+            81.8,
+            32.2
+          ],
+          "size": 8.4,
+          "height": 8.8,
+          "pupil": 6.4,
+          "rotation": [
+            -25,
+            -25
+          ]
+        },
+        "left": {
+          "left": [
+            25.6,
+            35
+          ],
+          "right": [
+            41.5,
+            41.3
+          ],
+          "size": 8.4,
+          "height": 8.8,
+          "pupil": 6.4,
+          "rotation": [
+            25,
+            25
+          ]
+        },
+        "top": {
+          "left": [
+            44.8,
+            65
+          ],
+          "right": [
+            65.2,
+            58
+          ],
+          "size": 10.5,
+          "height": 10.2,
+          "pupil": 7.2,
+          "rotation": [
+            -20,
+            -20
+          ]
+        }
       },
-      "eyelid": { "fill": "#ffe5d8", "stroke": "#493449" }
+      "eyelid": {
+        "fill": "#ffe5d8",
+        "stroke": "#493449"
+      }
     },
     "summer_beauty": {
       "labelKey": "set.bubble.skin.summer_beauty",
@@ -138,23 +482,121 @@
         "art": 192,
         "atlas": 384,
         "artOffset": 0,
-        "dockShift": { "right": -60, "left": 60, "top": 58 }
+        "dockShift": {
+          "right": -60,
+          "left": 60,
+          "top": 58
+        }
       },
       "frames": {
-        "open": [-7.5, 0],
-        "half": [-192, 0],
-        "closed": [0, -192],
-        "happy": [-180, -192]
+        "open": [
+          -7.5,
+          0
+        ],
+        "half": [
+          -192,
+          0
+        ],
+        "closed": [
+          0,
+          -192
+        ],
+        "happy": [
+          -180,
+          -192
+        ]
       },
-      "animation": { "blink": "overlay" },
+      "animation": {
+        "blink": "overlay"
+      },
       "eyes": {
-        "none": { "left": [91.3, 25.9], "right": [100.6, 24.3], "size": 4.8, "height": 3.6, "pupil": 2.8, "rotation": [-10, -10] },
-        "happy": { "left": [91.4, 26.2], "right": [100.6, 24], "size": 4.8, "height": 3.6, "pupil": 2.8, "rotation": [-10, -10] },
-        "right": { "left": [86.2, 51.1], "right": [100.5, 42.5], "size": 8, "height": 6, "pupil": 4.8, "rotation": [-24, -24] },
-        "left": { "left": [73.6, 49.1], "right": [90.6, 49.1], "size": 8, "height": 6, "pupil": 4.8 },
-        "top": { "left": [79.8, 70.3], "right": [103.8, 63.8], "size": 11.4, "height": 7.8, "pupil": 6, "rotation": [-15, -15] }
+        "none": {
+          "left": [
+            91.3,
+            25.9
+          ],
+          "right": [
+            100.6,
+            24.3
+          ],
+          "size": 4.8,
+          "height": 3.6,
+          "pupil": 2.8,
+          "rotation": [
+            -10,
+            -10
+          ]
+        },
+        "happy": {
+          "left": [
+            91.4,
+            26.2
+          ],
+          "right": [
+            100.6,
+            24
+          ],
+          "size": 4.8,
+          "height": 3.6,
+          "pupil": 2.8,
+          "rotation": [
+            -10,
+            -10
+          ]
+        },
+        "right": {
+          "left": [
+            86.2,
+            51.1
+          ],
+          "right": [
+            100.5,
+            42.5
+          ],
+          "size": 8,
+          "height": 6,
+          "pupil": 4.8,
+          "rotation": [
+            -24,
+            -24
+          ]
+        },
+        "left": {
+          "left": [
+            73.6,
+            49.1
+          ],
+          "right": [
+            90.6,
+            49.1
+          ],
+          "size": 8,
+          "height": 6,
+          "pupil": 4.8
+        },
+        "top": {
+          "left": [
+            79.8,
+            70.3
+          ],
+          "right": [
+            103.8,
+            63.8
+          ],
+          "size": 11.4,
+          "height": 7.8,
+          "pupil": 6,
+          "rotation": [
+            -15,
+            -15
+          ]
+        }
       },
-      "eyelid": { "fill": "#f3c2a5", "stroke": "#513428", "strokeWidth": 0.8 }
+      "eyelid": {
+        "fill": "#f3c2a5",
+        "stroke": "#513428",
+        "strokeWidth": 0.8
+      }
     },
     "pure_summer_beauty": {
       "labelKey": "set.bubble.skin.pure_summer_beauty",
@@ -169,62 +611,129 @@
         "art": 320,
         "atlas": 640,
         "artOffset": 0,
-        "dockShift": { "right": -103, "left": 103, "top": 94 }
+        "dockShift": {
+          "right": -103,
+          "left": 103,
+          "top": 94
+        }
       },
       "frames": {
-        "open": [0, 0],
-        "half": [-320, 0],
-        "closed": [0, -320],
-        "happy": [-320, -320]
+        "open": [
+          0,
+          0
+        ],
+        "half": [
+          -320,
+          0
+        ],
+        "closed": [
+          0,
+          -320
+        ],
+        "happy": [
+          -320,
+          -320
+        ]
       },
-      "animation": { "blink": "overlay" },
+      "animation": {
+        "blink": "overlay"
+      },
       "eyes": {
-        "none": { "left": [145.714, 32.857], "right": [168.571, 32.857], "size": 9.714, "height": 8, "pupil": 6.143, "tracking": "native", "rotation": [-5, -5] },
-        "happy": { "left": [145.714, 32.143], "right": [168.571, 32.143], "size": 9.714, "height": 8, "pupil": 6.143, "tracking": "native", "rotation": [-5, -5] },
-        "right": { "left": [258.571, 32.857], "right": [275.714, 31.429], "size": 10, "height": 8, "pupil": 6.286, "tracking": "native", "rotation": [-10, -10] },
-        "left": { "left": [48.571, 32.857], "right": [67.143, 32.857], "size": 10, "height": 8, "pupil": 6.286, "tracking": "native", "rotation": [10, 10] },
-        "top": { "left": [130, 118.571], "right": [185.714, 118.571], "size": 11.714, "height": 9.714, "pupil": 7.429, "tracking": "native", "rotation": [-18, -18] }
-      },
-      "eyelid": { "fill": "#f2d0c1", "stroke": "#5b3b3a", "strokeWidth": 0.8 }
-    },
-    "seed_san_3d": {
-      "labelKey": "set.bubble.skin.seed_san_3d",
-      "render": "model",
-      "model": {
-        "file": "models/seed-san.vrm",
-        "format": "vrm",
-        "animation": { "idle": true, "bob": 0.012, "sway": 2.2, "period": 3.1, "blink": true },
-        "camera": { "fov": 24, "targetY": 0.52 },
-        "head": { "enabled": true, "maxYaw": 20, "maxPitch": 14 },
-        "poses": {
-          "right": { "cameraYaw": 10, "cameraPitch": 3, "anchor": [0.05, 0.02] },
-          "left": { "cameraYaw": -10, "cameraPitch": 3, "anchor": [-0.05, 0.02] },
-          "top": { "cameraYaw": 0, "cameraPitch": -8, "anchor": [0, 0.08] }
+        "none": {
+          "left": [
+            145.714,
+            32.857
+          ],
+          "right": [
+            168.571,
+            32.857
+          ],
+          "size": 9.714,
+          "height": 8,
+          "pupil": 6.143,
+          "tracking": "native",
+          "rotation": [
+            -5,
+            -5
+          ]
+        },
+        "happy": {
+          "left": [
+            145.714,
+            32.143
+          ],
+          "right": [
+            168.571,
+            32.143
+          ],
+          "size": 9.714,
+          "height": 8,
+          "pupil": 6.143,
+          "tracking": "native",
+          "rotation": [
+            -5,
+            -5
+          ]
+        },
+        "right": {
+          "left": [
+            258.571,
+            32.857
+          ],
+          "right": [
+            275.714,
+            31.429
+          ],
+          "size": 10,
+          "height": 8,
+          "pupil": 6.286,
+          "tracking": "native",
+          "rotation": [
+            -10,
+            -10
+          ]
+        },
+        "left": {
+          "left": [
+            48.571,
+            32.857
+          ],
+          "right": [
+            67.143,
+            32.857
+          ],
+          "size": 10,
+          "height": 8,
+          "pupil": 6.286,
+          "tracking": "native",
+          "rotation": [
+            10,
+            10
+          ]
+        },
+        "top": {
+          "left": [
+            130,
+            118.571
+          ],
+          "right": [
+            185.714,
+            118.571
+          ],
+          "size": 11.714,
+          "height": 9.714,
+          "pupil": 7.429,
+          "tracking": "native",
+          "rotation": [
+            -18,
+            -18
+          ]
         }
       },
-      "layout": {
-        "content": 260,
-        "dockShift": { "right": 0, "left": 0, "top": 0 }
-      }
-    },
-    "animated_human_3d": {
-      "labelKey": "set.bubble.skin.animated_human_3d",
-      "render": "model",
-      "model": {
-        "file": "models/maya-idle.glb",
-        "format": "glb",
-        "animation": { "idle": true, "bob": 0.012, "sway": 1.8, "period": 3.2, "clip": "Idle_Standing", "blink": false },
-        "camera": { "fov": 24, "targetY": 0.52 },
-        "head": { "enabled": true, "bone": "Head", "maxYaw": 18, "maxPitch": 12 },
-        "poses": {
-          "right": { "cameraYaw": 8, "cameraPitch": 2, "anchor": [0.04, 0.02] },
-          "left": { "cameraYaw": -8, "cameraPitch": 2, "anchor": [-0.04, 0.02] },
-          "top": { "cameraYaw": 0, "cameraPitch": -7, "anchor": [0, 0.08] }
-        }
-      },
-      "layout": {
-        "content": 260,
-        "dockShift": { "right": 0, "left": 0, "top": 0 }
+      "eyelid": {
+        "fill": "#f2d0c1",
+        "stroke": "#5b3b3a",
+        "strokeWidth": 0.8
       }
     }
   }
