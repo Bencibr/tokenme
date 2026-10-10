@@ -452,7 +452,7 @@ pub async fn set_bubble_skin(app: AppHandle, skin: BubbleSkin) -> Result<(), Str
             return Err("settings busy".into());
         };
         let mut next = settings.clone();
-        next.bubble_skin = skin;
+        next.bubble_skin = skin.clone();
         next.save().map_err(|e| e.to_string())?;
         *settings = next;
     }

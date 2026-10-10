@@ -47,13 +47,19 @@ pub enum Theme {
     System,
 }
 
-/// The edge bubble's appearance; old settings keep the original waterdrop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum BubbleSkin {
-    #[default]
-    Waterdrop,
-    Kitten,
+/// The edge bubble's appearance. The renderer owns the skin manifest, so the
+/// persisted value is an opaque ID rather than a Rust enum: adding a JSON skin
+/// package does not require another backend release just to store its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BubbleSkin(String);
+
+impl BubbleSkin {
+    pub fn new(value: impl Into<String>) -> Self { Self(value.into()) }
+}
+
+impl Default for BubbleSkin {
+    fn default() -> Self { Self::new("waterdrop") }
 }
 
 /// Which of the two banner lines the tier machine may announce. `Both` is the
@@ -267,8 +273,8 @@ mod tests {
                 "bubble_enabled":false,"quota_polling":false,
                 "quota_probes_off":["copilot"],"budgets":{}}"#,
         ).expect("a settings file without bubble_skin must still load");
-        assert_eq!(s.bubble_skin, BubbleSkin::Waterdrop);
-        assert_eq!(Settings::default().bubble_skin, BubbleSkin::Waterdrop);
+        assert_eq!(s.bubble_skin, BubbleSkin::default());
+        assert_eq!(Settings::default().bubble_skin, BubbleSkin::default());
         assert_eq!(s.theme, Theme::Light);
         assert!(!s.bubble_enabled);
         assert!(!s.quota_polling);
@@ -277,11 +283,12 @@ mod tests {
 
     #[test]
     fn bubble_skins_round_trip_with_the_event_and_settings_names() {
-        for (name, skin) in [("waterdrop", BubbleSkin::Waterdrop), ("kitten", BubbleSkin::Kitten)] {
-            let payload = serde_json::to_value(skin).unwrap();
+        for name in ["waterdrop", "kitten", "han_girl", "han_boy", "modern_girl", "future_skin"] {
+            let skin = BubbleSkin::new(name);
+            let payload = serde_json::to_value(&skin).unwrap();
             assert_eq!(payload, serde_json::json!(name), "event payload must be a string");
             assert_eq!(serde_json::from_value::<BubbleSkin>(payload).unwrap(), skin);
-            let s = Settings { bubble_skin: skin, ..Settings::default() };
+            let s = Settings { bubble_skin: skin.clone(), ..Settings::default() };
             let json = serde_json::to_value(&s).unwrap();
             assert_eq!(json["bubble_skin"], serde_json::json!(name));
             assert_eq!(serde_json::from_value::<Settings>(json).unwrap().bubble_skin, skin);
@@ -289,10 +296,11 @@ mod tests {
     }
 
     #[test]
-    fn bubble_skin_rejects_invalid_names() {
-        for name in ["dog", "water_drop", "Waterdrop", "Kitten", ""] {
-            assert!(serde_json::from_value::<BubbleSkin>(serde_json::json!(name)).is_err(), "{name}");
-            assert!(serde_json::from_value::<Settings>(serde_json::json!({"bubble_skin": name})).is_err(), "{name}");
+    fn bubble_skin_accepts_manifest_ids_without_backend_changes() {
+        for name in ["dog", "future_skin"] {
+            let skin = serde_json::from_value::<BubbleSkin>(serde_json::json!(name)).unwrap();
+            assert_eq!(serde_json::to_value(&skin).unwrap(), serde_json::json!(name));
+            assert_eq!(serde_json::from_value::<Settings>(serde_json::json!({"bubble_skin": name})).unwrap().bubble_skin, skin);
         }
     }
 

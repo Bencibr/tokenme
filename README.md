@@ -195,7 +195,7 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs
 
 ## What's new in 0.1.6
 
-- **New**: desktop pet skins (water drop / animated kitten / cute hanfu girl / cute hanfu boy / modern cute girl — blinking, pointer-following pupils, edge poses, token badge on hover); the kitten's top pose was redesigned as a compact downward-looking peek; daily check-in for Trae, Trae CN and Qoder, done only after the vendor confirms; a separate Trae CN adapter with per-credit-pack windows; settings split into General / Alerts / Advanced / About with per-tool quota switches and auto check-in.
+- **New**: desktop pet skins (water drop / animated kitten / cute hanfu girl / cute hanfu boy / modern cute girl / summer long-legged beauty — blinking, pointer-following pupils, edge poses, token badge on hover); the summer skin preserves tall adult proportions, with display size and eye anchors defined in its JSON skin package; the pet registry now also supports lazy-loaded GLB/VRM model skins with JSON camera/head-tracking settings and a 2D fallback; the kitten's top pose was redesigned as a compact downward-looking peek; daily check-in for Trae, Trae CN and Qoder, done only after the vendor confirms; a separate Trae CN adapter with per-credit-pack windows; settings split into General / Alerts / Advanced / About with per-tool quota switches and auto check-in.
 - **Verified**: WorkBuddy and Cline on real Windows machines.
 - **Fixed**: Windows tray clicks, panel show/hide, borderless surface and bubble lifecycle — the invisible-panel and residual-surface regressions.
 

@@ -1659,6 +1659,8 @@
 
 .hb-lab {
   height: 13px;
+  /* the bar above is width:72% centered in the column; center the label on it */
+  text-align: center;
   font-size: 9.5px;
   line-height: 13px;
   color: var(--ink-3);

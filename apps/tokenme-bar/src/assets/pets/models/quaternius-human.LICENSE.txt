@@ -1,0 +1,11 @@
+Animated human model
+
+Source repository: https://github.com/UMRAM-Bilkent/supine-human-model
+Model file: assets/human.glb
+Original source: CC0 Quaternius character
+Repository license: CC0 1.0 (public domain dedication)
+
+The source repository identifies this rigged, skinned model as the original
+Quaternius source and includes eight walk/idle animations. It is bundled here
+as a low-poly animated runtime skin; no attribution is required by CC0, but
+the source link is retained for provenance.

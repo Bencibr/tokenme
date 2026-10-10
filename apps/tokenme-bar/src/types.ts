@@ -6,6 +6,8 @@
  * anything about Rust. `fixture.ts` produces the same shape.
  */
 
+import type petSkinManifest from "./assets/pets/pet-skins.json";
+
 export type Meter = "tokens" | "credits";
 
 /** `usage_core::TokenCounts` — the four Anthropic-style stages plus reasoning/credits. */
@@ -432,7 +434,9 @@ export interface Bridge {
 /** `system` defers to the OS media query; `light`/`dark` pin the panel. */
 export type ThemeKey = "system" | "light" | "dark";
 
-export type BubbleSkin = "waterdrop" | "kitten";
+// Raster skins are declared by the pet manifest. Adding a skin package updates
+// this union from JSON instead of requiring another CSS/TypeScript switch.
+export type BubbleSkin = "waterdrop" | keyof typeof petSkinManifest.skins;
 
 /** Which banner lines fire: both lines, only exhaustion, or nothing at all. */
 export type NotifyTierKey = "both" | "exhausted" | "off";

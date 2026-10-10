@@ -5,14 +5,13 @@
 
 pub const LABEL: &str = "bubble";
 
-/// The window is larger than the ball it shows: the core is 76 logical px
-/// (`--bubble-core` in bubble.css) and its box-shadow reaches ~31 px past the
-/// core edge (9 px offset + 22 px blur), so a window the size of the ball clips
-/// the shadow into a hard square edge. 144 leaves a 34 px margin on every side.
-/// BubbleApp.tsx keeps the same two numbers and derives its dock/peek math
-/// from them.
+/// The native surface needs an initial size before the webview has rendered a
+/// skin. BubbleApp immediately replaces this bootstrap size with the measured
+/// `.pet-skin` box plus its transparent/shadow headroom. Do not add min/max
+/// constraints here: different skins intentionally negotiate different HWND
+/// sizes at runtime.
 #[cfg(target_os = "windows")]
-pub const WINDOW_LOGICAL: f64 = 144.0;
+pub const BOOTSTRAP_WINDOW_LOGICAL: f64 = 144.0;
 
 #[cfg(target_os = "windows")]
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -23,9 +22,7 @@ pub fn configure(app: &AppHandle) -> tauri::Result<()> {
         Some(window) => window,
         None => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
             .title("")
-            .inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
-            .min_inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
-            .max_inner_size(WINDOW_LOGICAL, WINDOW_LOGICAL)
+            .inner_size(BOOTSTRAP_WINDOW_LOGICAL, BOOTSTRAP_WINDOW_LOGICAL)
             .decorations(false)
             .transparent(true)
             .shadow(false)
@@ -149,11 +146,16 @@ fn position_initial(window: &WebviewWindow) {
     let Ok(Some(monitor)) = window.current_monitor() else { return };
     let position = monitor.position();
     let monitor_size = monitor.size();
+    // Monitor coordinates are physical; bootstrap size and offsets are logical.
+    let scale = monitor.scale_factor();
+    let bootstrap = (BOOTSTRAP_WINDOW_LOGICAL * scale).round() as u32;
     let size = window
         .outer_size()
-        .unwrap_or_else(|_| tauri::PhysicalSize::new(WINDOW_LOGICAL as u32, WINDOW_LOGICAL as u32));
-    let x = position.x + monitor_size.width as i32 - size.width as i32 - 24;
-    let y = position.y + 128;
+        .unwrap_or_else(|_| tauri::PhysicalSize::new(bootstrap, bootstrap));
+    let right = (position.x + monitor_size.width as i32 - size.width as i32).max(position.x);
+    let bottom = (position.y + monitor_size.height as i32 - size.height as i32).max(position.y);
+    let x = (right - (24.0 * scale).round() as i32).max(position.x);
+    let y = (position.y + (128.0 * scale).round() as i32).min(bottom);
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 

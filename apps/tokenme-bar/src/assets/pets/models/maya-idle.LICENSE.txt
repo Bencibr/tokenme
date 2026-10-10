@@ -1,0 +1,6 @@
+Maya idle animated human model
+
+Source: https://www.innerscene.com/tools/library/3d-parts/idle-standing-maya-3d-person-animated-22b686d6
+File: idle-standing-maya-3d-person-animated.glb
+License: CC0 1.0 / public domain dedication, as stated by the source page.
+The source describes the asset as adapted from MakeHuman/MPFB CC0 body, rig and skin assets.

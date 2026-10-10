@@ -386,6 +386,13 @@ const zh = {
   "set.bubble.skin.hint": "关闭悬浮时也可选择，下次开启时生效",
   "set.bubble.skin.waterdrop": "经典水滴",
   "set.bubble.skin.kitten": "奶油橘猫",
+  "set.bubble.skin.han_girl": "古风萌女孩",
+  "set.bubble.skin.han_boy": "古风萌男孩",
+  "set.bubble.skin.modern_girl": "现代风美少女",
+  "set.bubble.skin.summer_beauty": "夏日长腿美女",
+  "set.bubble.skin.pure_summer_beauty": "清纯夏日美女",
+  "set.bubble.skin.seed_san_3d": "Seed-san 3D动画",
+  "set.bubble.skin.animated_human_3d": "3D真人动画",
   "set.theme": "外观",
   "set.theme.a11y": "外观主题",
   "set.theme.system": "跟随系统",
@@ -452,6 +459,7 @@ const zh = {
 
   /* 悬浮球 ---------------------------------------------------------------- */
   "bubble.today": "今日",
+  "bubble.pet_model_hint": "拖动旋转 · 点击换动作",
   "bubble.aria": "今日 {t} tokens",
 
   /* 页面区块标题（App 直传的 Section label） ------------------------------ */
@@ -808,6 +816,13 @@ const en: Record<StrKey, string> = {
   "set.bubble.skin.hint": "Choose even with the bubble off; applies when enabled",
   "set.bubble.skin.waterdrop": "Classic waterdrop",
   "set.bubble.skin.kitten": "Cream ginger kitten",
+  "set.bubble.skin.han_girl": "Cute hanfu girl",
+  "set.bubble.skin.han_boy": "Cute hanfu boy",
+  "set.bubble.skin.modern_girl": "Modern cute girl",
+  "set.bubble.skin.summer_beauty": "Summer long-legged beauty",
+  "set.bubble.skin.pure_summer_beauty": "Pure summer beauty",
+  "set.bubble.skin.seed_san_3d": "Seed-san animated 3D",
+  "set.bubble.skin.animated_human_3d": "Animated 3D human",
   "set.theme": "Appearance",
   "set.theme.a11y": "Theme",
   "set.theme.system": "System",
@@ -873,6 +888,7 @@ const en: Record<StrKey, string> = {
   "update.dev.none": "dev: no updates",
 
   "bubble.today": "Today",
+  "bubble.pet_model_hint": "Drag to rotate · click for next action",
   "bubble.aria": "Today {t} tokens",
 
   "sec.models": "Models",

@@ -229,13 +229,74 @@
   }
 }
 
-/* Pet art lives inside the same 144px host and uses the waterdrop's 76px
-   anchor. No circular clip: ears, paws and tail keep their alpha silhouette. */
+/* Pet art declares its own layout box. BubbleApp measures this box and gives
+   the native window matching headroom, so a taller skin is never squeezed
+   into the waterdrop's old 144px host. No circular clip: alpha silhouettes
+   keep their ears, hands, shoes and hair. */
 .pet-skin {
   position: relative;
-  width: 76px;
-  height: 76px;
+  display: block;
+  --pet-layout-size: 76px;
+  --pet-art-size: 96px;
+  --pet-atlas-size: 192px;
+  --pet-art-offset: -10px;
+  --pet-dock-right-shift: -24px;
+  --pet-dock-left-shift: 24px;
+  --pet-dock-top-shift: 29px;
+  width: var(--pet-layout-size);
+  height: var(--pet-layout-size);
   cursor: pointer;
+}
+
+/* Model skins share the same measured box and docking contract as raster
+   skins. The canvas is transparent, so only the imported character occupies
+   the window; WebGL never paints a square backdrop over the desktop. */
+.pet-model {
+  contain: layout;
+  overflow: visible;
+}
+
+.pet-model-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: auto;
+  cursor: grab;
+  filter: drop-shadow(0 3px 3px rgba(33, 21, 12, .2));
+}
+
+.pet-model-canvas:active { cursor: grabbing; }
+
+.pet-model-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 3px;
+  z-index: 2;
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 7px;
+  background: rgba(22, 30, 27, .88);
+  color: #f7fffc;
+  font-size: 9px;
+  line-height: 13px;
+  opacity: 0;
+  transform: translate(-50%, 3px);
+  transition: opacity 150ms ease, transform 150ms ease;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.pet-model:hover .pet-model-hint {
+  opacity: .94;
+  transform: translate(-50%, 0);
+}
+
+.pet-skin[data-ready="false"] {
+  /* Keep the layout measurable while artwork, eyes and caption wait together. */
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .pet-pose {
@@ -247,33 +308,37 @@
 
 .pet-art {
   position: absolute;
-  width: 96px;
-  height: 96px;
-  left: -10px;
-  top: -10px;
+  width: var(--pet-art-size);
+  height: var(--pet-art-size);
+  left: var(--pet-art-offset);
+  top: var(--pet-art-offset);
 }
 
 .pet-sprite, .pet-edge-art {
   position: absolute;
   inset: 0;
-  width: 96px;
-  height: 96px;
+  width: var(--pet-art-size);
+  height: var(--pet-art-size);
   filter: drop-shadow(0 3px 3px rgba(33, 21, 12, .2));
 }
 
 .pet-sprite {
-  /* The generated 1254px atlas has four tiles with different alpha padding.
-     Align each frame by its head center and paw baseline; percentage grid
-     positions would make the kitten jump sideways when blinking. */
-  background-size: 192px 192px;
-  background-position: -4.823px -3.254px;
+  /* Inherit all frame variables from the manifest on .pet-skin. Declaring
+     them here would override the skin's values with a different character. */
+  background-size: var(--pet-atlas-size) var(--pet-atlas-size);
+  background-position: var(--pet-blink-open);
   background-repeat: no-repeat;
+  clip-path: var(--pet-open-clip);
+}
+
+.pet-skin[data-blink="atlas"][data-dock="none"][data-motion="idle"] .pet-sprite {
   animation: pet-blink 6.2s steps(1, end) infinite;
 }
 
 .pet-skin[data-motion="happy"] .pet-sprite {
   animation: none;
-  background-position: -90.794px -94.967px;
+  background-position: var(--pet-happy-position);
+  clip-path: var(--pet-happy-clip);
 }
 
 .pet-skin[data-motion="happy"] .pet-pose {
@@ -282,7 +347,7 @@
 
 .pet-skin[data-motion="drag"] .pet-sprite {
   animation: none;
-  background-position: -4.823px -3.254px;
+  background-position: var(--pet-blink-open);
 }
 
 .pet-skin[data-motion="drag"] .pet-pose {
@@ -290,21 +355,21 @@
 }
 
 /* Bring the face into the visible sliver without moving/resizing the HWND. */
-.pet-skin[data-dock="right"] { transform: translateX(-24px); }
-.pet-skin[data-dock="left"] { transform: translateX(24px); }
-.pet-skin[data-dock="top"] { transform: translateY(29px); }
+.pet-skin[data-dock="right"] { transform: translateX(var(--pet-dock-right-shift)); }
+.pet-skin[data-dock="left"] { transform: translateX(var(--pet-dock-left-shift)); }
+.pet-skin[data-dock="top"] { transform: translateY(var(--pet-dock-top-shift)); }
 
 .pet-eyes {
   position: absolute;
   inset: 0;
-  --eye-lx: 35.445px;
-  --eye-ly: 39.541px;
-  --eye-rx: 61.091px;
-  --eye-ry: 39.541px;
-  --eye-size: 13px;
-  --eye-height: 11.5px;
-  --pupil-size: 9px;
-  animation: pet-tracker-blink 6.2s steps(1, end) infinite;
+  /* All pose coordinates come from the selected skin's JSON manifest. */
+  --eye-lx: var(--pet-eye-lx, 35.445px);
+  --eye-ly: var(--pet-eye-ly, 39.541px);
+  --eye-rx: var(--pet-eye-rx, 61.091px);
+  --eye-ry: var(--pet-eye-ry, 39.541px);
+  --eye-size: var(--pet-eye-size, 13px);
+  --eye-height: var(--pet-eye-height, 11.5px);
+  --pupil-size: var(--pet-pupil-size, 9px);
 }
 .pet-eye {
   position: absolute;
@@ -312,13 +377,17 @@
   top: var(--eye-ly);
   width: var(--eye-size);
   height: var(--eye-height);
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) rotate(var(--pet-eye-left-angle, 0deg));
   overflow: hidden;
   border-radius: 50%;
-  border: 1px solid #57321c;
-  background: #fff9ed;
+  /* The socket and lashes are already painted in the PNG. Only pupils and
+     eyelids are overlaid so skin details are preserved at small sizes. */
 }
-.pet-eye + .pet-eye { left: var(--eye-rx); top: var(--eye-ry); }
+.pet-eye + .pet-eye {
+  left: var(--eye-rx);
+  top: var(--eye-ry);
+  transform: translate(-50%, -50%) rotate(var(--pet-eye-right-angle, 0deg));
+}
 .pet-pupil {
   position: absolute;
   width: var(--pupil-size);
@@ -330,20 +399,21 @@
   transform: translate(calc(-50% + var(--pet-gx, 0px)), calc(-50% + var(--pet-gy, 0px)));
   transition: transform 130ms linear;
 }
-.pet-eyelid { display: none; }
-.pet-skin[data-motion="happy"][data-dock="none"] .pet-eyes { display: none; }
-.pet-skin[data-motion="drag"] .pet-eyes { animation: none; }
-.pet-skin:not([data-dock="none"]) .pet-eyes { animation: none; }
-.pet-skin:not([data-dock="none"]) .pet-eye { border: 0; }
-.pet-skin:not([data-dock="none"]) .pet-eyelid {
+.pet-eyes[data-tracking="native"] .pet-pupil { display: none; }
+.pet-eyelid {
   display: block;
   position: absolute;
   inset: -1px;
   border-radius: 50%;
-  background: #ffe6bf;
+  background: var(--pet-eyelid-fill, #ffe6bf);
   transform-origin: 50% 0;
   transform: scaleY(0);
   animation: pet-eye-close 6.2s ease-in-out infinite;
+}
+.pet-skin[data-motion="happy"] .pet-eyelid,
+.pet-skin[data-motion="drag"] .pet-eyelid {
+  animation: none;
+  transform: scaleY(0);
 }
 .pet-eyelid::after {
   content: "";
@@ -351,29 +421,9 @@
   left: 0;
   right: 0;
   top: 55%;
-  height: 2px;
+  height: var(--pet-eyelid-width, 2px);
   border-radius: 50%;
-  background: #57321c;
-}
-/* Pose-specific eye anchors are relative to the 96px transparent artwork. */
-.pet-skin[data-dock="right"] .pet-eyes {
-  --eye-lx: 35.445px; --eye-ly: 45.282px;
-  --eye-rx: 59.636px; --eye-ry: 40.038px;
-  --eye-size: 11px; --eye-height: 9.5px; --pupil-size: 8px;
-}
-.pet-skin[data-dock="left"] .pet-eyes {
-  --eye-lx: 38.584px; --eye-ly: 41.761px;
-  --eye-rx: 63.847px; --eye-ry: 45.627px;
-  --eye-size: 11.7px; --eye-height: 9.2px; --pupil-size: 7px;
-}
-.pet-skin[data-dock="top"] .pet-eyes {
-  --eye-lx: 32.612px; --eye-ly: 62.699px;
-  --eye-rx: 63.579px; --eye-ry: 65.761px;
-  --eye-size: 13.1px; --eye-height: 9.7px; --pupil-size: 7.5px;
-}
-@keyframes pet-tracker-blink {
-  0%, 88%, 97%, 100% { opacity: 1; }
-  90%, 95% { opacity: 0; }
+  background: var(--pet-eyelid-stroke, #57321c);
 }
 @keyframes pet-eye-close {
   0%, 88%, 96%, 100% { transform: scaleY(0); }
@@ -382,7 +432,7 @@
 
 .pet-token-badge {
   position: absolute;
-  top: 80px;
+  top: calc(var(--pet-layout-size) + 4px);
   left: 50%;
   display: flex;
   align-items: baseline;
@@ -409,10 +459,10 @@
 }
 
 @keyframes pet-blink {
-  0%, 88%, 100% { background-position: -4.823px -3.254px; }
-  90%, 95% { background-position: -90.794px -3.254px; }
-  92% { background-position: -4.900px -94.967px; }
-  97% { background-position: -4.823px -3.254px; }
+  0%, 88%, 100% { background-position: var(--pet-blink-open); clip-path: var(--pet-open-clip); }
+  90%, 95% { background-position: var(--pet-blink-half); clip-path: var(--pet-half-clip); }
+  92% { background-position: var(--pet-blink-closed); clip-path: var(--pet-closed-clip); }
+  97% { background-position: var(--pet-blink-open); clip-path: var(--pet-open-clip); }
 }
 @keyframes pet-breathe {
   0%, 100% { transform: translateY(0) scale(1); }
