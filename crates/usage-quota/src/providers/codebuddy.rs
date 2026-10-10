@@ -174,7 +174,13 @@ pub(crate) fn samples_from_resource(body: &Value) -> Vec<crate::QuotaSample> {
             window_minutes: 0,
             resets_at_ms: g.resets_at_ms,
             label: Some(format!("{name} · 已用 {}/{}", trim(g.size - g.remain), trim(g.size))),
-            id: Some("credits".into()),
+            // The pack name is the window's stable identity — grouping is by
+            // name, so it is unique per sample. A shared id makes the notify
+            // machine see one window flapping between tiers: the live pack's
+            // quiet reading re-arms the exhausted pack's spent state through
+            // the same key, and the 已用完 banner re-fires on every poll
+            // (measured 2026-10-10).
+            id: Some(name),
         })
         .collect()
 }
@@ -222,11 +228,14 @@ mod tests {
         let samples = samples_from_resource(&serde_json::from_str(MEASURED).unwrap());
         assert_eq!(samples.len(), 2, "one group per package name");
         let trial = samples.iter().find(|s| s.label.as_deref().is_some_and(|l| l.contains("体验版"))).unwrap();
+        assert_eq!(trial.id.as_deref(), Some("CodeBuddy个人体验版"), "the pack name is the stable window id");
         assert!((trial.used_percent - (1.0 - 492.29 / 500.0) * 100.0).abs() < 0.01);
         assert_eq!(trial.label.as_deref(), Some("CodeBuddy个人体验版 · 已用 7.7/500"));
         assert!(trial.resets_at_ms > 0, "a live pack carries its cycle expiry");
         let spent = samples.iter().find(|s| s.label.as_deref().is_some_and(|l| l.contains("裂变包"))).unwrap();
         assert_eq!(spent.used_percent, 100.0, "both exhausted packs sum into one group");
+        assert_eq!(spent.id.as_deref(), Some("CodeBuddy个人版国内运营裂变包"));
+        assert_ne!(spent.id, trial.id, "two packs must never share one window identity");
         assert_eq!(spent.label.as_deref(), Some("CodeBuddy个人版国内运营裂变包 · 已用 4000/4000"));
         assert_eq!(spent.resets_at_ms, 0, "a pack with nothing left has no reset worth naming");
     }

@@ -348,7 +348,12 @@ pub(crate) fn samples_from_resource(body: &Value) -> Vec<QuotaSample> {
             window_minutes: 0,
             resets_at_ms: g.resets_at_ms,
             label: Some(format!("{name} · 已用 {}/{}", trim(g.size - g.remain), trim(g.size))),
-            id: Some("credits".into()),
+            // The pack name is the window's stable identity — grouping is by
+            // name, so it is unique per sample. A shared id across packs makes
+            // the notify machine see one window flapping between tiers and
+            // re-fires the exhaustion banner on every poll (measured on the
+            // CodeBuddy sibling, 2026-10-10; this shape is identical).
+            id: Some(name),
         })
         .collect()
 }
