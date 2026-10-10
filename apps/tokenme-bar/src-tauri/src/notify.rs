@@ -77,6 +77,12 @@ impl Gate {
 const WARN_PCT: f64 = 80.0;
 /// The exhaustion line: used ≥ 100 %.
 const EXHAUSTED_PCT: f64 = 100.0;
+/// How far below the exhaustion line a reading must fall before a spent
+/// window believes it and re-arms. Vendors round and jitter a fraction of a
+/// percent across the line; without this margin, a 100 ↔ 99.8 flap re-arms
+/// the spent window on every crossing and the 已用完 banner fires again each
+/// time (measured 2026-10-10: intermittent repeats through the morning).
+const EXHAUSTED_HYSTERESIS_PCT: f64 = 5.0;
 /// A reset instant that moved more than this was a window rollover, not probe
 /// jitter — the same window's reset wobbles by seconds between samples.
 const RENEW_SLACK_MS: i64 = 300_000;
@@ -191,16 +197,19 @@ fn fresh_baseline(tier: u8, resets_at_ms: i64, now: i64) -> Decision {
     }
 }
 
-fn plan(prev: Option<&Entry>, tier: u8, resets_at_ms: i64, now: i64) -> Decision {
+fn plan(prev: Option<&Entry>, tier: u8, resets_at_ms: i64, now: i64, used_percent: f64) -> Decision {
     let Some(prev) = prev else {
         // First sight: the crossing may have happened before this process ever
         // ran, so nothing is announced except an already-exhausted window —
         // "用完" is the alarm, and meeting it silently would be the wrong quiet.
         return fresh_baseline(tier, resets_at_ms, now);
     };
+    // Only a forward jump past the slack reads as the vendor's next window; a
+    // reset that moves the other way is the vendor's own jitter, not a
+    // rollover, and a spent window must not re-announce off it.
     let renewed = prev.resets_at_ms > 0
         && resets_at_ms > 0
-        && (resets_at_ms - prev.resets_at_ms).abs() > RENEW_SLACK_MS;
+        && resets_at_ms > prev.resets_at_ms + RENEW_SLACK_MS;
     if renewed {
         // The vendor rolled the window over while we watched: a new instance
         // gets the first-sight treatment, not a banner for the old one's tally.
@@ -217,6 +226,12 @@ fn plan(prev: Option<&Entry>, tier: u8, resets_at_ms: i64, now: i64) -> Decision
     if tier < prev.tier {
         // The line re-arms silently: a renewed window (whose reset instant did
         // not move enough to read as a rollover) or credits topped back up.
+        // But a spent window only believes a real step down — one that clears
+        // the hysteresis margin. A reading that merely wobbles under the line
+        // keeps the window spent: it stays quiet and stays tier 2.
+        if prev.tier >= 2 && used_percent > EXHAUSTED_PCT - EXHAUSTED_HYSTERESIS_PCT {
+            return Decision { entry, fire: None, persist: false };
+        }
         entry.tier = tier;
         return Decision { entry, fire: None, persist: true };
     }
@@ -514,7 +529,7 @@ impl Worker {
         for q in quotas {
             let key = key_of(q);
             let prev = self.state.entries.get(&key).cloned();
-            let decision = plan(prev.as_ref(), tier_of(q.used_percent), q.resets_at_ms, now);
+            let decision = plan(prev.as_ref(), tier_of(q.used_percent), q.resets_at_ms, now, q.used_percent);
             let mut entry = decision.entry;
             if let Some(tier) = decision.fire {
                 if !gate.allows(&q.tool, tier) {
@@ -800,12 +815,12 @@ mod tests {
 
     #[test]
     fn a_first_sight_is_a_silent_baseline_unless_it_is_already_done() {
-        let quiet = plan(None, 0, RESET, NOW);
+        let quiet = plan(None, 0, RESET, NOW, 0.0);
         assert_eq!(quiet.fire, None);
         assert!(quiet.persist, "the baseline must survive a restart");
-        let warned = plan(None, 1, RESET, NOW);
+        let warned = plan(None, 1, RESET, NOW, 85.0);
         assert_eq!(warned.fire, None, "the crossing predates this process — no banner");
-        let done = plan(None, 2, RESET, NOW);
+        let done = plan(None, 2, RESET, NOW, 100.0);
         assert_eq!(done.fire, Some(2), "已经用完 is the alarm; meeting it quietly is wrong");
         assert_eq!(done.entry.tier, 0, "the announcement is pending until it actually posts");
     }
@@ -815,17 +830,17 @@ mod tests {
         // First sight of an exhausted window whose banner the system refused:
         // the persisted entry stays at the pre-announcement baseline, so the
         // next pass offers the banner again — a retry, not a silent swallow.
-        let first = plan(None, 2, RESET, NOW);
+        let first = plan(None, 2, RESET, NOW, 100.0);
         assert_eq!(first.fire, Some(2));
-        let retry = plan(Some(&first.entry), 2, RESET, NOW + 60_000);
+        let retry = plan(Some(&first.entry), 2, RESET, NOW + 60_000, 100.0);
         assert_eq!(retry.fire, Some(2), "still owed to the user");
         assert_eq!(retry.entry.tier, 0);
         // Once a post lands, the caller advances the tier and the line quiets.
         let settled = Entry { tier: 2, last_fired_ms: NOW, ..first.entry.clone() };
-        assert_eq!(plan(Some(&settled), 2, RESET, NOW + 120_000).fire, None);
+        assert_eq!(plan(Some(&settled), 2, RESET, NOW + 120_000, 100.0).fire, None);
         // A renewal met at 100 % is the same contract: announced, or retried.
         let old = Entry { tier: 1, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW };
-        let renewed = plan(Some(&old), 2, RESET + RENEW_SLACK_MS + 1, NOW);
+        let renewed = plan(Some(&old), 2, RESET + RENEW_SLACK_MS + 1, NOW, 100.0);
         assert_eq!(renewed.fire, Some(2));
         assert_eq!(renewed.entry.tier, 0, "fresh instance, announcement pending");
     }
@@ -833,16 +848,16 @@ mod tests {
     #[test]
     fn crossing_a_line_announces_it_and_only_advances_on_that_post() {
         let prev = Entry { tier: 0, resets_at_ms: RESET, last_fired_ms: 0, last_seen_ms: NOW };
-        let d = plan(Some(&prev), 1, RESET, NOW);
+        let d = plan(Some(&prev), 1, RESET, NOW, 85.0);
         assert_eq!(d.fire, Some(1));
         assert_eq!(d.entry.tier, 0, "the tier advances in the caller, after the post");
         assert!(!d.persist, "nothing durable happened yet");
         // Straight past both lines in one sample: one banner, the stronger tier.
-        let d = plan(Some(&prev), 2, RESET, NOW);
+        let d = plan(Some(&prev), 2, RESET, NOW, 100.0);
         assert_eq!(d.fire, Some(2));
         // The same observation again: already claimed, nothing to say.
         let at_one = Entry { tier: 1, ..prev.clone() };
-        let d = plan(Some(&at_one), 1, RESET, NOW);
+        let d = plan(Some(&at_one), 1, RESET, NOW, 85.0);
         assert_eq!(d.fire, None);
         assert!(!d.persist);
     }
@@ -850,12 +865,12 @@ mod tests {
     #[test]
     fn a_drop_rearms_the_line_silently() {
         let down = Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW - 1, last_seen_ms: NOW };
-        let d = plan(Some(&down), 0, RESET, NOW);
+        let d = plan(Some(&down), 0, RESET, NOW, 0.0);
         assert_eq!(d.fire, None, "falling back never announces");
         assert_eq!(d.entry.tier, 0);
         assert!(d.persist, "the re-arm must survive a restart");
         // And the next climb announces again.
-        let d = plan(Some(&d.entry), 2, RESET, NOW + 1_000);
+        let d = plan(Some(&d.entry), 2, RESET, NOW + 1_000, 100.0);
         assert_eq!(d.fire, Some(2));
     }
 
@@ -863,25 +878,52 @@ mod tests {
     fn reset_jitter_is_not_a_renewal_but_a_jump_is() {
         let prev = Entry { tier: 1, resets_at_ms: RESET, last_fired_ms: 0, last_seen_ms: NOW };
         // Seconds of wobble between samples: same instance, same tier, quiet.
-        let d = plan(Some(&prev), 1, RESET + 60_000, NOW);
+        let d = plan(Some(&prev), 1, RESET + 60_000, NOW, 85.0);
         assert_eq!(d.fire, None);
         assert_eq!(d.entry.resets_at_ms, RESET + 60_000);
         // A reset that jumped is the vendor's next window: fresh baseline, no
         // "re-arm" for a line nobody is below.
-        let d = plan(Some(&prev), 0, RESET + RENEW_SLACK_MS + 1, NOW);
+        let d = plan(Some(&prev), 0, RESET + RENEW_SLACK_MS + 1, NOW, 0.0);
         assert_eq!(d.fire, None);
         assert_eq!(d.entry.tier, 0, "a renewed window baselines at what it shows");
         assert_eq!(d.entry.last_fired_ms, 0, "the old instance's fire time does not carry over");
         // A renewed window met at 100 % announces once, like any first sight.
-        let d = plan(Some(&prev), 2, RESET + RENEW_SLACK_MS + 1, NOW);
+        let d = plan(Some(&prev), 2, RESET + RENEW_SLACK_MS + 1, NOW, 100.0);
         assert_eq!(d.fire, Some(2));
         assert_eq!(d.entry.tier, 0, "pending like a first sight — the post settles it");
         // A window that never advertises a reset cannot renew by reset; the
         // drop re-arm covers its top-ups instead.
         let no_reset = Entry { tier: 2, resets_at_ms: 0, last_fired_ms: NOW - 1, last_seen_ms: NOW };
-        let d = plan(Some(&no_reset), 0, 0, NOW);
+        let d = plan(Some(&no_reset), 0, 0, NOW, 0.0);
         assert_eq!(d.fire, None);
         assert_eq!(d.entry.tier, 0);
+    }
+
+    /// The 100 % banner is sticky across sub-line wobble. A vendor reporting
+    /// 99.8 one poll and 100 the next is jittering on the line, not topping
+    /// up — re-arming on the dip re-fired the banner on every crossing
+    /// (measured 2026-10-10: intermittent repeats through the morning). The
+    /// window stays spent until a reading clears the hysteresis margin, and
+    /// only then may the next climb announce again.
+    #[test]
+    fn a_spent_window_ignores_sub_line_wobble() {
+        let spent = Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW };
+        // 99.8 while spent: wobble, not a top-up — the window stays spent.
+        let wobble = plan(Some(&spent), 1, RESET, NOW + 1_000, 99.8);
+        assert_eq!(wobble.fire, None, "the same spent window must not re-fire");
+        assert_eq!(wobble.entry.tier, 2, "and it is not re-armed by the wobble");
+        assert!(!wobble.persist);
+        // The next 100 is that same spent window: quiet.
+        let again = plan(Some(&wobble.entry), 2, RESET, NOW + 2_000, 100.0);
+        assert_eq!(again.fire, None);
+        // A real top-up clears the margin and re-arms; the next climb fires —
+        // the user's contract: refill the quota, and the next 100 % announces.
+        let topped = plan(Some(&spent), 0, RESET, NOW + 3_000, 0.0);
+        assert_eq!(topped.fire, None);
+        assert_eq!(topped.entry.tier, 0);
+        assert!(topped.persist, "the re-arm must survive a restart");
+        let climbed = plan(Some(&topped.entry), 2, RESET, NOW + 4_000, 100.0);
+        assert_eq!(climbed.fire, Some(2));
     }
 
     #[test]
