@@ -11,6 +11,7 @@ export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 /** The dismiss control is a Windows tray-panel affordance; macOS uses the
  * native non-activating panel behavior and should not show a duplicate close. */
 export const isWindows = inTauri && /Windows/i.test(navigator.userAgent);
+export const isMac = inTauri && /Macintosh|Mac OS X/i.test(navigator.userAgent);
 
 /** `system` hands the media query back to the OS; a pin sets `data-theme`. */
 export function applyTheme(theme: ThemeKey): void {

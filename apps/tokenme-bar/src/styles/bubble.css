@@ -480,3 +480,16 @@
   .pet-pose, .pet-sprite, .pet-eyes, .pet-eyelid { animation: none !important; }
   .pet-token-badge, .pet-pupil { transition: none; }
 }
+
+/* ---------------------------------------------------------------- macOS
+   The pet sits steady on this platform: the perpetual peek bob and the
+   pulsing ripple read as jitter next to the menu bar, so the mac keeps the
+   drop-in entrance, the blink and the cursor gaze, and drops the loops. */
+.bubble-app[data-platform="mac"] .bubble-face,
+.bubble-app[data-platform="mac"] .bubble-ripple,
+.bubble-app[data-platform="mac"] .pet-pose {
+  animation: none;
+}
+.bubble-app[data-platform="mac"][data-dock="none"] .bubble-ripple {
+  opacity: 0;
+}

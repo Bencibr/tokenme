@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { availableMonitors, currentMonitor, cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
+import { isMac } from "../lib/bridge";
 import type { Monitor } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
@@ -483,6 +484,31 @@ export function BubbleApp() {
     dragging.current = true;
     setPetDragging(true);
     await expand();
+    if (isMac) {
+      // macOS owns the drag natively: performWindowDrag takes the pointer at
+      // the event and returns on release, so the webview never sees the move —
+      // the drop reads it off the window's own position instead.
+      const window = getCurrentWindow();
+      const before = await window.outerPosition().catch(() => null);
+      try {
+        await window.startDragging();
+      } catch {
+        dragging.current = false;
+        setPetDragging(false);
+        return;
+      }
+      dragging.current = false;
+      setPetDragging(false);
+      const after = await window.outerPosition().catch(() => null);
+      const wasMoved = !!before && !!after && (before.x !== after.x || before.y !== after.y);
+      if (wasMoved) {
+        setTimeout(() => void dockToEdge(true).catch(reportGeometryError), 80);
+      } else {
+        void bridge.showPanel();
+        setExpanded(false);
+      }
+      return;
+    }
     try {
       // Rust owns the move: the native startDragging loop refuses to drag a
       // non-activating window. Resolves at once; bubble-drag-ended reports the
@@ -524,6 +550,7 @@ export function BubbleApp() {
   return (
     <div
       className="bubble-app"
+      data-platform={isMac ? "mac" : "windows"}
       data-dock={dock ?? "none"}
       data-expanded={expanded}
       data-skin={skin}

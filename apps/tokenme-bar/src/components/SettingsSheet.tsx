@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BubbleSkin, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, ThemeKey, UpdateStatus } from "../types";
-import { bridge, isWindows } from "../lib/bridge";
+import { bridge, isMac, isWindows } from "../lib/bridge";
 import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
 import { t } from "../lib/i18n";
 import { toolDisplay } from "../lib/format";
@@ -443,7 +443,7 @@ export function SettingsSheet({
             </div>
             {switchRow(t("set.money"), t("set.money.hint"), settings.show_money, setMoney)}
             {switchRow(t("set.showempty"), t("set.showempty.hint"), settings.show_empty_tools, setShowEmptyTools)}
-            {isWindows ? (
+            {isWindows || isMac ? (
               <>
                 {switchRow(t("set.bubble"), t("set.bubble.hint"), settings.bubble_enabled, setBubble)}
                 <div className="sheet-row">
