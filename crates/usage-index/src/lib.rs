@@ -566,6 +566,50 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot retirement of the dsh v4 projection rows: the projection is
+        // the session's LIFETIME cumulative stamped with `lastPromptAt`, so a
+        // session continued across days dragged its whole total into the
+        // newest day — 12M billed yesterday read as 12M again today, and
+        // yesterday went to zero (reported 2026-10-10, session d2b4cf00). The
+        // v4 stream carries the per-call events itself (`assistant/message`,
+        // whose sums equal the projection's totals exactly) and bills now, so
+        // the cumulative rows would sit beside them as double money. The local
+        // rows go and the next pass re-reads the streams wholesale under the
+        // day-true attribution; merged rows are another machine's truth and
+        // stay (`source NOT LIKE 'linux:%'`, the antigravity rule), and the
+        // tool's rollup rows rebuild lazily from `event` on the next report
+        // read (the trae-split precedent).
+        const REPAIR_DSH_PROJECTION_RETIRED: &str = "repair:dsh-projection-retired-1";
+        let dsh_proj: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_DSH_PROJECTION_RETIRED],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if dsh_proj.is_none() {
+            const DSH_PROJ_ROWS: &str =
+                "(SELECT id FROM event WHERE tool = 'dsh' AND dedupe_key LIKE '%#proj' \
+                 AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({DSH_PROJ_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({DSH_PROJ_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({DSH_PROJ_ROWS})"), [])
+                .map_err(sql_err)?;
+            // Every dsh source re-reads from byte 0: the streams' own events
+            // re-emit under unchanged dedupe keys (replace no-ops), and the
+            // retired projections' stale cursors go with it.
+            conn.execute("DELETE FROM file_state WHERE tool = 'dsh'", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup WHERE tool = 'dsh' AND origin = ''", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_DSH_PROJECTION_RETIRED],
+            )
+            .map_err(sql_err)?;
+        }
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);

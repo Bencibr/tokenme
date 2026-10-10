@@ -2,22 +2,30 @@
 //!
 //! One source: `<sessions-root>/<workspace>/<session>/session.jsonl.zstd` —
 //! zstd-compressed JSONL event streams, one file per agent session. Usage
-//! rides on `assistant/chunk` lines whose chunk is `{"type":"usage"}` with the
-//! exclusive token convention (`inputTokens` excludes `cacheReadTokens`);
-//! the step's model arrives earlier on `request/header`.
+//! rides on per-call lines whose exact envelope the session's format version
+//! decides: v3 bills `assistant/chunk` (`{"type":"usage"}` with
+//! `inputTokens`/`outputTokens`/`cacheReadTokens`/`reasoningTokens`), v4
+//! bills `assistant/message` (`data.usage` with
+//! `inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`). Both
+//! name the uncached input `inputTokens` — the exclusive convention — and
+//! stamp every call with its own wall clock, so a session continued across
+//! days attributes each day's spend to that day.
 //!
 //! The sessions roots follow the writer's own layout (see [`paths`]): the
 //! macOS CLI-era tree `~/.dsh/sessions` first, the desktop app's
 //! `%APPDATA%\dsh-desktop\harness\sessions` (Windows) /
 //! `~/Library/Application Support/dsh-desktop/harness/sessions` (macOS) second.
-//! Format v4 names the stream `session.v4.jsonl.zstd`; the header gains
-//! `"version":4` and the tokens of such a session live in its projection
-//! cache, not the stream. All existing roots are read, one session each: the
-//! trees mirror each other by identity (workspace slug + session dir), and the
-//! first root in priority order wins a mirrored session — reading a session
-//! from both roots would double-bill, reading only one root hides the other's
-//! sessions entirely (measured 2026-09-29: the stale `~/.dsh` tree masked the
-//! live desktop app's sessions for a day).
+//! Format v4 names the stream `session.v4.jsonl.zstd` and bills the same way;
+//! its projection cache (`storages/session_projcache`) is the writer's own
+//! cumulative ledger — read by the accuracy audit ([`doctor::ledger`]), never
+//! by billing: the projection holds the session's lifetime totals stamped
+//! with `lastPromptAt`, and billing that would drag every earlier day's spend
+//! into whichever day the session was last touched. All existing roots are
+//! read, one session each: the trees mirror each other by identity (workspace
+//! slug + session dir), and the first root in priority order wins a mirrored
+//! session — reading a session from both roots would double-bill, reading
+//! only one root hides the other's sessions entirely (measured 2026-09-29:
+//! the stale `~/.dsh` tree masked the live desktop app's sessions for a day).
 //!
 //! Cursor is `FileKind::Tree`: whole-file re-parse on change, stable
 //! `<session>#<seq>` dedupe keys absorbing the re-emit.
@@ -28,7 +36,6 @@
 mod doctor;
 mod loader;
 mod parser;
-mod proj;
 mod paths;
 
 /// The accuracy audit surface: doctor::ledger reads this.
@@ -140,6 +147,84 @@ mod smoke {
         let again = adapter.read(&sources[0], ReadCursor(0)).unwrap();
         let again_keys: BTreeSet<_> = again.events.iter().filter_map(|e| e.dedupe_key.clone()).collect();
         assert_eq!(again_keys, keys);
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
+    }
+
+    /// A real-shaped v4 session: `session.v4.jsonl.zstd`, usage on
+    /// `assistant/message` (`data.usage`, `inputTokens` uncached), two calls
+    /// on two different days — the shape whose projection-era billing dragged
+    /// the whole session total into whichever day the session was last
+    /// touched. A projection cache beside it exists and must be ignored:
+    /// billing reads the stream.
+    fn write_v4_fixture() -> Vec<u8> {
+        let lines = [
+            r#"{"type":"session","version":4,"id":"session-d2b4cf00","createdAt":1791463181906,"cwd":"/Users/dev/workspace/wifitouch","isSeeded":false,"delegationDepth":0}"#,
+            r#"{"type":"permission/preset","seq":1,"time":1791463182000,"data":{"preset":"workspace-write"}}"#,
+            r#"{"type":"request/header","seq":20,"time":1791900000000,"data":{"header":{"config":{"provider":"xhs","model":"xhs"}}}}"#,
+            r#"{"type":"assistant/message","seq":51,"time":1791900005000,"data":{"turn":2,"step":1,"message":{"role":"assistant","content":[]},"usage":{"inputTokens":12000000,"outputTokens":200000,"cacheReadTokens":0,"totalTokens":12200000}}}"#,
+            r#"{"type":"user/message","seq":60,"time":1792500000000,"data":{"content":[]}}"#,
+            r#"{"type":"request/header","seq":70,"time":1792500001000,"data":{"header":{"config":{"provider":"xhs","model":"deepseek-flash"}}}}"#,
+            r#"{"type":"assistant/message","seq":80,"time":1792500006000,"data":{"turn":3,"step":1,"message":{"role":"assistant","content":[]},"usage":{"inputTokens":50000,"outputTokens":1600,"cacheReadTokens":1000,"totalTokens":52600}}}"#,
+            r#"{"type":"assistant/message","seq":81,"time":1792500007000,"data":{"turn":3,"step":2,"message":{"role":"assistant","content":[]}}}"#,
+        ];
+        let jsonl = lines.join("\n");
+        zstd::stream::encode_all(jsonl.as_bytes(), 3).unwrap()
+    }
+
+    #[test]
+    fn a_v4_session_bills_each_day_from_its_own_stream() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let stream = dir
+            .path()
+            .join("sessions/--Users-dev-workspace-wifitouch--/s1/session.v4.jsonl.zstd");
+        std::fs::create_dir_all(stream.parent().unwrap()).unwrap();
+        let bytes = write_v4_fixture();
+        std::fs::write(&stream, &bytes).unwrap();
+        // The writer's projection cache sits beside the sessions tree; its
+        // existence must not turn into a second source (and its lifetime
+        // cumulative must never bill).
+        let projcache = dir
+            .path()
+            .join("storages")
+            .join("session_projcache")
+            .join("sessions");
+        std::fs::create_dir_all(&projcache).unwrap();
+        std::fs::write(
+            projcache.join("session-d2b4cf00.json"),
+            r#"{"record":{"identity":{"formatVersion":4,"createdAt":1,"cwd":"C:\\w"},"rows":{"tokenUsage":{"val":{"totals":{"uncachedInputTokens":12200000,"outputTokens":201600,"cacheReadTokens":1000,"cacheWriteTokens":0}}}}}}"#,
+        )
+        .unwrap();
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        let adapter = DshAdapter;
+        let sources = adapter.discover(&DateFilter::default());
+        assert_eq!(sources.len(), 1, "the stream bills; the projection is not a source");
+        let outcome = adapter.read(&sources[0], ReadCursor(0)).unwrap();
+        assert_eq!(outcome.events.len(), 2, "the usage-less message is not billable");
+
+        let first = &outcome.events[0];
+        assert_eq!(first.session, "session-d2b4cf00");
+        assert_eq!(
+            first.counts,
+            TokenCounts { input: 12_000_000.0, cache_creation: 0.0, cache_read: 0.0, output: 200_000.0, reasoning: 0.0, credits: 0.0 }
+        );
+        assert_eq!(first.model.as_deref(), Some("xhs"), "carried from the v4 request/header");
+        assert_eq!(first.project.as_deref(), Some("wifitouch"));
+        assert_eq!(first.dedupe_key.as_deref(), Some("session-d2b4cf00#51"));
+        assert_eq!(first.ts_ms, 1_791_900_005_000, "the call's own day, not the session's last touch");
+
+        // The second call lands days later, under the model the newer header
+        // named — the two days stay two days, which is the whole point.
+        let second = &outcome.events[1];
+        assert_eq!(second.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(second.ts_ms, 1_792_500_006_000);
+        assert_eq!(
+            second.counts,
+            TokenCounts { input: 50_000.0, cache_creation: 0.0, cache_read: 1_000.0, output: 1_600.0, reasoning: 0.0, credits: 0.0 }
+        );
+        let keys: BTreeSet<_> = outcome.events.iter().filter_map(|e| e.dedupe_key.clone()).collect();
+        assert_eq!(keys.len(), 2);
         std::env::remove_var(crate::paths::ENV_DSH_HOME);
     }
 }
