@@ -397,7 +397,7 @@ mod tests {
         // Seed an answer older than the probe TTL but inside the grace window,
         // exactly what a previous good cycle leaves behind.
         let stale = format!(
-            r#"{{"captured_at_ms":{},"entries":[{{"used_percent":7.0,"window_minutes":300,"resets_at_ms":0,"label":"cached answer"}}]}}"#,
+            r#"{{"version":2,"captured_at_ms":{},"entries":[{{"used_percent":7.0,"window_minutes":300,"resets_at_ms":0,"label":"cached answer"}}]}}"#,
             cache::now_ms() - TTL.as_millis() as i64 - 60_000
         );
         std::fs::write(dir.path().join("slow.json"), stale).unwrap();

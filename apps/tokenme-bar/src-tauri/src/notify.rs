@@ -83,6 +83,12 @@ const EXHAUSTED_PCT: f64 = 100.0;
 /// the spent window on every crossing and the 已用完 banner fires again each
 /// time (measured 2026-10-10: intermittent repeats through the morning).
 const EXHAUSTED_HYSTERESIS_PCT: f64 = 5.0;
+/// A window that announced exhaustion stays quiet this long, whatever
+/// upstream identity churn did to re-arm it — a collided or renamed window id
+/// can make one poll's quiet reading re-arm another poll's spent state, and
+/// this cooldown is the last line under the one-banner-per-refresh contract.
+/// `last_fired_ms` survives re-arms, so the clock starts at the real post.
+const EXHAUSTED_REFIRE_COOLDOWN_MS: i64 = 4 * 60 * 60 * 1000;
 /// A reset instant that moved more than this was a window rollover, not probe
 /// jitter — the same window's reset wobbles by seconds between samples.
 const RENEW_SLACK_MS: i64 = 300_000;
@@ -221,6 +227,16 @@ fn plan(prev: Option<&Entry>, tier: u8, resets_at_ms: i64, now: i64, used_percen
     }
     entry.last_seen_ms = now;
     if tier > prev.tier {
+        // A spent window that was re-armed may not re-announce inside the
+        // cooldown: `last_fired_ms` survives re-arms precisely so this clock
+        // starts at the real post, not at the re-arm. A first announcement
+        // (last_fired_ms == 0) is never gated.
+        if tier == 2
+            && prev.last_fired_ms > 0
+            && now - prev.last_fired_ms < EXHAUSTED_REFIRE_COOLDOWN_MS
+        {
+            return Decision { entry, fire: None, persist: false };
+        }
         return Decision { entry, fire: Some(tier), persist: false };
     }
     if tier < prev.tier {
@@ -864,7 +880,13 @@ mod tests {
 
     #[test]
     fn a_drop_rearms_the_line_silently() {
-        let down = Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW - 1, last_seen_ms: NOW };
+        // Fired long enough ago that the refire cooldown has already run out.
+        let down = Entry {
+            tier: 2,
+            resets_at_ms: RESET,
+            last_fired_ms: NOW - EXHAUSTED_REFIRE_COOLDOWN_MS - 1,
+            last_seen_ms: NOW,
+        };
         let d = plan(Some(&down), 0, RESET, NOW, 0.0);
         assert_eq!(d.fire, None, "falling back never announces");
         assert_eq!(d.entry.tier, 0);
@@ -916,14 +938,36 @@ mod tests {
         // The next 100 is that same spent window: quiet.
         let again = plan(Some(&wobble.entry), 2, RESET, NOW + 2_000, 100.0);
         assert_eq!(again.fire, None);
-        // A real top-up clears the margin and re-arms; the next climb fires —
-        // the user's contract: refill the quota, and the next 100 % announces.
+        // A real top-up clears the margin and re-arms — but the climb seconds
+        // later still sits inside the refire cooldown of the announcement this
+        // window already made: quiet. (The announce-after-a-real-refill case
+        // lives in `a_drop_rearms_the_line_silently`, whose fire is hours old.)
         let topped = plan(Some(&spent), 0, RESET, NOW + 3_000, 0.0);
         assert_eq!(topped.fire, None);
         assert_eq!(topped.entry.tier, 0);
         assert!(topped.persist, "the re-arm must survive a restart");
         let climbed = plan(Some(&topped.entry), 2, RESET, NOW + 4_000, 100.0);
-        assert_eq!(climbed.fire, Some(2));
+        assert_eq!(climbed.fire, None, "one banner per window per cooldown");
+    }
+
+    /// The cooldown is the last line under the one-banner contract: even when
+    /// upstream churn re-arms a spent window (the collided window ids this
+    /// shipped with, measured 2026-10-10 — twelve banners in an hour), a climb
+    /// inside the cooldown stays quiet, because `last_fired_ms` survives the
+    /// re-arm and the clock reads the real post.
+    #[test]
+    fn a_recently_fired_window_stays_quiet_through_a_rearm_and_climb() {
+        let spent = Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW };
+        let topped = plan(Some(&spent), 0, RESET, NOW + 60_000, 0.0);
+        assert_eq!(topped.entry.tier, 0, "the re-arm itself is real and persists");
+        let climbed = plan(Some(&topped.entry), 2, RESET, NOW + 120_000, 100.0);
+        assert_eq!(climbed.fire, None, "inside the cooldown: quiet, not another banner");
+        assert!(!climbed.persist);
+        // Quiet does not mean forgotten: the window stays re-armed, and once
+        // the cooldown runs out the next climb announces again.
+        assert_eq!(climbed.entry.tier, 0);
+        let later = plan(Some(&climbed.entry), 2, RESET, NOW + EXHAUSTED_REFIRE_COOLDOWN_MS + 1, 100.0);
+        assert_eq!(later.fire, Some(2), "past the cooldown the climb announces like any other");
     }
 
     #[test]

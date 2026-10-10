@@ -30,9 +30,19 @@ struct Entry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Cached {
+    /// v2 = samples whose credit packs carry their own window id. v1 files
+    /// (no version field) packed all of one tool's packs under a shared id,
+    /// and replaying them re-fired the exhaustion banner through the
+    /// collision — old files are ignored on read, never upgraded in place.
+    #[serde(default)]
+    version: u32,
     captured_at_ms: i64,
     entries: Vec<Entry>,
 }
+
+/// See [`Cached::version`]. Bump when the cached shape's identity semantics
+/// change, so an upgrade never replays samples written under the old rules.
+const VERSION: u32 = 2;
 
 pub struct Cache {
     dir: PathBuf,
@@ -57,7 +67,8 @@ impl Cache {
 
     fn read(&self, tool: &str) -> Option<Cached> {
         let text = fs::read_to_string(self.path(tool)).ok()?;
-        serde_json::from_str(&text).ok()
+        let cached = serde_json::from_str::<Cached>(&text).ok()?;
+        (cached.version == VERSION).then_some(cached)
     }
 
     fn write(&self, tool: &str, cached: &Cached) {
@@ -120,7 +131,7 @@ impl Cache {
                 id: s.id.clone(),
             })
             .collect();
-        self.write(tool, &Cached { captured_at_ms: at, entries });
+        self.write(tool, &Cached { version: VERSION, captured_at_ms: at, entries });
     }
 }
 
