@@ -38,15 +38,6 @@ pub const ENV_DSH_HOME: &str = "DSH_HOME";
 /// side-by-side-install escape hatch the other adapters carry.
 pub const ENV_DSH_DESKTOP: &str = "DSH_DESKTOP_HOME";
 
-pub fn dsh_home() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(ENV_DSH_HOME) {
-        if !dir.is_empty() {
-            return Some(PathBuf::from(dir));
-        }
-    }
-    dirs::home_dir().map(|h| h.join(".dsh"))
-}
-
 /// The desktop harness root: the app-data tree that carries `sessions/` and
 /// `storages/session_projcache/`.
 fn harness_root() -> Option<PathBuf> {
@@ -98,11 +89,6 @@ fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var).filter(|d| !d.is_empty()).map(PathBuf::from)
 }
 
-/// The first existing root — the display root for `probe`, nothing more.
-pub fn sessions_dir() -> Option<PathBuf> {
-    sessions_roots().into_iter().next()
-}
-
 /// The projection dirs, one sibling of each sessions root, priority order —
 /// a root that exists but carries no `storages/` (the stale CLI-era home)
 /// simply contributes none.
@@ -126,13 +112,6 @@ pub fn is_session_file(path: &Path) -> bool {
         path.file_name().and_then(|n| n.to_str()),
         Some("session.jsonl.zstd") | Some("session.v4.jsonl.zstd")
     )
-}
-
-/// A v3 stream carries the session's per-call events. A v4 stream is
-/// header-only by design — its numbers live in the projection cache — so
-/// discovery reads v3 streams and skips v4 ones (see [`projcache_dirs`]).
-pub fn is_v3_stream(path: &Path) -> bool {
-    path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some("session.jsonl.zstd")
 }
 
 /// The format-v4 stream, named `session.v4.jsonl.zstd`. Its presence is what

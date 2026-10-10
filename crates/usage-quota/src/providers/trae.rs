@@ -439,7 +439,8 @@ fn cn_credit_windows(login: &Login) -> Vec<QuotaSample> {
             .pointer("/usage/credits_amount")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        let Some(limit) = limit.filter(|v| *v > 0.0) else {
+        // Validation only: a pack without a positive limit is not a quota row.
+        let Some(_limit) = limit.filter(|v| *v > 0.0) else {
             continue;
         };
         let name = pack

@@ -41,7 +41,6 @@
 //! distinct ids here), so it is the dedupe key and the byte cursor makes the read
 //! incremental. A line that is still being flushed is left for the next pass.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -83,12 +82,6 @@ pub fn discover(projects: &Path, since_ms: Option<i64>) -> Vec<SourceFile> {
         .collect();
     files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     files
-}
-
-/// How many transcript files a root holds — what `probe` reports before anything
-/// is parsed.
-pub fn count_files(projects: &Path) -> usize {
-    discover(projects, None).len()
 }
 
 pub fn read(file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
@@ -252,18 +245,6 @@ pub fn roots() -> Vec<PathBuf> {
         }
     }
     roots
-}
-
-/// Bookkeeping for the `probe` hint: sessions the app itself lists, so the number
-/// in the panel is what the app's sidebar shows.
-pub fn sessions_seen(files: &[SourceFile]) -> usize {
-    let mut set = HashMap::new();
-    for file in files {
-        if let Some(session) = owner_session(&file.path) {
-            set.insert(session, ());
-        }
-    }
-    set.len()
 }
 
 #[cfg(test)]

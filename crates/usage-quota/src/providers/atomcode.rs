@@ -40,7 +40,7 @@ impl QuotaProbe for AtomCodeQuota {
                 return samples_from(&body);
             }
         }
-        let Some(mut child) = spawn_daemon() else { return Vec::new() };
+        let Some(child) = spawn_daemon() else { return Vec::new() };
         // spawn_daemon only returns once the child published its info file.
         let mut mine: Vec<DaemonInfo> =
             daemon_infos().into_iter().filter(|i| i._pid == child.id()).collect();

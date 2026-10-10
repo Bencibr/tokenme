@@ -8,7 +8,9 @@
 //! machine can hold either, both, or neither. CN/CodeBuddy editions are separate
 //! products with their own stores — not this adapter's business.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(test)]
+use std::path::Path;
 
 pub const DB_NAME: &str = "workbuddy.db";
 
@@ -36,7 +38,9 @@ pub fn db_path() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// `(size, mtime_ms)` for the discover/manifest bookkeeping.
+/// `(size, mtime_ms)` — production stats its files inline; this survives for
+/// the transcript tests, which build `SourceFile`s from fixture paths.
+#[cfg(test)]
 pub fn stat_file(path: &Path) -> Option<(u64, i64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime_ms = meta

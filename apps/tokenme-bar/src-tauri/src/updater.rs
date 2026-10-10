@@ -17,17 +17,21 @@
 //! channel rides the public mirror.
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
 use ureq as ureq_client;
 
 use crate::engine::Shared;
 
 const API_LATEST: &str = "https://api.github.com/repos/Bencibr/tokenme/releases/latest";
 /// Where the swap script and the staged artifact land between phases.
+#[cfg(target_os = "macos")]
 const ARTIFACT_DIR: &str = "updates";
 /// The macOS bundle the release CI attaches, universal despite the name.
 const MAC_ZIP: &str = "tokenme-macos-arm64.app.zip";
 /// Progress events emitted while the artifact streams in.
+#[cfg(target_os = "macos")]
 const PROGRESS_EVENT: &str = "update-download-progress";
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +43,7 @@ pub struct UpdateStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg(target_os = "macos")]
 pub struct DownloadProgress {
     /// 0–100, rounded; the frontend renders `下载中 {percent}%`.
     pub percent: u32,
@@ -50,7 +55,12 @@ pub struct DownloadProgress {
 /// download URLs of the macOS bundle and the hash list.
 struct Release {
     version: String,
+    /// The URL fields are parsed on every platform — a release missing the
+    /// artifact set counts as no release anywhere — but only the macOS
+    /// download phase reads them.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     zip_url: String,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     sha_url: String,
 }
 
@@ -89,6 +99,7 @@ fn fetch_json(url: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+#[cfg(target_os = "macos")]
 fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
     let resp: ureq_client::http::Response<ureq_client::Body> = agent().get(url).call().ok()?;
     use std::io::Read as _;
@@ -97,6 +108,9 @@ fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Compiled for the macOS download phase and for the vector tests on every
+/// platform — the schedule must stay exercised where the tests can run.
+#[cfg(any(target_os = "macos", test))]
 fn sha256_hex(data: &[u8]) -> String {
     // Self-contained SHA-256 (FIPS 180-4): the tauri crate has no digest dep
     // and the check must not grow one for a single hash.

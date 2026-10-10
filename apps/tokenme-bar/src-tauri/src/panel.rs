@@ -86,7 +86,7 @@ pub(crate) fn remember_tray_rect(rect: &Rect) {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ScreenArea {
+pub(crate) struct ScreenArea {
     monitor: Bounds,
     work: Bounds,
 }
@@ -1211,11 +1211,6 @@ fn top_right_origin(area: Bounds, width: f64) -> (f64, f64) {
         (area.right - width - GAP).max(area.left),
         area.top,
     )
-}
-
-#[cfg(not(target_os = "macos"))]
-fn anchor_without_tray(window: &WebviewWindow) {
-    clamp(window);
 }
 
 fn clamp_in_bounds(x: f64, y: f64, size: (f64, f64), bounds: Bounds, margin: f64) -> (f64, f64) {

@@ -87,6 +87,7 @@ const RETRY_GAP: Duration = Duration::from_secs(60);
 /// report months ago is not coming back with its old tier.
 const STATE_RETENTION_MS: i64 = 30 * 24 * 3_600_000;
 /// How long a cached authorization answer is trusted before it is queried again.
+#[cfg(target_os = "macos")]
 const SETTINGS_TTL: Duration = Duration::from_secs(60);
 
 fn now_ms() -> i64 {
@@ -464,6 +465,10 @@ enum Auth {
     NotDetermined,
 }
 
+/// `Denied`/`NotDetermined` are produced only by the macOS permission flow,
+/// but every platform matches them in `note_failure`, so they cannot be
+/// cfg'd away — elsewhere they are simply never constructed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum DeliveryError {
     /// The user said no; only they can undo it.
     Denied,

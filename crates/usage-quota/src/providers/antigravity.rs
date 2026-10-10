@@ -76,15 +76,22 @@ fn ide_running() -> bool {
         .is_some_and(|(_, wanted)| wanted.iter().any(|n| crate::host::matches(&running, n)))
 }
 
+// The language-server attach path answers on unix only (see `attach`); every
+// helper it needs carries the same gate so the other platforms compile clean.
 /// The local Connect RPC path the language server serves (`CodexBar`
 /// `AntigravityStatusProbe.swift:847-852`).
+#[cfg(unix)]
 const QUOTA_SUMMARY_PATH: &str = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
 /// Local calls are answered in milliseconds; the budget only exists so a
 /// wedged server cannot eat the probe thread.
+#[cfg(unix)]
 const LOCAL_CONNECT: Duration = Duration::from_secs(3);
+#[cfg(unix)]
 const LOCAL_READ: Duration = Duration::from_secs(6);
 /// A desktop install runs one language server; two covers an app + IDE pair.
+#[cfg(unix)]
 const MAX_SERVERS: usize = 2;
+#[cfg(unix)]
 const MAX_PORTS: usize = 4;
 
 impl QuotaProbe for AntigravityQuota {
@@ -187,11 +194,13 @@ static SPAWN_BREAKER: SpawnBreaker = SpawnBreaker::new();
 /// not discovered at all: the server would 401 every call (`CodexBar` skips
 /// those the same way), so only the CLI's server may go without. The Debug
 /// impl redacts the token — test output must not leak it.
+#[cfg(unix)]
 struct LanguageServer {
     pid: u32,
     csrf: Option<String>,
 }
 
+#[cfg(unix)]
 impl std::fmt::Debug for LanguageServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LanguageServer")
@@ -260,6 +269,9 @@ fn find_language_servers() -> Option<Vec<LanguageServer>> {
 /// A `language_server` executable inside an Antigravity/Gemini desktop path or
 /// carrying the desktop's `--app_data_dir antigravity` flag. The path markers
 /// need their separators so unrelated names ("notantigravity/") cannot match.
+/// Also compiled for tests on every platform: the classification rules are
+/// pinned where the tests can run, not only where the probe does.
+#[cfg(any(unix, test))]
 fn is_desktop_language_server(lower: &str) -> bool {
     if !["/language_server", "/language-server", "\\language_server", "\\language-server"]
         .iter()
@@ -277,6 +289,7 @@ fn is_desktop_language_server(lower: &str) -> bool {
 
 /// The CLI hosts the same server under its own name (`agy`,
 /// `antigravity-cli/`) and needs no CSRF token.
+#[cfg(any(unix, test))]
 fn is_cli_language_server(lower: &str) -> bool {
     if lower.contains("/antigravity-cli/") || lower.contains("\\antigravity-cli\\") || lower.contains("/antigravity_cli/") {
         return true;
@@ -294,6 +307,7 @@ fn is_cli_language_server(lower: &str) -> bool {
 /// The value of a `--flag value` or `--flag=value` token, scanning whole argv —
 /// `ps` command lines can carry unrelated text, so a plain substring match is
 /// not enough.
+#[cfg(any(unix, test))]
 fn flag_value(command: &str, flag: &str) -> Option<String> {
     let mut tokens = command.split_whitespace();
     while let Some(token) = tokens.next() {
@@ -365,6 +379,7 @@ fn quota_summary(server: &LanguageServer, port: u16, scheme: &str) -> Option<Val
     response.into_json().ok()
 }
 
+#[cfg(unix)]
 fn http_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| ureq::AgentBuilder::new().timeout_connect(LOCAL_CONNECT).timeout_read(LOCAL_READ).build())

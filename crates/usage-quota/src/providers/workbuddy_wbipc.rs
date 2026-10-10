@@ -27,7 +27,6 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -38,15 +37,6 @@ const PIPE: &str = "wb.request";
 const FETCH_METHOD: &str = "http.fetch";
 const BROKER_GETPIPE: &str = "broker/GetPipe";
 const MAX_FRAME: usize = 1_048_576;
-/// The engine gives a probe a 5s budget (`BUDGET`); stay inside it so the
-/// answer lands in the round that asked.
-const DEADLINE: Duration = Duration::from_millis(4_500);
-
-/// Read budget that always leaves a tail inside the probe window; a spent
-/// deadline degrades to a short last read rather than a hang.
-fn read_budget(started: Instant) -> Duration {
-    DEADLINE.saturating_sub(started.elapsed()).max(Duration::from_millis(500))
-}
 
 /// `{endpoint, ticket}` discovery file — the broker's one public contract.
 /// Same ladder as the adapter's `paths::config_root`.
@@ -88,11 +78,9 @@ pub(crate) fn meter_envelope(body: &Value) -> Option<Value> {
     let endpoint = disc.get("endpoint")?.as_str()?.to_string();
     let ticket = disc.get("ticket")?.as_str()?.to_string();
 
-    let started = Instant::now();
     let mut conn = Connection {
         stream: BufReader::new(connect(&endpoint)?),
         next_id: 1,
-        started,
     };
     let (channel, methods) = conn.handshake(&endpoint, &ticket)?;
     if !methods.iter().any(|m| m == FETCH_METHOD) {
@@ -119,7 +107,6 @@ pub(crate) fn meter_envelope(body: &Value) -> Option<Value> {
 struct Connection {
     stream: BufReader<Stream>,
     next_id: u64,
-    started: Instant,
 }
 
 /// The broker endpoint, per platform: an AF_UNIX socket path on macOS/Linux,
@@ -271,14 +258,6 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // The read deadline exists so a probe never outlives the engine's window;
-    // pin its floor (never zero) and its ceiling (never over budget).
-    #[test]
-    fn the_read_budget_stays_inside_the_probe_window() {
-        assert_eq!(read_budget(Instant::now() - DEADLINE), Duration::from_millis(500));
-        assert!(read_budget(Instant::now()) <= DEADLINE);
-    }
 
     /// Golden vectors computed independently (python hashlib/hmac) for
     /// ticket "test-ticket", endpoint "/tmp/t.sock", nonces "client-nonce"
