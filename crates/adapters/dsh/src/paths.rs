@@ -118,6 +118,39 @@ pub fn projcache_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Every store location DSH has been known to write, existing or not — the
+/// store-drift diagnostics read this (scan.log freshness notes), never the
+/// adapter's reads: `sessions_roots()` stays the only read surface. Build 161
+/// chased a user whose writer left the home tree for somewhere none of the
+/// read roots guessed; a diagnostic that names where it looked turns the next
+/// one into a log line instead of a dir-listing errand.
+pub fn diagnostic_candidates() -> Vec<(&'static str, PathBuf)> {
+    let mut out: Vec<(&'static str, PathBuf)> = Vec::new();
+    match env_dir(ENV_DSH_HOME) {
+        Some(home) => out.push(("home", home.join("sessions"))),
+        None => {
+            if let Some(h) = dirs::home_dir() {
+                out.push(("home", h.join(".dsh").join("sessions")));
+            }
+        }
+    }
+    match env_dir(ENV_DSH_DESKTOP) {
+        Some(desktop) => out.push(("desktop-harness", desktop.join("harness").join("sessions"))),
+        None => {
+            if let Some(c) = dirs::config_dir() {
+                out.push(("desktop-harness", c.join("dsh-desktop").join("harness").join("sessions")));
+            }
+            // The Electron userData default is the roaming tree; the local one
+            // is where a renamed or repackaged build would land — one
+            // diagnostic line each, cheap.
+            if let Some(d) = dirs::data_local_dir() {
+                out.push(("desktop-harness-local", d.join("dsh-desktop").join("harness").join("sessions")));
+            }
+        }
+    }
+    out
+}
+
 /// The writer names its stream `session.jsonl.zstd`; format v4 (the session
 /// header carries `"version":4`, everything else the same shape) names it
 /// `session.v4.jsonl.zstd` — same directory layout either way. Both bill from
@@ -201,5 +234,20 @@ mod tests {
         let stray = dir.path().join("session.v4.jsonl");
         std::fs::write(&stray, b"x").unwrap();
         assert!(!is_session_file(&stray));
+    }
+
+    #[test]
+    fn diagnostic_candidates_follow_the_env_pins() {
+        let _env = lock_env();
+        let home = tempfile::tempdir().unwrap();
+        let desktop = tempfile::tempdir().unwrap();
+        std::env::set_var(ENV_DSH_HOME, home.path());
+        std::env::set_var(ENV_DSH_DESKTOP, desktop.path());
+        let cands = diagnostic_candidates();
+        assert_eq!(cands[0], ("home", home.path().join("sessions")));
+        assert_eq!(cands[1], ("desktop-harness", desktop.path().join("harness").join("sessions")));
+        assert_eq!(cands.len(), 2, "a pinned desktop root displaces the guessed local one");
+        std::env::remove_var(ENV_DSH_HOME);
+        std::env::remove_var(ENV_DSH_DESKTOP);
     }
 }

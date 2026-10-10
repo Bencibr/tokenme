@@ -47,6 +47,7 @@ use usage_core::{
 pub const TOOL_ID: &str = "dsh";
 
 pub use doctor::ledger;
+pub use paths::diagnostic_candidates;
 pub(crate) const DISPLAY_NAME: &str = "DSH";
 
 #[derive(Debug, Default, Clone, Copy)]
