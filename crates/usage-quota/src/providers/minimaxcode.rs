@@ -698,7 +698,9 @@ pub(crate) fn samples_from(body: &Value) -> Vec<QuotaSample> {
 /// the earliest expiry as the reset — which is the one reading that survives that
 /// merge. The vendor's per-type names (`Purchased`, `Check-in`) are keyed by a
 /// `credit_type` *number* this probe does not decode, so no type name is invented
-/// into a label.
+/// into a label. The summed figures ride the label tail in the credit packs'
+/// established ` · 已用 X/Y` shape: the frontend keeps that tail out of the row
+/// and hands it to the click tip, which is where a number beside a gauge belongs.
 pub(crate) fn credits_from(body: &Value) -> Vec<QuotaSample> {
     if base_failed(body) {
         return Vec::new();
@@ -736,7 +738,7 @@ pub(crate) fn credits_from(body: &Value) -> Vec<QuotaSample> {
         used_percent: (spent / granted * 100.0).clamp(0.0, 100.0),
         window_minutes: window,
         resets_at_ms: if resets == i64::MAX { 0 } else { resets },
-        label: Some("Credits".to_string()),
+        label: Some(format!("Credits · 已用 {spent:.2}/{granted:.2}")),
         id: Some("credits".to_string()),
     }]
 }
@@ -1400,7 +1402,9 @@ mod tests {
         let row = &samples[0];
         // 200 spent of 800 granted, plus 50 of 200: 250 of 1000.
         assert_eq!(row.used_percent, 25.0);
-        assert_eq!(row.label.as_deref(), Some("Credits"));
+        // The figures ride the packs' ` · 已用 X/Y` tail: the frontend shows
+        // it in the click tip, never in the row.
+        assert_eq!(row.label.as_deref(), Some("Credits · 已用 250.00/1000.00"));
         assert_eq!(row.id.as_deref(), Some("credits"));
         // The earliest expiry is the thing that actually disappears first, and the
         // period is the longest wallet's own span (granted→expire, not a month we
