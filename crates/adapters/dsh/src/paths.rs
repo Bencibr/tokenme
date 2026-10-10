@@ -38,6 +38,15 @@ pub const ENV_DSH_HOME: &str = "DSH_HOME";
 /// side-by-side-install escape hatch the other adapters carry.
 pub const ENV_DSH_DESKTOP: &str = "DSH_DESKTOP_HOME";
 
+pub fn dsh_home() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(ENV_DSH_HOME) {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".dsh"))
+}
+
 /// The desktop harness root: the app-data tree that carries `sessions/` and
 /// `storages/session_projcache/`.
 fn harness_root() -> Option<PathBuf> {
@@ -89,9 +98,17 @@ fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var).filter(|d| !d.is_empty()).map(PathBuf::from)
 }
 
+/// The first existing root — the display root for `probe`, nothing more.
+pub fn sessions_dir() -> Option<PathBuf> {
+    sessions_roots().into_iter().next()
+}
+
 /// The projection dirs, one sibling of each sessions root, priority order —
 /// a root that exists but carries no `storages/` (the stale CLI-era home)
-/// simply contributes none.
+/// simply contributes none. The projection caches are the writer's own
+/// cumulative ledger: the accuracy audit (`doctor::ledger`) reads them as the
+/// vendor's side of the reconciliation; billing never does (the streams carry
+/// the per-call events).
 pub fn projcache_dirs() -> Vec<PathBuf> {
     sessions_roots()
         .iter()
@@ -101,9 +118,44 @@ pub fn projcache_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Every store location DSH has been known to write, existing or not — the
+/// store-drift diagnostics read this (scan.log freshness notes), never the
+/// adapter's reads: `sessions_roots()` stays the only read surface. Build 161
+/// chased a user whose writer left the home tree for somewhere none of the
+/// read roots guessed; a diagnostic that names where it looked turns the next
+/// one into a log line instead of a dir-listing errand.
+pub fn diagnostic_candidates() -> Vec<(&'static str, PathBuf)> {
+    let mut out: Vec<(&'static str, PathBuf)> = Vec::new();
+    match env_dir(ENV_DSH_HOME) {
+        Some(home) => out.push(("home", home.join("sessions"))),
+        None => {
+            if let Some(h) = dirs::home_dir() {
+                out.push(("home", h.join(".dsh").join("sessions")));
+            }
+        }
+    }
+    match env_dir(ENV_DSH_DESKTOP) {
+        Some(desktop) => out.push(("desktop-harness", desktop.join("harness").join("sessions"))),
+        None => {
+            if let Some(c) = dirs::config_dir() {
+                out.push(("desktop-harness", c.join("dsh-desktop").join("harness").join("sessions")));
+            }
+            // The Electron userData default is the roaming tree; the local one
+            // is where a renamed or repackaged build would land — one
+            // diagnostic line each, cheap.
+            if let Some(d) = dirs::data_local_dir() {
+                out.push(("desktop-harness-local", d.join("dsh-desktop").join("harness").join("sessions")));
+            }
+        }
+    }
+    out
+}
+
 /// The writer names its stream `session.jsonl.zstd`; format v4 (the session
 /// header carries `"version":4`, everything else the same shape) names it
-/// `session.v4.jsonl.zstd` — same directory layout either way.
+/// `session.v4.jsonl.zstd` — same directory layout either way. Both bill from
+/// their own events — v3 on `assistant/chunk`, v4 on `assistant/message` (see
+/// the parser).
 pub fn is_session_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -112,14 +164,6 @@ pub fn is_session_file(path: &Path) -> bool {
         path.file_name().and_then(|n| n.to_str()),
         Some("session.jsonl.zstd") | Some("session.v4.jsonl.zstd")
     )
-}
-
-/// The format-v4 stream, named `session.v4.jsonl.zstd`. Its presence is what
-/// marks a session as projection-backed: a projection is read only when this
-/// file exists for the same session id, so a v3 session is never billed from
-/// both its stream and its projection.
-pub fn is_v4_stream(path: &Path) -> bool {
-    path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some("session.v4.jsonl.zstd")
 }
 
 #[cfg(test)]
@@ -190,5 +234,20 @@ mod tests {
         let stray = dir.path().join("session.v4.jsonl");
         std::fs::write(&stray, b"x").unwrap();
         assert!(!is_session_file(&stray));
+    }
+
+    #[test]
+    fn diagnostic_candidates_follow_the_env_pins() {
+        let _env = lock_env();
+        let home = tempfile::tempdir().unwrap();
+        let desktop = tempfile::tempdir().unwrap();
+        std::env::set_var(ENV_DSH_HOME, home.path());
+        std::env::set_var(ENV_DSH_DESKTOP, desktop.path());
+        let cands = diagnostic_candidates();
+        assert_eq!(cands[0], ("home", home.path().join("sessions")));
+        assert_eq!(cands[1], ("desktop-harness", desktop.path().join("harness").join("sessions")));
+        assert_eq!(cands.len(), 2, "a pinned desktop root displaces the guessed local one");
+        std::env::remove_var(ENV_DSH_HOME);
+        std::env::remove_var(ENV_DSH_DESKTOP);
     }
 }

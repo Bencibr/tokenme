@@ -20,7 +20,7 @@ function windowName(q: QuotaView): string {
 
 /** Tools whose quota probe owns a daily check-in: the group header grows the
  *  badge/button for exactly these. */
-const CHECKIN_TOOLS = ["trae_cn", "qoder"];
+const CHECKIN_TOOLS = ["trae_cn", "qoder", "minimaxcode"];
 
 /** The check-in state rides the report as zero-window marker rows. They are
  *  control channel, not data: the badge and the button read them off the raw
