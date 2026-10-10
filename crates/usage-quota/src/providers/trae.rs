@@ -465,7 +465,15 @@ fn cn_credit_windows(login: &Login) -> Vec<QuotaSample> {
             window_minutes: 0,
             resets_at_ms: expires_ms,
             label: Some(name.clone()),
-            id: Some(pack.get("entitlement_id").and_then(Value::as_str).unwrap_or("credits").to_string()),
+            // Two anonymous packs must not share an id: the window identity is
+            // what keeps one pack's spent state from flapping with another's.
+            id: Some(
+                pack.get("entitlement_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("pack:{name}")),
+            ),
         });
     }
     out

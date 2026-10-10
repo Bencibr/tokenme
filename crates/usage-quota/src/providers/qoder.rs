@@ -415,7 +415,12 @@ fn meter_sample(meter: Option<&Value>, name: &str, resets_at_ms: i64) -> Option<
         window_minutes: 0,
         resets_at_ms,
         label: Some(format!("{name} · 已用 {}/{}", trim(used), trim(total))),
-        id: Some("credits".into()),
+        // The meter name is the window's stable identity — an account carries
+        // several meters at once, and a shared id makes the notify machine see
+        // one window flapping between their tiers, re-firing the exhaustion
+        // banner on every poll (the codebuddy twin of this shape, measured
+        // 2026-10-10).
+        id: Some(format!("credits:{name}")),
     })
 }
 
