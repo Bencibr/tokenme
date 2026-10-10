@@ -655,7 +655,16 @@ fn claimable_campaigns(body: &Value) -> Vec<(String, f64)> {
 /// `CLAIMED`. A row that is missing proves nothing — measured 2026-10-09 the
 /// vendor drops today's row for minutes and answers CLAIMABLE again — and
 /// `VIEW_DETAILS` placements sit CLAIMED all their life and prove nothing.
-fn today_benefits_all_claimed(body: &Value) -> bool {
+///
+/// The read only runs once the day's window is open (`day_open`, 10:00
+/// local): before it, nothing legitimate can have claimed today, and the
+/// lingering row is yesterday's residue wearing a `startAt` that has already
+/// rolled to today — measured 2026-10-10 morning that exact shape read as
+/// 已签到 hours before the window opened.
+fn today_benefits_all_claimed(body: &Value, day_open: bool) -> bool {
+    if !day_open {
+        return false;
+    }
     let Some(rows) = body.get("campaigns").and_then(Value::as_array) else { return false };
     let today = chrono::Local::now().date_naive();
     let mut any_today = false;
@@ -1126,11 +1135,13 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         });
     }
     // The day's campaign opens at 10:00 local: before that a claimable list
-    // must not be claimed early and an empty list must not close the day —
-    // but the status read below still runs, so a benefit the IDE already paid
-    // (today's row CLAIMED) marks the day at any hour. The next pass after
-    // ten retries an open day on its own.
-    let may_claim = force || chrono::Timelike::hour(&chrono::Local::now()) >= 10;
+    // must not be claimed early, an empty list must not close the day, and no
+    // row may speak for today at all — the lingering row's CLAIMED status is
+    // yesterday's under a startAt that has already rolled to today (measured
+    // 2026-10-10 morning: the badge said 已签到 before the window opened).
+    // The next pass after ten retries an open day on its own.
+    let day_open = chrono::Timelike::hour(&chrono::Local::now()) >= 10;
+    let may_claim = force || day_open;
     let mut outcome = QoderCheckinOutcome {
         done_today: false,
         was_already: false,
@@ -1153,7 +1164,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         // nothing claimable and nothing closed is re-asked with the minted
         // identity before the day is read as closed or empty. The mint is
         // cached for 30 min, so this costs one bridge run per half hour.
-        let ident = if claimable_campaigns(&body).is_empty() && !today_benefits_all_claimed(&body) {
+        let ident = if claimable_campaigns(&body).is_empty() && !today_benefits_all_claimed(&body, day_open) {
             body.get("uid").and_then(Value::as_str).and_then(claim_identity)
         } else {
             None
@@ -1221,7 +1232,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         // reading stamped the day paid off that flap — the badge said 已签到
         // while the client still showed the benefit unclaimed. Only rows
         // whose window started *today* may speak for today at all.
-        if today_benefits_all_claimed(&body) {
+        if today_benefits_all_claimed(&body, day_open) {
             state.last_attempt_day = today.clone();
             state.last_ok_day = today.clone();
             state.last_credits = 0.0;
@@ -1385,29 +1396,48 @@ mod tests {
         // The flap: today's row absent, a VIEW_DETAILS row CLAIMED.
         let flap = json!({"campaigns": [
             {"campaignId": 1, "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED"}]});
-        assert!(!today_benefits_all_claimed(&flap));
+        assert!(!today_benefits_all_claimed(&flap, true));
         // Nothing listed at all: open, never paid.
-        assert!(!today_benefits_all_claimed(&json!({"campaigns": []})));
-        assert!(!today_benefits_all_claimed(&Value::Null));
+        assert!(!today_benefits_all_claimed(&json!({"campaigns": []}), true));
+        assert!(!today_benefits_all_claimed(&Value::Null, true));
         // Today's row CLAIMED = paid.
         let paid = json!({"campaigns": [
             {"campaignId": 2, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED", "startAt": now}]});
-        assert!(today_benefits_all_claimed(&paid));
+        assert!(today_benefits_all_claimed(&paid, true));
         // Claimable, mixed, or without a startAt: still open.
         let open = json!({"campaigns": [
             {"campaignId": 2, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE", "startAt": now}]});
-        assert!(!today_benefits_all_claimed(&open));
+        assert!(!today_benefits_all_claimed(&open, true));
         let mixed = json!({"campaigns": [
             {"campaignId": 2, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED", "startAt": now},
             {"campaignId": 3, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE", "startAt": now}]});
-        assert!(!today_benefits_all_claimed(&mixed));
+        assert!(!today_benefits_all_claimed(&mixed, true));
         let no_start = json!({"campaigns": [
             {"campaignId": 4, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED"}]});
-        assert!(!today_benefits_all_claimed(&no_start));
+        assert!(!today_benefits_all_claimed(&no_start, true));
         // Yesterday's lingering claimed row says nothing about today.
         let yesterday = json!({"campaigns": [
             {"campaignId": 5, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED", "startAt": now - 86_400}]});
-        assert!(!today_benefits_all_claimed(&yesterday));
+        assert!(!today_benefits_all_claimed(&yesterday, true));
+    }
+
+    /// Before the 10:00 refresh no row may close the day, whatever it shows.
+    /// The shape that fired the false 已签到 (2026-10-10 morning): yesterday's
+    /// row lingers CLAIMED under a `startAt` that has already rolled to today,
+    /// so the date-only read stamped the day paid hours before its window
+    /// opened — and nothing legitimate can have claimed before it opens.
+    #[test]
+    fn before_the_window_opens_no_row_closes_the_day() {
+        let now = chrono::Local::now().timestamp();
+        let rolled = json!({"campaigns": [
+            {"campaignId": 6, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED", "startAt": now}]});
+        assert!(!today_benefits_all_claimed(&rolled, false));
+        // The window's own start timestamp, pre-created ahead of 10:00.
+        let future = json!({"campaigns": [
+            {"campaignId": 7, "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED", "startAt": now + 3_600}]});
+        assert!(!today_benefits_all_claimed(&future, false));
+        // The same shapes read normally once the window is open.
+        assert!(today_benefits_all_claimed(&rolled, true));
     }
 
     /// The label is the exact wording the strip's badge reads — a drift here
