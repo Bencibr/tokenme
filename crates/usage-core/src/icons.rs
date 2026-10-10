@@ -39,6 +39,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("agnes", &["AgnesCode"]),
     ("atomcode", &[]),
     ("workbuddy", &["WorkBuddy AI", "WorkBuddy"]),
+    ("codebuddy", &["CodeBuddy", "CodeBuddy CN"]),
     ("crow5", &["Crow5"]),
     ("joycode", &["JoyCode"]),
     ("mimocode", &[]),
@@ -70,6 +71,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("joycode", include_bytes!("../assets/joycode.png")),
     ("cola", include_bytes!("../assets/cola.png")),
     ("workbuddy", include_bytes!("../assets/workbuddy.png")),
+    ("codebuddy", include_bytes!("../assets/codebuddy.png")),
     ("cline", include_bytes!("../assets/cline.png")),
     // OpenCode is a CLI, but the vendor ships an official mark (their own
     // apple-touch icon) — shipped, not scraped from an unrelated bundle.

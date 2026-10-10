@@ -16,6 +16,7 @@ usage-adapter-zcode.workspace = true
 usage-adapter-qoder.workspace = true
 usage-adapter-antigravity.workspace = true
 usage-adapter-agnes.workspace = true
+usage-adapter-codebuddy.workspace = true
 usage-adapter-atomcode.workspace = true
 usage-adapter-workbuddy.workspace = true
 usage-adapter-hermes.workspace = true

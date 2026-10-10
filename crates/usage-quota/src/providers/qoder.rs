@@ -211,7 +211,7 @@ fn read_windows_user_info(dir: &Path) -> Option<Value> {
         .decode(encrypted_key)
         .ok()?;
     let wrapped = wrapped.strip_prefix(b"DPAPI")?;
-    let key = dpapi_unprotect(wrapped)?;
+    let key = super::crypto::dpapi_unprotect(wrapped)?;
     if key.len() != 32 {
         return None;
     }
@@ -233,62 +233,11 @@ fn app_user_info(dir: &Path, pass: &str) -> Option<Value> {
     decrypt(pass, &blob).and_then(|p| parse(&p))
 }
 
-/// Chromium's Windows `safeStorage` key is a DPAPI blob prefixed by ASCII
-/// `DPAPI`. `CryptUnprotectData` allocates the output with LocalAlloc; copy it
-/// before freeing it so no Windows-owned pointer escapes this function.
-#[cfg(windows)]
-fn dpapi_unprotect(data: &[u8]) -> Option<Vec<u8>> {
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
-
-    let cb_data = u32::try_from(data.len()).ok()?;
-    let input = CRYPT_INTEGER_BLOB {
-        cbData: cb_data,
-        pbData: data.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB::default();
-    let ok = unsafe {
-        CryptUnprotectData(
-            &input,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            &mut output,
-        )
-    };
-    if ok == 0 || output.pbData.is_null() {
-        return None;
-    }
-
-    let plaintext =
-        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-    unsafe {
-        LocalFree(output.pbData.cast());
-    }
-    Some(plaintext)
-}
-
 /// Current Chromium/Electron Windows envelopes are `v10 || nonce(12) ||
 /// AES-256-GCM(ciphertext || tag)`, with empty additional authenticated data.
 #[cfg(windows)]
 fn decrypt_windows_v10(key: &[u8], blob: &[u8]) -> Option<Vec<u8>> {
-    use aes_gcm::{
-        aead::{Aead, KeyInit},
-        Aes256Gcm, Nonce,
-    };
-
-    let payload = blob.strip_prefix(b"v10")?;
-    if payload.len() <= 12 {
-        return None;
-    }
-    let (nonce, ciphertext) = payload.split_at(12);
-    if ciphertext.len() < 16 {
-        return None;
-    }
-    let cipher = Aes256Gcm::new_from_slice(key).ok()?;
-    cipher.decrypt(Nonce::from_slice(nonce), ciphertext).ok()
+    super::crypto::decrypt_windows_v10(key, blob)
 }
 
 fn state_dbs() -> Vec<std::path::PathBuf> {

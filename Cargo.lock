@@ -1317,6 +1317,7 @@ dependencies = [
  "usage-adapter-catpaw",
  "usage-adapter-claude",
  "usage-adapter-cline",
+ "usage-adapter-codebuddy",
  "usage-adapter-codex",
  "usage-adapter-dsh",
  "usage-adapter-funide",
@@ -1400,6 +1401,17 @@ dependencies = [
  "tempfile",
  "usage-core",
  "walkdir",
+]
+
+[[package]]
+name = "usage-adapter-codebuddy"
+version = "0.1.6"
+dependencies = [
+ "chrono",
+ "dirs",
+ "serde_json",
+ "tempfile",
+ "usage-core",
 ]
 
 [[package]]

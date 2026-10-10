@@ -21,7 +21,9 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("dsh", &["DSH Desktop", "dsh-desktop"]),
     ("zcode", &["ZCode", "zcode"]),
     ("antigravity", &["Antigravity"]),
-    ("workbuddy", &["WorkBuddy AI", "WorkBuddy"]),
+    // Windows installs the desktop app as one word; the spaced name is macOS.
+    ("workbuddy", &["WorkBuddy AI", "WorkBuddyAI", "WorkBuddy"]),
+    ("codebuddy", &["CodeBuddy", "CodeBuddy CN"]),
     ("catpaw", &["CatPawAI", "CatPaw"]),
     ("cline", &["Cline", "cline", "cline-app", "code-sidecar"]),
     ("codex", &["codex", "Codex"]),
@@ -200,5 +202,24 @@ mod tests {
         alive.clear();
         alive.insert("Cola Helper (Renderer)".to_string());
         assert!(!any_host_running("cola", &alive), "helpers alone are not the host");
+    }
+
+    /// The desktop app's process name carries no space on Windows
+    /// (`WorkBuddyAI.exe`, measured 2026-10-09); the spaced spelling is
+    /// macOS. Neither may fold into the other.
+    #[test]
+    fn workbuddy_follows_both_spellings_of_its_app() {
+        let mut alive: HashSet<String> = HashSet::new();
+        alive.insert("WorkBuddyAI.exe".to_string());
+        assert!(any_host_running("workbuddy", &alive));
+        alive.clear();
+        alive.insert("WorkBuddy AI".to_string());
+        assert!(any_host_running("workbuddy", &alive));
+        alive.clear();
+        alive.insert("WorkBuddy.exe".to_string());
+        assert!(any_host_running("workbuddy", &alive));
+        alive.clear();
+        alive.insert("WorkBuddy Helper (Renderer)".to_string());
+        assert!(!any_host_running("workbuddy", &alive), "helpers alone are not the host");
     }
 }

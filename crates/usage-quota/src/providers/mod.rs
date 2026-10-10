@@ -6,6 +6,7 @@ mod atomcode;
 mod crypto;
 mod catpaw;
 mod claude;
+mod codebuddy;
 mod cline;
 mod cola;
 mod codex;
@@ -29,6 +30,7 @@ pub use antigravity::AntigravityQuota;
 pub use atomcode::AtomCodeQuota;
 pub use catpaw::CatpawQuota;
 pub use claude::ClaudeQuota;
+pub use codebuddy::CodeBuddyQuota;
 pub use cline::ClineQuota;
 pub use cola::ColaQuota;
 pub use codex::CodexQuota;
@@ -76,6 +78,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(QoderQuota),
         Box::new(WorkBuddyQuota),
         Box::new(CatpawQuota),
+        Box::new(CodeBuddyQuota),
         Box::new(ZcodeQuota),
         Box::new(DshQuota),
         Box::new(TraeQuota { cn: false }),

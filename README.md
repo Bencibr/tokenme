@@ -154,7 +154,7 @@ Or skip the timer and move `~/tokenme-sync` yourself — Syncthing, a shared mou
 
 The quota bars come from each tool's own API or local credentials — probes that read, and never log you in. Three probes are deliberate exceptions, because those tools keep a short-lived access token on disk and the bar goes dead without a renewal: MiniMax Code (~1 h), Kimi Code (the vendor's own 15-minute token) and Cline's gateway token. Each exchanges the refresh token sitting in that same file and writes the rotated pair straight back, in that tool's own format and atomically — a rotation that is not persisted is a rotation consumed, and the app's own next refresh would then find its login dead. A failed exchange changes nothing. Every other probe reads credentials and never writes them. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
 
-Every tool below ships as a built-in adapter — 23 of them, indexed straight from the logs and databases each one writes to disk:
+Every tool below ships as a built-in adapter — 24 of them, indexed straight from the logs and databases each one writes to disk:
 
 | Tool | Live quota | Fixtures | Verified on |
 | :--- | :--- | :--- | :--- |
@@ -169,6 +169,7 @@ Every tool below ships as a built-in adapter — 23 of them, indexed straight fr
 | <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | Membership points — needs a one-time token (see below) | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota — local daemon | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** | Member credits — the desktop app's billing API / local broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft credits — the plans-usage billing meter; usage from the IDE history | ✅ | Windows ✅ |
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points — cloud points API | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | Points balance — points portal API | ✅ | macOS ✅ · Windows ⏳ |
@@ -194,7 +195,7 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs
 
 ## What's new in 0.1.6
 
-- **New**: desktop pet skins (water drop / animated kitten — blinking, pointer-following pupils, edge poses, token badge on hover); daily check-in for Trae, Trae CN and Qoder, done only after the vendor confirms; a separate Trae CN adapter with per-credit-pack windows; settings split into General / Alerts / Advanced / About with per-tool quota switches and auto check-in.
+- **New**: desktop pet skins (water drop / animated kitten / cute hanfu girl / cute hanfu boy / modern cute girl — blinking, pointer-following pupils, edge poses, token badge on hover); the kitten's top pose was redesigned as a compact downward-looking peek; daily check-in for Trae, Trae CN and Qoder, done only after the vendor confirms; a separate Trae CN adapter with per-credit-pack windows; settings split into General / Alerts / Advanced / About with per-tool quota switches and auto check-in.
 - **Verified**: WorkBuddy and Cline on real Windows machines.
 - **Fixed**: Windows tray clicks, panel show/hide, borderless surface and bubble lifecycle — the invisible-panel and residual-surface regressions.
 

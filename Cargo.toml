@@ -12,6 +12,7 @@ members = [
     "crates/adapters/antigravity",
     "crates/adapters/agnes",
     "crates/adapters/atomcode",
+    "crates/adapters/codebuddy",
     "crates/adapters/workbuddy",
     "crates/adapters/hermes",
     "crates/adapters/funide",
@@ -47,6 +48,7 @@ usage-adapter-zcode = { path = "crates/adapters/zcode" }
 usage-adapter-qoder = { path = "crates/adapters/qoder" }
 usage-adapter-antigravity = { path = "crates/adapters/antigravity" }
 usage-adapter-agnes = { path = "crates/adapters/agnes" }
+usage-adapter-codebuddy = { path = "crates/adapters/codebuddy" }
 usage-adapter-atomcode = { path = "crates/adapters/atomcode" }
 usage-adapter-workbuddy = { path = "crates/adapters/workbuddy" }
 usage-adapter-hermes = { path = "crates/adapters/hermes" }
