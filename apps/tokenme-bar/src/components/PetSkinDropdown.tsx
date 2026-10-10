@@ -2,22 +2,29 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import type { BubbleSkin } from "../types";
 import { bridge, isWindows } from "../lib/bridge";
-import { t } from "../lib/i18n";
+import { getPetSkinConfig, PET_SKIN_NAMES } from "../lib/petSkinRegistry";
+import { t, type StrKey } from "../lib/i18n";
 import { IconChevron } from "./Icons";
 
-const SKINS: BubbleSkin[] = ["waterdrop", "kitten"];
-const label = (skin: BubbleSkin) => skin === "waterdrop" ? t("set.bubble.skin.waterdrop") : t("set.bubble.skin.kitten");
+const SKINS: BubbleSkin[] = ["waterdrop", ...PET_SKIN_NAMES];
+const visibleSkin = (skin: BubbleSkin): BubbleSkin => SKINS.includes(skin) ? skin : "waterdrop";
+const label = (skin: BubbleSkin) => {
+  if (skin === "waterdrop") return t("set.bubble.skin.waterdrop");
+  const config = getPetSkinConfig(skin);
+  return config ? t(config.labelKey as StrKey) : skin;
+};
 
 export function PetSkinDropdown({ value, onChange, disabled = false }: {
   value: BubbleSkin;
   onChange: (skin: BubbleSkin) => void;
   disabled?: boolean;
 }) {
+  const displayedValue = visibleSkin(value);
   const trigger = useRef<HTMLButtonElement | null>(null);
   const menu = useRef<HTMLDivElement | null>(null);
   const keyboardBorrowed = useRef(false);
   const [open, setOpen] = useState(false);
-  const [active, setActive] = useState<BubbleSkin>(value);
+  const [active, setActive] = useState<BubbleSkin>(displayedValue);
   const [position, setPosition] = useState({ left: 0, top: 0, width: 180, maxHeight: 120 });
 
   const keyboard = useCallback((on: boolean) => {
@@ -35,7 +42,7 @@ export function PetSkinDropdown({ value, onChange, disabled = false }: {
 
   const show = (first = value) => {
     if (disabled) return;
-    setActive(first);
+    setActive(visibleSkin(first));
     setOpen(true);
     keyboard(true);
     trigger.current?.focus({ preventScroll: true });
@@ -113,7 +120,7 @@ export function PetSkinDropdown({ value, onChange, disabled = false }: {
         id="bubble-skin"
         role="combobox"
         className="scope-btn pet-skin-btn"
-        data-value={value}
+        data-value={displayedValue}
         data-open={open || undefined}
         aria-label={t("set.bubble.skin")}
         aria-describedby="bubble-skin-hint"
@@ -134,7 +141,7 @@ export function PetSkinDropdown({ value, onChange, disabled = false }: {
           show();
         }}
       >
-        <span>{label(value)}</span>
+        <span>{label(displayedValue)}</span>
         <IconChevron size={9} className="scope-chev" />
       </button>
       {open ? createPortal(
@@ -156,13 +163,13 @@ export function PetSkinDropdown({ value, onChange, disabled = false }: {
               className="scope-item"
               data-value={skin}
               data-active={active === skin || undefined}
-              aria-selected={value === skin}
+              aria-selected={displayedValue === skin}
               tabIndex={-1}
               onPointerDown={(e) => e.preventDefault()}
               onPointerMove={() => setActive(skin)}
               onClick={() => pick(skin)}
             >
-              <span className="si-check" aria-hidden="true">{value === skin ? "✓" : ""}</span>
+              <span className="si-check" aria-hidden="true">{displayedValue === skin ? "✓" : ""}</span>
               <span className="si-name">{label(skin)}</span>
             </button>
           ))}

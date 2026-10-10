@@ -30,6 +30,7 @@ count on.
 Usage: check-i18n-parity.py [path-to-i18n.ts]
 """
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -116,6 +117,12 @@ def referenced():
         if path.name == "i18n.ts":
             continue
         hit.update(LITERAL.findall(path.read_text(encoding="utf-8")))
+    # The pet selector reads labelKey from its JSON packages. These labels are
+    # live UI copy even though their keys no longer occur in a TS switch.
+    manifest = SRC / "assets/pets/pet-skins.json"
+    if manifest.exists():
+        skins = json.loads(manifest.read_text(encoding="utf-8"))["skins"]
+        hit.update(skin["labelKey"] for skin in skins.values())
     return hit
 
 

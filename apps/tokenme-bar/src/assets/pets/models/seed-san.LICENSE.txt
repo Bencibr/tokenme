@@ -1,0 +1,10 @@
+Seed-san model
+
+Author: VirtualCast, Inc.
+Source: https://github.com/vrm-c/vrm-specification/tree/master/samples/Seed-san
+Model license: VRM Public License 1.0
+License text: https://vrm.dev/en/licenses/1.0/
+
+The model metadata permits redistribution and modification redistribution and
+requires credit notation. This file is bundled with TokenMe as the required
+attribution notice for the embedded model.

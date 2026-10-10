@@ -5,20 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit --incremental --tsBuildInfoFile node_modules/tokenme.tsbuildinfo && vite build",
+    "build": "node ../../scripts/check-pet-skins.mjs && tsc --noEmit --incremental --tsBuildInfoFile node_modules/tokenme.tsbuildinfo && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node ../../scripts/check-pet-skins.mjs && tsc --noEmit",
     "tauri": "tauri"
   },
   "dependencies": {
+    "@pixiv/three-vrm": "^3.5.5",
     "@tauri-apps/api": "^2.1.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "three": "^0.186.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
