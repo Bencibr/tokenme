@@ -212,8 +212,15 @@ export function BubbleApp() {
     const pet = document.querySelector<HTMLElement>(".pet-skin");
     // offsetWidth/offsetHeight intentionally ignore dock translations. They
     // describe the skin's own box, which is the source of truth for the
-    // window size and remains stable while the pet peeks from an edge.
-    const content = pet ? Math.max(pet.offsetWidth, pet.offsetHeight) : DEFAULT_CONTENT;
+    // window size and remains stable while the pet peeks from an edge. The
+    // quota badge hangs BELOW that box, so the window's height must cover it
+    // too — a summary line clipped by the window's bottom edge was exactly
+    // what the first hover showed.
+    const badge = document.querySelector<HTMLElement>(".pet-token-badge");
+    const badgeDrop = badge ? badge.offsetTop + badge.offsetHeight - (pet?.offsetHeight ?? 0) : 0;
+    const content = pet
+      ? Math.max(pet.offsetWidth, pet.offsetHeight + Math.max(0, badgeDrop))
+      : DEFAULT_CONTENT;
     const contentLogical = Math.max(1, Math.ceil(content));
     const next: BubbleGeometry = {
       contentLogical,
@@ -476,6 +483,12 @@ export function BubbleApp() {
         const centerY = pos.y + (eyes.length ? eyes.reduce((sum, eye) => sum + eye.top + eye.height / 2, 0) / eyes.length * scale : size.height / 2);
         const cursor = await cursorPosition().catch(() => null);
         if (!cursor) break;
+        // The mac pet has no DOM mouseenter to lean on (a non-activating
+        // window sees no mouse-moved events): this poll IS the hover — the
+        // cursor inside the window means greet mode, outside means idle.
+        const inside = cursor.x >= pos.x && cursor.x < pos.x + size.width
+          && cursor.y >= pos.y && cursor.y < pos.y + size.height;
+        setHovered(inside);
         const dx = cursor.x - centerX;
         const dy = cursor.y - centerY;
         const dist = Math.hypot(dx, dy);
@@ -523,10 +536,6 @@ export function BubbleApp() {
       } else {
         void bridge.showPanel();
         setExpanded(false);
-        // The cursor rests on the pet: held hovered it would wave forever.
-        // Back to idle now; the next genuine leave+enter re-arms the greet.
-        setHovered(false);
-        suppressExpand.current = true;
       }
       return;
     }
@@ -586,8 +595,8 @@ export function BubbleApp() {
       aria-label={t("bubble.aria", { t: ballTokens(tokens) })}
     >
       {petSkin && petSkinName && !petAssetFailed ? (
-        <PetSkin key={petSkinName} skin={petSkinName} dock={dock} hovered={hovered} dragging={petDragging}
-          tokens={tokens} gaze={gaze} onAssetError={onPetAssetError} />
+        <PetSkin key={petSkinName} skin={petSkinName} dock={dock} dragging={petDragging}
+          tokens={tokens} gaze={gaze} hovered={hovered} onAssetError={onPetAssetError} />
       ) : <>
       <span className="bubble-ripple" aria-hidden="true" />
       <span className="bubble-core">

@@ -414,6 +414,11 @@ fn panel_hidden() -> &'static std::sync::atomic::AtomicBool {
     CELL.get_or_init(|| std::sync::atomic::AtomicBool::new(true))
 }
 
+/// The recorded state, for callers deciding show-vs-hide (the pet's toggle).
+pub fn is_panel_hidden() -> bool {
+    panel_hidden().load(std::sync::atomic::Ordering::Acquire)
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
