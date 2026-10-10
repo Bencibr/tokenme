@@ -57,11 +57,17 @@ if ! git diff --quiet -- assets/tokenme-hero-dark.svg assets/tokenme-hero-light.
   git commit --quiet -m "docs(hero): the banner follows the tree — version from Cargo.toml, tool count from TOOL_IDS, pill layout re-flowed, PNGs re-rendered at 2x"
 fi
 
-echo "==> gate: full-scope scan, every branch and tag"
-python scripts/scan-public.py
+echo "==> gate: the delivery range, exactly what the push carries"
+PUB=$(git rev-parse --short public)
+LEASE_NOW=$(git ls-remote github refs/heads/main 2>/dev/null | cut -f1 || true)
+if [[ -n "$LEASE_NOW" ]]; then
+  python scripts/scan-public.py "${LEASE_NOW}..public"
+else
+  python scripts/scan-public.py public
+fi
 
-echo "==> stage: the github branch follows main, and rides to the forge"
-git branch -f github main
+echo "==> stage: the github branch follows the public branch, and rides to the forge"
+git branch -f github public
 git push origin github
 
 if [[ $DRY_RUN == 1 ]]; then
@@ -80,8 +86,8 @@ fi
 
 lease=$(git ls-remote github refs/heads/main 2>/dev/null | cut -f1 || true)
 if [[ -n "$lease" ]]; then
-  git push --force-with-lease="refs/heads/main:$lease" github main
+  git push --force-with-lease="refs/heads/main:$lease" github public:main
 else
-  git push --force github main
+  git push --force github public:main
 fi
 echo "==> delivered: github/main = $(git rev-parse --short main)"
