@@ -173,7 +173,23 @@ export function BubbleApp() {
 
   const dockMonitor = async () => {
     const saved = dockAnchor.current?.monitor;
-    if (!dockRef.current || !saved) return currentMonitor();
+    if (!dockRef.current || !saved) {
+      // macOS: currentMonitor() answers null for a window hanging past the
+      // screen edge — exactly where a pet docks. Resolve the display that
+      // holds the window's centre, then the first known one.
+      const current = await currentMonitor();
+      if (current) return current;
+      const [pos, size, monitors] = await Promise.all([
+        window.outerPosition(), window.outerSize(), availableMonitors(),
+      ]);
+      const cx = pos.x + size.width / 2;
+      const cy = pos.y + size.height / 2;
+      return (
+        monitors.find((m) => cx >= m.position.x && cx < m.position.x + m.size.width
+          && cy >= m.position.y && cy < m.position.y + m.size.height)
+        ?? monitors[0]
+      );
+    }
     // A mostly off-screen HWND can be assigned to a neighbouring display.
     // Resolve the recorded display again to pick up layout and DPI changes.
     const monitors = await availableMonitors();
@@ -320,7 +336,7 @@ export function BubbleApp() {
   };
 
   const dockToEdge = async (afterDrag = false) => {
-    if (dragging.current) return;
+    if (isMac || dragging.current) return;
     if (afterDrag) {
       dockRef.current = null;
       dockAnchor.current = null;
@@ -373,6 +389,7 @@ export function BubbleApp() {
   };
 
   const scheduleDock = () => {
+    if (isMac) return; // dragging into an edge trips the system's stage gesture
     clearLeaveTimer();
     leaveTimer.current = setTimeout(() => {
       if (!dragging.current) void dockToEdge(false).catch(reportGeometryError);
@@ -506,6 +523,10 @@ export function BubbleApp() {
       } else {
         void bridge.showPanel();
         setExpanded(false);
+        // The cursor rests on the pet: held hovered it would wave forever.
+        // Back to idle now; the next genuine leave+enter re-arms the greet.
+        setHovered(false);
+        suppressExpand.current = true;
       }
       return;
     }

@@ -486,10 +486,19 @@
    pulsing ripple read as jitter next to the menu bar, so the mac keeps the
    drop-in entrance, the blink and the cursor gaze, and drops the loops. */
 .bubble-app[data-platform="mac"] .bubble-face,
-.bubble-app[data-platform="mac"] .bubble-ripple,
-.bubble-app[data-platform="mac"] .pet-pose {
+.bubble-app[data-platform="mac"] .bubble-ripple {
   animation: none;
 }
 .bubble-app[data-platform="mac"][data-dock="none"] .bubble-ripple {
   opacity: 0;
+}
+/* The mac breathe is a fifth of the Windows bob: a whisper of life, not a
+   wobble — measured 2026-10-10, the full-strength loop read as ±1.7px of
+   constant jitter at 2x. */
+.bubble-app[data-platform="mac"] .pet-pose {
+  animation: pet-breathe-mac 5.6s ease-in-out infinite;
+}
+@keyframes pet-breathe-mac {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-0.5px) scale(1.008, 1.012); }
 }
