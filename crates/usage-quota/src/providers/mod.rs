@@ -52,6 +52,10 @@ pub fn trae_manual_checkin() -> Result<(bool, String), String> {
 pub fn qoder_manual_checkin() -> Result<(bool, String), String> {
     qoder::qoder_manual_checkin()
 }
+/// The MiniMax Code check-in button entry (see `minimaxcode::minimaxcode_manual_checkin`).
+pub fn minimaxcode_manual_checkin() -> Result<(bool, String), String> {
+    minimaxcode::minimaxcode_manual_checkin()
+}
 pub use workbuddy::WorkBuddyQuota;
 pub use workbuddy::login as workbuddy_login;
 pub use zcode::ZcodeQuota;

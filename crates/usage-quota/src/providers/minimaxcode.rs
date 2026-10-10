@@ -54,9 +54,12 @@
 //! source); the server does not require them for these reads, so this probe sends
 //! none and never impersonates the first-party client.
 //!
-//! The daily check-in *panel* (`/minimax-cloud/api/v1/signin/status`) is a 7-day
-//! award calendar, not an allowance — it answers `invalid timezone_id` without the
-//! client's locale params and has no cap to draw a bar against, so it is not probed.
+//! The daily check-in is the other half of that gateway: the panel at
+//! `/minimax-cloud/api/v1/signin/status` is the 7-day award calendar whose
+//! `status: 2` row names the claimable day, and `POST …/signin/claim` collects
+//! it — see the check-in section below. It answers `invalid timezone_id`
+//! without the client's locale params, which is why every request here carries
+//! the exact query the vendor's own client builds.
 //!
 //! ## What is read, and what is not
 //!
@@ -79,7 +82,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use usage_core::QuotaSample;
 
-use crate::http::{get_json, post_form_any_status};
+use crate::http::{get_json, post_form_any_status, post_json};
 use crate::QuotaProbe;
 
 const PATH: &str = "/v1/api/openplatform/coding_plan/remains";
@@ -148,6 +151,15 @@ fn live() -> Option<Vec<QuotaSample>> {
         fetched(&cred.access, &agent_bases(cred.region.as_deref()), CREDITS_PATH, credits_from)
     {
         out.extend(rows);
+    }
+    // The day's claim rides the same credential and the same pass: a claimable
+    // panel row is collected right here (that is what makes this probe the
+    // auto-check-in), and a closed day ships its marker row so the strip's
+    // badge can read it.
+    if let Some(outcome) = minimax_daily_checkin(&cred, false) {
+        if outcome.done_today {
+            out.push(checkin_marker_row(&outcome));
+        }
     }
     (!out.is_empty()).then_some(out)
 }
@@ -729,6 +741,457 @@ pub(crate) fn credits_from(body: &Value) -> Vec<QuotaSample> {
     }]
 }
 
+// ---- the daily check-in ----------------------------------------------------
+//
+// The vendor ships this flow open-source (`MiniMax-AI/minimax-code`, the repo
+// the interface story above was read from): `packages/tui/src/checkin/` defines
+// the whole protocol. `GET {gateway}/minimax-cloud/api/v1/signin/status` answers
+// the 7-day panel — `status: 2` marks the claimable day, `is_today` + `status: 3`
+// the claimed one, no local clock guessing — and `POST …/signin/claim` with a
+// literal `{}` body collects it, answering `claim_result` 1 (Claimed) or 2
+// (AlreadyClaimed) beside the day's points.
+//
+// The requests ride the vendor's public-gateway attribution: a fixed query
+// (`device_platform=web`, `biz_id=3`, `app_id=3001`, `version_code=22201`, the
+// timezone offset, the user id) and the `yy` / `x-signature` header pair, which
+// the vendor's own source calls wire-protocol constants — "not credentials or a
+// security boundary: request authorization is the `Authorization: Bearer` token"
+// (`packages/tui/src/runtime/public-gateway.ts`). Both headers are md5 constructs
+// over the path+query and the body; they are recomputed here rather than skipped,
+// because the server validates the pair.
+//
+// One input the quota reads never needed: the account's `realUserID`, which the
+// gateway demands in the query (`user_id`). The client resolves it from
+// `GET /v1/api/user/info` when its disk caches have none, and the same ladder
+// runs here: the runtime's auth-context snapshot, the sha256-fingerprint-pinned
+// CLI identity file, then the account endpoint — the resolved id cached beside
+// the claim day.
+
+const SIGNIN_STATUS_PATH: &str = "/minimax-cloud/api/v1/signin/status";
+const SIGNIN_CLAIM_PATH: &str = "/minimax-cloud/api/v1/signin/claim";
+const USER_INFO_PATH: &str = "/v1/api/user/info";
+/// The TUI build the wire constants were read from; it rides the gateway query as
+/// `desktop_version`, an attribution tag like the rest.
+const DESKTOP_VERSION: &str = "0.6.5";
+/// `SigninDayStatus` in `@mavis/shared/daily-signin`: the two states this probe
+/// acts on. The other two (upcoming, disabled) mean the day is simply not open.
+const DAY_CLAIMABLE: f64 = 2.0;
+const DAY_CLAIMED: f64 = 3.0;
+
+/// The claim day and the identity, persisted between passes: a confirmed day
+/// short-circuits the next probe's status call, and a resolved `realUserID`
+/// saves the account-endpoint round trip.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct CheckinState {
+    #[serde(default)]
+    last_ok_day: String,
+    #[serde(default)]
+    confirmed: bool,
+    #[serde(default)]
+    last_points: f64,
+    #[serde(default)]
+    real_user_id: String,
+}
+
+fn checkin_state_path() -> Option<PathBuf> {
+    // The one hook a test pins: the claim day must never be practised against
+    // the real state file, so a fixture run re-homes it whole.
+    if let Ok(file) = std::env::var("MINIMAX_CHECKIN_STATE") {
+        let file = file.trim();
+        if !file.is_empty() {
+            return Some(PathBuf::from(file));
+        }
+    }
+    dirs::config_dir().map(|d| d.join("tokenme").join("quota").join("minimax_checkin.json"))
+}
+
+fn load_checkin_state(path: &Path) -> CheckinState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_checkin_state(path: &Path, state: &CheckinState) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_string(state) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+fn checkin_day() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// How the day's claim attempt ended. `was_already` covers both the panel
+/// answering "claimed" and the vendor's `AlreadyClaimed` — from the user's side
+/// they are the same fact.
+#[derive(Debug)]
+struct CheckinOutcome {
+    done_today: bool,
+    was_already: bool,
+    unavailable: bool,
+    signed_in: bool,
+    points: f64,
+}
+
+fn minimax_daily_checkin(cred: &Credential, force: bool) -> Option<CheckinOutcome> {
+    let state_path = checkin_state_path()?;
+    let today = checkin_day();
+    let mut state = load_checkin_state(&state_path);
+    // Only this reader's own confirmation may skip the live panel: the cached
+    // day is a network saving, never the answer to a forced click.
+    if !force && state.confirmed && state.last_ok_day == today {
+        return Some(CheckinOutcome {
+            done_today: true,
+            was_already: true,
+            unavailable: false,
+            signed_in: true,
+            points: state.last_points,
+        });
+    }
+    let Some(real_user_id) =
+        real_user_id(cred, (!state.real_user_id.is_empty()).then_some(state.real_user_id.as_str()))
+    else {
+        return Some(CheckinOutcome {
+            done_today: false,
+            was_already: false,
+            unavailable: true,
+            signed_in: false,
+            points: 0.0,
+        });
+    };
+    if state.real_user_id != real_user_id {
+        state.real_user_id = real_user_id.clone();
+        // The id is a cache, not a verdict — it persists even when the day
+        // ends unavailable, so the next pass skips the account-endpoint call.
+        save_checkin_state(&state_path, &state);
+    }
+
+    // The panel speaks first, and what it says bounds everything else: a day
+    // already claimed is closed without a claim POST, and a panel with nothing
+    // claimable is the vendor's answer — never confirmed into the state, because
+    // a panel read mid-flip would then close a day nobody claimed (the same
+    // lesson Qoder's marker learned the hard way).
+    let Some((claimed_today, claimable)) = signin_status(&cred.access, &real_user_id, cred.region.as_deref()) else {
+        return Some(CheckinOutcome {
+            done_today: false,
+            was_already: false,
+            unavailable: true,
+            signed_in: true,
+            points: 0.0,
+        });
+    };
+    if claimed_today {
+        state.last_ok_day = today;
+        state.confirmed = true;
+        save_checkin_state(&state_path, &state);
+        return Some(CheckinOutcome {
+            done_today: true,
+            was_already: true,
+            unavailable: false,
+            signed_in: true,
+            points: 0.0,
+        });
+    }
+    if !claimable {
+        return Some(CheckinOutcome {
+            done_today: false,
+            was_already: false,
+            unavailable: true,
+            signed_in: true,
+            points: 0.0,
+        });
+    }
+
+    let (claimed, points) = signin_claim(&cred.access, &real_user_id, cred.region.as_deref());
+    if claimed {
+        state.last_ok_day = today;
+        state.confirmed = true;
+        state.last_points = points;
+        save_checkin_state(&state_path, &state);
+    }
+    Some(CheckinOutcome {
+        done_today: claimed,
+        was_already: false,
+        unavailable: !claimed,
+        signed_in: true,
+        points: if claimed { points } else { 0.0 },
+    })
+}
+
+/// The row that carries the 已签到 mark into the strip: it only exists for a
+/// closed day, and the id prefix is exactly what the frontend's badge reads.
+fn checkin_marker_row(outcome: &CheckinOutcome) -> QuotaSample {
+    let label = if outcome.was_already {
+        "今日已签到".to_string()
+    } else if outcome.points > 0.0 {
+        format!("已自动签到 · +{:.0}", outcome.points)
+    } else {
+        "今日已签到".to_string()
+    };
+    QuotaSample { used_percent: 0.0, window_minutes: 0, resets_at_ms: 0, label: Some(label), id: Some("checkin".to_string()) }
+}
+
+/// The account id the gateway demands, by the ladder the client resolves it:
+/// the caller's hint (yesterday's resolution), the runtime auth-context file,
+/// the fingerprint-pinned CLI identity file, then the account endpoint itself.
+fn real_user_id(cred: &Credential, hint: Option<&str>) -> Option<String> {
+    if let Some(id) = hint.map(str::trim).filter(|v| !v.is_empty()) {
+        return Some(id.to_string());
+    }
+    if let Some(root) = cred.path.as_deref().and_then(auth_home).and_then(|h| h.parent().map(Path::to_path_buf)) {
+        if let Some(id) = read_json(&root.join("local-runtime.auth.json"))
+            .and_then(|v| string(&v["auth"], "realUserID"))
+        {
+            return Some(id);
+        }
+        let identity_path = root
+            .join("cli-auth")
+            .join(cred.build_env.as_deref().unwrap_or("prod"))
+            .join(cred.region.as_deref().unwrap_or("en"))
+            .join("account-identity.json");
+        if let Some(identity) = read_json(&identity_path) {
+            // The file is pinned to one access token by a sha256 fingerprint; a
+            // rotated token invalidates it, and a mismatched file is treated as
+            // exactly what it is — someone else's identity, not ours to send.
+            if string(&identity, "tokenFingerprint").as_deref() == Some(&format!("sha256:{}", sha256_hex(cred.access.trim()))) {
+                if let Some(id) = string(&identity, "realUserID") {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    for base in agent_bases(cred.region.as_deref()) {
+        if let Some(id) = account_identity(&cred.access, &base) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// `GET /v1/api/user/info` — the call the vendor's `fetchAccountIdentity` makes
+/// when neither disk cache holds an id. Its query is the account client's own
+/// (`device_platform=mcode`, no desktop tags, `user_id=0` — the value is being
+/// *asked for* here), and the answer's `userInfo.realUserID` is the account id.
+fn account_identity(token: &str, base: &str) -> Option<String> {
+    let now = now_ms();
+    let path_with_search = format!("{USER_INFO_PATH}?{}", matrix_query(now));
+    let headers = attribution(token, &path_with_search, now, None);
+    let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let body = get_json(&format!("{base}{path_with_search}"), &headers)?;
+    let data = body.get("data").unwrap_or(&Value::Null);
+    for holder in [
+        data.get("userInfo").unwrap_or(&Value::Null),
+        data.get("user_info").unwrap_or(&Value::Null),
+        body.get("userInfo").unwrap_or(&Value::Null),
+        body.get("user_info").unwrap_or(&Value::Null),
+    ] {
+        if let Some(id) = string(holder, "realUserID").or_else(|| string(holder, "real_user_id")) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// The panel's verdict: `(claimed_today, claimable)`. `None` when no origin
+/// answered with a panel at all.
+fn signin_status(token: &str, real_user_id: &str, region: Option<&str>) -> Option<(bool, bool)> {
+    for base in agent_bases(region) {
+        let now = now_ms();
+        let path_with_search =
+            format!("{SIGNIN_STATUS_PATH}?{}", gateway_query(now, real_user_id, region));
+        let headers = attribution(token, &path_with_search, now, None);
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let Some(body) = get_json(&format!("{base}{path_with_search}"), &headers) else { continue };
+        if base_failed(&body) {
+            continue;
+        }
+        let days = body.get("data").and_then(|d| d.get("days")).and_then(Value::as_array)?;
+        let mut claimed_today = false;
+        let mut claimable = false;
+        for day in days {
+            let status = number(day, "status").unwrap_or(0.0);
+            if status == DAY_CLAIMABLE {
+                claimable = true;
+            }
+            if status == DAY_CLAIMED && day.get("is_today").and_then(Value::as_bool).unwrap_or(false) {
+                claimed_today = true;
+            }
+        }
+        return Some((claimed_today, claimable));
+    }
+    None
+}
+
+/// The claim POST. `(claimed, points)`: the vendor answers `claim_result` 2 for
+/// an already-claimed day — same fact as the panel saying so, and as idempotent
+/// as a re-read.
+fn signin_claim(token: &str, real_user_id: &str, region: Option<&str>) -> (bool, f64) {
+    for base in agent_bases(region) {
+        let now = now_ms();
+        let path_with_search =
+            format!("{SIGNIN_CLAIM_PATH}?{}", gateway_query(now, real_user_id, region));
+        let headers = attribution(token, &path_with_search, now, Some("{}"));
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let Some(body) = post_json(
+            &format!("{base}{path_with_search}"),
+            &headers,
+            serde_json::Value::Object(serde_json::Map::new()),
+        ) else {
+            continue;
+        };
+        if base_failed(&body) {
+            continue;
+        }
+        let data = body.get("data").unwrap_or(&Value::Null);
+        let result = number(data, "claim_result").unwrap_or(0.0);
+        let points = number(data, "points").unwrap_or(0.0).max(0.0);
+        return (result == 1.0 || result == 2.0, points);
+    }
+    (false, 0.0)
+}
+
+/// The `yy` / `x-signature` pair plus the bearer, exactly as
+/// `createPublicGatewayRequest` builds them: md5 over the encoded path+query and
+/// the body against the two wire-protocol literals, and `x-timestamp` in seconds.
+fn attribution<'a>(
+    token: &'a str,
+    path_with_search: &'a str,
+    now: i64,
+    body: Option<&'a str>,
+) -> Vec<(&'static str, String)> {
+    let second = now / 1000;
+    let yy_body = body.unwrap_or("{}");
+    let sig_body = body.unwrap_or("");
+    vec![
+        ("accept", "application/json".to_string()),
+        ("content-type", "application/json".to_string()),
+        ("user-agent", "MiniMaxCode".to_string()),
+        ("authorization", format!("Bearer {token}")),
+        (
+            "yy",
+            md5_hex(&format!(
+                "{}_{yy_body}{}ooui",
+                encode_component(path_with_search),
+                md5_hex(&now.to_string())
+            )),
+        ),
+        ("x-timestamp", second.to_string()),
+        ("x-signature", md5_hex(&format!("{second}I*7Cf%WZ#S&%1RlZJ&C2{sig_body}"))),
+    ]
+}
+
+/// The gateway query — `createPublicGatewayRequest`'s exact field set, in its
+/// order, because the signature is taken over this string and the server sees
+/// the same bytes.
+fn gateway_query(now: i64, real_user_id: &str, region: Option<&str>) -> String {
+    let language = if region == Some("cn") { "zh" } else { "en" };
+    let fields: [(&str, String); 15] = [
+        ("device_platform", "web".into()),
+        ("biz_id", "3".into()),
+        ("app_id", "3001".into()),
+        ("version_code", "22201".into()),
+        ("is_desktop", "1".into()),
+        ("desktop_version", DESKTOP_VERSION.into()),
+        ("unix", now.to_string()),
+        ("timezone_offset", offset_seconds().to_string()),
+        ("sys_language", language.into()),
+        ("lang", language.into()),
+        ("device_id", "0".into()),
+        ("os_name", os_name()),
+        ("browser_name", "mcode".into()),
+        ("user_id", real_user_id.into()),
+        ("client", "mcode".into()),
+    ];
+    fields.map(|(k, v)| format!("{k}={}", encode_component(&v))).join("&")
+}
+
+/// The account client's query (`buildUrl`): `device_platform=mcode`, no desktop
+/// tags, and `user_id=0` — the value this very call is there to resolve.
+fn matrix_query(now: i64) -> String {
+    let fields: [(&str, String); 13] = [
+        ("device_platform", "mcode".into()),
+        ("biz_id", "3".into()),
+        ("app_id", "3001".into()),
+        ("version_code", "22201".into()),
+        ("unix", now.to_string()),
+        ("timezone_offset", offset_seconds().to_string()),
+        ("sys_language", "en".into()),
+        ("lang", "en".into()),
+        ("device_id", "0".into()),
+        ("os_name", os_name()),
+        ("browser_name", "mcode".into()),
+        ("user_id", "0".into()),
+        ("client", "mcode".into()),
+    ];
+    fields.map(|(k, v)| format!("{k}={}", encode_component(&v))).join("&")
+}
+
+/// `new Date().getTimezoneOffset() * -60` — seconds east of UTC.
+fn offset_seconds() -> i32 {
+    use chrono::Offset as _;
+    chrono::Local::now().offset().fix().local_minus_utc()
+}
+
+/// `process.platform`'s three spellings — the value rides the query, and the
+/// vendor's server was built against Node's names.
+fn os_name() -> String {
+    match std::env::consts::OS {
+        "macos" => "darwin".to_string(),
+        "windows" => "win32".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// JS `encodeURIComponent`, which is what the signature hashes: the unreserved
+/// set survives verbatim, everything else becomes an uppercase `%XX`.
+fn encode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
+            | b'\'' | b'(' | b')' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn md5_hex(value: &str) -> String {
+    use md5::Digest as _;
+    md5::Md5::digest(value.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn sha256_hex(value: &str) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(value.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The panel's check-in button: one forced claim right now. The bool is what
+/// the button paints — only a closed day becomes the done badge.
+pub fn minimaxcode_manual_checkin() -> Result<(bool, String), String> {
+    let Some(mut cred) = credential() else {
+        return Err("未找到 MiniMax Code 登录".into());
+    };
+    if cred.expires_at_ms.saturating_sub(now_ms()) < REFRESH_MARGIN_MS {
+        if let Some(fresh) = refresh(&cred) {
+            cred.access = fresh;
+        }
+    }
+    match minimax_daily_checkin(&cred, true) {
+        Some(o) if o.done_today && !o.was_already && o.points > 0.0 => {
+            Ok((true, format!("签到成功，+{:.0} 积分", o.points)))
+        }
+        Some(o) if o.done_today => Ok((true, "今日已签到".to_string())),
+        Some(o) if !o.signed_in => Ok((false, "请先在 MiniMax Code 客户端登录".into())),
+        Some(o) if o.unavailable => Ok((false, "今日没有可领的签到".into())),
+        _ => Ok((false, "签到未成功，稍后再试".to_string())),
+    }
+}
+
 /// `base_resp.status_code` is the payload's own verdict: a non-zero code is an
 /// answer ("no active token plan subscription"), not a transport failure.
 fn base_failed(body: &Value) -> bool {
@@ -1258,6 +1721,404 @@ mod tests {
         std::env::remove_var("MCODE_OAUTH_TOKEN_ENDPOINT");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before_file, "nothing is written");
         assert_eq!(std::fs::read_to_string(&state).unwrap(), before_state);
+    }
+
+    // ---- the daily check-in ----
+
+    /// Golden signature values computed by hand against the vendor's
+    /// construction (Python's hashlib over the exact formulas in
+    /// `createPublicGatewayRequest`), not by calling this code — otherwise the
+    /// test would only prove the code agrees with itself.
+    #[test]
+    fn the_attribution_headers_reproduce_the_vendors_construction() {
+        assert_eq!(md5_hex("hello"), "5d41402abc4b2a76b9719d911017c592");
+        assert_eq!(
+            encode_component("a b+c/?ü="),
+            "a%20b%2Bc%2F%3F%C3%BC%3D",
+            "JS encodeURIComponent's exact escaping"
+        );
+        let now = 1_770_000_000_123;
+        let pws = "/minimax-cloud/api/v1/signin/status?a=b&c=d";
+        let header = |body: Option<&str>, name: &str| -> String {
+            attribution("tok-1", pws, now, body)
+                .into_iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v)
+                .unwrap()
+        };
+        assert_eq!(header(None, "authorization"), "Bearer tok-1");
+        assert_eq!(header(None, "user-agent"), "MiniMaxCode");
+        assert_eq!(header(None, "x-timestamp"), "1770000000");
+        // A GET signs the query with `{}` for yy and the empty string for the
+        // signature; the claim POST signs its literal `{}` body in both.
+        assert_eq!(header(None, "yy"), "145f63fd9e5e08781d4d4e691e34f318");
+        assert_eq!(header(None, "x-signature"), "bf3bb91d176f334bf80cf51684913519");
+        assert_eq!(header(Some("{}"), "yy"), "145f63fd9e5e08781d4d4e691e34f318");
+        assert_eq!(header(Some("{}"), "x-signature"), "89baeb9632da653525dfe624ac10d977");
+    }
+
+    /// A fixture gateway: answers each request from a queued list (the last
+    /// entry repeats) and records every raw request for the byte-level
+    /// assertions. Both the signin endpoints and the identity fallback ride the
+    /// pinned base, so one server stands for the whole vendor.
+    fn gateway_fixture(
+        responses: Vec<(u16, String)>,
+    ) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut queue: std::collections::VecDeque<(u16, String)> = responses.into_iter().collect();
+            for stream in listener.incoming().flatten() {
+                let mut sock = stream;
+                let mut raw: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw).to_string();
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let len: usize = text
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse().ok())
+                            })
+                            .unwrap_or(0);
+                        if raw.len() >= head_end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                recorder.lock().unwrap().push(String::from_utf8_lossy(&raw).to_string());
+                let (status, body) = queue.pop_front().unwrap_or_else(|| (200, "{}".to_string()));
+                let phrase = if status == 200 { "OK" } else { "Bad Request" };
+                let resp = format!(
+                    "HTTP/1.1 {status} {phrase}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+        (port, seen)
+    }
+
+    /// The 7-day panel: days 1-3 claimed, day 4 today with `today_status`,
+    /// days 5-7 upcoming — the shape `validateSigninPanel` enforces.
+    fn panel_json(today_status: f64) -> String {
+        let mut days = Vec::new();
+        for day_no in 1..=7 {
+            let status = if day_no == 4 {
+                today_status
+            } else if day_no < 4 {
+                3.0
+            } else {
+                1.0
+            };
+            days.push(format!(
+                "{{\"day_no\":{day_no},\"points\":20,\"status\":{status},\"is_today\":{}}}",
+                day_no == 4
+            ));
+        }
+        format!("{{\"scene\":2,\"days\":[{}]}}", days.join(","))
+    }
+
+    fn envelope(panel: &str) -> String {
+        format!("{{\"base_resp\":{{\"status_code\":0}},\"data\":{panel}}}")
+    }
+
+    fn claim_json(result: f64, points: f64) -> String {
+        format!(
+            "{{\"base_resp\":{{\"status_code\":0}},\"data\":{{\"claim_id\":\"c1\",\"claim_result\":{result},\
+             \"day_no\":4,\"points\":{points},\"expire_at_ms\":1799999999999,\"panel\":{}}}}}",
+            panel_json(3.0)
+        )
+    }
+
+    /// A fixture harness: a temp dir holding the signed-in credential and the
+    /// state file, a gateway fixture answering from a queued list, and the env
+    /// pins set. Lives for the whole test so neither file tree disappears under
+    /// a second pass. The env pins are removed on drop.
+    struct Harness {
+        _dir: tempfile::TempDir,
+        state_path: PathBuf,
+        port: u16,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            std::env::remove_var("MINIMAX_DATA_DIR");
+            std::env::remove_var("MINIMAX_CODE_QUOTA_BASE");
+            std::env::remove_var("MINIMAX_CHECKIN_STATE");
+        }
+    }
+
+    fn harness(responses: Vec<(u16, String)>) -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, _state) = signed_in(dir.path());
+        let (port, seen) = gateway_fixture(responses);
+        std::env::set_var("MINIMAX_DATA_DIR", dir.path());
+        std::env::set_var("MINIMAX_CODE_QUOTA_BASE", format!("http://127.0.0.1:{port}"));
+        let state_path = dir.path().join("checkin-state.json");
+        std::env::set_var("MINIMAX_CHECKIN_STATE", &state_path);
+        Harness { _dir: dir, state_path, port, seen }
+    }
+
+    fn run_checkin() -> CheckinOutcome {
+        minimax_daily_checkin(&credential().unwrap(), true).unwrap()
+    }
+
+    fn state_at(path: &Path) -> CheckinState {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    const IDENTITY_BODY: &str = r#"{"base_resp":{"status_code":0},"data":{"userInfo":{"realUserID":"user-7"}}}"#;
+
+    #[test]
+    fn a_claimable_day_is_claimed_and_the_next_pass_remembers_it() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("MAVIS_ACCESS_TOKEN");
+        let h = harness(vec![
+            (200, IDENTITY_BODY.to_string()),
+            (200, envelope(&panel_json(2.0))),
+            (200, claim_json(1.0, 20.0)),
+        ]);
+        let outcome = run_checkin();
+        assert!(outcome.done_today && !outcome.was_already);
+        assert_eq!(outcome.points, 20.0);
+        assert_eq!(h.seen.lock().unwrap().len(), 3, "identity, status, claim — and nothing more");
+
+        // The status GET carries the gateway's attribution query with the
+        // resolved account id, and a signature over exactly what was sent.
+        let requests = h.seen.lock().unwrap();
+        let status = &requests[1];
+        assert!(status.starts_with("GET /minimax-cloud/api/v1/signin/status?"), "{status}");
+        for field in [
+            "device_platform=web",
+            "app_id=3001",
+            "version_code=22201",
+            "is_desktop=1",
+            "desktop_version=0.6.5",
+            "user_id=user-7",
+            "browser_name=mcode",
+            "client=mcode",
+        ] {
+            assert!(status.contains(field), "the gateway query field {field} is missing: {status}");
+        }
+        // The claim POST's body is the literal `{}` the vendor sends.
+        let claim = &requests[2];
+        assert!(claim.starts_with("POST /minimax-cloud/api/v1/signin/claim?"), "{claim}");
+        assert!(claim.ends_with("\r\n\r\n{}"), "the claim body is literally {{}}: {claim:?}");
+        drop(requests);
+
+        // Both signatures re-derive from the recorded bytes: the md5 pair is a
+        // function of the path+query and the body it rode on (the primitives
+        // themselves are pinned against external goldens above).
+        let requests = h.seen.lock().unwrap();
+        for request in requests.iter() {
+            let (head, body) = request.split_once("\r\n\r\n").unwrap();
+            let pws = head.lines().next().unwrap().split(' ').nth(1).unwrap();
+            let unix = pws
+                .split('?')
+                .nth(1)
+                .unwrap()
+                .split('&')
+                .find(|p| p.starts_with("unix="))
+                .unwrap()
+                .trim_start_matches("unix=");
+            let yy = md5_hex(&format!("{}_{}{}ooui", encode_component(pws), "{}", md5_hex(unix)));
+            let sent = |name: &str| -> String {
+                head.lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with(&format!("{name}:")))
+                    .unwrap()
+                    .split_once(':')
+                    .unwrap()
+                    .1
+                    .trim()
+                    .to_string()
+            };
+            assert_eq!(sent("yy"), yy, "yy over {pws}");
+            let sig_body = if request.starts_with("POST") { "{}" } else { "" };
+            let second = (unix.parse::<i64>().unwrap() / 1000).to_string();
+            assert_eq!(
+                sent("x-signature"),
+                md5_hex(&format!("{second}I*7Cf%WZ#S&%1RlZJ&C2{sig_body}")),
+                "x-signature over {pws}"
+            );
+        }
+        drop(requests);
+
+        let marker = checkin_marker_row(&outcome);
+        assert_eq!(marker.id.as_deref(), Some("checkin"), "the id the strip's badge reads");
+        assert!(marker.label.as_deref().unwrap().contains("+20"));
+
+        // The state file remembers the day and the identity, and the next pass
+        // — the fixture still listening — asks the vendor nothing at all.
+        let state = state_at(&h.state_path);
+        assert_eq!(state.last_ok_day, checkin_day());
+        assert!(state.confirmed);
+        assert_eq!(state.real_user_id, "user-7");
+        let before = h.seen.lock().unwrap().len();
+        let again = minimax_daily_checkin(&credential().unwrap(), false).unwrap();
+        assert!(again.done_today && again.was_already, "the cached day closes without the vendor");
+        assert_eq!(h.seen.lock().unwrap().len(), before, "a confirmed day is a network saving");
+    }
+
+    #[test]
+    fn a_claimed_day_is_read_off_the_panel_without_a_claim() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("MAVIS_ACCESS_TOKEN");
+        let h = harness(vec![
+            (200, IDENTITY_BODY.to_string()),
+            (200, envelope(&panel_json(3.0))),
+        ]);
+        let outcome = run_checkin();
+        assert!(outcome.done_today && outcome.was_already);
+        assert_eq!(outcome.points, 0.0);
+        assert_eq!(h.seen.lock().unwrap().len(), 2, "no claim POST behind a claimed panel");
+        assert_eq!(checkin_marker_row(&outcome).label.as_deref(), Some("今日已签到"));
+        assert!(state_at(&h.state_path).confirmed, "the panel's own claim is confirmation enough");
+    }
+
+    #[test]
+    fn a_panel_with_nothing_open_is_unavailable_and_never_confirmed() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("MAVIS_ACCESS_TOKEN");
+        let h = harness(vec![
+            (200, IDENTITY_BODY.to_string()),
+            (200, envelope(&panel_json(1.0))),
+        ]);
+        let outcome = run_checkin();
+        assert!(!outcome.done_today && outcome.unavailable);
+        assert!(!state_at(&h.state_path).confirmed, "a shut panel is not a closed day");
+    }
+
+    #[test]
+    fn a_failing_or_empty_panel_is_unavailable_not_a_row() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("MAVIS_ACCESS_TOKEN");
+        for body in [
+            r#"{"base_resp":{"status_code":1001}}"#.to_string(),
+            r#"{"base_resp":{"status_code":0},"data":{"days":[]}}"#.to_string(),
+        ] {
+            // The identity resolves first, so the failing body is the *panel's*
+            // answer — the path under test here.
+            let h = harness(vec![(200, IDENTITY_BODY.to_string()), (200, body.clone())]);
+            let outcome = run_checkin();
+            assert!(outcome.unavailable && !outcome.done_today, "{body}");
+        }
+    }
+
+    #[test]
+    fn the_identity_ladder_reads_disk_before_the_account_endpoint() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("MAVIS_ACCESS_TOKEN");
+        // The runtime auth-context snapshot wins without any network call.
+        {
+            let h = harness(vec![(200, envelope(&panel_json(3.0)))]);
+            std::fs::write(
+                h._dir.path().join("local-runtime.auth.json"),
+                r#"{"version":1,"updatedAtMs":1,"auth":{"accessToken":"old-access","realUserID":"runtime-1"}}"#,
+            )
+            .unwrap();
+            let outcome = run_checkin();
+            assert!(outcome.done_today, "outcome={outcome:?}");
+            let requests = h.seen.lock().unwrap();
+            assert_eq!(requests.len(), 1, "no identity call behind a disk id: {requests:?}");
+            assert!(requests[0].contains("user_id=runtime-1"), "{requests:?}");
+        }
+
+        // The CLI identity file is honoured only while its sha256 fingerprint
+        // still matches the access token it was pinned to; a stale file falls
+        // to the account endpoint, which is asked with `user_id=0` — the value
+        // being resolved.
+        for (fingerprint, pinned_works) in [
+            (format!("sha256:{}", sha256_hex("old-access")), true),
+            ("sha256:0000".to_string(), false),
+        ] {
+            // The pinned iteration makes no identity call, so the queue holds
+            // the panel alone; the fallback iteration pays the user/info trip
+            // before the panel.
+            let responses = if pinned_works {
+                vec![(200, envelope(&panel_json(3.0)))]
+            } else {
+                vec![(200, IDENTITY_BODY.to_string()), (200, envelope(&panel_json(3.0)))]
+            };
+            let h = harness(responses);
+            let _ = std::fs::remove_file(h._dir.path().join("local-runtime.auth.json"));
+            std::fs::create_dir_all(h._dir.path().join("cli-auth").join("prod").join("en")).unwrap();
+            std::fs::write(
+                h._dir
+                    .path()
+                    .join("cli-auth")
+                    .join("prod")
+                    .join("en")
+                    .join("account-identity.json"),
+                format!(
+                    r#"{{"version":1,"region":"en","buildEnv":"prod","status":"verified","tokenFingerprint":"{fingerprint}","realUserID":"cli-1","updatedAtMs":1}}"#
+                ),
+            )
+            .unwrap();
+            let outcome = run_checkin();
+            assert!(outcome.done_today, "pinned_works={pinned_works} outcome={outcome:?}");
+            let requests = h.seen.lock().unwrap();
+            if pinned_works {
+                assert_eq!(requests.len(), 1, "no identity call behind a fingerprint match: {requests:?}");
+                assert!(requests[0].contains("user_id=cli-1"), "{requests:?}");
+            } else {
+                assert_eq!(requests.len(), 2, "a mismatched fingerprint falls to the endpoint: {requests:?}");
+                assert!(
+                    requests[0].starts_with("GET /v1/api/user/info?"),
+                    "{requests:?}"
+                );
+                assert!(requests[0].contains("user_id=0"), "{requests:?}");
+                assert!(requests[1].contains("user_id=user-7"), "{requests:?}");
+            }
+        }
+    }
+
+    /// A live canary for the whole check-in chain — status, and the claim when
+    /// the panel offers one — against the real vendor with the real on-disk
+    /// credential. Ignored by default, doubly gated on `MCODE_LIVE_CHECKIN=1`:
+    /// a claim is an account action, so it only ever runs by explicit ask.
+    ///
+    /// ```sh
+    /// MCODE_LIVE_CHECKIN=1 cargo test -p usage-quota --lib \
+    ///     live_checkin_against_the_real_vendor -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "claims the real account's daily check-in; needs MCODE_LIVE_CHECKIN=1"]
+    fn live_checkin_against_the_real_vendor() {
+        if std::env::var("MCODE_LIVE_CHECKIN").as_deref() != Ok("1") {
+            eprintln!("skipped: set MCODE_LIVE_CHECKIN=1 to claim the real day");
+            return;
+        }
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("MAVIS_ACCESS_TOKEN");
+        assert!(
+            std::env::var("MINIMAX_CODE_QUOTA_BASE").is_err(),
+            "a pinned base would claim against a fixture"
+        );
+        let mut cred = credential().expect("a signed-in MiniMax Code on this machine");
+        if cred.expires_at_ms.saturating_sub(now_ms()) < REFRESH_MARGIN_MS {
+            if let Some(fresh) = refresh(&cred) {
+                cred.access = fresh;
+            }
+        }
+        let outcome = minimax_daily_checkin(&cred, true).expect("the check-in chain answered");
+        eprintln!(
+            "live check-in: done={} was_already={} points={} signed_in={}",
+            outcome.done_today, outcome.was_already, outcome.points, outcome.signed_in
+        );
+        assert!(outcome.signed_in, "the account id must resolve for a signed-in install");
+        assert!(outcome.done_today, "a forced claim closes the day one way or the other");
     }
 
     // ---- live canary: never runs in the normal gates ----
