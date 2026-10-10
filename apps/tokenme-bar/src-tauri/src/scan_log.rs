@@ -16,28 +16,48 @@
 //! - `errors`: reads that failed outright (their files are re-read next pass)
 //! - `notes`: what the adapters said while reading — a decrypt that answered
 //!   "no data" names its stage here, so "the user had a quiet day" and "the
-//!   store could not be read" are told apart from the file alone
+//!   store could not be read" are told apart from the file alone — plus the
+//!   store-drift watch: a tool whose newest indexed event sits >48h back
+//!   earns a bounded look at its watched roots and known alternate store
+//!   locations, so "the writer moved" is answerable from this file alone
+//!   (build 161 chased two days of invisible dsh usage to exactly that)
 //! - `ver`/`build`/`os`/`arch`: which binary wrote the line
 //! - `dsh_sessions`: the per-session figures the index holds — a v4 session
 //!   must show exactly one event with monotonically growing totals
 //! - `dsh_audit`: those same sessions reconciled against DSH's own projection
 //!   ledger, field by field — `match: false` is a double/under-count, named
-//!   per session, with `dsh_regressions` flagging any total that shrank (a
-//!   cumulative ledger only ever grows)
+//!   per session, with `dsh_regressions` flagging any session whose summed
+//!   totals shrank between passes (a cumulative store only grows). v3-era
+//!   streams spell their session id `session-<uuid>` while the ledger keys
+//!   the bare uuid and excludes those events from its totals by design, so
+//!   v3 rows are labeled `v3-stream` and never counted as mismatches
 //!
 //! Rotation keeps one 2 MiB generation; the file is always safe to delete.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use serde_json::json;
 
 use crate::logging;
 
 static LAST_HEARTBEAT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+// Per-session SUMS of (in, out, cache_read, cache_creation) at the last pass
+// that emitted a line — the unit the regression watch compares across passes.
 static LAST_TOTALS: Mutex<BTreeMap<String, (f64, f64, f64, f64)>> = Mutex::new(BTreeMap::new());
+// One store-drift note per tool per day: a stale store stays stale for hours,
+// and hourly repetition is noise, not signal.
+static STALE_NOTED: Mutex<BTreeMap<String, std::time::Instant>> = Mutex::new(BTreeMap::new());
 const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+const STALE_EVERY: std::time::Duration = std::time::Duration::from_secs(86_400);
+const STALE_AFTER_MS: i64 = 48 * 3_600_000;
+// Bounded app-data walks: the question is "when was this tree last written",
+// never a full listing — Electron caches carry tens of thousands of entries.
+const WALK_DEPTH: u8 = 4;
+const WALK_BUDGET: u32 = 20_000;
+const MAX_SIBLINGS: usize = 8;
 const MAX_BYTES: u64 = 2 << 20;
 
 /// Append one audit line for a finished ingest pass. Per-tool and per-session
@@ -84,39 +104,57 @@ pub fn pass(
 
     let tools: BTreeMap<String, u64> = index.per_tool_counts().unwrap_or_default();
     // The dsh reconciliation: what the index holds per session, what DSH's own
-    // projection ledger says, and whether any total moved backwards (a
-    // cumulative ledger only grows — a shrink is a re-read or double-write).
+    // projection ledger says, and whether any session's totals moved backwards
+    // (a cumulative store only grows — a shrink is a re-read or double-write).
+    // Totals are summed per session first: the index holds one event per call
+    // in no particular order, so a row-to-row comparison measures the
+    // iteration order, not the store — every quiet pass reported fake
+    // regressions that way.
     let dsh_rows = index.tool_events("dsh").unwrap_or_default();
+    let sums = sum_rows(&dsh_rows);
     let mut last_totals = LAST_TOTALS.lock().unwrap();
     let mut dsh_regressions: Vec<String> = Vec::new();
+    for (session, totals) in &sums {
+        if let Some(prev) = last_totals.get(session) {
+            if totals_shrank(*prev, *totals) {
+                dsh_regressions.push(format!("{session} (totals shrank)"));
+            }
+        }
+    }
+    for (session, totals) in &sums {
+        last_totals.insert(session.clone(), *totals);
+    }
+    drop(last_totals);
     let mut dsh_sessions: Vec<_> = Vec::new();
     let mut ledger_by_id: BTreeMap<String, (f64, f64, f64, f64)> = BTreeMap::new();
     for row in usage_adapter_dsh::ledger() {
         ledger_by_id.insert(row.session.clone(), (row.input, row.output, row.cache_read, row.cache_write));
     }
     for row in &dsh_rows {
-        let totals = (row.input, row.output, row.cache_read, row.cache_creation);
-        if let Some(prev) = last_totals.get(&row.session) {
-            if totals.0 < prev.0 || totals.1 < prev.1 || totals.2 < prev.2 || totals.3 < prev.3 {
-                dsh_regressions.push(row.session.clone());
-            }
-        }
-        last_totals.insert(row.session.clone(), totals);
         let id = row.session.clone();
-        let audit = match ledger_by_id.get(&id) {
-            Some(l) => {
-                let (li, lo, lcr, lcc) = *l;
-                let matches = (totals.0 - li).abs() < 0.5
-                    && (totals.1 - lo).abs() < 0.5
-                    && (totals.2 - lcr).abs() < 0.5
-                    && (totals.3 - lcc).abs() < 0.5;
-                json!({ "ledger_in": li, "ledger_out": lo, "ledger_cr": lcr, "ledger_cc": lcc, "match": matches })
+        // v3-era streams spell the header id `session-<uuid>` while the ledger
+        // keys the bare uuid — and the projection deliberately excludes
+        // inherited v3 events from its totals, so there is nothing to
+        // reconcile against: labeling these `match: false` cried wolf on
+        // every pass.
+        let audit = if id.starts_with("session-") {
+            json!({ "ledger": "v3-stream", "note": "projection totals exclude inherited v3 events by design" })
+        } else {
+            match ledger_by_id.get(&id) {
+                Some(l) => {
+                    let (li, lo, lcr, lcc) = *l;
+                    let matches = (row.input - li).abs() < 0.5
+                        && (row.output - lo).abs() < 0.5
+                        && (row.cache_read - lcr).abs() < 0.5
+                        && (row.cache_creation - lcc).abs() < 0.5;
+                    json!({ "ledger_in": li, "ledger_out": lo, "ledger_cr": lcr, "ledger_cc": lcc, "match": matches })
+                }
+                None => json!({ "ledger": "absent", "match": false }),
             }
-            None => json!({ "ledger": "absent", "match": false }),
         };
         dsh_sessions.push(json!({
             "id": id,
-            "in": totals.0, "cc": totals.3, "cr": totals.2, "out": totals.1,
+            "in": row.input, "cc": row.cache_creation, "cr": row.cache_read, "out": row.output,
             "events": 1, "model": row.model, "ts": row.ts_ms,
             "audit": audit,
         }));
@@ -180,6 +218,25 @@ pub fn pass(
         codex_audit = json!({ "sessions": checked, "mismatches": mismatches, "detail": sessions });
     }
 
+    // Store-drift watch, hourly with the heartbeat and rate-limited per tool:
+    // a tool whose newest event sits >48h back earns one note naming what its
+    // watched roots and known alternate stores look like. Store moves used to
+    // be invisible — the adapter read a frozen tree and called it a quiet
+    // week (dsh, build 161: two days of usage, zero events, zero errors).
+    let mut notes = report.notes.clone();
+    if heartbeat_due {
+        for source in detected {
+            let Some(note) = store_drift_note(&source.id, &source.roots, index) else { continue };
+            let mut noted = STALE_NOTED.lock().unwrap();
+            if noted.get(&source.id).map_or(true, |t| t.elapsed() >= STALE_EVERY) {
+                noted.insert(source.id.clone(), std::time::Instant::now());
+                drop(noted);
+                logging::info(&note);
+                notes.push(note);
+            }
+        }
+    }
+
     let line = json!({
         "ts": Local::now().to_rfc3339(),
         "proc": "panel",
@@ -206,13 +263,152 @@ pub fn pass(
         "deduped_by_tool": report.per_tool_deduped,
         "scanned_by_tool": report.scanned_by_tool,
         "errors": report.errors,
-        "notes": report.notes,
+        "notes": notes,
         "dsh_regressions": dsh_regressions,
         "dsh_sessions": dsh_sessions,
         "codex_audit": codex_audit,
     });
 
     append_line(&serde_json::to_string(&line).unwrap_or_default());
+}
+
+/// Per-session token sums — the unit the regression watch compares across
+/// passes: a session's event count grows per call, its sums only shrink when
+/// the store really lost something.
+fn sum_rows(rows: &[usage_index::ToolEventRow]) -> BTreeMap<String, (f64, f64, f64, f64)> {
+    let mut out: BTreeMap<String, (f64, f64, f64, f64)> = BTreeMap::new();
+    for row in rows {
+        let e = out.entry(row.session.clone()).or_insert((0.0, 0.0, 0.0, 0.0));
+        e.0 += row.input;
+        e.1 += row.output;
+        e.2 += row.cache_read;
+        e.3 += row.cache_creation;
+    }
+    out
+}
+
+/// Float-safe: re-summing the same rows in a different order drifts in the
+/// last bits, and half a token is not a regression.
+fn totals_shrank(prev: (f64, f64, f64, f64), cur: (f64, f64, f64, f64)) -> bool {
+    cur.0 < prev.0 - 0.5 || cur.1 < prev.1 - 0.5 || cur.2 < prev.2 - 0.5 || cur.3 < prev.3 - 0.5
+}
+
+fn newest_file(dir: &Path, depth: u8, budget: &mut u32) -> Option<(std::time::SystemTime, PathBuf)> {
+    if depth == 0 {
+        return None;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return None };
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        let Ok(ft) = entry.file_type() else { continue };
+        let path = entry.path();
+        let (t, p) = if ft.is_dir() {
+            match newest_file(&path, depth - 1, budget) {
+                Some(found) => found,
+                None => continue,
+            }
+        } else if ft.is_file() {
+            let Ok(t) = entry.metadata().and_then(|m| m.modified()) else { continue };
+            (t, path)
+        } else {
+            continue;
+        };
+        if best.as_ref().map_or(true, |(bt, _)| t > *bt) {
+            best = Some((t, p));
+        }
+    }
+    best
+}
+
+fn fmt_local(t: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t).with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()
+}
+
+fn fmt_ts(ms: i64) -> String {
+    Local.timestamp_millis_opt(ms).single().map_or_else(|| ms.to_string(), |d| d.format("%m-%d %H:%M").to_string())
+}
+
+/// App-data dirs named after the vendor, each with its newest file mtime —
+/// the in-log answer to a writer that moved its tree under a path no read
+/// root guesses. This replaced a PowerShell errand the user could not be
+/// handed: the log carries the dir listing instead.
+fn sibling_stores() -> Vec<String> {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    for base in [dirs::config_dir(), dirs::data_local_dir()].into_iter().flatten() {
+        if !bases.contains(&base) {
+            bases.push(base);
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for base in bases {
+        let Ok(entries) = std::fs::read_dir(&base) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if !(name.contains("dsh") || name.contains("deepseek")) || !entry.path().is_dir() {
+                continue;
+            }
+            let mut budget = WALK_BUDGET;
+            out.push(match newest_file(&entry.path(), WALK_DEPTH, &mut budget) {
+                Some((t, _)) => format!("{} (newest file {})", entry.path().display(), fmt_local(t)),
+                None => format!("{} (unreadable)", entry.path().display()),
+            });
+            if out.len() >= MAX_SIBLINGS {
+                out.push("…".into());
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// One store-drift fact per tool, or None while the tool looks alive: the
+/// indexed newest event against every watched root's newest file, plus — for
+/// dsh — the known alternate store locations and any sibling app-data dir.
+fn store_drift_note(tool: &str, roots: &[PathBuf], index: &usage_index::Index) -> Option<String> {
+    let newest = index.newest_ts_ms(tool).ok().flatten()?;
+    let age_ms = Local::now().timestamp_millis() - newest;
+    if age_ms < STALE_AFTER_MS {
+        return None;
+    }
+    let mut parts = vec![format!(
+        "{tool}: indexed newest {:.1}d ago ({})",
+        age_ms as f64 / 86_400_000.0,
+        fmt_ts(newest)
+    )];
+    for root in roots {
+        let mut budget = WALK_BUDGET;
+        parts.push(match newest_file(root, WALK_DEPTH, &mut budget) {
+            Some((t, _)) => format!("root {} newest file {}", root.display(), fmt_local(t)),
+            None => format!("root {} unreadable or empty", root.display()),
+        });
+    }
+    if tool == "dsh" {
+        for (label, path) in usage_adapter_dsh::diagnostic_candidates() {
+            if roots.iter().any(|r| r == &path) {
+                continue;
+            }
+            if !path.is_dir() {
+                parts.push(format!("{label} candidate {}: absent", path.display()));
+                continue;
+            }
+            let mut budget = WALK_BUDGET;
+            parts.push(match newest_file(&path, WALK_DEPTH, &mut budget) {
+                Some((t, p)) => format!("{label} candidate newest file {} ({})", fmt_local(t), p.display()),
+                None => format!("{label} candidate {}: exists, unreadable", path.display()),
+            });
+        }
+        let siblings = sibling_stores();
+        if siblings.is_empty() {
+            parts.push("app-data dirs named dsh/deepseek: none".into());
+        } else {
+            parts.push(format!("app-data dirs named dsh/deepseek: {}", siblings.join(" · ")));
+        }
+    }
+    Some(parts.join("; "))
 }
 
 fn path() -> Option<std::path::PathBuf> {
@@ -256,5 +452,44 @@ mod tests {
             last.map(|t| t.elapsed() >= HEARTBEAT_EVERY).unwrap_or(false)
         };
         assert!(!due_second);
+    }
+
+    #[test]
+    fn sums_aggregate_per_session_and_shrink_needs_half_a_token() {
+        let row = |session: &str, cache_read: f64| usage_index::ToolEventRow {
+            session: session.into(),
+            model: None,
+            ts_ms: 0,
+            input: 0.0,
+            cache_creation: 0.0,
+            cache_read,
+            output: 0.0,
+        };
+        // One session, two calls, rows in whatever order the index returns
+        // them — one summed entry either way.
+        let sums = sum_rows(&[row("a", 384.0), row("a", 20096.0), row("b", 7.0)]);
+        assert_eq!(sums.get("a").map(|t| t.2), Some(20480.0));
+        assert_eq!(sums.get("b").map(|t| t.2), Some(7.0));
+        // Reordered re-summing drifts in the last bits: not a regression.
+        let drifted = (0.0, 0.0, 20480.0 + 1e-9, 0.0);
+        assert!(!totals_shrank(drifted, sums["a"]));
+        // Losing a call is.
+        assert!(totals_shrank(sums["a"], (0.0, 0.0, 384.0, 0.0)));
+    }
+
+    #[test]
+    fn newest_file_walks_depth_and_budget_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        // Five dirs down: four levels of look see nothing, nine see it.
+        let deep = dir.path().join("a").join("b").join("c").join("d").join("e");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("beyond.jsonl"), b"x").unwrap();
+        let mut budget = WALK_BUDGET;
+        assert!(newest_file(dir.path(), 4, &mut budget).is_none());
+        assert!(newest_file(dir.path(), 9, &mut budget).is_some());
+        // A spent budget stops the walk before anything is answered.
+        std::fs::write(dir.path().join("1.txt"), b"x").unwrap();
+        let mut tight = 0;
+        assert!(newest_file(dir.path(), 4, &mut tight).is_none());
     }
 }
