@@ -69,6 +69,7 @@ tauri-build = { version = "2", features = [] }
 # server-pull E2E (src/servers/e2e.rs); production builds are unaffected.
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+tempfile = "3"
 
 [profile.dev]
 # The root workspace has said this since someone measured it, and it never reached

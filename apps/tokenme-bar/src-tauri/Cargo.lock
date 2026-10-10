@@ -5501,6 +5501,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-positioner",
  "tauri-plugin-single-instance",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "ureq 3.4.2",
