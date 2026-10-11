@@ -25,7 +25,7 @@ import { ToolsSection } from "./components/ToolsSection";
 import { BubbleApp } from "./components/BubbleApp";
 import { PetNoticeApp } from "./components/PetNoticeApp";
 import { PetPreview } from "./components/PetPreview";
-import { TtftTable } from "./components/TtftTable";
+import { SpeedPage } from "./components/SpeedPage";
 
 /** 托盘显示模式循环顺序:仅托盘 → 仅Token → 仅花费 → 三个托盘组合。 */
 const MODES: TrayMode[] = ["tray_only", "tokens_only", "cost_only", "tray_tokens", "tray_cost", "tray_tokens_cost"];
@@ -51,7 +51,7 @@ const [period, setPeriod] = useState<PeriodKey>(() => {
   // Dev/QA affordance: ?page=ranks deep-links a page; anything unknown is overview.
 const [page, setPage] = useState<PageKey>(() => {
   const p = new URLSearchParams(location.search).get("page");
-  return p === "tools" || p === "ranks" || p === "detail" ? p : "overview";
+  return p === "tools" || p === "ranks" || p === "detail" || p === "speed" ? p : "overview";
 });
   const scroll = useRef<HTMLElement | null>(null);
   const [tray, setTray] = useState<TrayState | null>(null);
@@ -500,9 +500,9 @@ const [page, setPage] = useState<PageKey>(() => {
                 <>
                   <Sessions rows={report.recent_sessions} now={now} />
                   <Sources sources={report.sources} allTime={report.all_time} />
-                  <TtftTable snapshot={ttftSnapshot} now={now} />
                 </>
               ) : null}
+              {page === "speed" ? <SpeedPage snapshot={ttftSnapshot} now={now} /> : null}
             </div>
           )}
         </main>

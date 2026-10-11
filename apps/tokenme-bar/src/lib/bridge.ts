@@ -270,7 +270,16 @@ export const bridge: Bridge = {
   },
 
   async ttftSnapshot(): Promise<TtftSnapshot> {
-    if (!inTauri) return { revision: 0, enabled: browserSettings.ttft_enabled, claude_receiver: "disabled", claude_config_status: "disabled", samples: [] };
+    if (!inTauri) {
+      // QA samples so the 访问速度 page reviews with rows on it.
+      const now = Date.now();
+      const samples = [
+        { provider: "codex" as const, granularity: "turn" as const, metric: "ttft" as const, ttft_ms: 1240, sampled_at_ms: now - 90_000, model: "gpt-5.2-codex" },
+        { provider: "codex" as const, granularity: "turn" as const, metric: "ttft" as const, ttft_ms: 1120, sampled_at_ms: now - 300_000, model: "gpt-5.2-codex" },
+        { provider: "claude_code" as const, granularity: "request" as const, metric: "first_content" as const, ttft_ms: 980, sampled_at_ms: now - 60_000, model: "glm-5.2" },
+      ];
+      return { revision: 0, enabled: browserSettings.ttft_enabled, claude_receiver: "disabled", claude_config_status: "disabled", samples };
+    }
     return invoke<TtftSnapshot>("get_ttft_snapshot");
   },
 

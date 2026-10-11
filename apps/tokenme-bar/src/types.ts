@@ -325,8 +325,8 @@ export interface Report {
 
 export type PeriodKey = "day" | "week" | "month" | "year";
 
-/** The panel is four pages rather than one long scroll; see `App.tsx`. */
-export type PageKey = "overview" | "tools" | "ranks" | "detail";
+/** The panel is five pages rather than one long scroll; see `App.tsx`. */
+export type PageKey = "overview" | "tools" | "ranks" | "detail" | "speed";
 
 /** Tray label modes, mirrored from `tokenme::TrayMode` (snake_case). */
 export type TrayMode =

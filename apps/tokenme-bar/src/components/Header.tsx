@@ -26,6 +26,7 @@ const PAGES: { key: PageKey; label: () => string; hint: () => string }[] = [
   { key: "tools", label: () => t("page.tools"), hint: () => t("page.tools.hint") },
   { key: "ranks", label: () => t("page.ranks"), hint: () => t("page.ranks.hint") },
   { key: "detail", label: () => t("page.detail"), hint: () => t("page.detail.hint") },
+  { key: "speed", label: () => t("page.speed"), hint: () => t("page.speed.hint") },
 ];
 
 interface Props {
