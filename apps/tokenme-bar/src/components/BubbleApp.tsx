@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { availableMonitors, currentMonitor, cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
+import { isMac } from "../lib/bridge";
 import type { Monitor } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
@@ -177,7 +178,23 @@ export function BubbleApp() {
 
   const dockMonitor = async () => {
     const saved = dockAnchor.current?.monitor;
-    if (!dockRef.current || !saved) return currentMonitor();
+    if (!dockRef.current || !saved) {
+      // macOS: currentMonitor() answers null for a window hanging past the
+      // screen edge — exactly where a pet docks. Resolve the display that
+      // holds the window's centre, then the first known one.
+      const current = await currentMonitor();
+      if (current) return current;
+      const [pos, size, monitors] = await Promise.all([
+        window.outerPosition(), window.outerSize(), availableMonitors(),
+      ]);
+      const cx = pos.x + size.width / 2;
+      const cy = pos.y + size.height / 2;
+      return (
+        monitors.find((m) => cx >= m.position.x && cx < m.position.x + m.size.width
+          && cy >= m.position.y && cy < m.position.y + m.size.height)
+        ?? monitors[0]
+      );
+    }
     // A mostly off-screen HWND can be assigned to a neighbouring display.
     // Resolve the recorded display again to pick up layout and DPI changes.
     const monitors = await availableMonitors();
@@ -200,8 +217,15 @@ export function BubbleApp() {
     const pet = document.querySelector<HTMLElement>(".pet-skin");
     // offsetWidth/offsetHeight intentionally ignore dock translations. They
     // describe the skin's own box, which is the source of truth for the
-    // window size and remains stable while the pet peeks from an edge.
-    const content = pet ? Math.max(pet.offsetWidth, pet.offsetHeight) : DEFAULT_CONTENT;
+    // window size and remains stable while the pet peeks from an edge. The
+    // quota badge hangs BELOW that box, so the window's height must cover it
+    // too — a summary line clipped by the window's bottom edge was exactly
+    // what the first hover showed.
+    const badge = document.querySelector<HTMLElement>(".pet-token-badge");
+    const badgeDrop = badge ? badge.offsetTop + badge.offsetHeight - (pet?.offsetHeight ?? 0) : 0;
+    const content = pet
+      ? Math.max(pet.offsetWidth, pet.offsetHeight + Math.max(0, badgeDrop))
+      : DEFAULT_CONTENT;
     const contentLogical = Math.max(1, Math.ceil(content));
     const next: BubbleGeometry = {
       contentLogical,
@@ -325,7 +349,7 @@ export function BubbleApp() {
   };
 
   const dockToEdge = async (afterDrag = false) => {
-    if (dragging.current) return;
+    if (isMac || dragging.current) return;
     if (afterDrag) {
       dockRef.current = null;
       dockAnchor.current = null;
@@ -378,6 +402,7 @@ export function BubbleApp() {
   };
 
   const scheduleDock = () => {
+    if (isMac) return; // dragging into an edge trips the system's stage gesture
     clearLeaveTimer();
     if (companion.noticeVisible.current) return;
     leaveTimer.current = setTimeout(() => {
@@ -473,6 +498,12 @@ export function BubbleApp() {
         const centerY = pos.y + (eyes.length ? eyes.reduce((sum, eye) => sum + eye.top + eye.height / 2, 0) / eyes.length * scale : size.height / 2);
         const cursor = await cursorPosition().catch(() => null);
         if (!cursor) break;
+        // The mac pet has no DOM mouseenter to lean on (a non-activating
+        // window sees no mouse-moved events): this poll IS the hover — the
+        // cursor inside the window means greet mode, outside means idle.
+        const inside = cursor.x >= pos.x && cursor.x < pos.x + size.width
+          && cursor.y >= pos.y && cursor.y < pos.y + size.height;
+        setHovered(inside);
         const dx = cursor.x - centerX;
         const dy = cursor.y - centerY;
         const dist = Math.hypot(dx, dy);
@@ -498,6 +529,31 @@ export function BubbleApp() {
     dragging.current = true;
     setPetDragging(true);
     await expand();
+    if (isMac) {
+      // macOS owns the drag natively: performWindowDrag takes the pointer at
+      // the event and returns on release, so the webview never sees the move —
+      // the drop reads it off the window's own position instead.
+      const window = getCurrentWindow();
+      const before = await window.outerPosition().catch(() => null);
+      try {
+        await window.startDragging();
+      } catch {
+        dragging.current = false;
+        setPetDragging(false);
+        return;
+      }
+      dragging.current = false;
+      setPetDragging(false);
+      const after = await window.outerPosition().catch(() => null);
+      const wasMoved = !!before && !!after && (before.x !== after.x || before.y !== after.y);
+      if (wasMoved) {
+        setTimeout(() => void dockToEdge(true).catch(reportGeometryError), 80);
+      } else {
+        void bridge.showPanel();
+        setExpanded(false);
+      }
+      return;
+    }
     try {
       // Rust owns the move: the native startDragging loop refuses to drag a
       // non-activating window. Resolves at once; bubble-drag-ended reports the
@@ -540,6 +596,7 @@ export function BubbleApp() {
   return (
     <div
       className="bubble-app"
+      data-platform={isMac ? "mac" : "windows"}
       data-dock={dock ?? "none"}
       data-expanded={expanded}
       data-skin={skin}

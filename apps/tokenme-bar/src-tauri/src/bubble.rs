@@ -13,7 +13,12 @@ pub const LABEL: &str = "bubble";
 #[cfg(target_os = "windows")]
 pub const BOOTSTRAP_WINDOW_LOGICAL: f64 = 144.0;
 
-#[cfg(target_os = "windows")]
+/// macOS: the pet hangs top-right under the menu bar, next to the TokenMe
+/// tray icon — the same corner the panel anchors to.
+#[cfg(target_os = "macos")]
+pub const BOOTSTRAP_WINDOW_LOGICAL: f64 = 144.0;
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 #[cfg(target_os = "windows")]
@@ -48,7 +53,42 @@ pub fn configure(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub fn configure(app: &AppHandle) -> tauri::Result<()> {
+    let window = match app.get_webview_window(LABEL) {
+        Some(window) => window,
+        None => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
+            .title("")
+            .inner_size(BOOTSTRAP_WINDOW_LOGICAL, BOOTSTRAP_WINDOW_LOGICAL)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .visible(false)
+            .focused(false)
+            .build()?,
+    };
+
+    // A hoverable utility surface must not become the foreground application.
+    // tauri maps this to a non-activating panel on macOS — the main panel's
+    // own semantics, already proven on this machine.
+    let _ = window.set_focusable(false);
+    position_initial(&window);
+
+    if app.state::<crate::engine::Shared>().settings().bubble_enabled {
+        let _ = window.show();
+    }
+    Ok(())
+}
+
+/// The Windows-only pieces of the Windows configure (the WebView2 visibility
+/// re-assert and the non-client subclass) have no macOS counterpart: WKWebView
+/// composites a transparent window without help.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn configure(_app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
@@ -67,7 +107,19 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) {
     });
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub fn set_enabled(app: &AppHandle, enabled: bool) {
+    let Some(window) = app.get_webview_window(LABEL) else { return };
+    let _ = app.run_on_main_thread(move || {
+        if enabled {
+            let _ = window.show();
+        } else {
+            let _ = window.hide();
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn set_enabled(_app: &tauri::AppHandle, _enabled: bool) {}
 
 /// Moves the bubble under the cursor until the left button is released.
@@ -142,7 +194,7 @@ pub fn begin_drag(app: &AppHandle) {
 pub fn begin_drag(_app: &tauri::AppHandle) {}
 
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn position_initial(window: &WebviewWindow) {
     let Ok(Some(monitor)) = window.current_monitor() else { return };
     let position = monitor.position();

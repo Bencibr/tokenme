@@ -551,11 +551,13 @@ body[data-surface="pet-notice"], body[data-surface="pet-notice"] #root {
   top: calc(var(--pet-layout-size) + 4px);
   left: 50%;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: baseline;
   gap: 4px;
   padding: 3px 7px;
   width: max-content;
-  max-width: 128px;
+  max-width: 176px;
   border: 1px solid rgba(255, 255, 255, .2);
   border-radius: 8px;
   background: rgba(22, 30, 27, .94);
@@ -568,6 +570,12 @@ body[data-surface="pet-notice"], body[data-surface="pet-notice"] #root {
 }
 
 .pet-token-badge strong { font-size: 12px; line-height: 16px; }
+.pet-badge-summary {
+  flex-basis: 100%;
+  text-align: center;
+  letter-spacing: .01em;
+  white-space: pre-line;
+}
 .pet-token-badge small { font-size: 8px; line-height: 12px; opacity: .8; }
 .pet-skin[data-motion="happy"][data-dock="none"] .pet-token-badge {
   opacity: 1;
@@ -595,4 +603,26 @@ body[data-surface="pet-notice"], body[data-surface="pet-notice"] #root {
 @media (prefers-reduced-motion: reduce) {
   .pet-pose, .pet-sprite, .pet-eyes, .pet-eyelid { animation: none !important; }
   .pet-token-badge, .pet-pupil { transition: none; }
+}
+
+/* ---------------------------------------------------------------- macOS
+   The pet sits steady on this platform: the perpetual peek bob and the
+   pulsing ripple read as jitter next to the menu bar, so the mac keeps the
+   drop-in entrance, the blink and the cursor gaze, and drops the loops. */
+.bubble-app[data-platform="mac"] .bubble-face,
+.bubble-app[data-platform="mac"] .bubble-ripple {
+  animation: none;
+}
+.bubble-app[data-platform="mac"][data-dock="none"] .bubble-ripple {
+  opacity: 0;
+}
+/* The mac breathe is a fifth of the Windows bob: a whisper of life, not a
+   wobble — measured 2026-10-10, the full-strength loop read as ±1.7px of
+   constant jitter at 2x. */
+.bubble-app[data-platform="mac"] .pet-pose {
+  animation: pet-breathe-mac 5.6s ease-in-out infinite;
+}
+@keyframes pet-breathe-mac {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-0.5px) scale(1.008, 1.012); }
 }

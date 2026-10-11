@@ -494,10 +494,22 @@ pub async fn set_pet_preferences(app:AppHandle, prefs:crate::settings::PetPrefer
     app.emit("pet-preferences-changed", prefs).map_err(|e| e.to_string())
 }
 
-/// Called by the Windows bubble when it is clicked.
+/// The pet's click: a toggle, not a one-way show — the second click takes
+/// the panel back down (user: 点击弹出菜单，再次点击隐藏菜单).
 #[tauri::command]
 pub fn show_panel(app: AppHandle) {
-    panel::show(&app, None);
+    if crate::panel::is_panel_hidden() {
+        panel::show(&app, None);
+    } else {
+        panel::hide(&app);
+    }
+}
+
+/// The panel's own visibility, as the hide/show paths record it.
+fn panel_hidden(app: &AppHandle) -> bool {
+    app.get_webview_window(crate::panel::LABEL)
+        .and_then(|w| w.is_visible().ok())
+        != Some(true)
 }
 
 /// Dismisses the panel while keeping the native and Rust visibility state in

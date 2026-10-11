@@ -13,6 +13,7 @@ export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 /** The dismiss control is a Windows tray-panel affordance; macOS uses the
  * native non-activating panel behavior and should not show a duplicate close. */
 export const isWindows = inTauri && /Windows/i.test(navigator.userAgent);
+export const isMac = inTauri && /Macintosh|Mac OS X/i.test(navigator.userAgent);
 
 function petListen<T>(name: string, handler: (payload: T) => void): () => void {
   if (!inTauri) return () => {};
