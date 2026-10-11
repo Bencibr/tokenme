@@ -35,15 +35,6 @@ pub struct TtftSample {
     pub sampled_at_ms: u64,
     /// Model label only; no request identifiers or prompt/response fields.
     pub model: Option<String>,
-    /// Output tokens per generation second over the span's own window
-    /// (`duration − ttft`). Present only when the export carries the usage
-    /// attribute and the span times; a `first_content` sample never carries
-    /// one, because that window answers a different question.
-    pub tps: Option<f64>,
-    /// Full request span duration and output count when the export includes
-    /// them. These values are kept only for the transient active-test result.
-    pub duration_ms: Option<f64>,
-    pub output_tokens: Option<u64>,
 }
 
 /// Binds strictly to IPv4 loopback. The caller owns and must lifecycle-manage
@@ -207,23 +198,16 @@ where
                     let mut ttft = None;
                     let mut first_content = None;
                     let mut model = None;
-                    let mut output_tokens = None;
                     let mut duplicate = false;
-                    let (mut saw_ttft, mut saw_first_content, mut saw_output) = (false, false, false);
-                    for attribute in &span.attributes {
+                    let (mut saw_ttft, mut saw_first_content, mut saw_model) = (false, false, false);
+                    for attribute in span.attributes {
                         let (seen, slot) = match attribute.key.as_str() {
                             "ttft_ms" => (&mut saw_ttft, &mut ttft),
                             "first_content_ms" => (&mut saw_first_content, &mut first_content),
-                            "gen_ai.usage.output_tokens" | "output_tokens" => (&mut saw_output, &mut output_tokens),
-                            "gen_ai.request.model" | "model" => {
-                                // The CLI ships the gen_ai standard attribute
-                                // and its own "model" twin, same value — an
-                                // echo is normal, a conflict is the anomaly.
-                                if model.is_some() && model.as_deref() != attribute.text.as_deref() {
-                                    duplicate = true;
-                                    break;
-                                }
-                                if model.is_none() { model = attribute.text.clone(); }
+                            "gen_ai.request.model" => {
+                                if saw_model { duplicate = true; break; }
+                                saw_model = true;
+                                model = attribute.text;
                                 continue;
                             }
                             _ => continue,
@@ -247,11 +231,9 @@ where
                     // is a fallback with a related but distinct definition; do
                     // not emit both for one request or mix them in medians.
                     if let Some(millis) = ttft {
-                        let duration_ms = span_ms(&span);
-                        let output_token_count = output_tokens.filter(|n| n.is_finite() && *n >= 0.0 && *n <= u64::MAX as f64).map(|n| n as u64);
-                        samples.push(TtftSample { field: MetricField::TtftMs, millis, sampled_at_ms, model, tps: tps_of(output_tokens, duration_ms, millis), duration_ms, output_tokens: output_token_count });
+                        samples.push(TtftSample { field: MetricField::TtftMs, millis, sampled_at_ms, model });
                     } else if let Some(millis) = first_content {
-                        samples.push(TtftSample { field: MetricField::FirstContentMs, millis, sampled_at_ms, model, tps: None, duration_ms: span_ms(&span), output_tokens: None });
+                        samples.push(TtftSample { field: MetricField::FirstContentMs, millis, sampled_at_ms, model });
                     }
                     if samples.len() >= MAX_SAMPLES_PER_EXPORT { break; }
                 }
@@ -324,42 +306,17 @@ struct ScopeSpans {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct Span {
     #[serde(default)]
     name: String,
     #[serde(default)]
     attributes: Vec<Attribute>,
-    #[serde(default)]
-    start_time_unix_nano: Option<String>,
-    #[serde(default)]
-    end_time_unix_nano: Option<String>,
 }
 
 struct Attribute {
     key: String,
     number: Option<f64>,
     text: Option<String>,
-}
-
-/// The span's wall duration in milliseconds, when both ends parse.
-fn span_ms(span: &Span) -> Option<f64> {
-    // Nanosecond timestamps exceed f64's exact integer range (~9e15), so the
-    // subtraction happens in u64 and only the final quotient goes float —
-    // subtracting the parsed floats first loses up to ~0.25 µs per span.
-    let start: u64 = span.start_time_unix_nano.as_ref()?.parse().ok()?;
-    let end: u64 = span.end_time_unix_nano.as_ref()?.parse().ok()?;
-    (end >= start).then_some(((end - start) as f64) / 1_000_000.0)
-}
-
-/// Output tokens per generation second: the window is the span's own minus the
-/// wait for the first token. Guarded to a sane band so a half-written export
-/// cannot print a five-figure speed.
-fn tps_of(output_tokens: Option<f64>, duration_ms: Option<f64>, ttft_ms: f64) -> Option<f64> {
-    let seconds = (duration_ms? - ttft_ms) / 1000.0;
-    if seconds <= 0.0 { return None; }
-    let tps = output_tokens? / seconds;
-    tps.is_finite().then_some(tps).filter(|tps| (0.1..=2000.0).contains(tps))
 }
 
 impl<'de> Deserialize<'de> for Attribute {
@@ -396,7 +353,7 @@ impl<'de> Deserialize<'de> for Attribute {
                 let mut number = None;
                 let mut text = None;
                 match key.as_str() {
-                    "ttft_ms" | "first_content_ms" | "gen_ai.usage.output_tokens" | "output_tokens" => {
+                    "ttft_ms" | "first_content_ms" => {
                         number = serde_json::from_value::<AttributeValue>(value).ok().and_then(|value| value.number());
                     }
                     "gen_ai.request.model" => {
@@ -415,24 +372,16 @@ impl<'de> Deserialize<'de> for Attribute {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AttributeValue {
-    // OTLP's JSON shape quotes 64-bit integers, but the CLI also ships bare
-    // numbers ("intValue": 996) — accept both, the deserializer is all-or-
-    // nothing per attribute and a form mismatch would silently drop it.
-    int_value: Option<serde_json::Value>,
+    int_value: Option<String>,
     double_value: Option<f64>,
     string_value: Option<String>,
 }
 
 impl AttributeValue {
     fn number(&self) -> Option<f64> {
-        let int_number = self.int_value.as_ref().and_then(|value| match value {
-            serde_json::Value::Number(number) => number.as_f64(),
-            serde_json::Value::String(text) => text.parse::<f64>().ok(),
-            _ => None,
-        });
         let number = self
             .double_value
-            .or(int_number)
+            .or_else(|| self.int_value.as_deref()?.parse::<f64>().ok())
             .or_else(|| self.string_value.as_deref()?.parse::<f64>().ok())?;
         (number.is_finite() && (0.0..=MAX_METRIC_MS).contains(&number)).then_some(number)
     }
@@ -482,7 +431,7 @@ mod tests {
     fn server_accepts_bounded_otlp_post_and_emits_only_metric_metadata() {
         let (tx, rx) = std::sync::mpsc::channel();
         let server = start_server(0, move |samples| { let _ = tx.send(samples); }).unwrap();
-        let body = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"claude_code.llm_request","startTimeUnixNano":"1759880000000000000","endTimeUnixNano":"1759880001137000000","attributes":[{"key":"ttft_ms","value":{"intValue":"137"}},{"key":"first_content_ms","value":{"intValue":"139"}},{"key":"gen_ai.usage.output_tokens","value":{"intValue":"250"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-sonnet"}},{"key":"prompt","value":{"stringValue":"private user content"}}]}]}]}]}"#;
+        let body = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"claude_code.llm_request","attributes":[{"key":"ttft_ms","value":{"intValue":"137"}},{"key":"first_content_ms","value":{"intValue":"139"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-sonnet"}},{"key":"prompt","value":{"stringValue":"private user content"}}]}]}]}]}"#;
         // The accept loop polls on a 20ms nonblocking cycle, and under the
         // gate's load a sibling test can starve it past the backlog's patience
         // — the kernel then RSTs the queued connection mid-read. One reconnect
@@ -511,9 +460,6 @@ mod tests {
         assert_eq!(sample.millis, 137.0);
         assert!(rx.try_recv().is_err(), "one export produces one callback batch");
         assert_eq!(sample.model.as_deref(), Some("claude-sonnet"));
-        assert_eq!(sample.tps, Some(250.0), "250 output tokens over the 1000 ms generation window");
-        assert_eq!(sample.duration_ms, Some(1137.0));
-        assert_eq!(sample.output_tokens, Some(250));
         assert!(sample.sampled_at_ms > 0);
         server.shutdown();
     }
