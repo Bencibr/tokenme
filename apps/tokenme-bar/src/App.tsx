@@ -23,6 +23,8 @@ import { IconProvider } from "./components/ToolIcon";
 import { StatusBar } from "./components/StatusBar";
 import { ToolsSection } from "./components/ToolsSection";
 import { BubbleApp } from "./components/BubbleApp";
+import { PetNoticeApp } from "./components/PetNoticeApp";
+import { PetPreview } from "./components/PetPreview";
 
 /** 托盘显示模式循环顺序:仅托盘 → 仅Token → 仅花费 → 三个托盘组合。 */
 const MODES: TrayMode[] = ["tray_only", "tokens_only", "cost_only", "tray_tokens", "tray_cost", "tray_tokens_cost"];
@@ -32,6 +34,8 @@ export default function App() {
   // entrypoint. Keeping it in a separate component prevents panel hooks from
   // ever running in the utility window.
   const isBubble = inTauri && getCurrentWindow().label === "bubble";
+  if (!inTauri && new URLSearchParams(location.search).has("pet-preview")) return <PetPreview />;
+  if ((inTauri && getCurrentWindow().label === "pet-notice") || (!inTauri && new URLSearchParams(location.search).has("pet-notice"))) return <PetNoticeApp />;
   return isBubble ? <BubbleApp /> : <PanelApp />;
 }
 

@@ -155,6 +155,7 @@ pub struct PanelSettings {
     pub show_empty_tools: bool,
     pub bubble_enabled: bool,
     pub bubble_skin: BubbleSkin,
+    pub pet_companion: crate::settings::PetPreferences,
     pub host_exit_pause: bool,
     pub auto_checkin: bool,
     pub quota_polling: bool,
@@ -251,6 +252,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
         bubble_skin: settings.bubble_skin,
+        pet_companion: settings.pet_companion,
         host_exit_pause: settings.host_exit_pause,
         auto_checkin: settings.auto_checkin,
         quota_polling: settings.quota_polling,
@@ -454,6 +456,7 @@ pub async fn set_bubble_enabled(app: AppHandle, on: bool) -> Result<(), String> 
         settings.clone().save().map_err(|e| e.to_string())?;
     }
     bubble::set_enabled(&app, on);
+    if !on { crate::pet_notice::dismiss(&app, None); }
     Ok(())
 }
 
@@ -471,6 +474,24 @@ pub async fn set_bubble_skin(app: AppHandle, skin: BubbleSkin) -> Result<(), Str
         *settings = next;
     }
     app.emit("bubble-skin-changed", skin).map_err(|e| e.to_string())
+}
+
+/// Called by the Windows bubble when it is clicked.
+#[tauri::command]
+pub async fn set_pet_preferences(app:AppHandle, prefs:crate::settings::PetPreferences) -> Result<(), String> {
+    let mut prefs = prefs;
+    prefs.rest_interval_minutes = prefs.rest_interval_minutes.clamp(15,180);
+    {
+        let shared = app.state::<Shared>();
+        let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
+        let mut next = settings.clone(); next.pet_companion = prefs.clone();
+        next.save().map_err(|e| e.to_string())?; *settings = next;
+    }
+    if crate::pet_notice::get_pet_notice(app.clone()).is_some_and(|n|
+        if n.kind == crate::pet_notice::Kind::Rest { !prefs.rest_reminders } else { !prefs.greetings }) {
+        crate::pet_notice::dismiss(&app, None);
+    }
+    app.emit("pet-preferences-changed", prefs).map_err(|e| e.to_string())
 }
 
 /// Called by the Windows bubble when it is clicked.

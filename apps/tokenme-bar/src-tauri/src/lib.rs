@@ -8,6 +8,7 @@ mod scan_log;
 mod panel;
 mod servers;
 mod settings;
+mod pet_notice;
 mod snapshot;
 mod tray;
 mod updater;
@@ -42,6 +43,7 @@ pub fn run() {
         .manage(EngineChannel(tx))
         .manage(engine::Shared::new(Settings::load()))
         .manage(servers::state())
+        .manage(pet_notice::NoticeState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_report,
             commands::get_tray_state,
@@ -83,6 +85,14 @@ pub fn run() {
             commands::set_tool_muted,
             commands::set_bubble_enabled,
             commands::set_bubble_skin,
+            commands::set_pet_preferences,
+            pet_notice::pet_activity,
+            pet_notice::get_pet_notice,
+            pet_notice::show_pet_notice,
+            pet_notice::preview_pet_notice,
+            pet_notice::pet_notice_ready,
+            pet_notice::respond_pet_notice,
+            pet_notice::reposition_pet_notice,
             notify::notify_status,
             notify::notify_enable,
             commands::begin_bubble_drag,

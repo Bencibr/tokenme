@@ -386,6 +386,17 @@ export interface Bridge {
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setBubbleSkin: (skin: BubbleSkin) => Promise<void>;
   onBubbleSkin: (handler: (skin: BubbleSkin) => void) => () => void;
+  setPetPreferences: (prefs: import("./lib/petCompanion").PetPreferences) => Promise<void>;
+  onPetPreferences: (handler: (prefs: import("./lib/petCompanion").PetPreferences) => void) => () => void;
+  petActivity: () => Promise<import("./lib/petCompanion").PetActivity>;
+  showPetNotice: (kind: import("./lib/petCompanion").PetNoticeKind, minutes: number) => Promise<import("./lib/petCompanion").PetNotice | null>;
+  previewPetNotice: () => Promise<import("./lib/petCompanion").PetNotice | null>;
+  getPetNotice: () => Promise<import("./lib/petCompanion").PetNotice | null>;
+  onPetNotice: (handler: (notice: import("./lib/petCompanion").PetNotice | null) => void) => () => void;
+  petNoticeReady: (id: number) => Promise<void>;
+  respondPetNotice: (id: number, action: import("./lib/petCompanion").PetResponse["action"]) => Promise<void>;
+  onPetResponse: (handler: (response: import("./lib/petCompanion").PetResponse) => void) => () => void;
+  repositionPetNotice: () => Promise<void>;
   setHostExitPause: (on: boolean) => Promise<void>;
   /** On, the host-exit pause stops applying to the check-in tools, so their
    *  daily claim fires and their rows stay live with the host app closed. */
@@ -453,6 +464,7 @@ export interface PanelSettings {
   show_empty_tools: boolean;
   bubble_enabled: boolean;
   bubble_skin: BubbleSkin;
+  pet_companion: import("./lib/petCompanion").PetPreferences;
   host_exit_pause: boolean;
   /** The check-in guarantee: on, Trae CN / Qoder keep being probed — and
    *  claimed — while their host app is closed. */

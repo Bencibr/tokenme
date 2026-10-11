@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
 import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
+import { DEFAULT_PET_PREFERENCES } from "./petCompanion";
+import type { PetNotice, PetPreferences, PetResponse } from "./petCompanion";
 import type { Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
@@ -11,6 +13,14 @@ export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 /** The dismiss control is a Windows tray-panel affordance; macOS uses the
  * native non-activating panel behavior and should not show a duplicate close. */
 export const isWindows = inTauri && /Windows/i.test(navigator.userAgent);
+
+function petListen<T>(name: string, handler: (payload: T) => void): () => void {
+  if (!inTauri) return () => {};
+  let cancelled = false;
+  let off: (() => void) | undefined;
+  void listen<T>(name, (event) => { if (!cancelled) handler(event.payload); }).then((fn) => { if (cancelled) fn(); else off = fn; }).catch(() => {});
+  return () => { cancelled = true; off?.(); };
+}
 
 /** `system` hands the media query back to the OS; a pin sets `data-theme`. */
 export function applyTheme(theme: ThemeKey): void {
@@ -340,6 +350,30 @@ export const bridge: Bridge = {
     await invoke<void>("install_update");
   },
 
+  async setPetPreferences(prefs: PetPreferences): Promise<void> {
+    if (!inTauri) { browserSettings.pet_companion = prefs; return; }
+    await invoke<void>("set_pet_preferences", { prefs });
+  },
+  onPetPreferences: (handler: (prefs: PetPreferences) => void) => petListen("pet-preferences-changed", handler),
+  async petActivity() {
+    return inTauri ? invoke<import("./petCompanion").PetActivity>("pet_activity")
+      : { idle_ms: 0, locked:false, fullscreen:false, visible:true };
+  },
+  async showPetNotice(kind: import("./petCompanion").PetNoticeKind, minutes: number) {
+    return inTauri ? invoke<PetNotice | null>("show_pet_notice", { kind, minutes }) : { id:Date.now(), kind, minutes };
+  },
+  async previewPetNotice() {
+    return inTauri ? invoke<PetNotice | null>("preview_pet_notice") : { id:Date.now(), kind:"hello" as const, minutes:0 };
+  },
+  async getPetNotice() { return inTauri ? invoke<PetNotice | null>("get_pet_notice") : null; },
+  onPetNotice: (handler: (notice: PetNotice | null) => void) => petListen("pet-notice-changed", handler),
+  async petNoticeReady(id: number) { if (inTauri) await invoke<void>("pet_notice_ready", { id }); },
+  async respondPetNotice(id: number, action: PetResponse["action"]) {
+    if (inTauri) await invoke<void>("respond_pet_notice", { id, action });
+  },
+  onPetResponse: (handler: (response: PetResponse) => void) => petListen("pet-response", handler),
+  async repositionPetNotice() { if (inTauri) await invoke<void>("reposition_pet_notice"); },
+
   onUpdateProgress(handler: (progress: DownloadProgress) => void): () => void {
     if (!inTauri) return () => {};
     let unlisten: (() => void) | null = null;
@@ -494,6 +528,7 @@ const browserSettings: PanelSettings = {
   show_empty_tools: false,
   bubble_enabled: true,
   bubble_skin: "waterdrop",
+  pet_companion: { ...DEFAULT_PET_PREFERENCES },
   host_exit_pause: true,
   auto_checkin: false,
   quota_polling: true,

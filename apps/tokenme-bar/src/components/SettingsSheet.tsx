@@ -92,6 +92,8 @@ export function SettingsSheet({
   const [probes, setProbes] = useState<ProbeTool[]>([]);
   const [showAll, setShowAll] = useState(false);
   const [notify, setNotify] = useState<NotifyState>("unknown");
+  const [petBusy, setPetBusy] = useState(false);
+  const [petError, setPetError] = useState<string | null>(null);
   const [quotaModeBusy, setQuotaModeBusy] = useState(false);
   const [quotaModeError, setQuotaModeError] = useState(false);
 
@@ -183,6 +185,15 @@ export function SettingsSheet({
     } finally {
       setSkinBusy(false);
     }
+  };
+
+  const setPetPreference = async (changes: Partial<PanelSettings["pet_companion"]>) => {
+    if (!settings || petBusy) return;
+    const next = { ...settings.pet_companion, ...changes };
+    setPetBusy(true); setPetError(null);
+    try { await bridge.setPetPreferences(next); patch((s) => ({ ...s, pet_companion: next })); }
+    catch { setPetError(t("pet.save.failed")); }
+    finally { setPetBusy(false); }
   };
 
   const setAutostart = (on: boolean) => {
@@ -503,6 +514,29 @@ export function SettingsSheet({
                     onChange={(skin) => void setBubbleSkin(skin)}
                   />
                 </div>
+                {switchRow(t("set.pet.greetings"), t("set.pet.greetings.hint"), settings.pet_companion.greetings,
+                  (on) => void setPetPreference({ greetings:on }), petBusy || !settings.bubble_enabled)}
+                {switchRow(t("set.pet.rest"), t("set.pet.rest.hint"), settings.pet_companion.rest_reminders,
+                  (on) => void setPetPreference({ rest_reminders:on }), petBusy || !settings.bubble_enabled)}
+                <div className="sheet-row">
+                  <div><label className="sheet-label" htmlFor="pet-rest-interval">{t("set.pet.interval")}</label>
+                    <div className="sheet-hint">{t("set.pet.interval.hint")}</div></div>
+                  <select id="pet-rest-interval" className="sheet-select" value={settings.pet_companion.rest_interval_minutes}
+                    disabled={petBusy || !settings.bubble_enabled || !settings.pet_companion.rest_reminders}
+                    onChange={(event) => void setPetPreference({ rest_interval_minutes:Number(event.target.value) })}>
+                    {[30,45,60,90,120].map((minutes) => <option key={minutes} value={minutes}>{t("set.pet.minutes", { minutes })}</option>)}
+                  </select>
+                </div>
+                {switchRow(t("set.pet.motions"), t("set.pet.motions.hint"), settings.pet_companion.motions,
+                  (on) => void setPetPreference({ motions:on }), petBusy || !settings.bubble_enabled)}
+                <div className="sheet-row">
+                  <div><div className="sheet-label">{t("set.pet.preview")}</div><div className="sheet-hint">{t("set.pet.preview.hint")}</div></div>
+                  <button type="button" className="sheet-action" disabled={!settings.bubble_enabled || petBusy}
+                    onClick={() => { void bridge.previewPetNotice().then((notice) => { if (!notice) setPetError(t("pet.preview.wait")); }).catch(() => setPetError(t("pet.save.failed"))); }}>
+                    {t("set.pet.preview.button")}
+                  </button>
+                </div>
+                {petError && <p className="sheet-hint sheet-pet-error" role="alert">{petError}</p>}
               </>
             ) : null}
           </>

@@ -6,9 +6,11 @@ import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import type { BubbleSkin, Report } from "../types";
 import { bridge, inTauri } from "../lib/bridge";
 import { ballTokens } from "../lib/format";
+import { WaterdropPet } from "./WaterdropPet";
 import { t } from "../lib/i18n";
 import { getPetSkinConfig, isPetSkinName } from "../lib/petSkinRegistry";
 import { PetSkin } from "./PetSkin";
+import { usePetCompanion } from "../lib/usePetCompanion";
 
 type Dock = "left" | "right" | "top";
 
@@ -61,6 +63,7 @@ function dockPosition(edge: Dock, anchor: DockAnchor, layout: BubbleGeometry, si
 }
 
 export function BubbleApp() {
+  const companion = usePetCompanion();
   const window = useMemo(() => getCurrentWindow(), []);
   const [report, setReport] = useState<Report | null>(null);
   const [dock, setDock] = useState<Dock | null>(null);
@@ -68,6 +71,8 @@ export function BubbleApp() {
   const [gaze, setGaze] = useState<{ x: number; y: number } | null>(null);
   const [skin, setSkin] = useState<BubbleSkin>("waterdrop");
   const [hovered, setHovered] = useState(false);
+  const hovering = useRef(false);
+  hovering.current = hovered;
   const [petDragging, setPetDragging] = useState(false);
   const [petAssetFailed, setPetAssetFailed] = useState(false);
   const onPetAssetError = useCallback(() => setPetAssetFailed(true), []);
@@ -258,6 +263,7 @@ export function BubbleApp() {
     })().catch(reportGeometryError);
     geometrySync.current = run;
     void run.then(() => { if (geometrySync.current === run) geometrySync.current = null; });
+    if (companion.noticeVisible.current) void run.then(() => bridge.repositionPetNotice()).catch(() => {});
     return run;
   };
 
@@ -373,10 +379,18 @@ export function BubbleApp() {
 
   const scheduleDock = () => {
     clearLeaveTimer();
+    if (companion.noticeVisible.current) return;
     leaveTimer.current = setTimeout(() => {
       if (!dragging.current) void dockToEdge(false).catch(reportGeometryError);
     }, 260);
   };
+
+  useEffect(() => bridge.onPetNotice((notice) => {
+    if (notice && !dragging.current) void expand().catch(reportGeometryError);
+    else if (!notice && !dragging.current && !hovering.current) scheduleDock();
+    // Native position is reconciled after expansion and again by the gaze poll.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []);
 
   useEffect(() => {
     // The native move loop consumes the pointer events while a drag is in
@@ -397,6 +411,7 @@ export function BubbleApp() {
     void listen("bubble-drag-ended", () => {
       dragging.current = false;
       setPetDragging(false);
+      companion.play("settle");
       press.current = null;
       void dockToEdge(true).catch(reportGeometryError);
     }).then((fn) => {
@@ -514,6 +529,7 @@ export function BubbleApp() {
       // click that follows startDragging(). Treat an unmoved pointer-up as the
       // click action so opening the panel is deterministic.
       void bridge.showPanel();
+      companion.play("cheer");
       setExpanded(false);
     }
   };
@@ -527,6 +543,9 @@ export function BubbleApp() {
       data-dock={dock ?? "none"}
       data-expanded={expanded}
       data-skin={skin}
+      data-action={companion.motion}
+      data-emotion={companion.emotion === "idle" ? companion.motion : companion.emotion}
+      data-animations={companion.motions}
       onMouseEnter={() => { setHovered(true); if (!suppressExpand.current) void expand().catch(reportGeometryError); }}
       onMouseLeave={() => { setHovered(false); scheduleDock(); }}
       onPointerDown={(event) => void onPointerDown(event)}
@@ -539,25 +558,8 @@ export function BubbleApp() {
     >
       {petSkin && petSkinName && !petAssetFailed ? (
         <PetSkin key={petSkinName} skin={petSkinName} dock={dock} hovered={hovered} dragging={petDragging}
-          tokens={tokens} gaze={gaze} onAssetError={onPetAssetError} />
-      ) : <>
-      <span className="bubble-ripple" aria-hidden="true" />
-      <span className="bubble-core">
-        <span className="bubble-value">{ballTokens(tokens)}</span>
-        <span className="bubble-unit">{t("bubble.today")} tokens</span>
-        {/* Docked, the ball turns into a robot pet peeking over the edge; the
-            pupils point at the cursor via the --gx/--gy vars set on the face. */}
-        <span
-          className="bubble-face"
-          aria-hidden="true"
-          style={gaze ? ({ "--gx": `${gaze.x}px`, "--gy": `${gaze.y}px` } as React.CSSProperties) : undefined}
-        >
-          <span className="bubble-eye"><span className="bubble-pupil" /></span>
-          <span className="bubble-eye"><span className="bubble-pupil" /></span>
-          <span className="bubble-mouth" />
-        </span>
-      </span>
-      </>}
+          tokens={tokens} gaze={gaze} onAssetError={onPetAssetError} action={companion.motion} emotion={companion.emotion} motions={companion.motions} />
+      ) : <WaterdropPet tokens={tokens} gaze={gaze} />}
     </div>
   );
 }

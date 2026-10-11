@@ -92,6 +92,7 @@ pub fn begin_drag(app: &AppHandle) {
         return;
     };
     let app = app.clone();
+    crate::pet_notice::dismiss(&app, None);
     // The frontend must know a Rust-side drag is running: its hover timers
     // would otherwise dock the window out from under the drag loop the moment
     // the cursor outruns the window for a frame.

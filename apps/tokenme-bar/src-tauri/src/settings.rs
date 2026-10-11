@@ -135,6 +135,22 @@ fn default_quota_polling() -> bool {
 }
 
 /// The whole persisted surface: a tiny JSON file under the platform config dir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PetPreferences {
+    pub greetings: bool,
+    pub rest_reminders: bool,
+    pub motions: bool,
+    pub rest_interval_minutes: u16,
+}
+
+impl Default for PetPreferences {
+    fn default() -> Self {
+        Self { greetings:true, rest_reminders:true, motions:true, rest_interval_minutes:60 }
+    }
+}
+
+/// The whole persisted surface: a tiny JSON file under the platform config dir.
 ///
 /// `budgets` is shared with the CLI: `tokenme budget set …` writes that one key of
 /// the same file, so a cap set in a terminal reaches the panel on the next refresh
@@ -170,6 +186,7 @@ pub struct Settings {
     pub bubble_enabled: bool,
     #[serde(default)]
     pub bubble_skin: BubbleSkin,
+    pub pet_companion: PetPreferences,
     /// Stop asking vendors for a tool's quota once its host application has
     /// exited: the number cannot change, and the calls are the user's own
     /// account traffic. Default on; the last known answer stays on screen.
@@ -227,6 +244,7 @@ impl Default for Settings {
             show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
             bubble_skin: BubbleSkin::default(),
+            pet_companion: PetPreferences::default(),
             host_exit_pause: default_host_exit_pause(),
             auto_checkin: false,
             quota_polling: default_quota_polling(),

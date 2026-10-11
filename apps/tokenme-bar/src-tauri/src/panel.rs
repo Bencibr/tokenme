@@ -1597,6 +1597,7 @@ fn start_click_away_monitor(app: &AppHandle) {
                             && has_point
                             && !window_contains_point(&panel, point.x, point.y)
                             && !tray_contains_point(&app, point.x, point.y)
+                            && !crate::pet_notice::contains_point(&app, point.x, point.y)
                         {
                             // Tauri's visibility cache can lag for a
                             // non-activating window immediately after a native

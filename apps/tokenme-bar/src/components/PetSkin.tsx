@@ -1,16 +1,14 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   getPetSkinConfig,
-  isModelSkinConfig,
   type PetDock,
   type RasterPetSkinConfig,
   type PetSkinName,
 } from "../lib/petSkinRegistry";
 import { ballTokens } from "../lib/format";
 import { t } from "../lib/i18n";
-
-const LazyPetModel = lazy(() => import("./PetModel").then(({ PetModel }) => ({ default: PetModel })));
+import type { PetMotion } from "../lib/petCompanion";
 
 export type { PetSkinName } from "../lib/petSkinRegistry";
 
@@ -70,50 +68,45 @@ type PetSkinProps = {
   dragging: boolean;
   tokens: number;
   gaze: { x: number; y: number } | null;
-  onAssetError: () => void;
+  onAssetError: (error?: unknown) => void;
+  action?: PetMotion;
+  motions?: boolean;
+  emotion?: PetMotion;
 };
 
 export function PetSkin(props: PetSkinProps) {
-  const config = getPetSkinConfig(props.skin);
-  if (!config) return null;
-  if (isModelSkinConfig(config)) {
-    return (
-      <Suspense fallback={<ModelLoading config={config} skin={props.skin} />}>
-        <LazyPetModel {...props} config={config} />
-      </Suspense>
-    );
-  }
+  // The archived model renderer stays in source but has no import here, so
+  // its Three.js chunk and model assets cannot enter the default bundle.
   return <RasterPetSkin {...props} />;
 }
 
-function ModelLoading({ config, skin }: { config: Extract<ReturnType<typeof getPetSkinConfig>, { render: "model" }>; skin: PetSkinName }) {
-  return <span className="pet-skin pet-model" data-skin={skin} data-dock="none" data-ready="false"
-    style={{ "--pet-layout-size": `${config.layout.content}px` } as CSSProperties} aria-hidden="true" />;
-}
-
-function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetError }: PetSkinProps) {
-  const config = getPetSkinConfig(skin);
-  const raster = config && !isModelSkinConfig(config) ? config : undefined;
+function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetError, action = "idle", emotion = "idle", motions = true }: PetSkinProps) {
+  const raster = getPetSkinConfig(skin);
   const assets = raster?.assets;
   const [decodedAssets, setDecodedAssets] = useState<typeof assets>();
 
   useEffect(() => {
     if (!assets) return;
     let alive = true;
-    const images = [assets.atlas, assets.side, assets.left, assets.top].map((src) => {
+    const loading = [assets.atlas, assets.side, assets.left, assets.top, ...(raster?.reactionAtlas ? [raster.reactionAtlas.file] : [])].map((src) => new Promise<void>((resolve, reject) => {
       const image = new Image();
+      image.onload = () => {
+        // All files must load, but a deferred GPU decode must not keep a
+        // hidden utility surface invisible. Warm the decoder without a gate.
+        void image.decode().catch(() => {});
+        resolve();
+      };
+      image.onerror = () => reject(new Error("pet asset unavailable"));
       image.src = src;
-      return image;
-    });
-    // A skin becomes visible as one unit after all of its poses are decoded.
-    // Ignore completions from a skin that was replaced while loading.
-    void Promise.all(images.map((image) => image.decode())).then(() => {
+    }));
+    // Wait for the complete skin package; ignore replaced-skin completions.
+    void Promise.all(loading).then(() => {
       if (alive) setDecodedAssets(assets);
-    }).catch(() => {
-      if (alive) onAssetError();
+    }).catch((error) => {
+      if (alive) onAssetError(error);
     });
     return () => { alive = false; };
-  }, [assets, onAssetError]);
+  }, [assets, raster, onAssetError]);
 
   if (!raster || !assets) return null;
 
@@ -121,9 +114,14 @@ function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetErr
   // Comparing the asset identity hides the new skin in its first render,
   // before the effect runs, even when React reuses this component.
   const ready = decodedAssets === assets;
-  const happy = hovered && !dragging;
+  const tone = emotion === "idle" ? action : emotion;
+  const happy = !dragging && (hovered || tone === "hello" || tone === "cheer");
   const eyes = happy && !dock ? raster.eyes.happy ?? raster.eyes.none : raster.eyes[pose];
   const style = skinStyle(raster, dock, happy);
+  const reaction = !dock && raster.reactionAtlas;
+  const reactionKey = tone === "cheer" ? "hello" : tone;
+  const reactionFrame = reaction && reactionKey in reaction.frames
+    ? reaction.frames[reactionKey as keyof typeof reaction.frames] : null;
   // The long-legged adult skin has smaller eyes than the chibi characters.
   // Limit pupil travel to its socket rather than clipping it at a fixed reach.
   const pupilOffset = (offset: number, size: number) => {
@@ -137,15 +135,22 @@ function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetErr
 
   return (
     <span className="pet-skin" data-skin={skin} data-dock={pose}
-      data-motion={dragging ? "drag" : hovered ? "happy" : "idle"}
+      data-motion={dragging ? "drag" : happy ? "happy" : "idle"}
       data-blink={raster.animation?.blink ?? "overlay"}
       data-ready={ready}
+      data-action={dragging ? "idle" : action}
+      data-animations={motions}
+      data-reaction={Boolean(reactionFrame)}
+      data-emotion={tone}
       style={style} aria-hidden="true">
       <span className="pet-pose">
         <span className="pet-art">
           {dock ? <img key={dock} className="pet-edge-art" src={dock === "top" ? assets.top : dock === "left" ? assets.left : assets.side} alt="" draggable={false} />
-            : <span className="pet-sprite" style={{ backgroundImage: `url(${assets.atlas})` }} />}
-          {ready && eyes.enabled !== false && <span className="pet-eyes" data-tracking={eyes.tracking ?? "pupil"} style={eyeStyle}>
+            : <span className="pet-sprite" style={reactionFrame && reaction ? {
+              backgroundImage:`url(${reaction.file})`, backgroundPosition:point(reactionFrame),
+              backgroundSize:px(raster.layout.art * 2), clipPath:"none", animation:"none",
+            } : { backgroundImage: `url(${assets.atlas})` }} />}
+          {ready && !reactionFrame && eyes.enabled !== false && <span className="pet-eyes" data-tracking={eyes.tracking ?? "pupil"} style={eyeStyle}>
             <span className="pet-eye"><span className="pet-pupil" /><span className="pet-eyelid" /></span>
             <span className="pet-eye"><span className="pet-pupil" /><span className="pet-eyelid" /></span>
           </span>}
