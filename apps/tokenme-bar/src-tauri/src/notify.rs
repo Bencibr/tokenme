@@ -267,7 +267,7 @@ fn copy_for(
     lang: Lang,
 ) -> (String, String) {
     let title = match label {
-        Some(l) if !l.is_empty() => format!("{display} · {l}"),
+        Some(l) if !l.is_empty() => format!("{display} · {}", localize_label(l, lang)),
         _ => display.to_string(),
     };
     let body = if tier >= 2 {
@@ -281,6 +281,74 @@ fn copy_for(
         }
     };
     (title, body)
+}
+
+/// The engine's quota labels are zh-authored data — the same table the strip's
+/// `quota.label.*` head map matches — and the banner title is where they
+/// display, so the known engine nouns and the meter verbs translate here while
+/// vendor plan names (Bonus Pack, GLM Coding Lite, CodeBuddy个人体验版) pass
+/// through verbatim. Keep the zh heads byte-identical with the strip's table:
+/// the two maps answer for the same strings. zh reads as identity, which also
+/// keeps the label-derived hysteresis keys stable across language switches.
+fn localize_label(label: &str, lang: Lang) -> String {
+    if lang == Lang::Zh {
+        return label.to_string();
+    }
+    label.split(" · ").map(localize_segment).collect::<Vec<_>>().join(" · ")
+}
+
+/// One ` · ` segment of a label: an exact engine noun, a composed phrase, or
+/// something vendor-shaped that stays as it is.
+fn localize_segment(seg: &str) -> String {
+    /// The engine nouns, verbatim from the providers that compose them.
+    const NOUNS: &[(&str, &str)] = &[
+        ("5 小时", "5 hours"), ("7 天", "7 days"), ("天", "Day"), ("周", "Week"),
+        ("月", "Month"), ("每周", "Weekly"), ("窗口", "Window"), ("今日额度", "Today's quota"),
+        ("月度 Premium 请求", "Monthly Premium requests"), ("套餐积分", "Plan credits"),
+        ("套餐内", "Included plan"), ("积分包", "Credit pack"), ("资源包", "Add-on pack"),
+        ("专属资源包", "Dedicated add-on pack"), ("共享资源包", "Shared add-on pack"),
+        ("积分", "Credits"), ("余额", "Balance"), ("每日限额", "Daily limit"),
+        ("无可查限额", "No visible limit"), ("免费版", "Free tier"), ("会员", "Member"),
+        ("模型额度", "Model quota"), ("会话", "Sessions"), ("工具调用", "Tool calls"),
+        ("试用", "trial"), ("已自动签到", "Auto-claimed"), ("今日已签到", "Checked in today"),
+        ("签到奖励", "Check-in bonus"), ("签到奖励(今)", "Check-in bonus (today)"),
+        ("签到奖励(昨)", "Check-in bonus (yesterday)"),
+    ];
+    if let Some((_, en)) = NOUNS.iter().find(|(zh, _)| *zh == seg) {
+        return (*en).to_string();
+    }
+    // Trailing nouns a composed head carries after its own name or figure;
+    // rewritten in place so a leading verb ("剩余 8578 点") still matches below.
+    let owned;
+    let seg = if let Some(name) = seg.strip_suffix(" 套餐") {
+        owned = format!("{name} plan"); &owned
+    } else if let Some(n) = seg.strip_suffix(" 分钟") {
+        owned = format!("{n} min"); &owned
+    } else if let Some(n) = seg.strip_suffix(" 点") {
+        owned = format!("{n} pts"); &owned
+    } else {
+        seg
+    };
+    // Leading verbs and the phrases that ride them.
+    if let Some(r) = seg.strip_prefix("已用 ") {
+        return format!("used {r}");
+    }
+    if let Some(r) = seg.strip_prefix("剩余 ") {
+        return format!("{r} left");
+    }
+    if let Some(r) = seg.strip_prefix("限时 ") {
+        return format!("limited {r}");
+    }
+    if let Some(r) = seg.strip_prefix("每日刷新 ") {
+        return format!("daily refresh {r}");
+    }
+    if let Some(r) = seg.strip_prefix("赠送 ") {
+        return format!("gift {r}");
+    }
+    if let Some(r) = seg.strip_prefix("积分 ") {
+        return format!("{r} credits");
+    }
+    seg.to_string()
 }
 
 enum Msg {
@@ -985,6 +1053,42 @@ mod tests {
         // An empty label is the same as no label.
         let (title, _) = copy_for("Qoder", Some(""), 81.0, 1, Lang::Zh);
         assert_eq!(title, "Qoder");
+    }
+
+    /// The title's engine-authored label follows the banner language: the
+    /// known nouns and meter verbs translate, vendor plan names and unknown
+    /// shapes pass through, and zh reads byte-identical so the label-derived
+    /// hysteresis keys never move.
+    #[test]
+    fn the_title_label_follows_the_language() {
+        // zh passthrough, byte for byte.
+        let (title, _) = copy_for("妙手", Some("套餐积分 · 已用 0/1200"), 0.0, 1, Lang::Zh);
+        assert_eq!(title, "妙手 · 套餐积分 · 已用 0/1200");
+        // The pack labels: known head + the used verb.
+        let (title, _) = copy_for("妙手", Some("套餐积分 · 已用 0/1200"), 0.0, 1, Lang::En);
+        assert_eq!(title, "妙手 · Plan credits · used 0/1200");
+        let (title, _) = copy_for("Qoder", Some("专属资源包 · 已用 130/600"), 21.6, 1, Lang::En);
+        assert_eq!(title, "Qoder · Dedicated add-on pack · used 130/600");
+        let (title, _) = copy_for("WorkBuddy", Some("Bonus Pack · 已用 250/310"), 80.6, 1, Lang::En);
+        assert_eq!(title, "WorkBuddy · Bonus Pack · used 250/310", "vendor plan names stay");
+        // Window names and plan suffixes.
+        let (title, _) = copy_for("ZCode", Some("5 小时 · GLM Coding Lite"), 85.0, 1, Lang::En);
+        assert_eq!(title, "ZCode · 5 hours · GLM Coding Lite");
+        let (title, _) = copy_for("Codex", Some("primary_window · 15 分钟"), 90.0, 1, Lang::En);
+        assert_eq!(title, "Codex · primary_window · 15 min");
+        // Remaining-first compositions (cola, agnes).
+        let (title, _) = copy_for("Cola", Some("breeze 套餐 · 剩余 30% · 试用"), 70.0, 1, Lang::En);
+        assert_eq!(title, "Cola · breeze plan · 30% left · trial");
+        let (title, _) = copy_for("AgnesCode", Some("剩余 8578 点 · 限时 1240 · 每日刷新 7338"), 40.0, 1, Lang::En);
+        assert_eq!(title, "AgnesCode · 8578 pts left · limited 1240 · daily refresh 7338");
+        // Balance heads and the auto-claimed marker.
+        let (title, _) = copy_for("DSH", Some("余额 ¥26.70"), 0.0, 1, Lang::En);
+        assert_eq!(title, "DSH · Balance ¥26.70");
+        let (title, _) = copy_for("MiniMax Code", Some("已自动签到 · +30"), 0.0, 1, Lang::En);
+        assert_eq!(title, "MiniMax Code · Auto-claimed · +30");
+        // A limit-less window.
+        let (title, _) = copy_for("Cline", Some("Free · 无可查限额"), 0.0, 1, Lang::En);
+        assert_eq!(title, "Cline · Free · No visible limit");
     }
 
     #[test]

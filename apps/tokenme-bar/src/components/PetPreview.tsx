@@ -18,8 +18,8 @@ export function PetPreview() {
   const [assetError, setAssetError] = useState("");
   const onAssetError = useCallback((error?:unknown) => setAssetError(error instanceof Error ? error.message : "asset unavailable"), []);
   if (selected === "all") return <div className="pet-preview-gallery" data-asset-error={assetError}>
-    <span /><span className="pet-preview-heading">问好</span><span className="pet-preview-heading">关怀</span>
-    <span className="pet-preview-heading">困倦</span><span className="pet-preview-heading">伸展</span>
+    <span /><span className="pet-preview-heading">{t("pet.preview.greet")}</span><span className="pet-preview-heading">{t("pet.preview.care")}</span>
+    <span className="pet-preview-heading">{t("pet.preview.sleepy")}</span><span className="pet-preview-heading">{t("pet.preview.stretch")}</span>
     {["waterdrop", ...PET_SKIN_NAMES].map((skin) => <GalleryRow key={skin} skin={skin} onAssetError={onAssetError} />)}
   </div>;
   if (selected !== "waterdrop" && !isPetSkinName(selected)) return null;
@@ -35,7 +35,7 @@ export function PetPreview() {
 }
 
 function GalleryRow({ skin, onAssetError }: { skin:string; onAssetError:(error?:unknown) => void }) {
-  const label = skin === "waterdrop" ? "经典水滴" : t(getPetSkinConfig(skin)!.labelKey as Parameters<typeof t>[0]);
+  const label = skin === "waterdrop" ? t("set.pet.skin.waterdrop") : t(getPetSkinConfig(skin)!.labelKey as Parameters<typeof t>[0]);
   return <>
     <span className="pet-preview-heading">{label}</span>
     {(["hello","care","sleep","stretch"] as const).map((tone) => <div className="pet-preview-cell" key={tone}>

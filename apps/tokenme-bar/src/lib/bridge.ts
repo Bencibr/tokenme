@@ -106,7 +106,7 @@ export const bridge: Bridge = {
    *  badge; `message` is the reason (未到签到时间 / 排队中) or the success
    *  copy, and the button shows it until the next sample refresh. */
   async checkinNow(tool: string): Promise<CheckinResult> {
-    if (!inTauri) return { ok: true, message: "签到成功" };
+    if (!inTauri) return { ok: true, message: "签到成功，+30 积分" };
     return invoke<CheckinResult>("checkin_now", { tool });
   },
 

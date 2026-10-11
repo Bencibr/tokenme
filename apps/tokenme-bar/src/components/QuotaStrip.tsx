@@ -27,6 +27,41 @@ const CHECKIN_TOOLS = ["trae_cn", "qoder", "minimaxcode", "workbuddy_cn"];
  *  report, the row list never shows them. Trae's entitlement window
  *  (`checkin_…`, a real gauge) is not one of these and stays visible. */
 const CHECKIN_STATE_IDS = ["checkin", "checkin-wait", "checkin-gated"];
+/** The engine's check-in answers are zh-authored constants — the same policy
+ *  as the quota labels the head map translates — and the button is where they
+ *  display, so known messages map onto copy here and unknown ones (vendor
+ *  shapes, rare transport errors) pass through verbatim. Keep the zh shapes in
+ *  step with the providers that author them. */
+function checkinCopy(msg: string | undefined): string | undefined {
+  if (!msg) return msg;
+  let m = msg.match(/^签到成功，\+([\d.]+) 积分$/);
+  if (m) return t("quota.checkin.msg.claimed", { n: m[1] });
+  m = msg.match(/^签到成功，领取 ([\d.]+) 积分$/);
+  if (m) return t("quota.checkin.msg.claimed_credit", { n: m[1] });
+  const exact: Record<string, Parameters<typeof t>[0]> = {
+    "今日已签到": "quota.checkin.msg.done",
+    "签到未成功，稍后再试": "quota.checkin.msg.retry",
+    "未到签到时间，10:00 后可领": "quota.checkin.msg.not_open",
+    "签到排队中，稍后再试": "quota.checkin.msg.queued",
+    "今日没有可领的签到": "quota.checkin.msg.none",
+    "今日暂无可领的签到活动": "quota.checkin.msg.none",
+    "签到活动未开启": "quota.checkin.msg.off",
+    "签到需在 Qoder 内领取": "quota.checkin.gated",
+    "WorkBuddy 登录或签到权限已失效": "quota.checkin.msg.expired",
+  };
+  if (exact[msg]) return t(exact[msg]);
+  m = msg.match(/^请在 (.+) 客户端内领取$/);
+  if (m) return t("quota.checkin.msg.claim_in", { client: m[1] });
+  m = msg.match(/^(?:请先在 (.+) 客户端登录|未找到 (.+) 登录)$/);
+  if (m) return t("quota.checkin.msg.login", { client: m[1] ?? m[2] ?? "" });
+  m = msg.match(/^签到未成功 \(code (\d+)\)$/);
+  if (m) return t("quota.checkin.msg.code", { n: m[1] });
+  m = msg.match(/^(.+) 没有签到活动$/);
+  if (m) return t("quota.checkin.msg.none_tool", { tool: m[1] });
+  if (msg.startsWith("签到任务失败")) return t("quota.checkin.msg.task") + msg.slice("签到任务失败".length);
+  if (msg.includes("签到失败，稍后自动重试")) return t("quota.checkin.msg.retry_auto");
+  return msg;
+}
 
 const ORIGIN_KEY: Record<string, Parameters<typeof t>[0]> = { probe: "quota.origin.probe", log: "quota.origin.log", budget: "quota.origin.budget" };
 const ORIGIN = (k: string): string => t(ORIGIN_KEY[k] ?? "quota.origin.probe");
@@ -488,7 +523,7 @@ export function QuotaStrip({
                         type="button"
                         className="checkin-btn"
                         disabled={checkinBusy === g.tool || checkinWaiting(g.tool) || checkinGated(g.tool)}
-                        title={checkinMsg[g.tool]}
+                        title={checkinCopy(checkinMsg[g.tool])}
                         onClick={async (e) => {
                           // The head is a drag handle; the button must not
                           // start a drag while it claims.
@@ -527,7 +562,7 @@ export function QuotaStrip({
                             ? t("quota.checkin.gated")
                             : checkinWaiting(g.tool)
                               ? t("quota.checkin.wait")
-                              : (checkinMsg[g.tool] ?? t("quota.checkin.btn"))}
+                              : (checkinCopy(checkinMsg[g.tool]) ?? t("quota.checkin.btn"))}
                       </button>
                     )}
                   </span>
@@ -586,7 +621,7 @@ export function QuotaStrip({
                   // ink sits ~2px inside its advance width and read as an
                   // indent against the flush-right digits, however the cell
                   // was aligned. An element's edge is exact by construction.
-                  resetNode = <span className="rq-dash" aria-label="无重置时间" />;
+                  resetNode = <span className="rq-dash" aria-label={t("quota.noreset.aria")} />;
                 }
                 // The window name leads at full ink; a plan suffix the source
                 // appended ("5 小时 · GLM Coding Lite") follows dimmed, so ten
