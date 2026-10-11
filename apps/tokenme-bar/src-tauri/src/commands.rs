@@ -152,6 +152,7 @@ pub struct PanelSettings {
     pub theme: Theme,
     pub show_money: bool,
     pub quota_display_mode: QuotaDisplayMode,
+    pub ttft_enabled: bool,
     pub show_empty_tools: bool,
     pub bubble_enabled: bool,
     pub bubble_skin: BubbleSkin,
@@ -249,6 +250,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         theme: settings.theme,
         show_money: settings.show_money,
         quota_display_mode: settings.quota_display_mode,
+        ttft_enabled: settings.ttft_enabled,
         show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
         bubble_skin: settings.bubble_skin,
@@ -438,6 +440,29 @@ pub async fn set_quota_display_mode(app: AppHandle, mode: QuotaDisplayMode) -> R
     let mut next = settings.clone();
     next.quota_display_mode = mode;
     next.save().map_err(|e| e.to_string())?;
+    *settings = next;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_ttft_snapshot(app: AppHandle) -> crate::ttft::TtftSnapshot {
+    app.state::<crate::ttft::TtftState>().snapshot()
+}
+
+#[tauri::command]
+pub fn set_ttft_enabled(app: AppHandle, on: bool) -> Result<(), String> {
+    let ttft = app.state::<crate::ttft::TtftState>();
+    let shared = app.state::<Shared>();
+    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
+    let previous = settings.ttft_enabled;
+    if previous == on { return Ok(()); }
+    ttft.set_enabled(on)?;
+    let mut next = settings.clone();
+    next.ttft_enabled = on;
+    if let Err(error) = next.clone().save() {
+        let _ = ttft.set_enabled(previous);
+        return Err(error.to_string());
+    }
     *settings = next;
     Ok(())
 }

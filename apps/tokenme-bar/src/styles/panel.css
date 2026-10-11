@@ -904,6 +904,96 @@
   padding: 6px 0 7px;
 }
 
+/* TTFT follows quota detail as a compact measurement table, while remaining
+   separate from quota accounting and model-usage rankings. */
+.ttft-section {
+  margin: 8px 0 4px;
+}
+
+.ttft-heading,
+.ttft-status {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.ttft-heading {
+  justify-content: space-between;
+  gap: var(--s2);
+  margin: 0 0 5px;
+}
+
+.ttft-heading h2 {
+  margin: 0;
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.ttft-state,
+.ttft-granularity {
+  flex: none;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.ttft-state.is-on { color: var(--accent-ink); }
+.ttft-status { display: inline-flex; align-items: center; gap: 6px; }
+.ttft-local { font-size: 10px; color: var(--ink-3); }
+
+.ttft-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.ttft-table th,
+.ttft-table td {
+  min-width: 0;
+  padding: 6px 5px;
+  border-bottom: 1px solid var(--hair);
+  text-align: left;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.ttft-table thead th {
+  padding-top: 4px;
+  padding-bottom: 5px;
+  color: var(--ink-3);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.ttft-table thead th:nth-child(1) { width: 21%; }
+.ttft-table thead th:nth-child(2) { width: 23%; }
+.ttft-table thead th:nth-child(3) { width: 23%; }
+.ttft-table thead th:nth-child(4) { width: 33%; }
+.ttft-table tbody th { font-weight: 400; }
+.ttft-table tbody tr:last-child th,
+.ttft-table tbody tr:last-child td { border-bottom: 0; }
+
+.ttft-name,
+.ttft-granularity,
+.ttft-last,
+.ttft-meta,
+.ttft-time {
+  display: block;
+}
+
+.ttft-name { color: var(--ink); font-size: 10px; font-weight: 600; }
+.ttft-granularity { margin-top: 2px; }
+.ttft-last { color: var(--accent-ink); font-size: var(--t-meta); font-weight: 650; white-space: nowrap; }
+.ttft-model { overflow: hidden; color: var(--ink-2); text-overflow: ellipsis; white-space: nowrap; }
+.ttft-meta,
+.ttft-time,
+.ttft-empty,
+.ttft-note { font-size: 10px; color: var(--ink-3); }
+.ttft-meta + .ttft-meta,
+.ttft-meta + .ttft-time { margin-top: 2px; }
+.ttft-note { margin: 4px 0 0; line-height: 1.45; }
+
 .quota-group + .quota-group {
   border-top: 1px solid var(--hair);
 }

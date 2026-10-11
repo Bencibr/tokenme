@@ -10,6 +10,7 @@ mod doctor;
 mod loader;
 mod parser;
 mod paths;
+mod ttft;
 
 use usage_core::{
     DateFilter, DetectedSource, Error, ReadCursor, ReadOutcome, Semantics, SourceAdapter, SourceFile,
@@ -19,6 +20,7 @@ pub const TOOL_ID: &str = "codex";
 
 /// The replay audit surface: `tokenme codex-doctor` and the scan log read this.
 pub use doctor::sessions as replay;
+pub use ttft::{read_ttft, CodexTtftCursor, CodexTtftRead, CodexTtftSample};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexAdapter;

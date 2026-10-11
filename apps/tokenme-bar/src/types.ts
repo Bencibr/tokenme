@@ -382,6 +382,9 @@ export interface Bridge {
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
   setQuotaDisplayMode: (mode: QuotaDisplayMode) => Promise<void>;
+  ttftSnapshot: () => Promise<TtftSnapshot>;
+  setTtftEnabled: (on: boolean) => Promise<void>;
+  onTtftUpdated: (handler: (snapshot: TtftSnapshot) => void) => () => void;
   setShowEmptyTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setBubbleSkin: (skin: BubbleSkin) => Promise<void>;
@@ -455,12 +458,30 @@ export type NotifyTierKey = "both" | "exhausted" | "off";
 
 export type QuotaDisplayMode = "used" | "remaining";
 
+export interface TtftSample {
+  provider: "codex" | "claude_code";
+  granularity: "turn" | "request";
+  metric: "ttft" | "first_content";
+  ttft_ms: number;
+  sampled_at_ms: number;
+  model: string | null;
+}
+
+export interface TtftSnapshot {
+  revision: number;
+  enabled: boolean;
+  claude_receiver: string;
+  claude_config_status: string;
+  samples: TtftSample[];
+}
+
 export interface PanelSettings {
   autostart: boolean;
   refresh_secs: number;
   theme: ThemeKey;
   show_money: boolean;
   quota_display_mode: QuotaDisplayMode;
+  ttft_enabled: boolean;
   show_empty_tools: boolean;
   bubble_enabled: boolean;
   bubble_skin: BubbleSkin;

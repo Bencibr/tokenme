@@ -9,6 +9,7 @@ mod panel;
 mod servers;
 mod settings;
 mod pet_notice;
+mod claude_otel_config;
 mod claude_otel_ttft;
 mod ttft;
 mod snapshot;
