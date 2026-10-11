@@ -176,6 +176,9 @@ pub struct Settings {
     pub show_money: bool,
     #[serde(default)]
     pub quota_display_mode: QuotaDisplayMode,
+    /// Opt-in passive client-side TTFT collection.
+    #[serde(default)]
+    pub ttft_enabled: bool,
     /// Also list tools whose session count for the period is zero on the
     /// tools page. Default off: a tool that did nothing this window is noise,
     /// and the page's job is comparing what ran. The tools list still keeps
@@ -241,6 +244,7 @@ impl Default for Settings {
             refresh_secs: default_refresh_secs(),
             show_money: default_show_money(),
             quota_display_mode: QuotaDisplayMode::default(),
+            ttft_enabled: false,
             show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
             bubble_skin: BubbleSkin::default(),

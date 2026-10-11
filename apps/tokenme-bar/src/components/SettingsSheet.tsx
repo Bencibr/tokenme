@@ -96,6 +96,8 @@ export function SettingsSheet({
   const [petError, setPetError] = useState<string | null>(null);
   const [quotaModeBusy, setQuotaModeBusy] = useState(false);
   const [quotaModeError, setQuotaModeError] = useState(false);
+  const [ttftBusy, setTtftBusy] = useState(false);
+  const [ttftError, setTtftError] = useState(false);
 
   useEffect(() => bridge.onUpdateProgress((p) => setProgress(p.percent)), []);
 
@@ -159,6 +161,20 @@ export function SettingsSheet({
       setQuotaModeError(true);
     } finally {
       setQuotaModeBusy(false);
+    }
+  };
+
+  const setTtft = async (on: boolean) => {
+    if (ttftBusy || settings?.ttft_enabled === on) return;
+    setTtftBusy(true);
+    setTtftError(false);
+    try {
+      await bridge.setTtftEnabled(on);
+      patch((s) => ({ ...s, ttft_enabled: on }));
+    } catch {
+      setTtftError(true);
+    } finally {
+      setTtftBusy(false);
     }
   };
 
@@ -587,6 +603,8 @@ export function SettingsSheet({
         {tab === "advanced" ? (
           <>
             {switchRow(t("set.polling"), t("set.polling.hint"), settings.quota_polling, setQuotaPolling)}
+            {switchRow(t("set.ttft"), t("set.ttft.hint"), settings.ttft_enabled, (on) => void setTtft(on), ttftBusy)}
+            {ttftError ? <p className="sheet-hint" role="alert">{t("set.ttft.failed")}</p> : null}
             {/* Master off ⇒ no claim can fire at all, so the guarantee would be
                 a promise the app cannot keep; the row locks like set.pause does. */}
             {switchRow(t("set.checkin"), t("set.checkin.hint"), settings.auto_checkin, setAutoCheckin, !settings.quota_polling)}

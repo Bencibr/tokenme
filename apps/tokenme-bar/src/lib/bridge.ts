@@ -5,7 +5,7 @@ import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
 import { DEFAULT_PET_PREFERENCES } from "./petCompanion";
 import type { PetNotice, PetPreferences, PetResponse } from "./petCompanion";
-import type { Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
+import type { Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -269,6 +269,20 @@ export const bridge: Bridge = {
     await invoke<void>("set_quota_display_mode", { mode });
   },
 
+  async ttftSnapshot(): Promise<TtftSnapshot> {
+    if (!inTauri) return { revision: 0, enabled: browserSettings.ttft_enabled, claude_receiver: "disabled", claude_config_status: "disabled", samples: [] };
+    return invoke<TtftSnapshot>("get_ttft_snapshot");
+  },
+
+  async setTtftEnabled(on: boolean): Promise<void> {
+    if (!inTauri) { browserSettings.ttft_enabled = on; return; }
+    await invoke<void>("set_ttft_enabled", { on });
+  },
+
+  onTtftUpdated(handler) {
+    return inTauri ? once<TtftSnapshot>("ttft-updated", handler) : () => {};
+  },
+
   async setHostExitPause(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.host_exit_pause = on;
@@ -526,6 +540,7 @@ const browserSettings: PanelSettings = {
   theme: "dark",
   show_money: false,
   quota_display_mode: "used",
+  ttft_enabled: false,
   show_empty_tools: false,
   bubble_enabled: true,
   bubble_skin: "waterdrop",

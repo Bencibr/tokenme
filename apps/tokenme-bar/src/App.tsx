@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { MachineScope, PageKey, PanelSettings, PeriodKey, QuotaDisplayMode, Report, ServerView, TrayMode, TrayState } from "./types";
+import type { MachineScope, PageKey, PanelSettings, PeriodKey, QuotaDisplayMode, Report, ServerView, TrayMode, TrayState, TtftSnapshot } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
@@ -25,6 +25,7 @@ import { ToolsSection } from "./components/ToolsSection";
 import { BubbleApp } from "./components/BubbleApp";
 import { PetNoticeApp } from "./components/PetNoticeApp";
 import { PetPreview } from "./components/PetPreview";
+import { TtftTable } from "./components/TtftTable";
 
 /** 托盘显示模式循环顺序:仅托盘 → 仅Token → 仅花费 → 三个托盘组合。 */
 const MODES: TrayMode[] = ["tray_only", "tokens_only", "cost_only", "tray_tokens", "tray_cost", "tray_tokens_cost"];
@@ -89,6 +90,7 @@ const [page, setPage] = useState<PageKey>(() => {
   // asked them to — a frozen figure with no explanation reads as a broken panel.
   const [quotaPolling, setQuotaPolling] = useState(true);
   const [quotaDisplayMode, setQuotaDisplayMode] = useState<QuotaDisplayMode>("used");
+  const [ttftSnapshot, setTtftSnapshot] = useState<TtftSnapshot>({ revision: 0, enabled: false, claude_receiver: "disabled", claude_config_status: "disabled", samples: [] });
   // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
   // switch without touching persistence.
   const [showEmptyTools, setShowEmptyTools] = useState(() => {
@@ -101,6 +103,13 @@ const [page, setPage] = useState<PageKey>(() => {
   // configured cadence (floored at 5s, capped at 30s) — a 15s setting read
   // through a 30s tick is how "最后刷新" could look a minute stale.
   const tick = useTicker(Math.min(30_000, Math.max(5_000, refreshSecs * 1000)));
+
+  useEffect(() => {
+    let alive = true;
+    void bridge.ttftSnapshot().then((snapshot) => { if (alive) setTtftSnapshot(snapshot); }).catch(() => {});
+    const un = bridge.onTtftUpdated((snapshot) => setTtftSnapshot(snapshot));
+    return () => { alive = false; un(); };
+  }, []);
 
   useEffect(() => {
     // The native chrome (tray menu, tooltip, updater copy) cannot see the
@@ -491,6 +500,7 @@ const [page, setPage] = useState<PageKey>(() => {
                 <>
                   <Sessions rows={report.recent_sessions} now={now} />
                   <Sources sources={report.sources} allTime={report.all_time} />
+                  <TtftTable snapshot={ttftSnapshot} now={now} />
                 </>
               ) : null}
             </div>
