@@ -431,13 +431,27 @@ mod tests {
     fn server_accepts_bounded_otlp_post_and_emits_only_metric_metadata() {
         let (tx, rx) = std::sync::mpsc::channel();
         let server = start_server(0, move |samples| { let _ = tx.send(samples); }).unwrap();
-        let mut client = TcpStream::connect(server.local_addr()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let body = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"claude_code.llm_request","attributes":[{"key":"ttft_ms","value":{"intValue":"137"}},{"key":"first_content_ms","value":{"intValue":"139"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-sonnet"}},{"key":"prompt","value":{"stringValue":"private user content"}}]}]}]}]}"#;
-        write!(client, "POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
-        client.write_all(body).unwrap();
+        // The accept loop polls on a 20ms nonblocking cycle, and under the
+        // gate's load a sibling test can starve it past the backlog's patience
+        // — the kernel then RSTs the queued connection mid-read. One reconnect
+        // rides that out; a reset can only mean the POST was never processed,
+        // so the retry cannot double-deliver a sample batch.
         let mut response = String::new();
-        client.read_to_string(&mut response).unwrap();
+        for attempt in 0..3 {
+            response.clear();
+            let mut client = TcpStream::connect(server.local_addr()).unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            write!(client, "POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            client.write_all(body).unwrap();
+            match client.read_to_string(&mut response) {
+                Ok(_) => break,
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset && attempt < 2 => {
+                    thread::sleep(Duration::from_millis(250));
+                }
+                Err(e) => panic!("otlp post failed: {e}"),
+            }
+        }
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         let samples = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(samples.len(), 1);
