@@ -106,6 +106,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Codex | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | Tokens | `~/.local/share/opencode/opencode.db` |
 | Pi | Tokens | `~/.pi/agent/sessions/**` |
+| Oh My Pi | Tokens | `~/.omp/agent/sessions/**`（`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` 可改） |
 | Cline | Tokens | `~/.cline/data/sessions/**` (the desktop app writes a sub-agent's transcript inside its parent session dir and its meta into a sibling `<session>__agent_<uuid>/`; each is attributed to the session's own workspace) |
 | ZCode | Tokens | `~/.zcode/cli/db/db.sqlite` |
 | Antigravity CLI | Tokens | `~/.gemini/antigravity-cli/conversations/*.db` |

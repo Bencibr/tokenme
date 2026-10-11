@@ -154,7 +154,7 @@ Or skip the timer and move `~/tokenme-sync` yourself — Syncthing, a shared mou
 
 The quota bars come from each tool's own API or local credentials — probes that read, and never log you in. Three probes are deliberate exceptions, because those tools keep a short-lived access token on disk and the bar goes dead without a renewal: MiniMax Code (~1 h), Kimi Code (the vendor's own 15-minute token) and Cline's gateway token. Each exchanges the refresh token sitting in that same file and writes the rotated pair straight back, in that tool's own format and atomically — a rotation that is not persisted is a rotation consumed, and the app's own next refresh would then find its login dead. A failed exchange changes nothing. Every other probe reads credentials and never writes them. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
 
-Every tool below ships as a built-in adapter — 26 of them, indexed straight from the logs and databases each one writes to disk:
+Every tool below ships as a built-in adapter — 27 of them, indexed straight from the logs and databases each one writes to disk:
 
 | Tool | Live quota | Fixtures | Verified on |
 | :--- | :--- | :--- | :--- |
@@ -162,6 +162,7 @@ Every tool below ships as a built-in adapter — 26 of them, indexed straight fr
 | <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT rate windows — official backend | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Go subscription, three dollar windows | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | Account window limits — Cline account API | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour/cycle windows + session budgets — the IDE's own quota API + local cookie decryption | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | Subscription windows — vendor usage API, local encrypted snapshot fallback; daily check-in state | ✅ | macOS ✅ · Windows ⏳ |

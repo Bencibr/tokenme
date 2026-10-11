@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use usage_adapter_pi::{ColaAdapter, PiAdapter, TOOL_ID};
+use usage_adapter_pi::{ColaAdapter, OmpAdapter, PiAdapter, TOOL_ID};
 use usage_core::{
     parse_ts_ms, DateFilter, Error, FileKind, Meter, ReadCursor, ReadOutcome, SourceAdapter,
     SourceFile, TokenCounts, UsageEvent,
@@ -17,7 +17,13 @@ use usage_core::{
 /// the lock.
 static ENV: Mutex<()> = Mutex::new(());
 
-const OVERRIDES: [&str; 3] = ["PI_AGENT_DIR", "PI_CODING_AGENT_DIR", "COLA_SESSIONS_DIR"];
+const OVERRIDES: [&str; 5] = [
+    "PI_AGENT_DIR",
+    "PI_CODING_AGENT_DIR",
+    "COLA_SESSIONS_DIR",
+    "OMP_AGENT_DIR",
+    "OMP_CODING_AGENT_DIR",
+];
 
 struct EnvGuard {
     _lock: MutexGuard<'static, ()>,
@@ -58,6 +64,14 @@ impl EnvGuard {
         Self::with(&[("COLA_SESSIONS_DIR", root)])
     }
 
+
+    fn omp_sessions(root: &Path) -> Self {
+        Self::with(&[("OMP_AGENT_DIR", root)])
+    }
+
+    fn omp_config(root: &Path) -> Self {
+        Self::with(&[("OMP_CODING_AGENT_DIR", root)])
+    }
     /// The real `~/.pi/agent/sessions`, for the ignored smoke test.
     fn cleared() -> Self {
         Self::with(&[])
@@ -686,6 +700,120 @@ fn cola_transcripts_are_stamped_cola_and_map_the_same_stages() {
     assert_eq!(first.counts.output, 165.0);
     assert_eq!(first.counts.reasoning, 42.0);
     assert_eq!(first.counts.total(), 20_440.0, "== the record's own totalTokens");
+}
+
+struct OmpInstall {
+    dir: tempfile::TempDir,
+}
+
+impl OmpInstall {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".omp").join("agent").join("sessions")).unwrap();
+        OmpInstall { dir }
+    }
+
+    fn sessions(&self) -> PathBuf {
+        self.dir.path().join(".omp").join("agent").join("sessions")
+    }
+
+    fn write(&self, key: &str, name: &str, body: &str) -> SourceFile {
+        let target = self.sessions().join(key).join(name);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, body).unwrap();
+        source_file(&target)
+    }
+}
+
+const OMP_PARENT: &str = concat!(
+    "{\"type\":\"session\",\"version\":3,\"id\":\"01a12963-75c1-73f7-a224-8fada7ae0114\",\"timestamp\":\"2026-10-11T05:15:46.497Z\",\"cwd\":\"/Users/lscho/Movies/project/huice\"}\n",
+    "{\"type\":\"message\",\"id\":\"9e43ad62\",\"parentId\":\"91e96656\",\"timestamp\":\"2026-10-11T05:15:51.822Z\",\"message\":{\"role\":\"assistant\",\"model\":\"google-antigravity/gemini-3.8-flash\",\"content\":[],\"usage\":{\"input\":7759,\"output\":328,\"cacheRead\":0,\"cacheWrite\":0,\"reasoning\":301,\"totalTokens\":8087,\"cost\":{\"input\":0.0058,\"output\":0.0012,\"total\":0.0070}},\"stopReason\":\"tool-calls\"}}\n",
+    "{\"type\":\"message\",\"id\":\"01359536\",\"parentId\":\"059688b2\",\"timestamp\":\"2026-10-11T05:15:46.705Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"describe skill\"}]}}\n",
+    "{\"type\":\"message\",\"id\":\"993d85a4\",\"parentId\":\"c893b3da\",\"timestamp\":\"2026-10-11T05:16:07.975Z\",\"message\":{\"role\":\"assistant\",\"model\":\"google-antigravity/gemini-3.8-flash\",\"content\":[],\"usage\":{\"input\":2000,\"output\":100,\"cacheRead\":500,\"cacheWrite\":0,\"totalTokens\":2600,\"cost\":{}},\"stopReason\":\"stop\"}}\n",
+);
+
+const OMP_SUBAGENT: &str = concat!(
+    "{\"type\":\"session\",\"version\":3,\"id\":\"01a05d04-8727-76cb-a76c-3099054f184b\",\"timestamp\":\"2026-09-01T12:49:32.967Z\",\"cwd\":\"/Users/lscho/www/fmk\"}\n",
+    "{\"type\":\"message\",\"id\":\"1e4e7485\",\"timestamp\":\"2026-09-01T12:49:35.000Z\",\"message\":{\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"usage\":{\"input\":3500,\"output\":150,\"cacheRead\":1000,\"cacheWrite\":256,\"reasoning\":50,\"totalTokens\":4906,\"cost\":{}},\"stopReason\":\"stop\"}}\n",
+);
+
+#[test]
+fn omp_is_detected_from_its_own_sessions_root() {
+    let install = OmpInstall::new();
+    install.write(
+        "-Movies-project-huice",
+        "2026-10-11T05-15-46-497Z_01a12963-75c1-73f7-a224-8fada7ae0114.jsonl",
+        OMP_PARENT,
+    );
+    install.write(
+        "-www-fmk/2026-09-01T12-37-30-508Z_01a05cf9-810c-73ca-8c89-5698e0534433",
+        "WechatSdk.jsonl",
+        OMP_SUBAGENT,
+    );
+
+    let other = tempfile::tempdir().unwrap();
+    let sessions = install.sessions();
+    let _env = EnvGuard::with(&[
+        ("OMP_AGENT_DIR", sessions.as_path()),
+        ("PI_AGENT_DIR", other.path()),
+        ("COLA_SESSIONS_DIR", other.path()),
+    ]);
+    let detected = OmpAdapter.probe().expect("omp detected");
+    assert_eq!(detected.id, "omp");
+    assert_eq!(detected.display, "Oh My Pi");
+    assert_eq!(detected.roots, vec![install.sessions()]);
+    assert_eq!(detected.hint.as_deref(), Some("session format v3"));
+
+    let files = OmpAdapter.discover(&DateFilter::default());
+    assert_eq!(files.len(), 2, "both root session and subagent session");
+    assert!(files.iter().all(|f| f.kind == FileKind::Jsonl));
+    assert!(
+        PiAdapter.discover(&DateFilter::default()).is_empty(),
+        "Pi reads its own root, never Omp's"
+    );
+    assert!(
+        ColaAdapter.discover(&DateFilter::default()).is_empty(),
+        "Cola reads its own root, never Omp's"
+    );
+}
+
+#[test]
+fn omp_transcripts_are_stamped_omp_and_map_the_same_stages() {
+    let install = OmpInstall::new();
+    let parent = install.write(
+        "-Movies-project-huice",
+        "2026-10-11T05-15-46-497Z_01a12963-75c1-73f7-a224-8fada7ae0114.jsonl",
+        OMP_PARENT,
+    );
+    let subagent = install.write(
+        "-www-fmk/2026-09-01T12-37-30-508Z_01a05cf9-810c-73ca-8c89-5698e0534433",
+        "WechatSdk.jsonl",
+        OMP_SUBAGENT,
+    );
+    let _env = EnvGuard::omp_sessions(&install.sessions());
+
+    let mut events = Vec::new();
+    for file in [&parent, &subagent] {
+        let out = OmpAdapter.read(file, ReadCursor(0)).expect("fixture read");
+        assert_eq!(out.cursor.0, file.size, "every line here is complete");
+        events.extend(out.events);
+    }
+
+    assert_eq!(events.len(), 3, "2 parent billed turns + 1 subagent billed turn");
+    assert!(
+        events.iter().all(|e| e.tool == "omp"),
+        "spend must be billed as omp"
+    );
+    let first = &events[0];
+    assert_eq!(first.session, "01a12963-75c1-73f7-a224-8fada7ae0114");
+    assert_eq!(
+        first.project.as_deref(),
+        Some("/Users/lscho/Movies/project/huice")
+    );
+    assert_eq!(first.model.as_deref(), Some("google-antigravity/gemini-3.8-flash"));
+    assert_eq!(first.counts.input, 7759.0);
+    assert_eq!(first.counts.output, 328.0);
+    assert_eq!(first.counts.total(), 8087.0);
 }
 
 #[test]
