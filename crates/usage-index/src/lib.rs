@@ -610,6 +610,50 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot re-key of the Trae events: the adapter stamped every event's
+        // session with the turn id, and the panel folds 会话 by that key — one
+        // chat conversation read as N sessions, each one turn (3 messages of a
+        // single Trae CN chat showed as "3 sessions" on 2026-10-11; the
+        // international store carries the same shape, 2 turns / 1 session).
+        // The rows must go, not update: the turn→session mapping lives in the
+        // encrypted store, and the re-read re-emits under the SAME dedupe keys,
+        // which INSERT OR IGNORE would keep ignoring while the old rows stand.
+        // `file_state` goes with them — an unchanged store skips its read, and
+        // Trae idle for days would leave the tools empty that whole time. The
+        // rollup rows for the two tools refold when the re-read lands (the dsh
+        // precedent); merged rows are another machine's truth and stay
+        // (`source NOT LIKE 'linux:%'`, the antigravity rule).
+        const REPAIR_TRAE_TURN_SESSION: &str = "repair:trae-turn-session-1";
+        let trae_key: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_TRAE_TURN_SESSION],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if trae_key.is_none() {
+            const TRAE_LOCAL_ROWS: &str = "(SELECT id FROM event \
+                 WHERE tool IN ('trae', 'trae_cn') AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({TRAE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({TRAE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({TRAE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute("DELETE FROM file_state WHERE tool IN ('trae', 'trae_cn')", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM event_rollup WHERE tool IN ('trae', 'trae_cn') AND origin = ''",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_TRAE_TURN_SESSION],
+            )
+            .map_err(sql_err)?;
+        }
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);
