@@ -56,6 +56,22 @@ pub fn error(msg: &str) {
     write_line("error", msg);
 }
 
+/// The check-in ledger, one line per attempt in its own file (`checkin.log`
+/// beside `panel.log`, same rotation rules). Panel log lines drown between
+/// ingest and poll chatter; a check-in history is per-day bookkeeping and
+/// wants to be findable in one place.
+pub fn checkin(msg: &str) {
+    let Some(base) = PATH.get() else { return };
+    let path = base.with_file_name("checkin.log");
+    let _guard = LOCK.lock();
+    let now = Local::now();
+    rotate(&path, &now);
+    let line = format!("{} {msg}\n", now.format("%Y-%m-%d %H:%M:%S"));
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 fn write_line(level: &str, msg: &str) {
     let Some(path) = PATH.get() else { return };
     let _guard = LOCK.lock();

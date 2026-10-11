@@ -9,6 +9,8 @@ mod panel;
 mod servers;
 mod settings;
 mod pet_notice;
+mod claude_otel_ttft;
+mod ttft;
 mod snapshot;
 mod tray;
 mod updater;
@@ -61,6 +63,8 @@ pub fn run() {
             commands::set_theme,
             commands::set_show_money,
             commands::set_quota_display_mode,
+            commands::get_ttft_snapshot,
+            commands::set_ttft_enabled,
             commands::set_show_empty_tools,
             commands::set_report_scope,
             servers::commands::get_servers,
@@ -115,8 +119,17 @@ pub fn run() {
 
             logging::init();
             notify::init(app.handle());
+            // The check-in ledger rides the panel's own log dir; the probes
+            // themselves call through this hook, so usage-quota stays
+            // host-agnostic.
+            usage_quota::set_checkin_log(std::sync::Arc::new(|msg| crate::logging::checkin(msg)));
 
             let handle = app.handle().clone();
+            let ttft_dir = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("tokenme").join("ttft.json");
+            let ttft_state = ttft::TtftState::new(handle.clone(), ttft_dir, handle.state::<engine::Shared>().settings().ttft_enabled);
+            ttft_state.start();
+            app.manage(ttft_state);
             tray::build(&handle)?;
             panel::configure(&handle);
             // The panel is created hidden (visible: false in tauri.conf.json)

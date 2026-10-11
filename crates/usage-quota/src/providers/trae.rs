@@ -626,18 +626,27 @@ fn cn_daily_checkin(login: &Login, force: bool) -> Option<TraeCheckinOutcome> {
         // 0 = claimed; 9095 = already checked in earlier today by the IDE or
         // the dashboard. Both close the day.
         Some((0, points)) => {
+            crate::log_checkin(&format!("trae: {today} claimed +{points:.0} points (auto)"));
             state.last_ok_day = today.clone();
             state.last_credits = points;
             outcome.done_today = true;
         }
         Some((9095, _)) => {
+            crate::log_checkin(&format!("trae: {today} already claimed (9095)"));
             state.last_ok_day = today.clone();
             outcome.done_today = true;
             outcome.was_already = true;
         }
         // 9074 queue/rate-limit, 1001/401/403 token trouble, anything else:
         // the day is spent either way — retrying is what extends the queue.
-        _ => {}
+        other => {
+            let (code, points) = other.map_or((None, None), |(code, points)| (Some(code), Some(points)));
+            crate::log_checkin(&format!(
+                "trae: {today} claim failed ({}{}) — will retry",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "no answer".into()),
+                points.map(|p| format!(" points={p:.0}")).unwrap_or_default()
+            ));
+        }
     }
     save_checkin_state(&path, &state);
     Some(outcome)

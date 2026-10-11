@@ -96,6 +96,14 @@ impl QuotaProbe for QoderQuota {
         "qoder"
     }
 
+    /// The daily check-in rides this probe and must run even while the host
+    /// gate pauses the live read: the claim is a vendor-side state change, not
+    /// a number to freeze (2026-10-11: Qoder closed all morning, the day's
+    /// check-in never ran).
+    fn daily_task(&self) -> bool {
+        true
+    }
+
     fn fetch(&self) -> Vec<QuotaSample> {
         // The desktop app's own Chromium profile (`com.qoder.app.*`) is the
         // live install; its `auth.v1.dat` is read through each platform's
@@ -1078,6 +1086,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     // state files have `confirmed=false`, so a stale zero-credit marker is
     // revalidated against the vendor instead of hiding a still-claimable row.
     if cached_checkin_is_confirmed(&state, &today, force) {
+        crate::log_checkin(&format!("qoder: {today} already claimed (cached, +{:.0}){}", state.last_credits, if force { " — forced re-check" } else { "" }));
         return Some(QoderCheckinOutcome {
             done_today: true,
             was_already: false,
@@ -1130,6 +1139,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         }
         for (id, amount) in claimable_campaigns(&body) {
             if !may_claim {
+                crate::log_checkin(&format!("qoder: {today} claimable but before 10:00 — waiting"));
                 outcome.too_early = true; // claimable but too early: day open, button greys
                 break 'bases;
             }
@@ -1155,6 +1165,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
                     state.last_ok_day = today.clone();
                     state.last_credits = credits;
                     state.confirmed = true;
+                    crate::log_checkin(&format!("qoder: {today} claimed +{credits:.0} credits (auto)"));
                     outcome = QoderCheckinOutcome {
                         done_today: true,
                         was_already: false,
@@ -1171,6 +1182,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
                 // stop — retrying a gated claim is what probes into a rate
                 // limit.
                 Some((false, _, true)) => {
+                    crate::log_checkin(&format!("qoder: {today} claim refused by the device gate (SAME_PERSON) — claim in the client"));
                     state.last_gated_day = today.clone();
                     outcome.claim_gated = true;
                     break 'bases;
@@ -1187,6 +1199,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         // while the client still showed the benefit unclaimed. Only rows
         // whose window started *today* may speak for today at all.
         if today_benefits_all_claimed(&body, day_open) {
+            crate::log_checkin(&format!("qoder: {today} already claimed (the row is CLAIMED)"));
             state.last_attempt_day = today.clone();
             state.last_ok_day = today.clone();
             state.last_credits = 0.0;
@@ -1205,8 +1218,10 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     }
     if answered && !outcome.done_today && !outcome.too_early && !outcome.claim_gated {
         if attempted {
+            crate::log_checkin(&format!("qoder: {today} claim failed (the POST was refused) — will retry"));
             outcome.claim_failed = true; // we asked and were refused for other reasons
         } else {
+            crate::log_checkin(&format!("qoder: {today} no claimable campaign — day stays open"));
             outcome.no_campaign = true; // the server spoke and had nothing to claim
         }
     }
@@ -1215,6 +1230,9 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         state.last_ok_day.clear();
         state.last_credits = 0.0;
         state.confirmed = false;
+    }
+    if !answered {
+        crate::log_checkin(&format!("qoder: {today} check-in skipped — the campaigns endpoint answered nothing"));
     }
     save_checkin_state(&path, &state);
     Some(outcome)
