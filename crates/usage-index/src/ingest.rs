@@ -15,8 +15,10 @@ use usage_core::{
 use crate::{call_kind_str, meter_str, now_ms, sql_err, Index, INSERT_EVENT, ORIGIN_SQL};
 
 /// Nothing older than this stays in the index, which is also how far `rebuild`
-/// re-reads. `report`'s heatmap spans 371 days, so 400 keeps it full.
-pub const RETENTION_DAYS: i64 = 400;
+/// re-reads. `report`'s heatmap spans 742 days (two years — the year view's
+/// last-year page), so 750 keeps it full; pruning shorter than that would
+/// silently empty the 去年 page one day at a time.
+pub const RETENTION_DAYS: i64 = 750;
 
 const RETENTION_MS: i64 = RETENTION_DAYS * 86_400_000;
 
