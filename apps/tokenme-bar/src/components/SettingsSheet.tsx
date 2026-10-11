@@ -42,7 +42,7 @@ const TABS: { key: Tab; label: () => string }[] = [
 ];
 type List = "probe" | "mute";
 
-/** The engine's own name when it has one (CatPaw, not the frontend's Catpaw);
+/** The engine's own name when it has one (妙手, not the frontend's fallback);
  *  the probes with no log adapter — copilot, gemini — fall back to the map. */
 function nameOf(p: ProbeTool, displays: Record<string, string>): string {
   return displays[p.id] ?? toolDisplay(p.id);

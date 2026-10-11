@@ -173,7 +173,7 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 | <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft 积分 — plans-usage 计费接口；用量取自 IDE history | ✅ | Windows ✅ |
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 — 云端点数接口 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | 积分余额 — 积分门户接口 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手**（原 CatPaw）| 积分余额 — 积分门户接口；新版本地凭据解密 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek 账户余额 — 官方 user/balance + 桌面端凭据文件 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
 | **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |

@@ -173,7 +173,7 @@ Every tool below ships as a built-in adapter — 25 of them, indexed straight fr
 | <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft credits — the plans-usage billing meter; usage from the IDE history | ✅ | Windows ✅ |
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points — cloud points API | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | Points balance — points portal API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手** (formerly CatPaw) | Points balance — points portal API | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance — official user/balance + desktop credential file | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
 | **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |

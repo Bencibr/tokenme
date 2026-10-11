@@ -51,6 +51,9 @@ const DISPLAY: Record<string, string> = {
   workbuddy_cn: "WorkBuddy",
   crow5: "Crow5",
   mimocode: "Mimocode",
+  // 妙手 — the product's own current name (the engine's displays map wins
+  // when a report is loaded; this is the pre-report fallback).
+  catpaw: "妙手",
   dsh: "DSH",
   cola: "Cola",
   trae: "Trae",

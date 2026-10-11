@@ -31,7 +31,8 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("cline", &["Cline"]),
     ("zcode", &["ZCode"]),
     ("qoder", &["Qoder"]),
-    ("catpaw", &["CatPawAI"]),
+    // 妙手 is the renamed CatPaw; both bundle names stay in the hunt.
+    ("catpaw", &["妙手", "CatPawAI"]),
     ("dsh", &["DSH Desktop"]),
     ("funide", &[]),
     ("hermes", &[]),
@@ -153,7 +154,7 @@ fn icons_from(dirs: &[PathBuf], wanted: &[(&str, &[&str])]) -> BTreeMap<String, 
 /// `.icns`, so the answer never depends on directory iteration order.
 fn icns_bytes(bundle: &Path) -> Option<Vec<u8>> {
     let res = bundle.join("Contents").join("Resources");
-    for name in ["AppIcon.icns", "icon.icns", "electron.icns", "CatPawAI.icns"] {
+    for name in ["AppIcon.icns", "icon.icns", "electron.icns", "妙手.icns", "CatPawAI.icns"] {
         let p = res.join(name);
         if p.is_file() {
             return std::fs::read(p).ok();

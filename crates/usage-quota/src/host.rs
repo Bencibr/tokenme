@@ -25,7 +25,9 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("workbuddy", &["WorkBuddy AI", "WorkBuddyAI"]),
     ("workbuddy_cn", &["WorkBuddy"]),
     ("codebuddy", &["CodeBuddy", "CodeBuddy CN"]),
-    ("catpaw", &["CatPawAI", "CatPaw"]),
+    // 妙手 is the renamed CatPaw: the process carries the product name itself
+    // (妙手.exe on this machine), the pre-rename names stay for old installs.
+    ("catpaw", &["妙手", "CatPawAI", "CatPaw"]),
     ("cline", &["Cline", "cline", "cline-app", "code-sidecar"]),
     ("codex", &["codex", "Codex"]),
     ("opencode", &["opencode", "OpenCode"]),
