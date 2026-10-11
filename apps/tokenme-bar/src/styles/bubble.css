@@ -435,11 +435,13 @@
   top: calc(var(--pet-layout-size) + 4px);
   left: 50%;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: baseline;
   gap: 4px;
   padding: 3px 7px;
   width: max-content;
-  max-width: 128px;
+  max-width: 176px;
   border: 1px solid rgba(255, 255, 255, .2);
   border-radius: 8px;
   background: rgba(22, 30, 27, .94);
@@ -452,6 +454,12 @@
 }
 
 .pet-token-badge strong { font-size: 12px; line-height: 16px; }
+.pet-badge-summary {
+  flex-basis: 100%;
+  text-align: center;
+  letter-spacing: .01em;
+  white-space: pre-line;
+}
 .pet-token-badge small { font-size: 8px; line-height: 12px; opacity: .8; }
 .pet-skin[data-motion="happy"][data-dock="none"] .pet-token-badge {
   opacity: 1;
