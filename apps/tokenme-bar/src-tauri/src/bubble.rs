@@ -229,7 +229,21 @@ pub fn contains_point(app: &AppHandle, x: i32, y: i32) -> bool {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// macOS: the pet's window frame, in screen points, when it is on screen.
+/// The click-away/focus-dismissal paths use this to treat a click on the pet
+/// as the pet's own business rather than as a click elsewhere.
+#[cfg(target_os = "macos")]
+pub fn visible_frame(app: &tauri::AppHandle) -> Option<(f64, f64, f64, f64)> {
+    let window = app.get_webview_window(LABEL)?;
+    if !window.is_visible().unwrap_or(false) {
+        return None;
+    }
+    let pos = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    Some((pos.x as f64, pos.y as f64, size.width as f64, size.height as f64))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn contains_point(_app: &tauri::AppHandle, _x: i32, _y: i32) -> bool {
     false
 }
