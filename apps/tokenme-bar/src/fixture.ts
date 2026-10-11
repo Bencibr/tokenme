@@ -22,8 +22,9 @@ import type {
  */
 
 const DAY = 86_400_000;
-/** `usage_core::report::HEATMAP_DAYS` — a whole number of weeks ending today. */
-const HEATMAP_DAYS = 371;
+/** `usage_core::report::HEATMAP_DAYS` — a whole number of weeks ending today,
+ * two years deep so the year view's last-year page has something to show. */
+const HEATMAP_DAYS = 742;
 
 function counts(
   input: number,
@@ -252,12 +253,17 @@ const RECENT_DAYS: Array<[number, number, number]> = [
   [2_146_000, 0.79, 44], [0, 0, 0], [1_328_000, 0.44, 27], [12_380_000, 4.21, 331],
 ];
 
-/** The back catalogue: busier usage as the tool became the daily driver, then a gap before install. */
+/** The back catalogue, newest outwards: busier usage as the tool became the
+ * daily driver, a quiet spell, an earlier lighter era (so the year view's
+ * last-year page has bars to page to), then nothing at all. The days must sum
+ * to HEATMAP_DAYS - RECENT_DAYS.length. */
 const HISTORY_BANDS: Array<{ days: number; tokens: number; rate: number; perReq: number }> = [
   { days: 84, tokens: 2_640_000, rate: 0.28, perReq: 26_400 },
   { days: 84, tokens: 1_180_000, rate: 0.21, perReq: 21_000 },
   { days: 84, tokens: 420_000, rate: 0.17, perReq: 17_400 },
-  { days: 91, tokens: 0, rate: 0, perReq: 1 },
+  { days: 140, tokens: 0, rate: 0, perReq: 1 },
+  { days: 180, tokens: 900_000, rate: 0.19, perReq: 22_000 },
+  { days: 142, tokens: 0, rate: 0, perReq: 1 },
 ];
 
 /** Deterministic jitter, so the fixture looks identical on every reload. */
@@ -326,6 +332,23 @@ function buildHourly(now: Date): HourCell[] {
       total_tokens,
       cost: round2((total_tokens / 1_000_000) * 0.29),
       requests: Math.max(1, Math.round(k * 9)),
+    };
+  });
+}
+
+/** Yesterday's shape: a fuller day than today's running total, so the
+ *  swipe-back view reads as real history with its own scale. */
+const HOUR_SHAPE_PREV = [
+  0, 0.2, 0.1, 0, 0, 0, 0.2, 1.1, 2.8, 4.4, 5.6, 3.9, 1.8, 2.6, 4.2, 5.4, 3.6, 2.1, 1.2, 1.8, 4.6, 3.2, 1.4, 0.5,
+];
+
+function buildHourlyPrev(): HourCell[] {
+  return HOUR_SHAPE_PREV.map((k, i) => {
+    const total_tokens = Math.round(k * 96_000 + (i % 4) * 2_400);
+    return {
+      total_tokens,
+      cost: round2((total_tokens / 1_000_000) * 0.29),
+      requests: Math.max(k > 0 ? 1 : 0, Math.round(k * 8)),
     };
   });
 }
@@ -598,6 +621,11 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     ]),
   });
 
+  const hourly = buildHourly(now);
+  const quarter_hourly = Array.from({ length: 96 }, (_, i) => {
+    const h = hourly[Math.floor(i / 4)];
+    return { total_tokens: h.total_tokens / 4, cost: h.cost / 4, requests: Math.round(h.requests / 4) };
+  });
   return {
     generated_at_ms: nowMs2,
     utc_offset: fmtOffset(now),
@@ -606,7 +634,9 @@ export function makeFixtureReport(nowMs = Date.now()): Report {
     month,
     year,
     heatmap: buildHeatmap(localMidnight(now)),
-    hourly: buildHourly(now),
+    hourly,
+    hourly_prev: buildHourlyPrev(),
+    quarter_hourly,
     quotas: pinnedQuotaWait() ? [] : quotasOf(nowMs2),
     quotas_pending: pinnedQuotaWait(),
     sources: SOURCES,

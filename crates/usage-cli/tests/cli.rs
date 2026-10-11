@@ -187,7 +187,7 @@ fn report_json_is_the_whole_usage_core_report() {
     for key in ["day", "week", "month", "heatmap", "quotas", "sources", "pricing", "recent_sessions", "all_time"] {
         assert!(value.get(key).is_some(), "Report.{key} missing");
     }
-    assert_eq!(value["heatmap"].as_array().map(Vec::len), Some(371));
+    assert_eq!(value["heatmap"].as_array().map(Vec::len), Some(742));
     assert_eq!(value["day"]["summary"]["requests"], 0);
     remove_db(&db);
 }

@@ -484,7 +484,7 @@ const [page, setPage] = useState<PageKey>(() => {
             <div className="page" key={page}>
               {page === "overview" ? (
                 <>
-                  <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} period={period} />
+                  <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} hoursPrev={report.hourly_prev} period={period} />
                   <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} />
                 </>
               ) : null}

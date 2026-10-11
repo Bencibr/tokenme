@@ -94,6 +94,10 @@ export function BubbleApp() {
   // Set while a drag is running (whichever side of the bridge drives it) so
   // hover timers and expand can never fight the drag loop for the window.
   const dragging = useRef(false);
+  // mac: the native drag session arms on the first real move, never on the
+  // press — a press that ran startDragging raced the webview's own pointerup
+  // and the click contract ran twice (panel flashes open, then closes).
+  const macDragStarted = useRef(false);
   // The pet owns its layout size. Keep the latest measured geometry in refs so
   // native hover/drag callbacks never use a stale render value.
   const geometry = useRef<BubbleGeometry>(DEFAULT_GEOMETRY);
@@ -526,34 +530,20 @@ export function BubbleApp() {
     clearLeaveTimer();
     moved.current = false;
     press.current = { x: event.clientX, y: event.clientY };
+    if (isMac) {
+      // mac: the press arms nothing. The click contract (open the panel)
+      // runs ONCE, from pointerup; the drag session arms on the first real
+      // move in onPointerMove. Running the contract from both the press
+      // continuation and the release is what toggled twice per click and
+      // flashed the panel (2026-10-11). The pet keeps its skin — no expand
+      // on the press, whose collapse read as a state flicker.
+      dragging.current = false;
+      macDragStarted.current = false;
+      return;
+    }
     dragging.current = true;
     setPetDragging(true);
     await expand();
-    if (isMac) {
-      // macOS owns the drag natively: performWindowDrag takes the pointer at
-      // the event and returns on release, so the webview never sees the move —
-      // the drop reads it off the window's own position instead.
-      const window = getCurrentWindow();
-      const before = await window.outerPosition().catch(() => null);
-      try {
-        await window.startDragging();
-      } catch {
-        dragging.current = false;
-        setPetDragging(false);
-        return;
-      }
-      dragging.current = false;
-      setPetDragging(false);
-      const after = await window.outerPosition().catch(() => null);
-      const wasMoved = !!before && !!after && (before.x !== after.x || before.y !== after.y);
-      if (wasMoved) {
-        setTimeout(() => void dockToEdge(true).catch(reportGeometryError), 80);
-      } else {
-        void bridge.showPanel();
-        setExpanded(false);
-      }
-      return;
-    }
     try {
       // Rust owns the move: the native startDragging loop refuses to drag a
       // non-activating window. Resolves at once; bubble-drag-ended reports the
@@ -567,12 +557,39 @@ export function BubbleApp() {
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const start = press.current;
-    if (start && (Math.abs(event.clientX - start.x) > 4 || Math.abs(event.clientY - start.y) > 4)) {
+    if (!start) return;
+    if (Math.abs(event.clientX - start.x) > 6 || Math.abs(event.clientY - start.y) > 6) {
       moved.current = true;
+      if (isMac && !macDragStarted.current) {
+        // The move is real: hand the pointer to the native drag session. The
+        // webview sees no further pointer events until release, and mac has
+        // no edge dock to return to (scheduleDock bows out on mac).
+        macDragStarted.current = true;
+        dragging.current = true;
+        setPetDragging(true);
+        void getCurrentWindow().startDragging().catch(() => {
+          dragging.current = false;
+          setPetDragging(false);
+        });
+      }
     }
   };
 
   const onPointerUp = () => {
+    if (isMac) {
+      // The single click contract on mac: a press that never became a drag
+      // toggles the panel — once, here, and nowhere else.
+      const dragged = macDragStarted.current;
+      macDragStarted.current = false;
+      dragging.current = false;
+      setPetDragging(false);
+      press.current = null;
+      if (!dragged) {
+        void bridge.showPanel();
+        setExpanded(false);
+      }
+      return;
+    }
     if (!dragging.current) return;
     const wasMoved = moved.current;
     dragging.current = false;

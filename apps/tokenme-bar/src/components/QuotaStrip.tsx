@@ -304,19 +304,24 @@ export function QuotaStrip({
     }
   };
 
+  if (pending) {
+    // 探测未跑（boot 的首次发布故意跳过配额）。此时 quotas 里可能已经躺着
+    // 日志来源的行——那是折叠顺手带出的副产品，不是这一轮的答案：一条窗口
+    // 刚开时记下的日志样本会顶着实时倒计时冒充当前用量（2026-10-11 实测：
+    // 启动首屏 Codex 1.0%，十几秒后探测落地是 30%），"1 个窗口 · 1 个工具"
+    // 的清单头也会把半张图读成全图。pending 的承诺是"这份清单不是定稿"，
+    // 所以加载态优先于行数判断。
+    return (
+      // fill: 探测没跑完时这块替整列配额占位，转圈落在那列行的中间。
+      <Section label={t("quota.section")} fill>
+        <div className="quota-loading">
+          <Loading size={22} label={t("quota.pending")} />
+        </div>
+      </Section>
+    );
+  }
   if (live.length === 0) {
-    // 探测未跑（boot 的首次发布故意跳过配额）：给一个可见的等待，
-    // 而不是让配额区块无声消失。pending 为假且为空 = 真没有配额。
-    if (pending) {
-      return (
-        // fill: 探测没跑完时这块替整列配额占位，转圈落在那列行的中间。
-        <Section label={t("quota.section")} fill>
-          <div className="quota-loading">
-            <Loading size={22} label={t("quota.pending")} />
-          </div>
-        </Section>
-      );
-    }
+    // pending 为假且为空 = 真没有配额，而不是让配额区块无声消失。
     return null;
   }
 

@@ -1,7 +1,8 @@
 mod common;
 
-/// The heatmap in `usage-core::report` spans 371 days; an index that forgets
-/// more than that would show holes at the left edge, forever.
+/// The heatmap in `usage-core::report` spans two years (742 days — the year
+/// view's last-year page); an index that forgets more than that would show
+/// holes at the left edge, forever.
 const _: () = assert!(usage_index::RETENTION_DAYS > usage_core::report::HEATMAP_DAYS);
 
 use common::{adapters_for, append_fixture, count_of, replace_file, staged, Mock};
@@ -288,7 +289,7 @@ fn an_on_disk_index_reopens_with_its_events() {
 
 #[test]
 fn retention_and_default_path_look_sane() {
-    assert_eq!(RETENTION_DAYS, 400);
+    assert_eq!(RETENTION_DAYS, 750);
     if let Some(path) = Index::default_path() {
         assert!(path.ends_with("tokenme/index.db") || path.ends_with("tokenme\\index.db"), "{path:?}");
     }

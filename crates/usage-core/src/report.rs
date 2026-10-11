@@ -14,11 +14,22 @@ use crate::pricing::{Price, PricingMap, PricingMeta};
 use crate::types::{CallKind, Meter, QuotaSample, TokenCounts, UsageEvent};
 
 /// Cells ending today; a whole number of weeks so the grid needs no padding.
-pub const HEATMAP_DAYS: i64 = 371;
+/// Two years (106 weeks): the year view's swipe-back page is *last* year, and
+/// the retention window below must keep those days alive for it to read.
+pub const HEATMAP_DAYS: i64 = 742;
 
-/// How long a log-derived quota row that advertises no reset date stays on the
-/// panel after its last mention.
+/// A no-reset log row's freshness horizon: a meter nobody has mentioned for a
+/// day — a probe that changed its labels, a session long closed — is not on
+/// the panel. Open-ended meters (credit packs, MCP counters) update slowly, so
+/// this stays a day even though windowed rows are held to [`LOG_SAMPLE_MAX_AGE_MS`].
 pub const LOG_ROW_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// A log sample older than this is not this run's answer, whatever its window
+/// claims — the same hour the restore gate (`snapshot::accept`) allows a whole
+/// snapshot. Within a window `used_percent` only grows, so an old log sample
+/// understates usage while wearing a live countdown; the probe is the designed
+/// freshness backstop, the log row its fallback, not a substitute.
+pub const LOG_SAMPLE_MAX_AGE_MS: i64 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
@@ -75,8 +86,8 @@ pub struct Window {
     pub start_ms: i64,
     pub end_ms: i64,
     pub summary: Summary,
-    /// Previous period of equal length (today up to now vs yesterday to the
-    /// same clock time), so a partial period is never compared to a full one.
+    /// Previous complete calendar period: yesterday, last week, last month,
+    /// or last year, depending on this window.
     pub prev: Summary,
     pub delta_cost_pct: f64,
     pub delta_tokens_pct: f64,
@@ -206,6 +217,15 @@ pub struct Report {
     /// without the field read as empty; the panel then keeps the heatmap view.
     #[serde(default)]
     pub hourly: Vec<HourCell>,
+    /// Yesterday bucketed by local hour, 24 slots in index order — the day
+    /// chart's one-day swipe-back. No further history: the heatmap covers
+    /// older days. Older snapshots without the field read as empty and the
+    /// panel then hides the swipe.
+    #[serde(default)]
+    pub hourly_prev: Vec<HourCell>,
+    /// Today bucketed into local 15-minute slots, 96 slots in index order.
+    #[serde(default)]
+    pub quarter_hourly: Vec<HourCell>,
     pub quotas: Vec<QuotaView>,
     /// True while the quota probes have not run yet: the boot publish skips
     /// them on purpose and the post-scan publish carries the numbers. The
@@ -387,49 +407,47 @@ struct Span {
     label: String,
 }
 
-/// Calendar-aligned span plus an equally long slice immediately before it.
+/// Calendar-aligned span plus the preceding complete calendar period.
 fn spans(now_ms: i64) -> (Span, Span, Span, Span) {
     let now = to_local(now_ms).unwrap_or_else(Local::now);
     let today = now.date_naive();
 
     let day_start = start_of_day_ms(today);
-    let elapsed = (now_ms - day_start).max(1);
     let day = Span {
         start_ms: day_start,
         end_ms: now_ms,
-        prev_start_ms: day_start - elapsed,
+        prev_start_ms: start_of_day_ms(today - chrono::Duration::days(1)),
         key: today.format("%Y-%m-%d").to_string(),
         label: today.format("%m-%d").to_string(),
     };
 
     let this_monday = week_start(today);
     let week_start_ms = start_of_day_ms(this_monday);
-    let week_elapsed = (now_ms - week_start_ms).max(1);
     let week = Span {
         start_ms: week_start_ms,
         end_ms: now_ms,
-        prev_start_ms: week_start_ms - week_elapsed,
+        prev_start_ms: start_of_day_ms(this_monday - chrono::Duration::days(7)),
         key: iso_week_key(today),
         label: format!("{} ~ {}", this_monday.format("%m-%d"), today.format("%m-%d")),
     };
 
     let month_first = today.with_day(1).unwrap_or(today);
     let month_start_ms = start_of_day_ms(month_first);
-    let month_elapsed = (now_ms - month_start_ms).max(1);
+    let prev_month_first = (month_first - chrono::Duration::days(1)).with_day(1).unwrap_or(month_first);
     let month = Span {
         start_ms: month_start_ms,
         end_ms: now_ms,
-        prev_start_ms: month_start_ms - month_elapsed,
+        prev_start_ms: start_of_day_ms(prev_month_first),
         key: month_first.format("%Y-%m").to_string(),
         label: month_first.format("%Y-%m").to_string(),
     };
     let year_first = today.with_month(1).and_then(|d| d.with_day(1)).unwrap_or(today);
     let year_start_ms = start_of_day_ms(year_first);
-    let year_elapsed = (now_ms - year_start_ms).max(1);
+    let prev_year_first = (year_first - chrono::Duration::days(1)).with_month(1).and_then(|d| d.with_day(1)).unwrap_or(year_first);
     let year = Span {
         start_ms: year_start_ms,
         end_ms: now_ms,
-        prev_start_ms: year_start_ms - year_elapsed,
+        prev_start_ms: start_of_day_ms(prev_year_first),
         key: year_first.format("%Y").to_string(),
         label: year_first.format("%Y").to_string(),
     };
@@ -737,10 +755,19 @@ fn merge_quotas<'a>(
     // A log row that advertises no reset at all cannot be judged that way, so it
     // is judged by age instead: a meter nobody has mentioned for a day — a probe
     // that changed its labels, a session long closed — is not on the panel.
+    // A windowed log row is held to a tighter age bound ([`LOG_SAMPLE_MAX_AGE_MS`]):
+    // within a window the percentage only grows, so an old sample understates
+    // usage while wearing a live countdown. Arm order is load-bearing — the
+    // no-reset branch must stay above the windowed one, or the day horizon is
+    // silently shadowed (E22 in the golden fixture is the canary for exactly
+    // that regression).
     let mut quotas: Vec<QuotaView> = quotas
         .into_values()
         .filter(|q| match (q.resets_at_ms, q.origin) {
             (0, QuotaOrigin::Log) => q.sampled_at_ms + LOG_ROW_LIFETIME_MS > now_ms,
+            (_, QuotaOrigin::Log) => {
+                q.sampled_at_ms + LOG_SAMPLE_MAX_AGE_MS > now_ms && q.resets_at_ms >= now_ms
+            }
             _ => q.resets_at_ms == 0 || q.resets_at_ms >= now_ms,
         })
         .collect();
@@ -851,14 +878,23 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         })
         .collect();
 
-    // The same rows re-bucketed by local hour of today, for the 今日 chart.
+    // The same rows re-bucketed by local hour of today and of yesterday, for
+    // the 今日 chart and its one-day swipe-back. Yesterday is a complete day,
+    // so its slots never carry a future hatch.
+    let yesterday = today - chrono::Duration::days(1);
     let mut hour_map: BTreeMap<u32, (f64, f64, u64)> = BTreeMap::new();
+    let mut prev_hour_map: BTreeMap<u32, (f64, f64, u64)> = BTreeMap::new();
     for r in &rows {
         let Some(t) = to_local(r.ev.ts_ms) else { continue };
-        if t.date_naive() != today {
+        let d = t.date_naive();
+        let map = if d == today {
+            &mut hour_map
+        } else if d == yesterday {
+            &mut prev_hour_map
+        } else {
             continue;
-        }
-        let e = hour_map.entry(t.hour()).or_insert((0.0, 0.0, 0));
+        };
+        let e = map.entry(t.hour()).or_insert((0.0, 0.0, 0));
         e.0 += r.tokens();
         e.1 += r.cost;
         e.2 += 1;
@@ -867,6 +903,30 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         .map(|h| {
             let (total_tokens, cost, requests) = hour_map.get(&h).copied().unwrap_or((0.0, 0.0, 0));
             HourCell { total_tokens, cost, requests }
+        })
+        .collect();
+    let hourly_prev = (0..24)
+        .map(|h| {
+            let (total_tokens, cost, requests) = prev_hour_map.get(&h).copied().unwrap_or((0.0, 0.0, 0));
+            HourCell { total_tokens, cost, requests }
+        })
+        .collect();
+    let quarter_hourly = (0..96)
+        .map(|q| {
+            let start = today.and_hms_opt((q / 4) as u32, (q % 4 * 15) as u32, 0)
+                .and_then(|naive| Local.from_local_datetime(&naive).single())
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(opts.now_ms);
+            let end = if q == 95 { start_of_day_ms(today + chrono::Duration::days(1)) } else {
+                today.and_hms_opt((q / 4) as u32, (q % 4 * 15 + 15) as u32, 0)
+                    .and_then(|naive| Local.from_local_datetime(&naive).single())
+                    .map(|dt| dt.timestamp_millis()).unwrap_or(start + 15 * 60 * 1000)
+            };
+            let mut s = (0.0, 0.0, 0u64);
+            for r in &rows {
+                if r.ev.ts_ms >= start && r.ev.ts_ms < end { s.0 += r.tokens(); s.1 += r.cost; s.2 += 1; }
+            }
+            HourCell { total_tokens: s.0, cost: s.1, requests: s.2 }
         })
         .collect();
 
@@ -950,6 +1010,8 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         year,
         heatmap,
         hourly,
+        hourly_prev,
+        quarter_hourly,
         quotas,
         // The caller (the panel engine) flips this when its boot publish
         // skipped the probes; summarize itself has no opinion.
@@ -985,6 +1047,12 @@ pub const LIVE_TODAY: u32 = 100;
 pub const LIVE_PREV: u32 = 101;
 /// Today's hourly buckets: `LIVE_HOUR0 + hour`, 24 of them.
 pub const LIVE_HOUR0: u32 = 200;
+/// Today's 15-minute buckets: `LIVE_QUARTER0 + slot`, 96 of them.
+pub const LIVE_QUARTER0: u32 = 300;
+/// Yesterday's hourly buckets: `LIVE_PREV_HOUR0 + hour`, 24 of them — the day
+/// chart's one-day swipe-back. The rollup has no hour column, so the complete
+/// previous day rides the live slice like today's does.
+pub const LIVE_PREV_HOUR0: u32 = 400;
 
 /// All period boundaries, computed in chrono from `now_ms`.
 ///
@@ -999,17 +1067,20 @@ pub struct AggregatePlan {
     pub today: NaiveDate,
     /// Local midnight opening each cur window: day, week, month, year (0..=3).
     pub cur_start_ms: [i64; 4],
-    /// Start of each equal-elapsed prev slice; the window is `[prev_start, cur_start)`.
+    /// Start of each preceding complete calendar period; the window is `[prev_start, cur_start)`.
     pub prev_start_ms: [i64; 4],
-    /// Next local midnight after each `prev_start`. The prev slice's *head* day
-    /// is partial (it starts at `prev_start`, not midnight), so it is served
-    /// live from `event`; every rollup day strictly between `date(prev_start)`
-    /// and `date(cur_start)` is a whole day inside the window. Cur starts are
-    /// midnights, so the tail of a prev window is never partial.
+    /// End of the live previous-period slice. Complete previous periods are
+    /// already represented by rollup rows, so these buckets are empty.
     pub prev_live_end_ms: [i64; 4],
     /// Today's local-midnight hour starts, 25 entries: `hour_start_ms[h]` opens
     /// hour h and closes hour h-1; `[24]` is tomorrow's midnight.
     pub hour_start_ms: [i64; 25],
+    /// Yesterday's local-midnight hour starts, 25 entries: same wall-clock
+    /// resolution as [`Self::hour_start_ms`], one day earlier; `[24]` is
+    /// today's midnight.
+    pub prev_hour_start_ms: [i64; 25],
+    /// Today's local 15-minute starts, 97 entries.
+    pub quarter_start_ms: [i64; 97],
     /// First date of the [`HEATMAP_DAYS`] window ending today.
     pub heatmap_first: NaiveDate,
     pub recent_session_limit: usize,
@@ -1021,12 +1092,7 @@ impl AggregatePlan {
         let today = date_of(now_ms).unwrap_or_else(|| Local::now().date_naive());
         let prev_start_ms =
             [day.prev_start_ms, week.prev_start_ms, month.prev_start_ms, year.prev_start_ms];
-        let prev_live_end_ms = [
-            next_local_midnight(day.prev_start_ms, 1),
-            next_local_midnight(week.prev_start_ms, 1),
-            next_local_midnight(month.prev_start_ms, 1),
-            next_local_midnight(year.prev_start_ms, 1),
-        ];
+        let prev_live_end_ms = [day.prev_start_ms, week.prev_start_ms, month.prev_start_ms, year.prev_start_ms];
         let day_start_ms = day.start_ms;
         let mut hour_start_ms = [0i64; 25];
         for (h, slot) in hour_start_ms.iter_mut().enumerate() {
@@ -1046,6 +1112,31 @@ impl AggregatePlan {
                     .unwrap_or(day_start_ms + h as i64 * 3_600_000)
             };
         }
+        let mut quarter_start_ms = [0i64; 97];
+        for (i, slot) in quarter_start_ms.iter_mut().enumerate() {
+            let h = i / 4;
+            let q = i % 4;
+            *slot = hour_start_ms[h] + q as i64 * 15 * 60 * 1000;
+        }
+        // Yesterday's hours, the same wall-clock resolution one day earlier.
+        // `[24]` closes hour 23 with today's local midnight — `day.prev_start_ms`
+        // by construction, so the day window and the hourly buckets cannot
+        // disagree about where yesterday ended.
+        let yesterday = today - chrono::Duration::days(1);
+        let prev_day_start_ms = day.prev_start_ms;
+        let mut prev_hour_start_ms = [0i64; 25];
+        for (h, slot) in prev_hour_start_ms.iter_mut().enumerate() {
+            *slot = if h == 24 {
+                // Today's local midnight closes yesterday's hour 23.
+                day.start_ms
+            } else {
+                yesterday
+                    .and_hms_opt(h as u32, 0, 0)
+                    .and_then(|naive| Local.from_local_datetime(&naive).single())
+                    .map(|dt| dt.timestamp_millis())
+                    .unwrap_or(prev_day_start_ms + h as i64 * 3_600_000)
+            };
+        }
         Self {
             now_ms,
             today,
@@ -1053,6 +1144,8 @@ impl AggregatePlan {
             prev_start_ms,
             prev_live_end_ms,
             hour_start_ms,
+            prev_hour_start_ms,
+            quarter_start_ms,
             heatmap_first: today - chrono::Duration::days(HEATMAP_DAYS - 1),
             recent_session_limit: recent_session_limit.max(1),
         }
@@ -1393,9 +1486,7 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
     let keep = |origin: &str| opts.scope.keeps(origin);
 
     // Cur = whole rollup days from the window's local midnight through yesterday,
-    // plus today's live slice; prev = whole days strictly between the prev head
-    // day and the cur start, plus that head day's live tail. Together they
-    // reassemble `[cur_start, now]` / `[prev_start, cur_start)` exactly.
+    // plus today's live slice; prev = the complete preceding calendar period.
     let mut windows = Vec::with_capacity(4);
     let (sp0, sp1, sp2, sp3) = spans(opts.now_ms);
     for (i, span) in [sp0, sp1, sp2, sp3].into_iter().enumerate() {
@@ -1422,7 +1513,7 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
             .iter()
             .filter(|r| {
                 keep(&r.origin)
-                    && r.day.as_str() > prev_keys[i as usize].as_str()
+                    && r.day.as_str() >= prev_keys[i as usize].as_str()
                     && r.day.as_str() < cur_keys[i as usize].as_str()
             })
             .map(rollup_g)
@@ -1480,9 +1571,10 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
     }
     let [day, week, month, year] = windows.try_into().expect("four windows");
 
-    // Heatmap: one accumulator per local day over the rollup; only the 371-day
-    // window is emitted, which is what the event path did too (it accumulated
-    // everything, emitted the window). `""`-day rows never match a real date.
+    // Heatmap: one accumulator per local day over the rollup; only the
+    // [`HEATMAP_DAYS`] window is emitted, which is what the event path did too
+    // (it accumulated everything, emitted the window). `""`-day rows never
+    // match a real date.
     let mut heat_acc: HashMap<&str, (f64, f64, u64)> = HashMap::new();
     for r in facts.rollup.iter().filter(|r| keep(&r.origin)) {
         let (cost, _) = money.cost(&r.tool, r.model.as_deref(), &r.counts, r.meter);
@@ -1502,7 +1594,9 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
         })
         .collect();
 
-    // Hourly: today's live hour buckets, always 24 slots in index order.
+    // Hourly: today's live hour buckets, always 24 slots in index order — and
+    // yesterday's, the day chart's swipe-back (the rollup has no hour column,
+    // so the complete previous day comes from the same live slices).
     let mut hourly = Vec::with_capacity(24);
     for h in 0..24u32 {
         let (s, _) = fold_groups(
@@ -1510,6 +1604,22 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
             &mut money,
         );
         hourly.push(HourCell { total_tokens: s.total_tokens, cost: s.cost, requests: s.requests });
+    }
+    let mut hourly_prev = Vec::with_capacity(24);
+    for h in 0..24u32 {
+        let (s, _) = fold_groups(
+            facts.live.iter().filter(|f| f.bucket == LIVE_PREV_HOUR0 + h && keep(&f.origin)).map(live_g),
+            &mut money,
+        );
+        hourly_prev.push(HourCell { total_tokens: s.total_tokens, cost: s.cost, requests: s.requests });
+    }
+    let mut quarter_hourly = Vec::with_capacity(96);
+    for q in 0..96u32 {
+        let (s, _) = fold_groups(
+            facts.live.iter().filter(|f| f.bucket == LIVE_QUARTER0 + q && keep(&f.origin)).map(live_g),
+            &mut money,
+        );
+        quarter_hourly.push(HourCell { total_tokens: s.total_tokens, cost: s.cost, requests: s.requests });
     }
 
     // Budget bars keep this machine's own cost inputs even when the panel is
@@ -1595,6 +1705,8 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
         year,
         heatmap,
         hourly,
+        hourly_prev,
+        quarter_hourly,
         quotas,
         quotas_pending: false,
         // A fold built here is this run's own. Only the panel's boot restore
@@ -1709,13 +1821,19 @@ mod tests {
         assert_eq!(r.hourly[8].total_tokens, 0.0);
         assert_eq!(r.hourly[10].total_tokens, 0.0);
         assert!(r.hourly.iter().enumerate().all(|(h, c)| h == 9 || h == 13 || c.total_tokens == 0.0));
+        // The swipe-back day: yesterday's 9 o'clock lands in yesterday's slot,
+        // never in today's, and the vec is the full 24 slots either way.
+        assert_eq!(r.hourly_prev.len(), 24);
+        assert_eq!(r.hourly_prev[9].requests, 1);
+        assert_eq!(r.hourly_prev[9].total_tokens, 9_900.0);
+        assert!(r.hourly_prev.iter().enumerate().all(|(h, c)| h == 9 || c.total_tokens == 0.0));
     }
 
     #[test]
-    fn delta_compares_against_equal_elapsed_previous_slice() {
+    fn delta_compares_against_complete_previous_day() {
         let p = pricing();
         let now = ms_of(2026, 9, 23, 14);
-        // 09:00 yesterday is inside the equal-elapsed window; 20:00 is not.
+        // Both yesterday events belong to the complete previous-day total.
         let events = vec![
             ev("claude", now, "s1", "claude-sonnet-4-6", TokenCounts { input: 100.0, ..Default::default() }),
             ev("claude", ms_of(2026, 9, 22, 9), "s0", "claude-sonnet-4-6", TokenCounts { input: 400.0, ..Default::default() }),
@@ -1723,7 +1841,7 @@ mod tests {
         ];
         let opts = ReportOptions::new(&p).with_now(now);
         let r = summarize(&events, &opts);
-        assert_eq!(r.day.prev.requests, 1);
+        assert_eq!(r.day.prev.requests, 2);
         assert!(r.day.delta_cost_pct < 0.0, "cost fell vs yesterday slice: {}", r.day.delta_cost_pct);
     }
 
@@ -1801,8 +1919,12 @@ mod tests {
         let opts = ReportOptions::new(&p).with_now(now);
         let r = summarize(&[], &opts);
         assert_eq!(r.heatmap.len() as i64, HEATMAP_DAYS);
-        assert_eq!(r.heatmap.last().unwrap().date, "2026-09-23");
-        assert_eq!(r.heatmap.first().unwrap().date, "2025-09-18");
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 23).unwrap();
+        assert_eq!(r.heatmap.last().unwrap().date, today.format("%Y-%m-%d").to_string());
+        assert_eq!(
+            r.heatmap.first().unwrap().date,
+            (today - chrono::Duration::days(HEATMAP_DAYS - 1)).format("%Y-%m-%d").to_string()
+        );
         assert!(r.heatmap.iter().all(|c| c.total_tokens == 0.0));
     }
 
@@ -1991,6 +2113,9 @@ mod tests {
             label: Some("5 小时".into()),
             id: None,
         });
+        // A windowed row is held to the hour even though its reset is still
+        // open: a sample from window-open understates what the window now
+        // holds, and the live countdown makes the understatement look current.
         let mut reset_governed = ev("codex", now - 2 * 86_400_000, "s", "gpt-5", TokenCounts::default());
         reset_governed.quota = Some(crate::types::QuotaSample {
             used_percent: 50.0,
@@ -1999,12 +2124,69 @@ mod tests {
             label: Some("5 小时".into()),
             id: None,
         });
-        let r = summarize(&[stale, fresh, reset_governed], &ReportOptions::new(&p).with_now(now));
+        // One minute inside the hour, the same shape stays.
+        let mut fresh_windowed = ev("codex", now - 59 * 60_000, "s2", "gpt-5", TokenCounts::default());
+        fresh_windowed.quota = Some(crate::types::QuotaSample {
+            used_percent: 12.0,
+            window_minutes: 300,
+            resets_at_ms: now + 2 * 3_600_000,
+            label: None,
+            id: None,
+        });
+        let r = summarize(
+            &[stale, fresh, reset_governed, fresh_windowed],
+            &ReportOptions::new(&p).with_now(now),
+        );
         let labels: Vec<&str> = r.quotas.iter().map(|q| q.label.as_deref().unwrap_or_default()).collect();
         assert!(!labels.iter().any(|l| l.contains("已用完")), "{labels:?} — a day-old no-reset row is not a meter");
         let fresh_row = r.quotas.iter().find(|q| q.tool == "zcode").expect("the fresh no-reset row stays");
         assert_eq!(fresh_row.origin, QuotaOrigin::Log);
-        assert_eq!(r.quotas.len(), 2, "{labels:?} — the reset-governed row is judged by its reset, not by its age");
+        assert!(
+            r.quotas.iter().any(|q| q.tool == "codex" && q.used_percent == 12.0),
+            "{labels:?} — a windowed log row inside the hour stays"
+        );
+        assert_eq!(r.quotas.len(), 2, "{labels:?} — the two-day-old windowed row is judged by its age, not its reset");
+    }
+
+    /// The sampled-age bound is the log arm's law only: a probe (or its cache)
+    /// that has not answered in two hours still shows, with the strip's own
+    /// staleness line speaking for it — the fold must not drop it.
+    #[test]
+    fn an_old_probe_row_is_not_held_to_the_log_age_bound() {
+        let p = pricing();
+        let now = ms_of(2026, 9, 24, 15);
+        let opts = ReportOptions::new(&p).with_now(now).with_quota(vec![QuotaView {
+            tool: "codex".to_string(),
+            used_percent: 30.0,
+            window_minutes: 300,
+            resets_at_ms: now + 3_600_000,
+            sampled_at_ms: now - 2 * 3_600_000,
+            label: None,
+            id: None,
+            origin: QuotaOrigin::Probe,
+        }]);
+        let r = summarize(&[], &opts);
+        let row = r.quotas.iter().find(|q| q.tool == "codex").expect("a stale probe answer is still the answer");
+        assert_eq!(row.origin, QuotaOrigin::Probe);
+        assert_eq!(row.used_percent, 30.0);
+    }
+
+    /// The hour bound is inclusive on the drop side: exactly one hour old is
+    /// out (the same `>` convention the no-reset arm's day horizon uses).
+    #[test]
+    fn a_windowed_log_row_exactly_one_hour_old_is_dropped() {
+        let p = pricing();
+        let now = ms_of(2026, 9, 24, 15);
+        let mut edge = ev("codex", now - 3_600_000, "s", "gpt-5", TokenCounts::default());
+        edge.quota = Some(crate::types::QuotaSample {
+            used_percent: 7.0,
+            window_minutes: 300,
+            resets_at_ms: now + 3_600_000,
+            label: None,
+            id: None,
+        });
+        let r = summarize(&[edge], &ReportOptions::new(&p).with_now(now));
+        assert!(r.quotas.iter().all(|q| q.tool != "codex"), "{:?}", r.quotas);
     }
 
     #[test]

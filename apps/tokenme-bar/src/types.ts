@@ -297,6 +297,11 @@ export interface Report {
   heatmap: HeatCell[];
   /** Today by local hour, 24 slots. Older snapshots may omit it (empty). */
   hourly: HourCell[];
+  /** Yesterday by local hour, 24 slots — the day chart's one-day swipe-back.
+      Older engines omit it (undefined) and the chart hides the swipe; a
+      present-but-zero day is honest data, not absence. */
+  hourly_prev?: HourCell[];
+  quarter_hourly: HourCell[];
   quotas: QuotaView[];
   /** True until the quota probes have run (boot publishes without them). */
   quotas_pending?: boolean;
