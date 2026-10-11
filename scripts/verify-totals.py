@@ -353,7 +353,11 @@ def pi_family():
     cacheRead + cacheWrite + input + output on every record (asserted here), and
     `cacheWrite1h` is a sub-breakdown of `cacheWrite`, never an extra stage.
     """
-    roots = {"pi": "~/.pi/agent/sessions/*/*.jsonl", "cola": "~/.cola/sessions/*/*.jsonl"}
+    roots = {
+        "pi": "~/.pi/agent/sessions/*/*.jsonl",
+        "cola": "~/.cola/sessions/*/*.jsonl",
+        "omp": "~/.omp/agent/sessions/**/*.jsonl",
+    }
     result = {}
     for tool, pattern in roots.items():
         agg = defaultdict(float)

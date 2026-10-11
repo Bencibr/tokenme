@@ -64,6 +64,16 @@ pub(crate) static COLA: Product = Product {
     default_rel: &[".cola", SESSIONS_SUBDIR],
 };
 
+/// Oh My Pi keeps its coding transcripts in `~/.omp/agent/sessions/<mangled-cwd>/<ISO>_<uuid>.jsonl`
+/// with Pi's record shape, one `type:"message"` line per billed call.
+pub(crate) static OMP: Product = Product {
+    id: "omp",
+    display: "Oh My Pi",
+    sessions_env: "OMP_AGENT_DIR",
+    config_env: Some("OMP_CODING_AGENT_DIR"),
+    default_rel: &[".omp", "agent", SESSIONS_SUBDIR],
+};
+
 /// Pi's sessions root. See [`sessions_dir_for`] for the generic form.
 #[allow(dead_code)] // frozen surface: behaviour must not change for Pi
 pub(crate) fn sessions_dir() -> Option<PathBuf> {
@@ -228,6 +238,24 @@ mod tests {
         assert_eq!(
             sessions_dir_in(&COLA, Some(OsStr::new("")), None, Some(home)),
             Some(PathBuf::from("/home/x/.cola/sessions")),
+            "an empty override is unset, not the working directory"
+        );
+        assert_eq!(
+            sessions_dir_in(&OMP, None, None, Some(home)),
+            Some(PathBuf::from("/home/x/.omp/agent/sessions"))
+        );
+        assert_eq!(
+            sessions_dir_in(&OMP, Some(OsStr::new("/tmp/omp-sessions")), None, Some(home)),
+            Some(PathBuf::from("/tmp/omp-sessions"))
+        );
+        assert_eq!(
+            sessions_dir_in(&OMP, None, Some(OsStr::new("/tmp/omp-agent")), Some(home)),
+            Some(PathBuf::from("/tmp/omp-agent/sessions"))
+        );
+        assert_eq!(OMP.config_env, Some("OMP_CODING_AGENT_DIR"));
+        assert_eq!(
+            sessions_dir_in(&OMP, Some(OsStr::new("")), None, Some(home)),
+            Some(PathBuf::from("/home/x/.omp/agent/sessions")),
             "an empty override is unset, not the working directory"
         );
     }

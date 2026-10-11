@@ -50,6 +50,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     // usage flows through; the bare CLI on its own has no bundle.
     ("kimicode", &["Kimi"]),
     ("minimaxcode", &["MiniMax Code"]),
+    ("omp", &[]),
 ];
 
 /// PNGs shipped with the panel, consulted only when the bundle lookup above
@@ -93,6 +94,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     // Kimi Code: the 128-px layer of the installed desktop client's icon.icns,
     // the same layer the live bundle lookup picks.
     ("kimicode", include_bytes!("../assets/kimicode.png")),
+    ("omp", include_bytes!("../assets/omp.png")),
 ];
 
 /// Where a user-installed app lives. `~/Applications` first: a per-user install
@@ -350,6 +352,12 @@ mod tests {
     fn the_shipped_kimi_icon_is_a_real_png() {
         let (_, png) = BUNDLED_ICONS.iter().find(|(tool, _)| *tool == "kimicode").expect("kimicode ships an icon");
         assert_eq!(png_width(png), Some(128), "{:?}", &png[..16]);
+    }
+
+    #[test]
+    fn the_shipped_omp_icon_is_a_real_png() {
+        let (_, png) = BUNDLED_ICONS.iter().find(|(tool, _)| *tool == "omp").expect("omp ships an icon");
+        assert_eq!(png_width(png), Some(256), "{:?}", &png[..16]);
     }
 
     /// Live proof on the machine that has the apps; run with

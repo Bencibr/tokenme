@@ -13,7 +13,7 @@ Every supported AI tool writes its own local logs; TokenMe never talks to a vend
 | `crates/usage-core` | Shared contract: `UsageEvent`/`TokenCounts`, pricing (models.dev precedence), report aggregation, budgets |
 | `crates/usage-index` | SQLite incremental index: file cursors, dedupe, ingest lease, retention, watcher |
 | `crates/usage-quota` | Live vendor quota probes (one file per provider), one shared 5-minute TTL with one cache file per tool |
-| `crates/adapters/<tool>` | One crate per tool family (19), each with its own parser + tests against fixtures; three sibling products ride an existing crate's parser (crow5 and mimocode in `opencode`, cola in `pi`) |
+| `crates/adapters/<tool>` | One crate per tool family (19), each with its own parser + tests against fixtures; four sibling products ride an existing crate's parser (crow5 and mimocode in `opencode`, cola and omp in `pi`) |
 | `crates/adapters/all` | Registry: `TOOL_IDS`, `detect_all`, `builtin_adapters` |
 | `crates/usage-cli` | The `tokenme` CLI |
 | `apps/tokenme-bar` | Tauri 2 menu-bar panel (frontend `src/`, Rust `src-tauri/`) |
