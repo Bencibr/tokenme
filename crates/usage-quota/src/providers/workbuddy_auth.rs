@@ -51,6 +51,8 @@ pub(super) fn credentials(cn: bool) -> Option<Value> {
         token.to_string()
     } else {
         let mut cmd = Command::new(runtime(cn)?);
+        #[cfg(windows)]
+        { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); }
         cmd.args(["-e", DECRYPT_JS]);
         for (key, _) in std::env::vars_os() {
             let upper = key.to_string_lossy().to_uppercase();
@@ -76,6 +78,8 @@ fn runtime(cn: bool) -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let mut cmd = Command::new("powershell.exe");
+        #[cfg(windows)]
+        { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); }
         // Product is a fixed string, never input interpolated into shell code.
         let pattern = if cn { "^WorkBuddy(?:\\s+\\d|$)" } else { "^WorkBuddy\\s?AI(?:\\s+\\d|$)" };
         let script = format!("$n='{product}.exe'; Get-CimInstance Win32_Process -Filter \"Name='$n'\" | Select-Object -First 1 -ExpandProperty ExecutablePath; Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Where-Object {{$_.DisplayName -match '{pattern}'}} | ForEach-Object {{if($_.InstallLocation){{Join-Path $_.InstallLocation $n}}; if($_.DisplayIcon){{($_.DisplayIcon -replace ',[-0-9]+$','').Trim([char]34)}}}}" );
