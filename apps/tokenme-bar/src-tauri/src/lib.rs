@@ -13,6 +13,8 @@ mod tray;
 mod updater;
 #[cfg(target_os = "windows")]
 mod windows_surface;
+#[cfg(target_os = "windows")]
+mod windows_tray;
 
 pub use settings::{BubbleSkin, Settings, TrayMode};
 
