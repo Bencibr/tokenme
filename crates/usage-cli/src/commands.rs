@@ -667,7 +667,7 @@ pub fn quota(ctx: &Ctx) -> Result<(), String> {
         println!(
             "{}",
             render::dim(
-                "no quota: Codex reports it in its own logs, Claude/OpenCode/Copilot only answer when probed (a signed-out or proxy-managed tool has no window)",
+                "no quota: Codex reports it in its own logs (kept for an hour only — an older sample is not the current answer), Claude/OpenCode/Copilot only answer when probed (a signed-out or proxy-managed tool has no window)",
                 ctx.color
             )
         );
