@@ -348,6 +348,11 @@ mod tests {
         )
         .unwrap();
         std::env::set_var("CATPAW_CREDENTIAL_FILE", &credential);
+        // The machine gate belongs to the envelope's key alone; the wrong-id
+        // case fails the file decrypt and would fall through to the legacy
+        // store — which on a machine with a real pre-rename install answers
+        // with its live token. Pin it absent like every test here does.
+        std::env::set_var("CATPAW_STATE_DB", dir.path().join("absent-state.vscdb"));
         std::env::set_var("CATPAW_MACHINE_ID", "test-machine");
         assert_eq!(read_token().as_deref(), Some("tok-new"));
         // A wrong machine id (or a truncated blob) is silence, not an error.
@@ -355,6 +360,7 @@ mod tests {
         assert_eq!(read_token(), None);
         std::env::remove_var("CATPAW_CREDENTIAL_FILE");
         std::env::remove_var("CATPAW_MACHINE_ID");
+        std::env::remove_var("CATPAW_STATE_DB");
     }
 
     /// The renamed file wins over the legacy db when both exist — an upgraded
