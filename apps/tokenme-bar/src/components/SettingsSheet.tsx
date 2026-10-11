@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { BubbleSkin, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, ThemeKey, UpdateStatus } from "../types";
+import type { BubbleSkin, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, QuotaDisplayMode, ThemeKey, UpdateStatus } from "../types";
 import { bridge, isWindows } from "../lib/bridge";
 import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
 import { t } from "../lib/i18n";
@@ -24,6 +24,11 @@ const TIERS: { key: NotifyTierKey; label: () => string }[] = [
   { key: "both", label: () => t("set.tiers.both") },
   { key: "exhausted", label: () => t("set.tiers.exhausted") },
   { key: "off", label: () => t("set.tiers.off") },
+];
+
+const QUOTA_MODES: { key: QuotaDisplayMode; label: () => string }[] = [
+  { key: "used", label: () => t("quota.mode.used") },
+  { key: "remaining", label: () => t("quota.mode.remaining") },
 ];
 
 type Tab = "general" | "alert" | "advanced" | "about";
@@ -61,6 +66,7 @@ export function SettingsSheet({
   onRefreshSecs,
   onMoney,
   onPolling,
+  onQuotaDisplayMode,
   displays,
 }: {
   onClose: () => void;
@@ -71,6 +77,7 @@ export function SettingsSheet({
   onMoney: (on: boolean) => void;
   /** The master switch, so the quota section can say it stopped immediately. */
   onPolling: (on: boolean) => void;
+  onQuotaDisplayMode: (mode: QuotaDisplayMode) => void;
   displays: Record<string, string>;
 }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
@@ -85,6 +92,8 @@ export function SettingsSheet({
   const [probes, setProbes] = useState<ProbeTool[]>([]);
   const [showAll, setShowAll] = useState(false);
   const [notify, setNotify] = useState<NotifyState>("unknown");
+  const [quotaModeBusy, setQuotaModeBusy] = useState(false);
+  const [quotaModeError, setQuotaModeError] = useState(false);
 
   useEffect(() => bridge.onUpdateProgress((p) => setProgress(p.percent)), []);
 
@@ -134,6 +143,21 @@ export function SettingsSheet({
     patch((s) => ({ ...s, show_money: on }));
     onMoney(on);
     void bridge.setShowMoney(on);
+  };
+
+  const setQuotaMode = async (mode: QuotaDisplayMode) => {
+    if (quotaModeBusy || settings?.quota_display_mode === mode) return;
+    setQuotaModeBusy(true);
+    setQuotaModeError(false);
+    try {
+      await bridge.setQuotaDisplayMode(mode);
+      patch((s) => ({ ...s, quota_display_mode: mode }));
+      onQuotaDisplayMode(mode);
+    } catch {
+      setQuotaModeError(true);
+    } finally {
+      setQuotaModeBusy(false);
+    }
   };
 
   const setShowEmptyTools = (on: boolean) => {
@@ -441,6 +465,28 @@ export function SettingsSheet({
                 ))}
               </div>
             </div>
+            <div className="sheet-row">
+              <div>
+                <div className="sheet-label">{t("set.quota.mode")}</div>
+                <div className="sheet-hint">{t("set.quota.hint")}</div>
+              </div>
+              <div className="seg" role="radiogroup" aria-label={t("set.quota.mode")}>
+                {QUOTA_MODES.map((mode) => (
+                  <button
+                    key={mode.key}
+                    type="button"
+                    role="radio"
+                    className="seg-btn"
+                    aria-checked={settings.quota_display_mode === mode.key}
+                    disabled={quotaModeBusy}
+                    onClick={() => void setQuotaMode(mode.key)}
+                  >
+                    {mode.label()}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {quotaModeError ? <p className="sheet-hint" role="alert">{t("set.quota.failed")}</p> : null}
             {switchRow(t("set.money"), t("set.money.hint"), settings.show_money, setMoney)}
             {switchRow(t("set.showempty"), t("set.showempty.hint"), settings.show_empty_tools, setShowEmptyTools)}
             {isWindows ? (

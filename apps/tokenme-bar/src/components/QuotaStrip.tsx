@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Loading } from "./Loading";
-import type { NotifyState, QuotaOrder, QuotaView } from "../types";
+import type { NotifyState, QuotaDisplayMode, QuotaOrder, QuotaView } from "../types";
 import { bridge } from "../lib/bridge";
 import { toolColor, toolDisplay, until, freshness } from "../lib/format";
 import { t } from "../lib/i18n";
@@ -113,6 +113,7 @@ export function QuotaStrip({
   pending,
   scoped,
   polling = true,
+  displayMode = "used",
 }: {
   quotas: QuotaView[];
   now: number;
@@ -125,6 +126,7 @@ export function QuotaStrip({
   /** False when the user turned vendor polling off: the rows keep their last
    *  answer and the section says when it was taken. */
   polling?: boolean;
+  displayMode?: QuotaDisplayMode;
 }) {
   // The check-in marker rows are state, not data (CHECKIN_STATE_IDS): every
   // count and row on screen reads this filtered list; the badge and button
@@ -403,9 +405,10 @@ export function QuotaStrip({
     void bridge.setQuotaOrder(final).catch(() => {});
   };
 
+  const remaining = displayMode === "remaining";
   return (
     <Section
-      label={t("quota.section")}
+      label={`${t("quota.section")} · ${remaining ? t("quota.mode.remaining") : t("quota.mode.used")}`}
       meta={scoped ? t("quota.meta.local") : t("quota.meta", { w: live.length, g: groups.length })}
       trail={
         <span className="quota-legend" aria-hidden="true">
@@ -531,12 +534,13 @@ export function QuotaStrip({
                 ) : null}
               </div>
               {g.rows.map((q) => {
-                const pct = q.used_percent;
+                const used = q.used_percent;
+                const pct = remaining ? Math.max(0, Math.min(100, 100 - used)) : used;
                 const width = Math.max(0, Math.min(100, pct));
                 // One colour per stage, the whole bar: <50% mint, 50-79% amber,
                 // ≥80% red — a gauge whose hue answers "how urgent", never a
                 // gradient that leaves two colour semantics on one bar.
-                const stage = pct > 100 ? "over" : pct >= 80 ? "high" : pct >= 50 ? "mid" : "low";
+                const stage = used > 100 ? "over" : used >= 80 ? "high" : used >= 50 ? "mid" : "low";
                 // A source with no metered limit at all keeps its row (so the
                 // tool block never loses a line) but its track hatches: nothing
                 // here is being measured, and a 0% bar would claim otherwise.
@@ -631,16 +635,18 @@ export function QuotaStrip({
                       <span
                         className="track"
                         role="progressbar"
-                        aria-valuenow={Math.round(pct)}
+                        aria-valuenow={Math.round(width)}
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-label={t("quota.bar.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })}
+                        aria-label={remaining
+                          ? t("quota.bar.remaining.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })
+                          : t("quota.bar.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })}
                       >
                         <i
                           style={{
                             width: `${width}%`,
-                            // A used window at 3% must still read as *started*;
-                            // below ~4 px the fill is invisible on a 84 px track.
+                            // Keep a nonzero gauge visible; an exhausted remaining
+                            // gauge must reach zero with no minimum fill.
                             minWidth: pct > 0 ? 4 : undefined,
                           }}
                           data-stage={stage}
@@ -652,7 +658,9 @@ export function QuotaStrip({
                     ) : figureInPct ? (
                       <span className="quota-pct quota-pct--na num">{figure}</span>
                     ) : (
-                      <span className="quota-pct num" data-stage={stage}>
+                      <span className="quota-pct num" data-stage={stage} title={remaining
+                        ? t("quota.bar.remaining.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })
+                        : t("quota.bar.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })}>
                         {pct > 100 ? Math.round(pct) : pct < 10 ? pct.toFixed(1) : Math.round(pct)}
                         <em>%</em>
                       </span>

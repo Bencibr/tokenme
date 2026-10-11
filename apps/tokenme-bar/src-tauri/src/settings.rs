@@ -47,6 +47,15 @@ pub enum Theme {
     System,
 }
 
+/// Display direction only; probes and notification thresholds still use spent quota.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaDisplayMode {
+    #[default]
+    Used,
+    Remaining,
+}
+
 /// The edge bubble's appearance. The renderer owns the skin manifest, so the
 /// persisted value is an opaque ID rather than a Rust enum: adding a JSON skin
 /// package does not require another backend release just to store its name.
@@ -149,6 +158,8 @@ pub struct Settings {
     /// some users would rather not see it.
     #[serde(default = "default_show_money")]
     pub show_money: bool,
+    #[serde(default)]
+    pub quota_display_mode: QuotaDisplayMode,
     /// Also list tools whose session count for the period is zero on the
     /// tools page. Default off: a tool that did nothing this window is noise,
     /// and the page's job is comparing what ran. The tools list still keeps
@@ -212,6 +223,7 @@ impl Default for Settings {
             theme: Theme::default(),
             refresh_secs: default_refresh_secs(),
             show_money: default_show_money(),
+            quota_display_mode: QuotaDisplayMode::default(),
             show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
             bubble_skin: BubbleSkin::default(),

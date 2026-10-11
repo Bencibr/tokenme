@@ -381,6 +381,7 @@ export interface Bridge {
   setRefreshSecs: (secs: number) => Promise<void>;
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
+  setQuotaDisplayMode: (mode: QuotaDisplayMode) => Promise<void>;
   setShowEmptyTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setBubbleSkin: (skin: BubbleSkin) => Promise<void>;
@@ -441,11 +442,14 @@ export type BubbleSkin = "waterdrop" | keyof typeof petSkinManifest.skins;
 /** Which banner lines fire: both lines, only exhaustion, or nothing at all. */
 export type NotifyTierKey = "both" | "exhausted" | "off";
 
+export type QuotaDisplayMode = "used" | "remaining";
+
 export interface PanelSettings {
   autostart: boolean;
   refresh_secs: number;
   theme: ThemeKey;
   show_money: boolean;
+  quota_display_mode: QuotaDisplayMode;
   show_empty_tools: boolean;
   bubble_enabled: boolean;
   bubble_skin: BubbleSkin;

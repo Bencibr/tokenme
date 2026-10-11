@@ -9,7 +9,7 @@ use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
-use crate::settings::{BubbleSkin, NotifyTier, Theme, TrayMode};
+use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Theme, TrayMode};
 use crate::tray;
 
 /// Terminates the tray application, rather than merely hiding its panel.
@@ -151,6 +151,7 @@ pub struct PanelSettings {
     pub refresh_secs: u64,
     pub theme: Theme,
     pub show_money: bool,
+    pub quota_display_mode: QuotaDisplayMode,
     pub show_empty_tools: bool,
     pub bubble_enabled: bool,
     pub bubble_skin: BubbleSkin,
@@ -246,6 +247,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         refresh_secs: settings.refresh_secs,
         theme: settings.theme,
         show_money: settings.show_money,
+        quota_display_mode: settings.quota_display_mode,
         show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
         bubble_skin: settings.bubble_skin,
@@ -424,6 +426,18 @@ pub async fn set_show_money(app: AppHandle, on: bool) -> Result<(), String> {
     };
     settings.show_money = on;
     settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// Persist the gauge direction without waking probes or clearing cached answers.
+#[tauri::command]
+pub async fn set_quota_display_mode(app: AppHandle, mode: QuotaDisplayMode) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
+    let mut next = settings.clone();
+    next.quota_display_mode = mode;
+    next.save().map_err(|e| e.to_string())?;
+    *settings = next;
+    Ok(())
 }
 
 

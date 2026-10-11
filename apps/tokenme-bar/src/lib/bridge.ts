@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
 import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
-import type { Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
+import type { Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -250,6 +250,14 @@ export const bridge: Bridge = {
     await invoke<void>("set_show_money", { on });
   },
 
+  async setQuotaDisplayMode(mode: QuotaDisplayMode): Promise<void> {
+    if (!inTauri) {
+      browserSettings.quota_display_mode = mode;
+      return;
+    }
+    await invoke<void>("set_quota_display_mode", { mode });
+  },
+
   async setHostExitPause(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.host_exit_pause = on;
@@ -482,6 +490,7 @@ const browserSettings: PanelSettings = {
   refresh_secs: 30,
   theme: "dark",
   show_money: false,
+  quota_display_mode: "used",
   show_empty_tools: false,
   bubble_enabled: true,
   bubble_skin: "waterdrop",

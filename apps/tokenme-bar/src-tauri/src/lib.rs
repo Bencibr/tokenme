@@ -58,6 +58,7 @@ pub fn run() {
             commands::checkin_now,
             commands::set_theme,
             commands::set_show_money,
+            commands::set_quota_display_mode,
             commands::set_show_empty_tools,
             commands::set_report_scope,
             servers::commands::get_servers,
