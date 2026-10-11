@@ -381,10 +381,22 @@ export interface Bridge {
   setRefreshSecs: (secs: number) => Promise<void>;
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
+  setQuotaDisplayMode: (mode: QuotaDisplayMode) => Promise<void>;
   setShowEmptyTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setBubbleSkin: (skin: BubbleSkin) => Promise<void>;
   onBubbleSkin: (handler: (skin: BubbleSkin) => void) => () => void;
+  setPetPreferences: (prefs: import("./lib/petCompanion").PetPreferences) => Promise<void>;
+  onPetPreferences: (handler: (prefs: import("./lib/petCompanion").PetPreferences) => void) => () => void;
+  petActivity: () => Promise<import("./lib/petCompanion").PetActivity>;
+  showPetNotice: (kind: import("./lib/petCompanion").PetNoticeKind, minutes: number) => Promise<import("./lib/petCompanion").PetNotice | null>;
+  previewPetNotice: () => Promise<import("./lib/petCompanion").PetNotice | null>;
+  getPetNotice: () => Promise<import("./lib/petCompanion").PetNotice | null>;
+  onPetNotice: (handler: (notice: import("./lib/petCompanion").PetNotice | null) => void) => () => void;
+  petNoticeReady: (id: number) => Promise<void>;
+  respondPetNotice: (id: number, action: import("./lib/petCompanion").PetResponse["action"]) => Promise<void>;
+  onPetResponse: (handler: (response: import("./lib/petCompanion").PetResponse) => void) => () => void;
+  repositionPetNotice: () => Promise<void>;
   setHostExitPause: (on: boolean) => Promise<void>;
   /** On, the host-exit pause stops applying to the check-in tools, so their
    *  daily claim fires and their rows stay live with the host app closed. */
@@ -441,14 +453,18 @@ export type BubbleSkin = "waterdrop" | keyof typeof petSkinManifest.skins;
 /** Which banner lines fire: both lines, only exhaustion, or nothing at all. */
 export type NotifyTierKey = "both" | "exhausted" | "off";
 
+export type QuotaDisplayMode = "used" | "remaining";
+
 export interface PanelSettings {
   autostart: boolean;
   refresh_secs: number;
   theme: ThemeKey;
   show_money: boolean;
+  quota_display_mode: QuotaDisplayMode;
   show_empty_tools: boolean;
   bubble_enabled: boolean;
   bubble_skin: BubbleSkin;
+  pet_companion: import("./lib/petCompanion").PetPreferences;
   host_exit_pause: boolean;
   /** The check-in guarantee: on, Trae CN / Qoder keep being probed — and
    *  claimed — while their host app is closed. */

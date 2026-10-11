@@ -1,12 +1,22 @@
-//! The one reader: `t_ui_messages` rows whose content JSON carries a
-//! `tokenUsage` object, one event per billed model call.
+//! The two readers, dispatched by which table the store carries:
 //!
-//! The row's `rowid` is the cursor ([`usage_core::FileKind::Sqlite`]). A
-//! corrupted store is a supported state on long-running installs (this
-//! machine's 2.5 GB copy is): the first unreadable page stops the pass and the
-//! cursor stays at the last good row, so a healing store is picked up on a
-//! later refresh without a rescan, and re-reads are idempotent because the
-//! dedupe keys are stable. Nothing is ever invented to fill a gap.
+//! - **Legacy** (`t_ui_messages`, pre-rename CatPaw): rows whose content JSON
+//!   carries a `tokenUsage` object, one event per billed model call. The
+//!   row's `rowid` is the cursor ([`usage_core::FileKind::Sqlite`]).
+//! - **Renamed** (`ui_sdk_messages`, 妙手): assistant rows whose payload JSON
+//!   carries `extra.contextInfo.usage` (camelCase), one event per billed
+//!   model call. The cursor is the highest `updated_at_ms`, *not* a rowid —
+//!   an assistant row is inserted when its turn starts and its usage lands at
+//!   the turn's end (measured: created 11:09:31.462, updated 11:09:34.439),
+//!   so a rowid cursor would walk past a row before the numbers arrive.
+//!   Re-reading the re-touched rows is safe: the dedupe keys are stable and
+//!   the index enforces them across passes.
+//!
+//! A corrupted store is a supported state on long-running installs (the
+//! legacy machine copy is 2.5 GB): the first unreadable page stops the pass
+//! and the cursor stays at the last good row, so a healing store is picked up
+//! on a later refresh without a rescan, and re-reads are idempotent because
+//! the dedupe keys are stable. Nothing is ever invented to fill a gap.
 
 use std::path::Path;
 
@@ -27,15 +37,29 @@ pub struct Census {
     pub totals: TokenCounts,
 }
 
-/// Read usage-bearing rows appended after `cursor`.
+/// Read usage-bearing rows appended after `cursor`, whichever generation the
+/// file belongs to.
 pub fn read(path: &Path, cursor: ReadCursor, source_key: &str) -> Result<(ReadOutcome, Census), Error> {
     let Ok(conn) = open(path) else {
         return Ok((ReadOutcome { events: Vec::new(), cursor }, Census::default()));
     };
-    if !table_exists(&conn, "t_ui_messages") {
-        return Ok((ReadOutcome { events: Vec::new(), cursor }, Census::default()));
+    if table_exists(&conn, "t_ui_messages") {
+        return read_legacy(&conn, path, cursor, source_key);
     }
-    let Ok(max_rowid) = scalar(&conn, "SELECT COALESCE(MAX(rowid), 0) FROM t_ui_messages") else {
+    if table_exists(&conn, "ui_sdk_messages") {
+        return read_moon(&conn, path, cursor, source_key);
+    }
+    Ok((ReadOutcome { events: Vec::new(), cursor }, Census::default()))
+}
+
+/// The pre-rename store: cursor is the max `rowid` of `t_ui_messages`.
+fn read_legacy(
+    conn: &Connection,
+    path: &Path,
+    cursor: ReadCursor,
+    source_key: &str,
+) -> Result<(ReadOutcome, Census), Error> {
+    let Ok(max_rowid) = scalar(conn, "SELECT COALESCE(MAX(rowid), 0) FROM t_ui_messages") else {
         return Ok((ReadOutcome { events: Vec::new(), cursor }, Census::default()));
     };
     if i64::try_from(cursor.0).unwrap_or(i64::MAX) > max_rowid {
@@ -43,7 +67,7 @@ pub fn read(path: &Path, cursor: ReadCursor, source_key: &str) -> Result<(ReadOu
     }
     // The conversation's own row carries the workspace path; a missing table
     // only costs the label, never the usage.
-    let project_sub = if table_exists(&conn, "t_conversation") {
+    let project_sub = if table_exists(conn, "t_conversation") {
         "(SELECT c.project_path FROM t_conversation c WHERE c.conversation_id = m.conversation_id)"
     } else {
         "NULL"
@@ -151,6 +175,136 @@ fn token_usage(content: &Value) -> Option<TokenCounts> {
         cache_creation: num("cacheWriteTokens"),
         cache_read: num("cacheReadTokens"),
         output: num("completion_tokens"),
+        reasoning: 0.0,
+        credits: 0.0,
+    };
+    (!counts.is_zero()).then_some(counts)
+}
+
+/// The renamed store (妙手): cursor is the max `updated_at_ms` of
+/// `ui_sdk_messages`, because usage lands on an already-inserted row when its
+/// turn closes — see the module doc. Rows re-read after a cursor advance
+/// re-emit under their original dedupe keys, which the index collapses.
+fn read_moon(
+    conn: &Connection,
+    path: &Path,
+    cursor: ReadCursor,
+    source_key: &str,
+) -> Result<(ReadOutcome, Census), Error> {
+    let Ok(max_updated) = scalar(conn, "SELECT COALESCE(MAX(updated_at_ms), 0) FROM ui_sdk_messages") else {
+        return Ok((ReadOutcome { events: Vec::new(), cursor }, Census::default()));
+    };
+    if i64::try_from(cursor.0).unwrap_or(i64::MAX) > max_updated {
+        return Err(Error::Cursor { path: path.to_path_buf(), cursor: cursor.0 });
+    }
+    let sql = "SELECT conversation_id, message_id, payload, created_at_ms, updated_at_ms \
+               FROM ui_sdk_messages WHERE updated_at_ms > ?1 \
+               ORDER BY updated_at_ms, conversation_id, seq";
+    let mut events = Vec::new();
+    let mut census = Census { max_rowid: max_updated, ..Census::default() };
+    let mut reached_end = true;
+    {
+        let Ok(mut stmt) = conn.prepare(sql) else {
+            return Ok((ReadOutcome { events: Vec::new(), cursor }, Census::default()));
+        };
+        let key = source_key.to_string();
+        let Ok(mut rows) = stmt.query([max_rowid_of(cursor)]) else {
+            return Ok((ReadOutcome { events: Vec::new(), cursor }, Census::default()));
+        };
+        loop {
+            match rows.next() {
+                Err(_) => {
+                    // First unreadable page: stop, keep what was parsed, and
+                    // let the cursor stay behind so the healed rows re-read.
+                    reached_end = false;
+                    break;
+                }
+                Ok(None) => break,
+                Ok(Some(row)) => {
+                    census.rows += 1;
+                    match moon_row_to_event(row, &key) {
+                        Ok((Some(event), counts)) => {
+                            census.events += 1;
+                            census.totals += &counts;
+                            events.push(event);
+                        }
+                        Ok((None, counts)) => {
+                            census.plain_rows += usize::from(counts.is_zero());
+                        }
+                        Err(_) => census.plain_rows += 1,
+                    }
+                }
+            }
+        }
+    }
+    let cursor = if reached_end {
+        census.max_rowid = max_updated;
+        ReadCursor(u64::try_from(max_updated).unwrap_or(u64::MAX))
+    } else {
+        cursor
+    };
+    Ok((ReadOutcome { events, cursor }, census))
+}
+
+/// `(event or skip, counts)` for a `ui_sdk_messages` row — the renamed store's
+/// analog of [`row_to_event`].
+fn moon_row_to_event(row: &rusqlite::Row<'_>, source_key: &str) -> rusqlite::Result<(Option<UsageEvent>, TokenCounts)> {
+    let conversation: Option<String> = row.get::<_, Option<String>>("conversation_id")?;
+    let message_id: Option<String> = row.get::<_, Option<String>>("message_id")?;
+    let payload_raw: Option<String> = row.get::<_, Option<String>>("payload")?;
+    let created_ms: Option<i64> = row.get::<_, Option<i64>>("created_at_ms")?;
+    let updated_ms: Option<i64> = row.get::<_, Option<i64>>("updated_at_ms")?;
+
+    // Same wall-clock rule as the legacy store, with the insert time first:
+    // `created_at_ms` is nullable and the update stamp is the fallback.
+    let Some(ts_ms) = created_ms.filter(|v| *v > 0).or(updated_ms.filter(|v| *v > 0)) else {
+        return Ok((None, TokenCounts::default()));
+    };
+    let parsed = payload_raw.as_deref().and_then(|p| serde_json::from_str::<Value>(p).ok());
+    let Some(counts) = parsed.as_ref().and_then(moon_usage) else {
+        return Ok((None, TokenCounts::default()));
+    };
+    // No model name in the new store (the legacy `actualUseModelName` id is
+    // gone), and no workspace path — `projectId` is an opaque account-scope
+    // guid, so the event honestly carries neither.
+    let session = conversation
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| format!("catpaw-moon-{}", ts_ms));
+    let mut event = UsageEvent::new(TOOL_ID, ts_ms, &session).with(counts);
+    event.meter = usage_core::Meter::Tokens;
+    // One assistant row is one model call: the message id is the billed
+    // identity, same shape as the legacy `conversation#message_id` keys.
+    event.dedupe_key = message_id
+        .clone()
+        .filter(|m| !m.is_empty())
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|p| p.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .map(|mid| format!("{session}#{mid}"));
+    event.source = format!(
+        "{source_key}#ui_sdk_messages#{}#{}",
+        session,
+        message_id.unwrap_or_else(|| ts_ms.to_string())
+    );
+    Ok((Some(event), counts))
+}
+
+/// `payload.extra.contextInfo.usage` — camelCase spelling of the same
+/// exclusive convention (`promptTokens` excludes `cacheReadTokens`: measured
+/// 9135 + 16896 + 73 = totalTokens 26104). Absent / null / wrong types read as
+/// zero, and an all-zero row is not a billable call.
+fn moon_usage(payload: &Value) -> Option<TokenCounts> {
+    let usage = payload.get("extra")?.get("contextInfo")?.get("usage")?.as_object()?;
+    let num = |k: &str| usage.get(k).and_then(Value::as_f64).unwrap_or(0.0).max(0.0);
+    let counts = TokenCounts {
+        input: num("promptTokens"),
+        cache_creation: num("cacheWriteTokens"),
+        cache_read: num("cacheReadTokens"),
+        output: num("completionTokens"),
         reasoning: 0.0,
         credits: 0.0,
     };

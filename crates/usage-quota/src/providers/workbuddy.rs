@@ -6,7 +6,8 @@
 //! The desktop app keeps its OAuth record at
 //! `~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info`:
 //! `auth.accessToken`, `auth.expiresAt` (epoch ms), `auth.domain`
-//! (`www.workbuddy.ai` global / `www.codebuddy.cn` CN), `account.uid`. The
+//! (`www.workbuddy.ai`), `account.uid`. Domestic accounts feed `workbuddy_cn`.
+//! On Windows the record lives in LocalAppData/CodeBuddyExtension. The
 //! record is read, never written: **nothing here ever refreshes** — consuming
 //! a refresh grant without writing the rotation back would log the user out
 //! of their own app, the same rule the Qoder probe follows.
@@ -18,10 +19,10 @@
 //! needs no credential work at all (see `workbuddy_wbipc`) — then explicit
 //! tokens: the desktop app's auth file (`WORKBUDDY_AUTH_FILE` overrides), then
 //! a bare pasted token (`WORKBUDDY_TOKEN` or `tokenme/workbuddy.token`) —
-//! current app versions encrypt that file's accessToken in place, so the paste
-//! is what keeps installs without a running app working.
-//! `POST https://<domain>/billing/meter/get-user-resource` (global; the CN
-//! realm keeps the older `/v2/billing/meter/get-user-resource`, which is also
+//! current app versions encrypt that file's accessToken in place; the matching
+//! installed runtime opens it through its native storage binding, without
+//! modifying the desktop login. A pasted token remains an optional fallback.
+//! `POST https://<domain>/billing/meter/get-user-resource` (with `/v2` as
 //! the global 404 fallback), body
 //! `{PageNumber, PageSize, ProductCode: "p_tcaca", Status: [0,3],
 //! PackageEndTimeRangeBegin, PackageEndTimeRangeEnd}` — measured live against
@@ -80,20 +81,8 @@ impl QuotaProbe for WorkBuddyQuota {
 
 // ---------------------------------------------------------------- credential
 
-/// The auth record's location; `WORKBUDDY_AUTH_FILE` overrides it for tests
-/// and side-by-side installs.
-fn auth_file() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("WORKBUDDY_AUTH_FILE") {
-        return Some(PathBuf::from(path));
-    }
-    dirs::data_dir()
-        .map(|d| d.join("CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info"))
-        .filter(|p| p.is_file())
-}
-
 fn read_auth() -> Option<Value> {
-    let raw = std::fs::read_to_string(auth_file()?).ok()?;
-    serde_json::from_str(&raw).ok()
+    super::workbuddy_auth::credentials(false)
 }
 
 /// A bare access token, for installs where the desktop app encrypts its auth
@@ -136,7 +125,7 @@ fn saved_login_path() -> Option<PathBuf> {
 
 /// The credential saved by [`login`]: a JSON mirror of the auth file's `auth`
 /// section plus `uid`, so `token_is_fresh` and `call` read it unchanged.
-fn saved_login_auth() -> Option<Value> {
+pub(super) fn saved_login_auth() -> Option<Value> {
     let raw = std::fs::read_to_string(saved_login_path()?).ok()?;
     let cred: Value = serde_json::from_str(&raw).ok()?;
     let auth = cred.get("auth")?.clone();
@@ -267,7 +256,9 @@ fn call(info: &Value, body: &Value) -> Option<Value> {
     let token = auth.get("accessToken").and_then(Value::as_str).filter(|t| !t.is_empty())?;
     let uid = info.pointer("/account/uid").and_then(Value::as_str).unwrap_or_default();
     let domain = auth.get("domain").and_then(Value::as_str).unwrap_or("www.workbuddy.ai");
-    let cn = domain.contains("codebuddy.cn");
+    // The legacy browser login may have saved a domestic credential. It must
+    // feed the CN probe alone, never the international row or an arbitrary host.
+    if !super::workbuddy_auth::matches_edition(info, false) { return None; }
     let base = format!("https://{domain}");
     let bearer = format!("Bearer {token}");
     let headers: Vec<(&str, &str)> = vec![
@@ -280,7 +271,7 @@ fn call(info: &Value, body: &Value) -> Option<Value> {
     // CN answers only under /v2; global prefers the bare path and falls back
     // on it. post_json drops non-2xx, so a 404 on the first candidate simply
     // moves to the next — a network blip costs one extra POST, nothing else.
-    let paths: &[&str] = if cn { &[METER_PATH_V2] } else { &[METER_PATH, METER_PATH_V2] };
+    let paths: &[&str] = &[METER_PATH, METER_PATH_V2];
     for path in paths {
         if let Some(body) = post_json(&format!("{base}{path}"), &headers, body.clone()) {
             return Some(body);
@@ -316,13 +307,13 @@ pub(crate) fn samples_from_resource(body: &Value) -> Vec<QuotaSample> {
         // Cycle fields describe the current billing cycle and win when set;
         // the Capacity triple is the package's lifetime fallback.
         let (size, remain) = match (
-            acct.get("CycleCapacitySize").and_then(Value::as_f64).unwrap_or(0.0),
-            acct.get("CycleCapacityRemain").and_then(Value::as_f64).unwrap_or(0.0),
+            capacity(acct, "CycleCapacitySize"),
+            capacity(acct, "CycleCapacityRemain"),
         ) {
             (size, remain) if size > 0.0 => (size, remain.clamp(0.0, size)),
             _ => (
-                acct.get("CapacitySize").and_then(Value::as_f64).unwrap_or(0.0),
-                acct.get("CapacityRemain").and_then(Value::as_f64).unwrap_or(0.0),
+                capacity(acct, "CapacitySize"),
+                capacity(acct, "CapacityRemain").clamp(0.0, capacity(acct, "CapacitySize").max(0.0)),
             ),
         };
         if size <= 0.0 {
@@ -358,6 +349,13 @@ pub(crate) fn samples_from_resource(body: &Value) -> Vec<QuotaSample> {
         .collect()
 }
 
+/// Prefer precise decimal fields over the vendor's rounded integer twins.
+fn capacity(account: &Value, field: &str) -> f64 {
+    account.get(format!("{field}Precise")).or_else(|| account.get(field))
+        .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        .filter(|n: &f64| n.is_finite()).unwrap_or(0.0)
+}
+
 /// `CycleEndTime` is a UTC+8 wall clock with no offset on the wire.
 fn parse_cycle_end(raw: &str) -> Option<i64> {
     use chrono::TimeZone;
@@ -374,6 +372,20 @@ fn trim(n: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn precise_credit_fields_win_over_the_rounded_integer_twins() {
+        let body = json!({"data":{"Response":{"Data":{"Accounts":[
+            {"PackageName":"体验版","CycleCapacitySize":500,"CycleCapacityRemain":492,
+             "CycleCapacitySizePrecise":"500","CycleCapacityRemainPrecise":"492.29000001"},
+            {"PackageName":"签到积分","CapacitySize":"100","CapacityRemain":"100"}
+        ]}}}});
+        let samples = samples_from_resource(&body);
+        let plan = samples.iter().find(|s| s.id.as_deref() == Some("体验版")).unwrap();
+        assert!((plan.used_percent - 1.541999998).abs() < 1e-8);
+        assert_eq!(plan.label.as_deref(), Some("体验版 · 已用 7.7/500"));
+        assert_eq!(samples.len(), 2);
+    }
 
     /// The answer this machine's account actually gave (2026-09-25), trimmed
     /// to the fields the probe reads: one exhausted pack and two live ones.

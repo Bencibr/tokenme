@@ -654,6 +654,41 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // The former WorkBuddy adapter walked both editions under one id.
+        // Re-home the domestic store's local rows and replay its cursors: an
+        // identical call id in the two stores may have lost a row to dedupe.
+        // Sync imports and every other tool stay intact. This repair is atomic
+        // and does not trigger a workspace-wide re-ingest.
+        const REPAIR_WORKBUDDY_SPLIT: &str = "repair:workbuddy-split-1";
+        let buddy_split: Option<String> = conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1", params![REPAIR_WORKBUDDY_SPLIT], |r| r.get(0),
+        ).optional().map_err(sql_err)?;
+        if buddy_split.is_none() {
+            let tx = conn.unchecked_transaction().map_err(sql_err)?;
+            const CN_STORE: &str = "source NOT LIKE 'linux:%' AND instr(replace(source, char(92), '/'), '/.workbuddy/') > 0";
+            let twins = format!(
+                "SELECT id FROM event e WHERE e.tool = 'workbuddy' AND {CN_STORE} AND EXISTS \
+                 (SELECT 1 FROM event t WHERE t.tool = 'workbuddy_cn' \
+                  AND t.dedupe_key = 'workbuddy_cn#' || substr(e.dedupe_key, 11))"
+            );
+            tx.execute(&format!("DELETE FROM call WHERE event_id IN ({twins})"), []).map_err(sql_err)?;
+            tx.execute(&format!("DELETE FROM quota WHERE event_id IN ({twins})"), []).map_err(sql_err)?;
+            let removed = tx.execute(&format!("DELETE FROM event WHERE id IN ({twins})"), []).map_err(sql_err)?;
+            let moved = tx.execute(&format!(
+                "UPDATE event SET tool = 'workbuddy_cn', dedupe_key = 'workbuddy_cn#' || substr(dedupe_key, 11) \
+                 WHERE tool = 'workbuddy' AND {CN_STORE}"
+            ), []).map_err(sql_err)?;
+            tx.execute(
+                "DELETE FROM file_state WHERE tool = 'workbuddy' \
+                 AND source_key NOT LIKE 'linux:%' \
+                 AND instr(replace(source_key, char(92), '/'), '/.workbuddy/') > 0", [],
+            ).map_err(sql_err)?;
+            // The lazy rebuild detects an empty rollup, not missing groups.
+            // Rebuild the entire cache only when events actually moved.
+            if moved + removed > 0 { tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?; }
+            tx.execute("INSERT INTO meta(key, value) VALUES(?1, '1')", params![REPAIR_WORKBUDDY_SPLIT]).map_err(sql_err)?;
+            tx.commit().map_err(sql_err)?;
+        }
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);

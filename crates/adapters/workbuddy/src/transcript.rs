@@ -49,7 +49,7 @@ use serde_json::Value;
 use usage_core::{Error, FileKind, Meter, ReadCursor, ReadOutcome, SourceFile, TokenCounts, UsageEvent};
 use walkdir::WalkDir;
 
-use crate::{DEDUPE_PREFIX, TOOL_ID};
+use crate::TOOL_ID;
 
 /// Pre-filter: the store is mostly reasoning text and tool payloads, and only a
 /// `rawUsage` line can ever bill.
@@ -85,6 +85,10 @@ pub fn discover(projects: &Path, since_ms: Option<i64>) -> Vec<SourceFile> {
 }
 
 pub fn read(file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
+    read_for(file, cursor, TOOL_ID)
+}
+
+pub fn read_for(file: &SourceFile, cursor: ReadCursor, tool: &str) -> Result<ReadOutcome, Error> {
     let Some(tail) = read_tail(file, cursor.0)? else {
         return Ok(ReadOutcome { events: Vec::new(), cursor });
     };
@@ -102,7 +106,7 @@ pub fn read(file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error>
         // Invalid UTF-8 is a torn write, same class as a JSON parse failure.
         let Ok(text) = std::str::from_utf8(raw) else { continue };
         let Ok(line) = serde_json::from_str::<Value>(text) else { continue };
-        if let Some(event) = event_from_line(&line, session.as_deref(), file) {
+        if let Some(event) = event_from_line(&line, session.as_deref(), file, tool) {
             events.push(event);
         }
     }
@@ -141,7 +145,7 @@ fn owner_session(path: &Path) -> Option<String> {
 
 /// One usage-bearing line → one billable call, or `None` when the line carries
 /// nothing to charge or no id to dedupe on.
-fn event_from_line(line: &Value, session: Option<&str>, file: &SourceFile) -> Option<UsageEvent> {
+fn event_from_line(line: &Value, session: Option<&str>, file: &SourceFile, tool: &str) -> Option<UsageEvent> {
     let data = line.get("providerData")?;
     let usage = data.get("rawUsage")?;
     let id = text(line, "id")?;
@@ -158,13 +162,13 @@ fn event_from_line(line: &Value, session: Option<&str>, file: &SourceFile) -> Op
     // The line's own sessionId is a sub-agent's private id; the owner directory
     // is what the app lists and what the database keys on.
     let session = session.unwrap_or(id.as_str());
-    let mut event = UsageEvent::new(TOOL_ID, ts_ms, session).with(counts);
+    let mut event = UsageEvent::new(tool, ts_ms, session).with(counts);
     event.meter = Meter::Tokens;
     event.model = text(data, "model")
         .or_else(|| text(data, "requestModelId"))
         .filter(|model| !model.is_empty());
     event.project = text(line, "cwd").map(basename);
-    event.dedupe_key = Some(format!("{DEDUPE_PREFIX}{id}"));
+    event.dedupe_key = Some(format!("{tool}#{id}"));
     event.source = file.key();
     Some(event)
 }
@@ -233,12 +237,14 @@ fn text(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Roots to walk: the desktop app's data dir plus the CLI/CodeBuddy-shaped one,
-/// which the third-party readers default to. Both exist on some machines and
-/// only one on others.
+/// Roots of the international edition only.
 pub fn roots() -> Vec<PathBuf> {
+    roots_for(false)
+}
+
+pub fn roots_for(cn: bool) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    for root in crate::paths::config_roots() {
+    for root in crate::paths::config_roots_for(cn) {
         let projects = root.join("projects");
         if projects.is_dir() && !roots.contains(&projects) {
             roots.push(projects);

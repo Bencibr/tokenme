@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../scripts/check-pet-skins.mjs && tsc --noEmit --incremental --tsBuildInfoFile node_modules/tokenme.tsbuildinfo && vite build",
+    "build": "node ../../scripts/check-pet-skins.mjs && tsc --noEmit --incremental --tsBuildInfoFile node_modules/tokenme.tsbuildinfo && vite build && node ../../scripts/check-pet-bundle.mjs",
     "preview": "vite preview",
     "typecheck": "node ../../scripts/check-pet-skins.mjs && tsc --noEmit",
     "tauri": "tauri"

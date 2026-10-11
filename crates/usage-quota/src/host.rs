@@ -22,9 +22,12 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("zcode", &["ZCode", "zcode"]),
     ("antigravity", &["Antigravity"]),
     // Windows installs the desktop app as one word; the spaced name is macOS.
-    ("workbuddy", &["WorkBuddy AI", "WorkBuddyAI", "WorkBuddy"]),
+    ("workbuddy", &["WorkBuddy AI", "WorkBuddyAI"]),
+    ("workbuddy_cn", &["WorkBuddy"]),
     ("codebuddy", &["CodeBuddy", "CodeBuddy CN"]),
-    ("catpaw", &["CatPawAI", "CatPaw"]),
+    // 妙手 is the renamed CatPaw: the process carries the product name itself
+    // (妙手.exe on this machine), the pre-rename names stay for old installs.
+    ("catpaw", &["妙手", "CatPawAI", "CatPaw"]),
     ("cline", &["Cline", "cline", "cline-app", "code-sidecar"]),
     ("codex", &["codex", "Codex"]),
     ("opencode", &["opencode", "OpenCode"]),
@@ -163,6 +166,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_workbuddy_editions_follow_only_their_own_process() {
+        let cn = HashSet::from(["workbuddy.exe".into()]);
+        assert!(any_host_running("workbuddy_cn", &cn));
+        assert!(!any_host_running("workbuddy", &cn));
+        let global = HashSet::from(["workbuddyai.exe".into()]);
+        assert!(any_host_running("workbuddy", &global));
+        assert!(!any_host_running("workbuddy_cn", &global));
+    }
+
+    #[test]
     fn an_unmapped_tool_is_always_running() {
         let empty: HashSet<String> = HashSet::new();
         assert!(host_running("pi", &|_| false), "a CLI tool runs in any terminal");
@@ -217,7 +230,8 @@ mod tests {
         assert!(any_host_running("workbuddy", &alive));
         alive.clear();
         alive.insert("WorkBuddy.exe".to_string());
-        assert!(any_host_running("workbuddy", &alive));
+        assert!(!any_host_running("workbuddy", &alive));
+        assert!(any_host_running("workbuddy_cn", &alive));
         alive.clear();
         alive.insert("WorkBuddy Helper (Renderer)".to_string());
         assert!(!any_host_running("workbuddy", &alive), "helpers alone are not the host");

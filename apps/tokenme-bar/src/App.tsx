@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { MachineScope, PageKey, PanelSettings, PeriodKey, Report, ServerView, TrayMode, TrayState } from "./types";
+import type { MachineScope, PageKey, PanelSettings, PeriodKey, QuotaDisplayMode, Report, ServerView, TrayMode, TrayState } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
@@ -23,6 +23,8 @@ import { IconProvider } from "./components/ToolIcon";
 import { StatusBar } from "./components/StatusBar";
 import { ToolsSection } from "./components/ToolsSection";
 import { BubbleApp } from "./components/BubbleApp";
+import { PetNoticeApp } from "./components/PetNoticeApp";
+import { PetPreview } from "./components/PetPreview";
 
 /** 托盘显示模式循环顺序:仅托盘 → 仅Token → 仅花费 → 三个托盘组合。 */
 const MODES: TrayMode[] = ["tray_only", "tokens_only", "cost_only", "tray_tokens", "tray_cost", "tray_tokens_cost"];
@@ -32,6 +34,8 @@ export default function App() {
   // entrypoint. Keeping it in a separate component prevents panel hooks from
   // ever running in the utility window.
   const isBubble = inTauri && getCurrentWindow().label === "bubble";
+  if (!inTauri && new URLSearchParams(location.search).has("pet-preview")) return <PetPreview />;
+  if ((inTauri && getCurrentWindow().label === "pet-notice") || (!inTauri && new URLSearchParams(location.search).has("pet-notice"))) return <PetNoticeApp />;
   return isBubble ? <BubbleApp /> : <PanelApp />;
 }
 
@@ -84,6 +88,7 @@ const [page, setPage] = useState<PageKey>(() => {
   // The quota section must say when the numbers stopped moving because the user
   // asked them to — a frozen figure with no explanation reads as a broken panel.
   const [quotaPolling, setQuotaPolling] = useState(true);
+  const [quotaDisplayMode, setQuotaDisplayMode] = useState<QuotaDisplayMode>("used");
   // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
   // switch without touching persistence.
   const [showEmptyTools, setShowEmptyTools] = useState(() => {
@@ -138,6 +143,7 @@ const [page, setPage] = useState<PageKey>(() => {
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
       setQuotaPolling(s.quota_polling);
+      setQuotaDisplayMode(s.quota_display_mode);
       // The idle cadence is what the "updates stopped" line measures against.
       setRefreshSecs(s.refresh_secs);
       if (new URLSearchParams(location.search).get("showempty") === null) {
@@ -470,7 +476,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "overview" ? (
                 <>
                   <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} period={period} />
-                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
@@ -514,6 +520,7 @@ const [page, setPage] = useState<PageKey>(() => {
             onRefreshSecs={setRefreshSecs}
             onMoney={setShowMoney}
             onPolling={setQuotaPolling}
+            onQuotaDisplayMode={setQuotaDisplayMode}
             displays={Object.fromEntries(report.sources.map((s) => [s.id, s.display]))}
           />
         ) : null}

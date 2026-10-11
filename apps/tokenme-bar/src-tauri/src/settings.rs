@@ -47,6 +47,15 @@ pub enum Theme {
     System,
 }
 
+/// Display direction only; probes and notification thresholds still use spent quota.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaDisplayMode {
+    #[default]
+    Used,
+    Remaining,
+}
+
 /// The edge bubble's appearance. The renderer owns the skin manifest, so the
 /// persisted value is an opaque ID rather than a Rust enum: adding a JSON skin
 /// package does not require another backend release just to store its name.
@@ -126,6 +135,22 @@ fn default_quota_polling() -> bool {
 }
 
 /// The whole persisted surface: a tiny JSON file under the platform config dir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PetPreferences {
+    pub greetings: bool,
+    pub rest_reminders: bool,
+    pub motions: bool,
+    pub rest_interval_minutes: u16,
+}
+
+impl Default for PetPreferences {
+    fn default() -> Self {
+        Self { greetings:true, rest_reminders:true, motions:true, rest_interval_minutes:60 }
+    }
+}
+
+/// The whole persisted surface: a tiny JSON file under the platform config dir.
 ///
 /// `budgets` is shared with the CLI: `tokenme budget set …` writes that one key of
 /// the same file, so a cap set in a terminal reaches the panel on the next refresh
@@ -149,6 +174,8 @@ pub struct Settings {
     /// some users would rather not see it.
     #[serde(default = "default_show_money")]
     pub show_money: bool,
+    #[serde(default)]
+    pub quota_display_mode: QuotaDisplayMode,
     /// Also list tools whose session count for the period is zero on the
     /// tools page. Default off: a tool that did nothing this window is noise,
     /// and the page's job is comparing what ran. The tools list still keeps
@@ -159,6 +186,7 @@ pub struct Settings {
     pub bubble_enabled: bool,
     #[serde(default)]
     pub bubble_skin: BubbleSkin,
+    pub pet_companion: PetPreferences,
     /// Stop asking vendors for a tool's quota once its host application has
     /// exited: the number cannot change, and the calls are the user's own
     /// account traffic. Default on; the last known answer stays on screen.
@@ -212,9 +240,11 @@ impl Default for Settings {
             theme: Theme::default(),
             refresh_secs: default_refresh_secs(),
             show_money: default_show_money(),
+            quota_display_mode: QuotaDisplayMode::default(),
             show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),
             bubble_skin: BubbleSkin::default(),
+            pet_companion: PetPreferences::default(),
             host_exit_pause: default_host_exit_pause(),
             auto_checkin: false,
             quota_polling: default_quota_polling(),

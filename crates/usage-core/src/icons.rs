@@ -31,14 +31,16 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("cline", &["Cline"]),
     ("zcode", &["ZCode"]),
     ("qoder", &["Qoder"]),
-    ("catpaw", &["CatPawAI"]),
+    // 妙手 is the renamed CatPaw; both bundle names stay in the hunt.
+    ("catpaw", &["妙手", "CatPawAI"]),
     ("dsh", &["DSH Desktop"]),
     ("funide", &[]),
     ("hermes", &[]),
     ("antigravity", &["Antigravity"]),
     ("agnes", &["AgnesCode"]),
     ("atomcode", &[]),
-    ("workbuddy", &["WorkBuddy AI", "WorkBuddy"]),
+    ("workbuddy", &["WorkBuddy AI"]),
+    ("workbuddy_cn", &["WorkBuddy"]),
     ("codebuddy", &["CodeBuddy", "CodeBuddy CN"]),
     ("crow5", &["Crow5"]),
     ("joycode", &["JoyCode"]),
@@ -71,6 +73,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("joycode", include_bytes!("../assets/joycode.png")),
     ("cola", include_bytes!("../assets/cola.png")),
     ("workbuddy", include_bytes!("../assets/workbuddy.png")),
+    ("workbuddy_cn", include_bytes!("../assets/workbuddy.png")),
     ("codebuddy", include_bytes!("../assets/codebuddy.png")),
     ("cline", include_bytes!("../assets/cline.png")),
     // OpenCode is a CLI, but the vendor ships an official mark (their own
@@ -151,7 +154,7 @@ fn icons_from(dirs: &[PathBuf], wanted: &[(&str, &[&str])]) -> BTreeMap<String, 
 /// `.icns`, so the answer never depends on directory iteration order.
 fn icns_bytes(bundle: &Path) -> Option<Vec<u8>> {
     let res = bundle.join("Contents").join("Resources");
-    for name in ["AppIcon.icns", "icon.icns", "electron.icns", "CatPawAI.icns"] {
+    for name in ["AppIcon.icns", "icon.icns", "electron.icns", "妙手.icns", "CatPawAI.icns"] {
         let p = res.join(name);
         if p.is_file() {
             return std::fs::read(p).ok();

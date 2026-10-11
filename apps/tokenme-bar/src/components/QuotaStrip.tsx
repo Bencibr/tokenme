@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Loading } from "./Loading";
-import type { NotifyState, QuotaOrder, QuotaView } from "../types";
+import type { NotifyState, QuotaDisplayMode, QuotaOrder, QuotaView } from "../types";
 import { bridge } from "../lib/bridge";
 import { toolColor, toolDisplay, until, freshness } from "../lib/format";
 import { t } from "../lib/i18n";
@@ -20,7 +20,7 @@ function windowName(q: QuotaView): string {
 
 /** Tools whose quota probe owns a daily check-in: the group header grows the
  *  badge/button for exactly these. */
-const CHECKIN_TOOLS = ["trae_cn", "qoder", "minimaxcode"];
+const CHECKIN_TOOLS = ["trae_cn", "qoder", "minimaxcode", "workbuddy_cn"];
 
 /** The check-in state rides the report as zero-window marker rows. They are
  *  control channel, not data: the badge and the button read them off the raw
@@ -113,6 +113,7 @@ export function QuotaStrip({
   pending,
   scoped,
   polling = true,
+  displayMode = "used",
 }: {
   quotas: QuotaView[];
   now: number;
@@ -125,6 +126,7 @@ export function QuotaStrip({
   /** False when the user turned vendor polling off: the rows keep their last
    *  answer and the section says when it was taken. */
   polling?: boolean;
+  displayMode?: QuotaDisplayMode;
 }) {
   // The check-in marker rows are state, not data (CHECKIN_STATE_IDS): every
   // count and row on screen reads this filtered list; the badge and button
@@ -137,7 +139,7 @@ export function QuotaStrip({
   // 另一个工具误标成已签。状态与点击都在这里，而不是配额分组之后——那一段
   // 有早退（无窗口时），hooks 挪过去就会条件化调用，首次渲染即崩（白屏）。
   const [checkinBusy, setCheckinBusy] = useState<string | null>(null);
-  const [checkinClaimed, setCheckinClaimed] = useState<Set<string>>(new Set());
+  const [checkinClaimed, setCheckinClaimed] = useState<Map<string, number>>(new Map());
   const [checkinMsg, setCheckinMsg] = useState<Record<string, string | undefined>>({});
   /** The backend stamps a claimed day into the checkin pack's window: its id
    *  starts with "checkin" (Trae's entitlement row, Qoder's marker row) — the
@@ -146,7 +148,8 @@ export function QuotaStrip({
    *  read the raw report: the marker rows are filtered out of the visible
    *  list, so a group's rendered rows cannot answer for them. */
   const groupCheckedIn = (tool: string): boolean =>
-    quotas.some((q) => q.tool === tool && q.id?.startsWith("checkin") && q.id !== "checkin-wait" && q.id !== "checkin-gated");
+    quotas.some((q) => q.tool === tool && q.id?.startsWith("checkin") && q.id !== "checkin-wait" && q.id !== "checkin-gated"
+      && (tool !== "workbuddy_cn" || q.resets_at_ms > Date.now()));
   /** The backend says this tool's day has not opened yet (Qoder 10:00): the
    *  button greys and names the hour instead of claiming into the void. */
   const checkinWaiting = (tool: string): boolean =>
@@ -402,9 +405,10 @@ export function QuotaStrip({
     void bridge.setQuotaOrder(final).catch(() => {});
   };
 
+  const remaining = displayMode === "remaining";
   return (
     <Section
-      label={t("quota.section")}
+      label={`${t("quota.section")} · ${remaining ? t("quota.mode.remaining") : t("quota.mode.used")}`}
       meta={scoped ? t("quota.meta.local") : t("quota.meta", { w: live.length, g: groups.length })}
       trail={
         <span className="quota-legend" aria-hidden="true">
@@ -477,7 +481,7 @@ export function QuotaStrip({
                 </span>
                 {CHECKIN_TOOLS.includes(g.tool) ? (
                   <span className="quota-checkin">
-                    {groupCheckedIn(g.tool) || checkinClaimed.has(g.tool) ? (
+                    {groupCheckedIn(g.tool) || (checkinClaimed.get(g.tool) ?? 0) > Date.now() ? (
                       <span className="checkin-badge">{t("quota.checkin.done")}</span>
                     ) : (
                       <button
@@ -496,7 +500,15 @@ export function QuotaStrip({
                             // Only a real claim turns the button into the done
                             // badge; a reason (未到签到时间, 排队中) flashes on
                             // the button itself until the next sample refresh.
-                            if (ok) setCheckinClaimed((done) => new Set(done).add(g.tool));
+                            if (ok) {
+                              // A CN claim expires at Beijing midnight even if
+                              // the sheet remains open across the day boundary.
+                              const day = 86_400_000;
+                              const until = g.tool === "workbuddy_cn"
+                                ? (Math.floor((Date.now() + 8 * 3_600_000) / day) + 1) * day - 8 * 3_600_000
+                                : Infinity;
+                              setCheckinClaimed((done) => new Map(done).set(g.tool, until));
+                            }
                             else
                               window.setTimeout(
                                 () => setCheckinMsg((m) => ({ ...m, [g.tool]: undefined })),
@@ -522,12 +534,13 @@ export function QuotaStrip({
                 ) : null}
               </div>
               {g.rows.map((q) => {
-                const pct = q.used_percent;
+                const used = q.used_percent;
+                const pct = remaining ? Math.max(0, Math.min(100, 100 - used)) : used;
                 const width = Math.max(0, Math.min(100, pct));
                 // One colour per stage, the whole bar: <50% mint, 50-79% amber,
                 // ≥80% red — a gauge whose hue answers "how urgent", never a
                 // gradient that leaves two colour semantics on one bar.
-                const stage = pct > 100 ? "over" : pct >= 80 ? "high" : pct >= 50 ? "mid" : "low";
+                const stage = used > 100 ? "over" : used >= 80 ? "high" : used >= 50 ? "mid" : "low";
                 // A source with no metered limit at all keeps its row (so the
                 // tool block never loses a line) but its track hatches: nothing
                 // here is being measured, and a 0% bar would claim otherwise.
@@ -622,16 +635,18 @@ export function QuotaStrip({
                       <span
                         className="track"
                         role="progressbar"
-                        aria-valuenow={Math.round(pct)}
+                        aria-valuenow={Math.round(width)}
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-label={t("quota.bar.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })}
+                        aria-label={remaining
+                          ? t("quota.bar.remaining.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })
+                          : t("quota.bar.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })}
                       >
                         <i
                           style={{
                             width: `${width}%`,
-                            // A used window at 3% must still read as *started*;
-                            // below ~4 px the fill is invisible on a 84 px track.
+                            // Keep a nonzero gauge visible; an exhausted remaining
+                            // gauge must reach zero with no minimum fill.
                             minWidth: pct > 0 ? 4 : undefined,
                           }}
                           data-stage={stage}
@@ -643,7 +658,9 @@ export function QuotaStrip({
                     ) : figureInPct ? (
                       <span className="quota-pct quota-pct--na num">{figure}</span>
                     ) : (
-                      <span className="quota-pct num" data-stage={stage}>
+                      <span className="quota-pct num" data-stage={stage} title={remaining
+                        ? t("quota.bar.remaining.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })
+                        : t("quota.bar.a11y", { tool: toolDisplay(q.tool), label, p: pct.toFixed(1) })}>
                         {pct > 100 ? Math.round(pct) : pct < 10 ? pct.toFixed(1) : Math.round(pct)}
                         <em>%</em>
                       </span>

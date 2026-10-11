@@ -837,3 +837,44 @@ fn the_trae_turn_session_repair_drops_local_rows_and_keeps_merged_ones_once() {
         .unwrap();
     assert_eq!(back, 1, "the repair never runs twice");
 }
+
+#[test]
+fn the_workbuddy_split_preserves_other_editions_and_replays_domestic_cursors() {
+    let dir = tempfile::tempdir().unwrap(); let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn().execute("DELETE FROM meta WHERE key = 'repair:workbuddy-split-1'", []).unwrap();
+        for (id, tool, key, source) in [
+            (1,"workbuddy","workbuddy#unix","/home/demo/.workbuddy/projects/session.jsonl"),
+            (2,"workbuddy","workbuddy#win",r"C:\Users\demo\.workbuddy\projects\session.jsonl"),
+            (3,"workbuddy","workbuddy#global","/home/demo/.workbuddy-ai/projects/session.jsonl"),
+            (4,"workbuddy","workbuddy#remote","linux:server:/home/demo/.workbuddy/projects/session.jsonl"),
+            (5,"workbuddy","workbuddy#twin","/home/demo/.workbuddy/projects/twin.jsonl"),
+            (6,"workbuddy_cn","workbuddy_cn#twin","/home/demo/.workbuddy/projects/twin.jsonl"),
+        ] {
+            idx.conn().execute("INSERT INTO event(id,tool,ts_ms,session,meter,in_tok,dedupe_key,source) VALUES(?1,?2,10,'s','tokens',100,?3,?4)", rusqlite::params![id,tool,key,source]).unwrap();
+            idx.conn().execute("INSERT OR REPLACE INTO file_state(source_key,tool,cursor) VALUES(?1,?2,999)", rusqlite::params![source,tool]).unwrap();
+        }
+        idx.conn().execute("INSERT INTO call(event_id,kind,name) VALUES(5,'tool','test')", []).unwrap();
+        idx.conn().execute("INSERT INTO quota(event_id,used_percent,window_minutes,resets_at_ms) VALUES(5,10,60,100)", []).unwrap();
+        idx.conn().execute("INSERT INTO event_rollup(day,origin,tool,session,project,model,meter,in_tok,cc_tok,cr_tok,out_tok,reason_tok,credits,n,nonzero,min_ts,max_ts) VALUES('2026-10-10','','claude','s','','','tokens',1,0,0,0,0,0,1,1,10,10)", []).unwrap();
+        idx.conn().execute("INSERT INTO meta(key,value) VALUES('sync:linux:server','keep')", []).unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT count(*) FROM event WHERE tool='workbuddy_cn'"),3);
+    assert_eq!(count("SELECT count(*) FROM event WHERE tool='workbuddy'"),2);
+    assert_eq!(count("SELECT count(*) FROM event WHERE dedupe_key IN ('workbuddy_cn#unix','workbuddy_cn#win','workbuddy_cn#twin')"),3);
+    assert_eq!(count("SELECT count(*) FROM event WHERE id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM call WHERE event_id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM quota WHERE event_id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE tool='workbuddy' AND instr(replace(source_key,char(92),'/'),'/.workbuddy/')>0 AND source_key NOT LIKE 'linux:%'"),0);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE source_key LIKE '%/.workbuddy-ai/%'"),1);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE source_key LIKE 'linux:%'"),1,"remote cursors survive");
+    assert_eq!(count("SELECT count(*) FROM event_rollup"),0,"rollup must rebuild all groups together");
+    assert_eq!(idx.meta_value("sync:linux:server").unwrap().as_deref(),Some("keep"));
+    assert_eq!(idx.meta_value("repair:workbuddy-split-1").unwrap().as_deref(),Some("1"));
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    assert_eq!(idx.conn().query_row("SELECT count(*) FROM event", [], |r| r.get::<_,i64>(0)).unwrap(),5);
+}

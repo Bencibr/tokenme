@@ -154,6 +154,8 @@ fn paint<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
     // must never remove the application's only tray entry after an upgrade.
     #[cfg(target_os = "windows")]
     let mode = { let _ = mode; TrayMode::TrayOnly };
+    #[cfg(target_os = "windows")]
+    crate::windows_tray::refresh(app);
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
     let (title, tooltip) = label_for(report, mode);
     // Re-setting the image repaints the status item — visible as a flicker on
@@ -171,11 +173,14 @@ fn paint<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
     };
     if changed {
         // 仅Token/仅花费 hide the icon entirely: a text-only status item.
+        #[cfg(not(target_os = "windows"))]
         let icon = if mode.shows_icon() {
             app.try_state::<TrayAssets>().map(|a| a.0.clone())
         } else {
             None
         };
+        #[cfg(target_os = "windows")]
+        let icon = Some(crate::windows_tray::image(app));
         let _ = tray.set_icon(icon);
         // set_icon resets the template flag; without it macOS stops recoloring
         // the glyph and the black PNG ships as-is — invisible on a dark bar.
@@ -219,6 +224,7 @@ impl MenuItems {
 
 /// The dual-ring icon, kept so 仅Token/仅花费 can hide it and the 托盘 modes
 /// can put it back without re-reading the file.
+#[cfg(not(target_os = "windows"))]
 struct TrayAssets(tauri::image::Image<'static>);
 
 /// The last mode the status item was painted with — the guard that keeps
@@ -290,6 +296,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let (menu, autostart) = build_menu(app)?;
     app.manage(MenuItems(std::sync::Mutex::new(Some(autostart))));
     let icon = tray_image();
+    #[cfg(target_os = "windows")]
+    let icon = crate::windows_tray::init(app, icon);
+    #[cfg(not(target_os = "windows"))]
     app.manage(TrayAssets(icon.clone()));
     // The builder already painted the icon for the startup mode's default;
     // seeding None makes the first publish apply the real mode's imagery.
@@ -308,7 +317,10 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .on_tray_icon_event(on_tray_event)
         .build(app)?;
     #[cfg(target_os = "windows")]
-    promote_taskbar_icon();
+    {
+        crate::windows_tray::watch(app);
+        promote_taskbar_icon();
+    }
     Ok(())
 }
 

@@ -3,6 +3,10 @@
   "skins": {
     "kitten": {
       "labelKey": "set.bubble.skin.kitten",
+      "reactionAtlas": {
+        "file": "kitten-reactions-v1.webp",
+        "frames": { "hello": [0, 0], "care": [-96, 0], "sleep": [0, -96], "stretch": [-96, -96] }
+      },
       "assets": {
         "atlas": "kitten-sprites.png",
         "side": "kitten-edge-side.png",
@@ -121,6 +125,10 @@
     },
     "han_girl": {
       "labelKey": "set.bubble.skin.han_girl",
+      "reactionAtlas": {
+        "file": "han-girl-reactions-v1.webp",
+        "frames": { "hello": [0, 0], "care": [-96, 0], "sleep": [0, -96], "stretch": [-96, -96] }
+      },
       "assets": {
         "atlas": "han-girl-sprites.png",
         "side": "han-girl-edge-side.png",
@@ -234,6 +242,10 @@
     },
     "han_boy": {
       "labelKey": "set.bubble.skin.han_boy",
+      "reactionAtlas": {
+        "file": "han-boy-reactions-v1.webp",
+        "frames": { "hello": [0, 0], "care": [-96, 0], "sleep": [0, -96], "stretch": [-96, -96] }
+      },
       "assets": {
         "atlas": "han-boy-sprites.png",
         "side": "han-boy-edge-side.png",
@@ -347,6 +359,10 @@
     },
     "modern_girl": {
       "labelKey": "set.bubble.skin.modern_girl",
+      "reactionAtlas": {
+        "file": "modern-girl-reactions-v1.webp",
+        "frames": { "hello": [0, 0], "care": [-112, 0], "sleep": [0, -112], "stretch": [-112, -112] }
+      },
       "assets": {
         "atlas": "modern-girl-sprites.png",
         "side": "modern-girl-edge-side.png",
@@ -471,6 +487,10 @@
     },
     "summer_beauty": {
       "labelKey": "set.bubble.skin.summer_beauty",
+      "reactionAtlas": {
+        "file": "summer-beauty-reactions-v1.webp",
+        "frames": { "hello": [0, 0], "care": [-192, 0], "sleep": [0, -192], "stretch": [-192, -192] }
+      },
       "assets": {
         "atlas": "summer-beauty-sprites.png",
         "side": "summer-beauty-edge-side.png",
@@ -600,6 +620,10 @@
     },
     "pure_summer_beauty": {
       "labelKey": "set.bubble.skin.pure_summer_beauty",
+      "reactionAtlas": {
+        "file": "pure-summer-beauty-reactions-v1.webp",
+        "frames": { "hello": [0, 0], "care": [-320, 0], "sleep": [0, -320], "stretch": [-320, -320] }
+      },
       "assets": {
         "atlas": "pure-summer-beauty-sprites.png",
         "side": "pure-summer-beauty-edge-side.png",
