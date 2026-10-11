@@ -38,7 +38,8 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("antigravity", &["Antigravity"]),
     ("agnes", &["AgnesCode"]),
     ("atomcode", &[]),
-    ("workbuddy", &["WorkBuddy AI", "WorkBuddy"]),
+    ("workbuddy", &["WorkBuddy AI"]),
+    ("workbuddy_cn", &["WorkBuddy"]),
     ("codebuddy", &["CodeBuddy", "CodeBuddy CN"]),
     ("crow5", &["Crow5"]),
     ("joycode", &["JoyCode"]),
@@ -71,6 +72,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("joycode", include_bytes!("../assets/joycode.png")),
     ("cola", include_bytes!("../assets/cola.png")),
     ("workbuddy", include_bytes!("../assets/workbuddy.png")),
+    ("workbuddy_cn", include_bytes!("../assets/workbuddy.png")),
     ("codebuddy", include_bytes!("../assets/codebuddy.png")),
     ("cline", include_bytes!("../assets/cline.png")),
     // OpenCode is a CLI, but the vendor ships an official mark (their own

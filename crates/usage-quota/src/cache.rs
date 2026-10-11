@@ -44,6 +44,13 @@ struct Cached {
 /// change, so an upgrade never replays samples written under the old rules.
 const VERSION: u32 = 2;
 
+fn version_for(tool: &str) -> u32 {
+    // Before the edition split this id could cache either account. Those
+    // answers cannot be relabelled WorkBuddy AI honestly; other tools' last
+    // known answers keep their existing version and remain readable.
+    if tool == "workbuddy" { 3 } else { VERSION }
+}
+
 pub struct Cache {
     dir: PathBuf,
     ttl: Duration,
@@ -68,7 +75,7 @@ impl Cache {
     fn read(&self, tool: &str) -> Option<Cached> {
         let text = fs::read_to_string(self.path(tool)).ok()?;
         let cached = serde_json::from_str::<Cached>(&text).ok()?;
-        (cached.version == VERSION).then_some(cached)
+        (cached.version == version_for(tool)).then_some(cached)
     }
 
     fn write(&self, tool: &str, cached: &Cached) {
@@ -131,7 +138,7 @@ impl Cache {
                 id: s.id.clone(),
             })
             .collect();
-        self.write(tool, &Cached { version: VERSION, captured_at_ms: at, entries });
+        self.write(tool, &Cached { version: version_for(tool), captured_at_ms: at, entries });
     }
 }
 
@@ -252,6 +259,22 @@ pub fn cache_dir(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod cache_clear_tests {
     use super::Cache;
+
+    #[test]
+    fn a_pre_split_workbuddy_answer_cannot_be_replayed_as_international() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::in_dir(dir.path().to_path_buf(), crate::TTL);
+        cache.store("workbuddy", &[]);
+        cache.store("workbuddy_cn", &[]);
+        let path = dir.path().join("workbuddy.json");
+        let mut old: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        old["version"] = serde_json::json!(2);
+        std::fs::write(path, old.to_string()).unwrap();
+        assert!(cache.stale("workbuddy").is_none(), "an old combined answer has no edition");
+        assert!(cache.stale("workbuddy_cn").is_some(), "the independent CN cache remains readable");
+        cache.store("workbuddy", &[]);
+        assert!(cache.fresh("workbuddy").is_some(), "a new international answer is accepted");
+    }
 
     #[test]
     fn clear_forces_the_next_read_to_miss() {

@@ -27,9 +27,6 @@ mod transcript;
 
 pub const TOOL_ID: &str = "workbuddy";
 
-/// The dedupe namespace for per-call transcript events.
-pub(crate) const DEDUPE_PREFIX: &str = "workbuddy#";
-
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkBuddyAdapter;
 
@@ -39,7 +36,7 @@ impl SourceAdapter for WorkBuddyAdapter {
     }
 
     fn display_name(&self) -> &'static str {
-        "WorkBuddy"
+        "WorkBuddy AI"
     }
 
     fn semantics(&self) -> Semantics {
@@ -85,9 +82,70 @@ impl SourceAdapter for WorkBuddyAdapter {
     }
 }
 
+/// Domestic WorkBuddy: the same transcript dialect in a separate data store.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WorkBuddyCnAdapter;
+
+impl SourceAdapter for WorkBuddyCnAdapter {
+    fn id(&self) -> &'static str { "workbuddy_cn" }
+    fn display_name(&self) -> &'static str { "WorkBuddy" }
+    fn semantics(&self) -> Semantics { WorkBuddyAdapter.semantics() }
+
+    fn probe(&self) -> Option<DetectedSource> {
+        let roots = transcript::roots_for(true);
+        let files = roots.iter().flat_map(|root| transcript::discover(root, None)).count();
+        if files == 0 { return None; }
+        let sessions = paths::db_path_for(true).and_then(|db| db::count_sessions(&db)).unwrap_or(0);
+        Some(DetectedSource {
+            id: self.id().into(), display: self.display_name().into(), roots,
+            hint: Some(format!("{sessions} sessions · {files} transcripts")),
+        })
+    }
+
+    fn discover(&self, filter: &usage_core::DateFilter) -> Vec<SourceFile> {
+        let mut files: Vec<_> = transcript::roots_for(true).iter()
+            .flat_map(|root| transcript::discover(root, filter.since_ms)).collect();
+        files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        files
+    }
+
+    fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
+        match file.kind {
+            FileKind::Jsonl => transcript::read_for(file, cursor, self.id()),
+            _ => Ok(ReadOutcome { events: Vec::new(), cursor }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editions_keep_their_roots_and_event_keys_separate() {
+        let _env = paths::lock_env();
+        let global = tempfile::tempdir().unwrap();
+        let cn = tempfile::tempdir().unwrap();
+        transcript::tests::fixture(global.path());
+        transcript::tests::fixture(cn.path());
+        std::env::set_var(paths::ENV_CONFIG_DIR, global.path());
+        std::env::set_var("WORKBUDDY_CN_CONFIG_DIR", cn.path());
+        let filter = usage_core::DateFilter::default();
+        let global_files = WorkBuddyAdapter.discover(&filter);
+        let cn_files = WorkBuddyCnAdapter.discover(&filter);
+        std::env::remove_var(paths::ENV_CONFIG_DIR);
+        std::env::remove_var("WORKBUDDY_CN_CONFIG_DIR");
+        assert!(global_files.iter().all(|f| f.path.starts_with(global.path())));
+        assert!(cn_files.iter().all(|f| f.path.starts_with(cn.path())));
+        let g = WorkBuddyAdapter.read(&global_files[0], ReadCursor(0)).unwrap();
+        let c = WorkBuddyCnAdapter.read(&cn_files[0], ReadCursor(0)).unwrap();
+        assert_eq!(g.events[0].tool, "workbuddy");
+        assert_eq!(c.events[0].tool, "workbuddy_cn");
+        assert_ne!(g.events[0].dedupe_key, c.events[0].dedupe_key);
+        assert_eq!(g.events[0].counts, c.events[0].counts);
+        assert_eq!(WorkBuddyAdapter.display_name(), "WorkBuddy AI");
+        assert_eq!(WorkBuddyCnAdapter.display_name(), "WorkBuddy");
+    }
 
     #[test]
     fn an_absent_store_probes_as_not_installed() {

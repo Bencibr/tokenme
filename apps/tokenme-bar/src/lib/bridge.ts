@@ -501,7 +501,7 @@ const browserSettings: PanelSettings = {
  *  mirrors the ten tools with a cached answer on this machine. */
 const browserProbes: ProbeTool[] = [
   "claude", "agnes", "antigravity", "atomcode", "cola", "kimicode", "minimaxcode", "funide",
-  "cline", "opencode", "codex", "copilot", "gemini", "joycode", "qoder", "workbuddy", "catpaw",
+  "cline", "opencode", "codex", "copilot", "gemini", "joycode", "qoder", "workbuddy", "workbuddy_cn", "catpaw",
   "zcode", "dsh", "trae",
 ].map((id) => ({
   id,

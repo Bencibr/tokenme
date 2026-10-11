@@ -88,7 +88,7 @@ tokenme codex-doctor
 
 ## workbuddy-login
 
-Log in to WorkBuddy for the quota probe: asks the vendor for a state, opens Tencent SSO in your browser, then polls up to 5 minutes for the token. What it saves lands in `workbuddy-auth.json` under the OS config directory (the probe reads it, and never refreshes it); nothing is stored when the window elapses. No flags.
+Log in to domestic WorkBuddy for the quota probe: asks the vendor for a state, opens Tencent SSO in your browser, then polls up to 5 minutes for the token. What it saves lands in `workbuddy-auth.json` under the OS config directory (the probe reads it, and never refreshes it); nothing is stored when the window elapses. No flags. The saved credential's domain selects its edition; a domestic login never feeds the international WorkBuddy AI row. Installed desktop clients normally need no extra login.
 
 ```bash
 tokenme workbuddy-login
