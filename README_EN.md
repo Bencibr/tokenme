@@ -145,7 +145,7 @@ tokenme quota           # live quotas and reset countdowns
 
 ## Supported tools & live quota
 
-Every tool below ships as a built-in adapter — 27 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
+Every tool below ships as a built-in adapter — 26 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
 
 | Tool | Live quota | Check-in | Fixtures | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -159,7 +159,6 @@ Every tool below ships as a built-in adapter — 27 of them, indexed straight fr
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | subscription windows | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | credits + plan / resource packs | ✅ | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | self-computed (CLI `/usage`) | — | ✅ | ✅ | ⏳ |
-| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | membership points (one-time token) | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI** (international) | member points | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** (China) | credit-pack quota | ✅ | ✅ | ⏳ | ✅ |
@@ -181,7 +180,7 @@ Every tool below ships as a built-in adapter — 27 of them, indexed straight fr
 >
 > **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
 >
-> Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
+> **AgnesCode**: sessions are indexed as usual; its quota needs a manually injected, memory-only token, so it stays off the table. Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 
 ## TTFT & TPS measurements
 

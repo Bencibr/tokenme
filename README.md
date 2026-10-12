@@ -145,7 +145,7 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 
 ## 支持的工具与实时配额
 
-以下工具全部内置适配器——共 27 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
+以下工具全部内置适配器——共 26 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
 
 | 工具 | 实时配额 | 签到 | 兼容性测试 | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -159,7 +159,6 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | Credits + 套餐/资源包 | ✅ | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算（CLI `/usage`） | — | ✅ | ✅ | ⏳ |
-| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | 会员点数（注入一次令牌） | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan 配额 | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI**（国际版） | 会员点数 | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy**（国内版） | 积分包配额 | ✅ | ✅ | ⏳ | ✅ |
@@ -181,7 +180,7 @@ tokenme quota           # 各家订阅的实时额度与重置倒计时
 >
 > **平台验证**：随实机验证进度更新。⏳ 表示该平台的路径已实现、但尚未在实机上跑通；验证通过后更新标记即可。
 >
-> 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——实测其落盘 OAuth 令牌已过期，要续期就得用 Gemini CLI 自带包里的 client id/secret 去提交表单，而磁盘上也找不到该接口要的 project id（`crates/usage-quota/src/providers/gemini.rs`）。
+> **AgnesCode**：会话照常索引；配额需手动注入一次令牌（仅存内存，重启即失），故不入上表。仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——实测其落盘 OAuth 令牌已过期，要续期就得用 Gemini CLI 自带包里的 client id/secret 去提交表单，而磁盘上也找不到该接口要的 project id（`crates/usage-quota/src/providers/gemini.rs`）。
 
 ## TTFT 与 TPS 测量
 
