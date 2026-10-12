@@ -174,35 +174,35 @@ OpenCode quota reads only the official OpenCode Go provider (credential id `open
 
 Every tool below ships as a built-in adapter — 27 of them, indexed straight from the logs and databases each one writes to disk:
 
-| Tool | Live quota | Fixtures | Verified on |
-| :--- | :--- | :--- | :--- |
-| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 5-hour / cycle windows — official backend | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT rate windows — official backend | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Official OpenCode Go provider only — three dollar windows | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | Account window limits — Cline account API | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour/cycle windows + session budgets — the IDE's own quota API + local cookie decryption | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | Subscription windows — vendor usage API, local encrypted snapshot fallback; daily check-in state | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | Credits from its own CN logs; plan/resource-pack quota and daily check-in through the CN API | ✅ | macOS ⏳ · Windows ✅ |
-| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | Self-computed — runs the CLI's `/usage` | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | Membership points — needs a one-time token (see below) | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota — local daemon | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI** (international) | Member credits — the desktop app's billing API / local broker | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** (China) | Credit packages + daily check-in — its own account API / local broker | ✅ | macOS ⏳ · Windows ✅ |
-| <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft credits — the plans-usage billing meter; usage from the IDE history | ✅ | Windows ✅ |
-| <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points — cloud points API | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手** (formerly CatPaw) | Points balance — points portal API | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance — official user/balance + desktop credential file | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
-| **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | Plan quota — vendor billing API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE points — reads the IDE's own login state | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | Subscription quota — vendor v1 API, local credential decryption; daily check-in | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | Subscription quota — the CN fleet's own API and credential store, split credit windows and daily check-in | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | Plan windows — 5h / weekly / monthly via the vendor's `/usages`; usage read from the CLI **or** the desktop app's embedded runtime; an expired access token is renewed in place through the vendor's own refresh contract | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | Plan windows — 5h / weekly — plus the credit balance (purchased + check-in wallets); the ~1 h access token is renewed in place from the app's own refresh token | ✅ | macOS ✅ · Windows ✅ |
+| Tool | Live quota | Check-in | Fixtures | macOS | Windows |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | official 5-hour / cycle windows | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT rate windows | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | OpenCode Go, three dollar windows (official provider only) | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | account window limits | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour / cycle windows + session budgets | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | subscription windows | ✅ | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | credits + plan / resource packs | ✅ | ✅ | ⏳ | ✅ |
+| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | self-computed (CLI `/usage`) | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | membership points (one-time token) | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI** (international) | member points | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** (China) | credit-pack quota | ✅ | ✅ | ⏳ | ✅ |
+| <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft credits | — | ✅ | — | ✅ |
+| <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手** (formerly CatPaw) | points balance | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | — | ✅ | ✅ | ⏳ |
+| **Mimocode** | — | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | plan quota | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE points | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | subscription quota | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | subscription quota (per credit pack) | ✅ | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | 5-hour / weekly / monthly quotas | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | 5-hour / weekly quotas + points balance | ✅ | ✅ | ✅ | ✅ |
 
 > **Fixtures**: every adapter carries a fixture test suite, run in full on CI for each commit, and every integration was verified against a real machine's data before it landed.
 >

@@ -174,35 +174,35 @@ OpenCode 配额只查询官方 OpenCode Go provider（凭据 id `opencode-go`，
 
 以下工具全部内置适配器——共 27 款，直接从各工具自己落盘的日志与数据库建立索引：
 
-| 工具 | 实时配额 | 兼容性测试 | 平台验证 |
-| :--- | :--- | :--- | :--- |
-| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 5 小时/周期窗口 — 官方后端 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT 速率窗口 — 官方后端 | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | 仅官方 OpenCode Go provider — 三个美元额度窗口 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 — Cline 账号 API | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 — IDE 同款配额接口 + cookie 本地解密 | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 — 官方用量接口，本地加密快照兜底；支持每日签到状态 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | 独立采集国内版 Credits 用量；国内区套餐、资源包配额与自动签到 | ✅ | macOS ⏳ · Windows ✅ |
-| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算配额 — 调用其 CLI 的 `/usage` | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | 会员点数 — 需注入一次令牌（见下） | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan 配额 — 本地守护进程 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI**（国际版） | 会员点数 — 桌面 app 同款计费接口 / 本地 broker | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy**（国内版） | 积分包配额与每日签到 — 国内账号接口 / 本地 broker | ✅ | macOS ⏳ · Windows ✅ |
-| <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft 积分 — plans-usage 计费接口；用量取自 IDE history | ✅ | Windows ✅ |
-| <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 — 云端点数接口 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手**（原 CatPaw）| 积分余额 — 积分门户接口；新版本地凭据解密 | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek 账户余额 — 官方 user/balance + 桌面端凭据文件 | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
-| **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | 套餐配额 — 官方 billing 接口，本地凭据解密 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE 点数 — 读取 IDE 自身登录态 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | 订阅配额 — 官方 v1 接口，本地凭据解密；支持每日签到 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | 订阅配额 — CN 独立接口与凭据存储，按积分包拆分额度并支持每日签到 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | 套餐额度 — 5 小时 / 每周 / 每月，走官方 `/usages`；用量读 CLI 或桌面端内嵌 runtime 的日志；访问令牌过期时按官方刷新契约就地续期 | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | 套餐额度 — 5 小时 / 每周 — 外加积分余额（购买与签到两种钱包）；约 1 小时过期的访问令牌由 tokenme 用应用自己的刷新令牌原地续期 | ✅ | macOS ✅ · Windows ✅ |
+| 工具 | 实时配额 | 签到 | 兼容性测试 | macOS | Windows |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 官方 5 小时/周期窗口 | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT 速率窗口 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | OpenCode Go 三美元窗口（仅官方 provider） | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 | ✅ | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | Credits + 套餐/资源包 | ✅ | ✅ | ⏳ | ✅ |
+| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算（CLI `/usage`） | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | 会员点数（注入一次令牌） | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan 配额 | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI**（国际版） | 会员点数 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy**（国内版） | 积分包配额 | ✅ | ✅ | ⏳ | ✅ |
+| <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft 积分 | — | ✅ | — | ✅ |
+| <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手**（原 CatPaw） | 积分余额 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek 账户余额 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | — | ✅ | ✅ | ⏳ |
+| **Mimocode** | — | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | 套餐配额 | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE 点数 | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | 订阅配额 | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | 订阅配额（按积分包拆分） | ✅ | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | 5 小时/每周/每月额度 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | 5 小时/周额度 + 积分余额 | ✅ | ✅ | ✅ | ✅ |
 
 > **兼容性测试**：每款适配器都带夹具测试套件，CI 每次提交全量运行；每项接入落地前都用真实机器的数据验证过。
 >
