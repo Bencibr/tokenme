@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { TtftSample, TtftSnapshot } from "../types";
 import { relativeTime } from "../lib/format";
 import { t } from "../lib/i18n";
+import { IconInfo } from "./Icons";
 import { Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
 
@@ -110,7 +111,7 @@ export function SpeedPage({ snapshot, now }: { snapshot: TtftSnapshot; now: numb
             aria-expanded={aboutOpen}
             aria-controls="ttft-about-note"
             onClick={() => setAboutOpen((open) => !open)}
-          >?</button>
+          ><IconInfo size={7} /></button>
         </span>
       }
     >

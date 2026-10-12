@@ -987,18 +987,35 @@
 .ttft-local { font-size: 10px; color: var(--ink-3); }
 .ttft-granularity { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* The about badge: the page accent, not the ink scale — a hairline grey
+   circle disappears on the dark panel, and this is the one control on the
+   page that must invite a click. Expanded, it fills and inverts. */
 .ttft-about-button {
   flex: none;
-  width: 16px;
-  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* text-sized: matches the 10px status line's height, so the badge reads
+     as punctuation beside 未启用, not a shouty bubble */
+  width: 12px;
+  height: 12px;
   padding: 0;
-  border: 1px solid var(--hair);
+  border: 1px solid color-mix(in srgb, var(--page-accent) 60%, transparent);
   border-radius: 50%;
-  background: none;
-  color: var(--ink-3);
-  font-size: 10px;
-  line-height: 1;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
   cursor: pointer;
+}
+
+.ttft-about-button:hover {
+  border-color: var(--page-accent);
+  color: var(--page-accent);
+}
+
+.ttft-about-button[aria-expanded="true"] {
+  background: var(--page-accent);
+  border-color: var(--page-accent);
+  color: var(--on-accent);
 }
 
 .ttft-about-note { margin: 2px 0 4px; font-size: 10px; line-height: 1.45; color: var(--ink-3); }
