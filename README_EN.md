@@ -25,9 +25,9 @@ TokenMe is a menu bar app that tracks token usage, spend, and subscription quota
 - How much is left on each subscription, and when does it reset?
 - Which tool owns this month's spend — and how much did caching actually save me?
 
-Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index.
+Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index; headless servers and containers run the collector and report home on a schedule, rolling every machine into the same ledger. Quota probes read each vendor's own API or local credentials — read-only — and the five tools with daily check-in can claim right from the panel.
 
-## Sound familiar?
+## What can TokenMe do?
 
 Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
 
@@ -36,7 +36,7 @@ Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
 - Points, credits, dollar windows — every subscription ships its own dashboard, and none of them talk to each other.
 - At month's end you want the per-tool breakdown, and the only way to get it is parsing logs by hand.
 
-TokenMe puts all of it in one panel, a click away.
+TokenMe puts all of it in one panel, a click away — usage, spend, quota, check-in and speed on one screen, with servers and containers rolled into the same ledger.
 
 ## Screenshots
 
@@ -47,12 +47,13 @@ TokenMe puts all of it in one panel, a click away.
   <img alt="TokenMe panel — Tools tab, dark" src="docs/screenshots/panel-en-tools-dark.png" width="24%">
 </p>
 
-## Inside the panel
+## Core features
 
-The panel opens with four pages, each one drilling deeper:
+The panel opens with five pages, each one drilling deeper:
 
-- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; each vendor's quota bar with remaining share and reset countdown; and a native banner when a window crosses 80% used or runs out — thresholds, and which vendors are asked at all, are settings.
-- **Tools** — one row per tool: requests, sessions, tokens, cache rate — with each tool's share painted into the row itself.
+- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; an Activity tab with a GitHub-style year heatmap (swipe for last week, last month, last year). Below, each vendor's quota bar with remaining share and reset countdown — tools with daily check-in claim right from the row header; and a native banner when a window crosses 80% used or runs out. Thresholds, and which vendors are asked at all, are settings.
+- **Speed** — passive TTFT and TPS measurement, plus one-shot active probes for Codex and Claude Code.
+- **Tools** — one row per tool: requests, sessions, tokens, cache rate — tinted with each tool's own app icon.
 - **Rankings** — sessions ranked, so the expensive ones surface immediately.
 - **Details** — per-request records, filterable by model and project.
 
