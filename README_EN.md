@@ -179,6 +179,8 @@ Every tool below ships as a built-in adapter — 27 of them, indexed straight fr
 > **Fixtures**: every adapter carries a fixture test suite, run in full on CI for each commit, and every integration was verified against a real machine's data before it landed.
 >
 > **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
+
+OpenCode quota supports the official provider only. TokenMe reads `OPENCODE_API_KEY`, `provider.<id>.options.apiKey` from `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json` when `baseURL` is `https://opencode.ai/zen/go/v1`, and finally API entries in `~/.local/share/opencode/auth.json`. Custom proxy providers are ignored.
 >
 > Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 
@@ -226,4 +228,4 @@ Multi-machine roll-ups move data over your own channels too — ssh/scp, or the 
 
 Released under the [MIT](LICENSE) license.
 
-Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+Full reference: **[docs/COMMANDS_EN.md](docs/COMMANDS_EN.md)** · Task guides: **[docs/USER_GUIDE_EN.md](docs/USER_GUIDE_EN.md)** · Architecture: **[docs/ARCHITECTURE_EN.md](docs/ARCHITECTURE_EN.md)**
