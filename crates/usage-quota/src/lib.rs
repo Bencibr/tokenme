@@ -11,6 +11,7 @@
 pub mod cache;
 pub mod host;
 mod http;
+pub mod diagnostics;
 mod providers;
 
 use std::sync::Arc;
@@ -70,7 +71,12 @@ pub fn manual_checkin(tool: &str) -> Result<(bool, String), String> {
     CHECKIN_TOOLS
         .iter()
         .find(|(id, _)| *id == tool)
-        .map(|(_, claim)| claim())
+        .map(|(id, claim)| {
+            let mut trace = diagnostics::ProbeTrace::start(id);
+            let result = claim();
+            trace.finish(match &result { Ok((true, _)) => "confirmed", Ok(_) => "not_confirmed", Err(_) => "error" }, None);
+            result
+        })
         .unwrap_or_else(|| Err(format!("{tool} 没有签到活动")))
 }
 
@@ -119,7 +125,11 @@ pub trait QuotaProbe: Send + Sync {
     /// Probes shell out and hit the network; neither may take the menu-bar
     /// process down with them.
     fn guarded_fetch(&self) -> Vec<QuotaSample> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.fetch())).unwrap_or_default()
+        let mut trace = diagnostics::ProbeTrace::start(self.tool());
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.fetch())) {
+            Ok(samples) => { trace.finish(if samples.is_empty() { "empty" } else { "ok" }, Some(samples.len())); samples },
+            Err(_) => { trace.finish("panic", None); Vec::new() },
+        }
     }
 }
 
@@ -250,6 +260,7 @@ fn collect_probes_gated(
         // it — the task runs at the first pass past its window, not per poll.
         let gated_off = !gate(probe.tool()) && !probe.daily_task();
         let spawned = std::thread::Builder::new()
+            .name(format!("quota-{}", probe.tool()))
             .stack_size(256 * 1024)
             .spawn(move || {
                 let cached: Option<&cache::Cache> = (*cache).as_ref();
@@ -261,6 +272,7 @@ fn collect_probes_gated(
                 // check-in tool the user disabled) whenever the cache dir was
                 // unavailable — the exact opposite of the gate's promise.
                 let views = if gated_off {
+                    diagnostics::note(probe.tool(), "probe_skipped", "gated");
                     cached
                         .map(|c| c.stale(probe.tool()).unwrap_or_default())
                         .unwrap_or_default()

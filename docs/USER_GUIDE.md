@@ -145,6 +145,16 @@ Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are no
 | A bundle was rejected | The import message names the reason (sha256 mismatch = corrupted or truncated in transit; format/schema mismatch = version skew between the machines). The file is kept, nothing was merged — fix the transport or update the older side, then it retries by itself |
 
 
+## Windows crash diagnostics
+
+Windows installers configure local full-memory crash dumps for `TokenMe.exe` and the optional `TokenMe-diagnostic.exe`, retaining three dumps per image under `%LOCALAPPDATA%\tokenme\crashes`. This requires administrator rights; a non-admin per-user install still works, and `panel.log` reports if full dumps are unavailable. Existing custom WER settings are preserved. No dump is uploaded automatically; full dumps can contain credentials and should stay local.
+
+`quota.log` beside `panel.log` records JSONL probe/request IDs, process and Windows thread IDs, provider, host, HTTP status/error category, elapsed time and in-flight counts. It excludes URL paths/query strings, headers, payloads and response bodies. `http_response` means response headers arrived; `probe_end` follows body processing. An unmatched begin event identifies work active when a native abort occurred. Each log is limited to 2 MiB plus one backup. Rust panic records additionally include a backtrace; native heap corruption is captured by WER instead of being caught and continued.
+
+Normal `pnpm tauri build --bundles nsis` builds archive matching EXE/PDB files, source revision/fingerprint, local patches and SHA256 values in `dist/windows-symbols/` after bundling. For builds without an installer, run `node scripts/build-windows-panel.mjs --no-bundle --ci` from the repository root. Archive creation rejects a stale source fingerprint or a PDB whose GUID/age does not match the executable.
+
+For a controlled heap-corruption investigation, copy the archived executable as `TokenMe-diagnostic.exe`, stop the normal instance, and enable full PageHeap from an administrator PowerShell with `windows-pageheap.ps1 -Mode Enable`. Restart the diagnostic copy for the setting to apply. Disable it with `-Mode Disable` and restart when finished. PageHeap is never enabled during normal installation/startup and can use substantial memory. The helper is installed in the application's `bin` directory; the corresponding WER helper, `windows-crash-dumps.ps1 -Mode Enable`, can repair dump configuration with administrator rights.
+
 ## Desktop pet greetings (Windows)
 
 General settings has separate switches for pet greetings, break reminders and motions, plus the reminder interval and a Say hello preview. Greetings follow local time: morning 06:00–11:00, noon 11:00–14:00, evening 18:00–22:00 and a gentle night greeting from 22:00–06:00. Each period greets once per local day; the hours around midnight belong to one night.

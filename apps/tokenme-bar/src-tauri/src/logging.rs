@@ -56,6 +56,29 @@ pub fn error(msg: &str) {
     write_line("error", msg);
 }
 
+/// JSONL beside panel.log, separately size-bounded. Metadata only: the quota
+/// crate cannot put a request header, body or error Display string in Event.
+pub fn quota_event(event: &usage_quota::diagnostics::Event) {
+    let Some(path) = PATH.get() else { return };
+    let Ok(record) = serde_json::to_string(event) else { return };
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = append_metadata(&path.with_file_name("quota.log"), record.as_bytes(), MAX_BYTES);
+}
+
+fn append_metadata(path: &Path, record: &[u8], limit: u64) -> std::io::Result<()> {
+    if record.len() as u64 + 1 > limit { return Ok(()) }
+    if fs::metadata(path).is_ok_and(|m| m.len().saturating_add(record.len() as u64 + 1) > limit) {
+        let backup = path.with_extension("log.1");
+        if backup.exists() { fs::remove_file(&backup)?; }
+        fs::rename(path, backup)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(record)?;
+    file.write_all(b"\n")?;
+    // A begin event must reach the file before an uncaught native abort.
+    file.flush()
+}
+
 /// The check-in ledger, one line per attempt in its own file (`checkin.log`
 /// beside `panel.log`, same rotation rules). Panel log lines drown between
 /// ingest and poll chatter; a check-in history is per-day bookkeeping and
@@ -141,7 +164,8 @@ fn cleanup(path: &Path, now: &DateTime<Local>) {
         let name = name.to_string_lossy();
         let ours = (name.starts_with("panel-") && name.ends_with(".log"))
             || name == "panel.log.1"
-            || name == "scan.log.1";
+            || name == "scan.log.1"
+            || name == "quota.log.1";
         if !ours {
             continue;
         }
@@ -167,6 +191,24 @@ fn install_panic_hook() {
             None => String::new(),
         };
         write_line("panic", &format!("thread={thread}{at} {info}"));
+        write_line("panic", &format!("backtrace:\n{}", std::backtrace::Backtrace::force_capture()));
         default_hook(info);
     }));
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_rotation_keeps_complete_records_and_one_backup() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("quota.log");
+        append_metadata(&path, br#"{"request_id":1}"#, 35).unwrap();
+        append_metadata(&path, br#"{"request_id":2}"#, 35).unwrap();
+        append_metadata(&path, br#"{"request_id":3}"#, 35).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"request_id\":3}\n");
+        assert_eq!(fs::read_to_string(path.with_extension("log.1")).unwrap(), "{\"request_id\":1}\n{\"request_id\":2}\n");
+        append_metadata(&path, &[b'x'; 100], 35).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"request_id\":3}\n");
+    }
 }

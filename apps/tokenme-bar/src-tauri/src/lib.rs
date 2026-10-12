@@ -13,6 +13,8 @@ mod claude_otel_config;
 mod claude_otel_ttft;
 mod ttft;
 mod active_speed;
+#[cfg(windows)]
+mod windows_diagnostics;
 mod snapshot;
 mod tray;
 mod updater;
@@ -121,6 +123,9 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             logging::init();
+            usage_quota::diagnostics::set_sink(Some(std::sync::Arc::new(logging::quota_event)));
+            #[cfg(windows)]
+            windows_diagnostics::init();
             #[cfg(windows)]
             logging::info("quota TLS: session resumption disabled on Windows");
             notify::init(app.handle());

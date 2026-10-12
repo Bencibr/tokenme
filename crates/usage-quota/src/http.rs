@@ -13,7 +13,7 @@ const READ: Duration = Duration::from_secs(6);
 /// One-shot probes do not need resumption; keep normal certificate validation
 /// while avoiding that shared cache. Other platforms retain ureq's defaults.
 pub(crate) fn agent_builder() -> ureq::AgentBuilder {
-    let builder = ureq::AgentBuilder::new();
+    let builder = ureq::AgentBuilder::new().middleware(crate::diagnostics::http_middleware);
     #[cfg(windows)]
     {
         use std::sync::{Arc, OnceLock};
