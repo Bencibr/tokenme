@@ -101,7 +101,7 @@ sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 
 ### Windows
 
-Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/latest). The installer supports an all-users install: on shared machines choose **All users**, and use the same mode for upgrades — the machine-wide installation is then replaced in place for every Windows account. The CLI ships no Windows installer yet; use `cargo install` via [build from source](#build-from-source) when you need it.
+Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/latest). The installer supports an all-users install: on shared machines choose **All users**, and use the same mode for upgrades — the machine-wide installation is then replaced in place for every Windows account. The setup also installs the `tokenme` CLI and adds its `bin` directory to the user PATH (Only me) or system PATH (All users). Open a new terminal after installation to use `tokenme --help`, `tokenme daily`, and `tokenme quota`. Upgrades do not duplicate the PATH entry; uninstall removes only this installation's entry.
 
 ### Linux
 
@@ -183,6 +183,8 @@ Every tool below ships as a built-in adapter — 27 of them, indexed straight fr
 >
 > Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 
+> **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
+
 ## TTFT & TPS measurements
 
 TokenMe can passively measure **TTFT** (time to first token) and **TPS** (generated tokens per second) from local client activity. These are observed client-side timings, not provider benchmarks. Collection begins when enabled; earlier activity is not backfilled.
@@ -193,11 +195,8 @@ TokenMe can passively measure **TTFT** (time to first token) and **TPS** (genera
 | **Claude Code CLI** | Request-level TTFT and TPS from Claude Code OpenTelemetry spans; first-content timing is labeled separately and is not TTFT | Yes — one short CLI request with temporary, process-scoped telemetry |
 | **DSH (DeepSeek Harness)** | Request-level TTFT and TPS from local compressed session logs, when the stream contains first-token timestamps | No — passive collection only |
 
-DSH follows its session statistics: the latest session's captured requests are grouped together, TTFT is averaged per request, and TPS is calculated as total output tokens divided by total decode time (completion minus first-token time). Older DSH log formats without first-token timestamps cannot produce these measurements. Active tests send a short prompt only after you click, use plan quota, and are kept separate from passive averages. The speed collector does not retain prompt or response text.
+DSH follows its session stats: TTFT averaged per request, TPS as output tokens over decode time; older logs without first-token timestamps yield neither. An active test sends one short prompt only after you click (uses plan quota), is kept separate from passive averages, and retains no prompt or response text.
 
-> **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
-
-Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 
 ## What's new in 0.1.7
 
@@ -227,3 +226,5 @@ Machines can sync their indexes to each other — a file-based `tokenme export` 
 ## License
 
 Released under the [MIT](LICENSE) license.
+
+Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
