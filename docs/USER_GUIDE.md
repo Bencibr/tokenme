@@ -1,6 +1,6 @@
 # TokenMe 使用指南
 
-> 版本：0.1.7 · 更新：2026-10-12 · 读者：日常用户 · 面板与 CLI 都在覆盖范围内 · [English](USER_GUIDE_EN.md)（0.1.5 旧版，待同步）
+> 版本：0.1.7 · 更新：2026-10-12 · 读者：日常用户 · 面板与 CLI 都在覆盖范围内 · [English](USER_GUIDE_EN.md)
 
 ## 功能清单
 
@@ -89,7 +89,7 @@ macOS 由 `scripts/build-macos.sh` 构建，Windows 由 `apps/tokenme-bar` 下�
 
 ### 3.5 OpenCode 官方配额
 
-TokenMe 只读取官方 OpenCode Go provider 的配额：优先 `OPENCODE_API_KEY`，其次 `~/.config/opencode/opencode.json` 中任意 `provider.<id>.options.apiKey`（该 provider 的 `options.baseURL` 必须是 `https://opencode.ai/zen/go/v1`），最后回退 `~/.local/share/opencode/auth.json`。自定义代理地址不会被当作官方配额凭据。OpenCode 行显示 5 小时、7 天与月度三个窗口。行没出现时，依次检查 高级 → 自动探测配额、逐工具探测的 OpenCode 开关，以及 `panel.log` 的 quota poll 记录。
+TokenMe 只读取官方 OpenCode Go provider 的配额：优先 `OPENCODE_API_KEY`，其次 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`；该 provider 的 `options.baseURL` 必须是 `https://opencode.ai/zen/go/v1`），最后回退 `~/.local/share/opencode/auth.json`。自定义代理地址不会被当作官方配额凭据。OpenCode 行显示 5 小时、7 天与月度三个窗口。行没出现时，依次检查 高级 → 自动探测配额、逐工具探测的 OpenCode 开关，以及 `panel.log` 的 quota poll 记录。
 
 ### 3.6 令牌自动续期
 
