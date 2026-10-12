@@ -10,57 +10,57 @@
 </p>
 
 <p align="center">
-  <b>One menu bar dashboard for every AI coding tool's token usage, spend, and remaining quota — so you stop checking each vendor's console.</b>
+  <b>一份菜单栏看板，看清每个 AI 编程工具的 token 用量、花费与剩余额度——不用再挨个翻各家的控制台。</b>
 </p>
 
 <p align="center">
-  <b>English</b> | <a href="README_CN.md">简体中文</a>
+  <a href="README_EN.md">English</a> | <b>简体中文</b>
 </p>
 
-## What is TokenMe?
+## 这是什么
 
-TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, a fully static Linux collector and CLI. It answers three questions that usually have no good home:
+TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的菜单栏应用：macOS 与 Windows 有原生安装包，Linux 是一等的静态采集端，外加命令行工具。它回答三个平时没地方看的问题：
 
-- How many tokens did I burn today, and what did they cost?
-- How much is left on each subscription, and when does it reset?
-- Which tool owns this month's spend — and how much did caching actually save me?
+- 今天用了多少 token、折合多少钱？
+- 各家订阅的额度还剩多少、什么时候重置？
+- 这个月每个工具各占了多少开销，缓存到底省了多少？
 
-Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index.
+这些数字平时散在各家自己的控制台和本地日志里，口径互不相通。TokenMe 直接读取这些工具写在磁盘上的日志和数据库，在本机汇成一份索引。
 
-## Sound familiar?
+## 解决什么问题
 
-Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
+同时用 Claude Code、Codex、ZCode 和其他 AI 编程工具时，这些场景大概不陌生：
 
-- You want to know what today cost, so you open three vendor consoles — and their numbers don't agree.
-- A 5-hour rolling window runs dry right when the work is hottest.
-- Points, credits, dollar windows — every subscription ships its own dashboard, and none of them talk to each other.
-- At month's end you want the per-tool breakdown, and the only way to get it is parsing logs by hand.
+- 想知道今天花了多少钱，得挨个打开各家的控制台，口径还对不上；
+- 5 小时滚动窗口快用完了才发现，正赶上活儿最紧的时候；
+- 点数、credits、美元窗口——每种订阅一个看板，各看各的；
+- 月底想复盘：哪个工具是大头、缓存命中率省了多少钱，只能翻日志自己算。
 
-TokenMe puts all of it in one panel, a click away.
+TokenMe 把这些收进同一个面板，菜单栏随时点开。
 
-## Screenshots
+## 运行截图
 
 <p align="center">
-  <img alt="TokenMe panel — Overview tab, light" src="docs/screenshots/panel-en-overview.png" width="24%">
-  <img alt="TokenMe panel — Tools tab, light" src="docs/screenshots/panel-en-tools.png" width="24%">
-  <img alt="TokenMe panel — Overview tab, dark" src="docs/screenshots/panel-en-overview-dark.png" width="24%">
-  <img alt="TokenMe panel — Tools tab, dark" src="docs/screenshots/panel-en-tools-dark.png" width="24%">
+  <img alt="TokenMe 面板 — 概览页，浅色" src="docs/screenshots/panel-zh-overview.png" width="24%">
+  <img alt="TokenMe 面板 — 工具页，浅色" src="docs/screenshots/panel-zh-tools.png" width="24%">
+  <img alt="TokenMe 面板 — 概览页，深色" src="docs/screenshots/panel-zh-overview-dark.png" width="24%">
+  <img alt="TokenMe 面板 — 工具页，深色" src="docs/screenshots/panel-zh-tools-dark.png" width="24%">
 </p>
 
-## Inside the panel
+## 面板里有什么
 
-The panel opens with four pages, each one drilling deeper:
+菜单栏点开后分四页，一层层往下钻：
 
-- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; each vendor's quota bar with remaining share and reset countdown; and a native banner when a window crosses 80% used or runs out — thresholds, and which vendors are asked at all, are settings.
-- **Tools** — one row per tool: requests, sessions, tokens, cache rate — with each tool's share painted into the row itself.
-- **Rankings** — sessions ranked, so the expensive ones surface immediately.
-- **Details** — per-request records, filterable by model and project.
+- **概览**——当天的 token、费用与缓存命中率，按小时分布的用量柱状图，下面是各家配额条：剩余比例和重置倒计时；窗口跨过 80% 或耗尽时弹一条原生通知——提醒档位与「问哪几家」都归设置管；
+- **工具**——每个工具的请求数、会话数、token 量与缓存率，一行一个，用量占比就画在行底色里；
+- **排行**——按会话排名，一眼找出最贵的那几个；
+- **明细**——单次请求级的记录，可以按模型、项目筛选。
 
-The UI follows the system language: English and Chinese. Costs are converted, not billed — token counts times the [models.dev](https://models.dev) price list. It won't match a vendor invoice to the cent, but it answers where the money went and whether it was well spent. The index handles hundreds of thousands of events, builds in seconds, and each incremental scan after that takes tens of milliseconds.
+界面语言跟随系统，中英双语。费用是折算出来的：token 计数乘以 [models.dev](https://models.dev) 的模型单价——和官方扣款记录未必分毫不差，但足够回答钱花在哪、花得值不值。几十万条事件的索引在本机秒级建好，之后每次增量扫描只需几十毫秒。
 
-## The CLI
+## 命令行
 
-When the panel stays closed, the CLI reads the same index:
+不开面板时，CLI 读的是同一份索引：
 
 ```text
 $ tokenme daily --days 3
@@ -76,49 +76,49 @@ $ tokenme daily --days 3
 └────────────┴──────────┴──────────┴────────┴────────────┴────────┴────────┴─────────┴────────┘
 ```
 
-## Install
+## 安装
 
-**Homebrew (macOS)** — tap once, then short names:
+**Homebrew（macOS）**——tap 一次，之后用短名：
 
 ```bash
 brew tap Bencibr/tokenme https://github.com/Bencibr/homebrew-tokenme
-brew trust bencibr/tokenme        # once — brew 6 asks before trusting third-party casks
-brew install --cask tokenme       # the menu-bar panel
-brew install tokenme-cli          # the CLI
+brew trust bencibr/tokenme        # 一次即可——brew 6 对第三方 cask 有信任确认
+brew install --cask tokenme       # 菜单栏面板
+brew install tokenme-cli          # CLI
 ```
 
-The tap is bumped automatically on every release, so `brew upgrade` keeps you current, and cask installs carry no quarantine flag — Gatekeeper never steps in.
+tap 随每次发布自动更新，`brew upgrade` 即可升级；cask 安装不带隔离标记，Gatekeeper 不会拦。
 
-**Installers**: grab one from [Releases](https://github.com/Bencibr/tokenme/releases/latest) — the macOS menu-bar app (drag to Applications), a Windows setup, and the static Linux collector tarballs (`x86_64` / `aarch64`, each with `install-linux.sh` beside it).
+**安装包**：到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载，里面有 macOS 菜单栏应用（拖入 Applications）、Windows 安装程序，以及 Linux 静态采集端压缩包（`x86_64` / `aarch64`，包内已附 `install-linux.sh`）。
 
-**Windows installation**: the setup supports an all-users install for shared machines. Choose **All users** in the installer when TokenMe should be available to every Windows account; use the same mode for upgrades so the machine-wide installation is replaced in place.
+**Windows 安装**：安装器支持“所有用户”模式。共享电脑上请选择“所有用户”，升级时也保持同一模式，这样会原地替换机器级安装，并对所有 Windows 账户生效。
 
-> **First launch on macOS** (manual DMG only): the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in. Right-click → Open works, or clear the quarantine flag:
+> **macOS 首次打开**（仅手动装 DMG 时）：安装包是 ad-hoc 签名（没有开发者证书），Gatekeeper 可能拦一下——右键打开即可，或者清掉隔离标记后正常启动：
 >
 > ```bash
 > sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 > ```
 
-Build from source instead:
+想从源码构建：
 
 ```bash
 git clone https://github.com/Bencibr/tokenme.git
 cd tokenme
 cargo install --path crates/usage-cli --bin tokenme   # CLI
-./scripts/build-macos.sh                              # macOS panel
+./scripts/build-macos.sh                              # macOS 面板
 ```
 
-Once it's in, run a detection pass and look at the last week:
+装好先跑一次探测，再看最近一周的账：
 
 ```bash
-tokenme detect          # find every installed tool and where its logs live
-tokenme daily --days 7  # the last week's daily usage and spend
-tokenme quota           # live quotas and reset countdowns
+tokenme detect          # 自动探测本机装了哪些工具、日志在哪
+tokenme daily --days 7  # 最近一周的每日消耗与账单
+tokenme quota           # 各家订阅的实时额度与重置倒计时
 ```
 
-## Linux — the headless collector
+## Linux —— 无头采集端
 
-The menu-bar panel is macOS and Windows. **Linux is where the work actually happens** — the box you SSH into, the container your agent runs in, the build machine that never shows a GUI — so Linux ships as a first-class collector rather than an afterthought: one fully static binary (musl, `x86_64` and `aarch64`, so there is no glibc version to match and no Rust or Python to install on the machine), plus one command to make it report home.
+菜单栏面板只有 macOS 和 Windows。而**真正干活的机器往往是 Linux**——你 ssh 上去的服务器、跑 agent 的容器、不出图形的构建机——所以 Linux 不是"能用命令行"的附庸，而是一等采集端：一个完全静态的二进制（musl，`x86_64` 与 `aarch64` 两种，不用对齐 glibc 版本，机器上也不需要装 Rust 或 Python），加一条命令就能把数据报回家。
 
 ```bash
 tar xzf tokenme-cli-*-linux-musl.tar.gz
@@ -126,113 +126,115 @@ cd tokenme-cli-*-linux-musl
 ./install-linux.sh --every 15 --push you@display-host
 ```
 
-That puts `tokenme` in `~/.local/bin` (appending the PATH line to `~/.profile` when it is missing) and installs a **systemd `--user` timer** that runs `tokenme export --days 30` every 15 minutes into `~/tokenme-sync`, then scp's each fresh bundle to the display machine — whose panel merges it on its next pass and shows it as that machine's numbers, under its own name. No user manager reachable (a container, a bare ssh session)? The installer falls back to a **cron job running the same generated script**, and `--uninstall` cleans up either one while keeping your data. On a headless box the installer also turns on lingering (or prints the one `loginctl enable-linger $USER` line to run) so the timer keeps firing with nobody logged in. `--days 400` once pulls the whole retention window in as a backfill; `--prefix <dir>` moves the binary.
+这条命令把 `tokenme` 装进 `~/.local/bin`（`~/.profile` 里缺 PATH 时会补上），并装一个 **systemd `--user` 定时器**：每 15 分钟执行一次 `tokenme export --days 30`，把 bundle 写进 `~/tokenme-sync`，再 scp 给展示机——面板下一轮自动合并，并把这台机器当成独立来源按名字显示。如果机器上没有可用的 user manager（容器、裸 ssh 会话），安装器**退化成 cron 任务跑同一个脚本**；`--uninstall` 两种都会清理，且保留你的数据。无头机器上安装器还会打开 lingering（不行时就打印出那行要你自己跑的 `loginctl enable-linger $USER`），让定时器在无人登录时照样触发。首次想补齐历史就单独跑一次 `--days 400`（整个保留窗口），`--prefix <dir>` 可以换安装目录。
 
-Run it interactively and the same numbers are available in a terminal, with no display at all:
+在终端里直接用它，不接显示器也能拿到同一套数字：
 
 ```bash
-tokenme detect          # what is installed here, and where each tool's logs live
-tokenme daily --days 7  # a week of usage and spend
-tokenme quota           # live quotas and reset countdowns
-tokenme export          # one bundle into ~/tokenme-sync
+tokenme detect          # 这台机器装了哪些工具、各自日志在哪
+tokenme daily --days 7  # 最近一周用量与花费
+tokenme quota           # 实时额度与重置倒计时
+tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 ```
 
-Or skip the timer and move `~/tokenme-sync` yourself — Syncthing, a shared mount, a nightly rsync. The transport is yours: tokenme opens no port, runs no daemon beyond that timer, and holds no accounts. The panel can also do the SSH half for you — its footer 服务器 entry probes a host, pins its fingerprint, installs the collector and pulls bundles on a schedule. See the [user guide](docs/USER_GUIDE.md) §4.
+也可以完全不用定时器，自己搬 `~/tokenme-sync`——Syncthing、共享挂载、每晚 rsync 都行。传输通道由你决定：tokenme 不监听端口、除这个定时器外不驻留守护进程、也不持有任何账号。面板底栏的「服务器」入口还能把 SSH 这半边代办掉：探测主机、固定指纹、投放采集器并按周期拉取合并。详见[用户指南](docs/USER_GUIDE.md) §4。
 
-## Common commands
+## 常用命令
 
-| Command | What it does |
+| 命令 | 说明 |
 | :--- | :--- |
-| `tokenme daily --days 30` | Day-by-day throughput, cache rate, and cost |
-| `tokenme report --window week --group model` | One window, broken down every which way |
-| `tokenme quota` | Live quotas with reset countdowns |
-| `tokenme budget set zcode --monthly 50` | Put a monthly cap on a tool that has none |
-| `tokenme export` / `tokenme import` | Ship a window of the index to another machine and merge it back — file-based, idempotent, no accounts |
-| `tokenme pricing explain <model>` | Audit where a price comes from |
+| `tokenme daily --days 30` | 按天汇总吞吐、缓存率与费用 |
+| `tokenme report --window week --group model` | 单窗口多维拆分与环比 |
+| `tokenme quota` | 实时配额与重置倒计时 |
+| `tokenme budget set zcode --monthly 50` | 为无限额工具设定成本上限 |
+| `tokenme export` / `tokenme import` | 把本机一段窗口导出给另一台机器合并——纯文件、幂等、无账号 |
+| `tokenme pricing explain <model>` | 审计定价来源 |
 
-## Supported tools & live quota
+## 支持的工具与实时配额
 
-The quota bars come from each tool's own API or local credentials — probes that read, and never log you in. Three probes are deliberate exceptions, because those tools keep a short-lived access token on disk and the bar goes dead without a renewal: MiniMax Code (~1 h), Kimi Code (the vendor's own 15-minute token) and Cline's gateway token. Each exchanges the refresh token sitting in that same file and writes the rotated pair straight back, in that tool's own format and atomically — a rotation that is not persisted is a rotation consumed, and the app's own next refresh would then find its login dead. A failed exchange changes nothing. Every other probe reads credentials and never writes them. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
+配额条来自各工具自己的接口或本地凭据——探测只读，绝不代替你的登录。有三处是有意之外的例外，因为这些工具在磁盘上存的是短时效访问令牌，不续期额度条就会长期空白：MiniMax Code（约 1 小时）、Kimi Code（厂商自己的 15 分钟令牌）以及 Cline 的 gateway 令牌。三者都只拿同一份文件里的 refresh token 去换，并把轮换后的新对子按该工具自己的格式原子性地写回——没有落盘的轮换等于已经被消耗掉的轮换，应用下一次自己刷新时就会发现登录已经死了。换取失败则什么都不改。其余所有探测只读凭据、绝不写回。宿主应用退出后自动暂停对应工具的探测、保留最后数值，重新启动即恢复——设置里的"退出后暂停配额"开关可控制这一行为。
 
-Every tool below ships as a built-in adapter — 27 of them, indexed straight from the logs and databases each one writes to disk:
+OpenCode 配额只查询官方 OpenCode Go provider（凭据 id `opencode-go`，兼容旧 id `opencode`）的订阅窗口；也可用 `OPENCODE_API_KEY` 显式提供该 provider 的 key。`auth.json` 中其他 provider 的 API key 不会被拿来尝试。
 
-| Tool | Live quota | Fixtures | Verified on |
+以下工具全部内置适配器——共 27 款，直接从各工具自己落盘的日志与数据库建立索引：
+
+| 工具 | 实时配额 | 兼容性测试 | 平台验证 |
 | :--- | :--- | :--- | :--- |
-| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 5-hour / cycle windows — official backend | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT rate windows — official backend | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Go subscription, three dollar windows | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 5 小时/周期窗口 — 官方后端 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT 速率窗口 — 官方后端 | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | 仅官方 OpenCode Go provider — 三个美元额度窗口 | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | Account window limits — Cline account API | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour/cycle windows + session budgets — the IDE's own quota API + local cookie decryption | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | Subscription windows — vendor usage API, local encrypted snapshot fallback; daily check-in state | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | Credits from its own CN logs; plan/resource-pack quota and daily check-in through the CN API | ✅ | macOS ⏳ · Windows ✅ |
-| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | Self-computed — runs the CLI's `/usage` | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | Membership points — needs a one-time token (see below) | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota — local daemon | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI** (international) | Member credits — the desktop app's billing API / local broker | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** (China) | Credit packages + daily check-in — its own account API / local broker | ✅ | macOS ⏳ · Windows ✅ |
-| <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft credits — the plans-usage billing meter; usage from the IDE history | ✅ | Windows ✅ |
+| <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 — Cline 账号 API | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 — IDE 同款配额接口 + cookie 本地解密 | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 — 官方用量接口，本地加密快照兜底；支持每日签到状态 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | 独立采集国内版 Credits 用量；国内区套餐、资源包配额与自动签到 | ✅ | macOS ⏳ · Windows ✅ |
+| <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算配额 — 调用其 CLI 的 `/usage` | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | 会员点数 — 需注入一次令牌（见下） | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan 配额 — 本地守护进程 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI**（国际版） | 会员点数 — 桌面 app 同款计费接口 / 本地 broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy**（国内版） | 积分包配额与每日签到 — 国内账号接口 / 本地 broker | ✅ | macOS ⏳ · Windows ✅ |
+| <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft 积分 — plans-usage 计费接口；用量取自 IDE history | ✅ | Windows ✅ |
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points — cloud points API | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手** (formerly CatPaw) | Points balance — points portal API | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance — official user/balance + desktop credential file | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 — 云端点数接口 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手**（原 CatPaw）| 积分余额 — 积分门户接口；新版本地凭据解密 | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek 账户余额 — 官方 user/balance + 桌面端凭据文件 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
 | **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | Plan quota — vendor billing API, local credential decryption | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE points — reads the IDE's own login state | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | Subscription quota — vendor v1 API, local credential decryption; daily check-in | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | Subscription quota — the CN fleet's own API and credential store, split credit windows and daily check-in | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | Plan windows — 5h / weekly / monthly via the vendor's `/usages`; usage read from the CLI **or** the desktop app's embedded runtime; an expired access token is renewed in place through the vendor's own refresh contract | ✅ | macOS ✅ · Windows ✅ |
-| <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | Plan windows — 5h / weekly — plus the credit balance (purchased + check-in wallets); the ~1 h access token is renewed in place from the app's own refresh token | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | 套餐配额 — 官方 billing 接口，本地凭据解密 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/joycode.png" width="20" alt=""> **JoyCode** | IDE 点数 — 读取 IDE 自身登录态 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae** | 订阅配额 — 官方 v1 接口，本地凭据解密；支持每日签到 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/trae.png" width="20" alt=""> **Trae CN** | 订阅配额 — CN 独立接口与凭据存储，按积分包拆分额度并支持每日签到 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/kimicode.png" width="20" alt=""> **Kimi Code** | 套餐额度 — 5 小时 / 每周 / 每月，走官方 `/usages`；用量读 CLI 或桌面端内嵌 runtime 的日志；访问令牌过期时按官方刷新契约就地续期 | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/minimaxcode.png" width="20" alt=""> **MiniMax Code** | 套餐额度 — 5 小时 / 每周 — 外加积分余额（购买与签到两种钱包）；约 1 小时过期的访问令牌由 tokenme 用应用自己的刷新令牌原地续期 | ✅ | macOS ✅ · Windows ✅ |
 
-> **Fixtures**: every adapter carries a fixture test suite, run in full on CI for each commit, and every integration was verified against a real machine's data before it landed.
+> **兼容性测试**：每款适配器都带夹具测试套件，CI 每次提交全量运行；每项接入落地前都用真实机器的数据验证过。
 >
-> **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
+> **平台验证**：随实机验证进度更新。⏳ 表示该平台的路径已实现、但尚未在实机上跑通；验证通过后更新标记即可。
 >
-> Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
+> 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——实测其落盘 OAuth 令牌已过期，要续期就得用 Gemini CLI 自带包里的 client id/secret 去提交表单，而磁盘上也找不到该接口要的 project id（`crates/usage-quota/src/providers/gemini.rs`）。
 
-## TTFT & TPS measurements
+## TTFT 与 TPS 测量
 
-TokenMe can passively measure **TTFT** (time to first token) and **TPS** (generated tokens per second) from local client activity. These are observed client-side timings, not provider benchmarks. Collection begins when enabled; earlier activity is not backfilled.
+TokenMe 可以从本地客户端活动中被动测量 **TTFT**（首 token 延迟）和 **TPS**（每秒生成 token 数）。这些是客户端实际观测值，不是厂商基准测试。启用采集后才开始记录，不会补录此前的活动。
 
-| Host | Passive measurements | User-triggered test |
+| 宿主 | 被动测量 | 用户主动测试 |
 | :--- | :--- | :--- |
-| **Codex** | Turn-level TTFT from local Codex rollout streams; TPS when the stream provides output-token and timing data | Yes — one short request through the Codex CLI app-server |
-| **Claude Code CLI** | Request-level TTFT and TPS from Claude Code OpenTelemetry spans; first-content timing is labeled separately and is not TTFT | Yes — one short CLI request with temporary, process-scoped telemetry |
-| **DSH (DeepSeek Harness)** | Request-level TTFT and TPS from local compressed session logs, when the stream contains first-token timestamps | No — passive collection only |
+| **Codex** | 从本地 Codex rollout 流中读取轮次级 TTFT；流中提供输出 token 数和计时信息时计算 TPS | 支持：通过 Codex CLI app-server 发起一次短请求 |
+| **Claude Code CLI** | 从 Claude Code OpenTelemetry span 读取请求级 TTFT 和 TPS；首段内容耗时单独标记，不等同于 TTFT | 支持：通过临时、仅对该进程生效的遥测配置发起一次短请求 |
+| **DSH（DeepSeek Harness）** | 从本地压缩会话日志读取请求级 TTFT 和 TPS；日志包含首 token 时间时才可测量 | 暂不支持，仅被动采集 |
 
-DSH follows its session statistics: the latest session's captured requests are grouped together, TTFT is averaged per request, and TPS is calculated as total output tokens divided by total decode time (completion minus first-token time). Older DSH log formats without first-token timestamps cannot produce these measurements. Active tests send a short prompt only after you click, use plan quota, and are kept separate from passive averages. The speed collector does not retain prompt or response text.
+DSH 按会话统计：将最新会话中已采集的请求汇总，TTFT 按请求求平均；TPS 按输出 token 总数除以解码总耗时计算（完成时间减首 token 时间）。不包含首 token 时间的旧版 DSH 日志无法提供这些指标。主动测试仅在点击后发送一条短提示，会消耗套餐额度，结果与被动均值分开显示。速度采集器不会保存提示词或回复文本。
 
-> **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
+> **AgnesCode 令牌注入**：其登录令牌只存在于应用内存，无法静默读取。登录 agnescode.agnes-ai.cn 后从请求头取 `access_token`，写入 tokenme 系统配置目录下的 `agnes.token`（macOS 为 `~/Library/Application Support/tokenme/agnes.token`，Linux 为 `~/.config/tokenme/agnes.token`，Windows 为 `%APPDATA%\tokenme\agnes.token`），或设置 `AGNES_TOKEN` 即可启用。
 
-Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+完整参考：**[docs/COMMANDS.md](docs/COMMANDS.md)** · 场景指南：**[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · 架构总览：**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 
-## What's new in 0.1.7
+## 0.1.7 更新内容
 
-- **New**: passive TTFT/TPS measurements for Codex, Claude Code and DSH; DSH results now aggregate by session using its output-weighted TPS formula. Optional one-shot speed tests are available for Codex and Claude Code.
-- **New**: Qoder CN as a separate usage and quota adapter, with credit-pack windows and daily check-in.
+- **新增**：支持被动采集 Codex、Claude Code 与 DSH 的 TTFT/TPS；DSH 按会话汇总，并采用输出 token 加权的 TPS 公式。Codex 与 Claude Code 支持用户主动发起单次测速。
+- **新增**：Qoder CN 独立用量与配额适配器，支持积分包窗口和每日签到。
 
-## What's new in 0.1.6
+## 0.1.6 更新内容
 
-- **New**: desktop pet skins (water drop / animated kitten / cute hanfu girl / cute hanfu boy / modern cute girl / summer long-legged beauty — blinking, pointer-following pupils, edge poses, token badge on hover); the summer skin preserves tall adult proportions, with display size and eye anchors defined in its JSON skin package; the pet registry now also supports lazy-loaded GLB/VRM model skins with JSON camera/head-tracking settings and a 2D fallback; the kitten's top pose was redesigned as a compact downward-looking peek; daily check-in for Trae, Trae CN and Qoder, done only after the vendor confirms; a separate Trae CN adapter with per-credit-pack windows; settings split into General / Alerts / Advanced / About with per-tool quota switches and auto check-in.
-- **Verified**: WorkBuddy and Cline on real Windows machines.
-- **Fixed**: Windows tray clicks, panel show/hide, borderless surface and bubble lifecycle — the invisible-panel and residual-surface regressions.
+- **新增**：桌面宠物皮肤（水滴 / 动态小猫 / 古风萌女孩 / 古风萌男孩 / 现代风美少女 / 夏日长腿美女——眨眼、瞳孔跟随、贴边姿态，悬停显示 token 徽标）；夏日皮肤保留成年人物的修长比例，显示尺寸与眼睛锚点由 JSON 皮肤包配置；宠物注册表新增按需加载的 GLB/VRM 3D 模型皮肤，支持 JSON 相机、头部跟踪配置，并保留 2D 回退；小猫顶部姿态重做为紧凑的向下探看；Trae、Trae CN、Qoder 每日签到，厂商确认成功才算完成；Trae CN 独立适配器与积分包窗口；设置拆分为通用 / 提醒 / 高级 / 关于四页，支持逐工具配额开关与自动签到。
+- **验证**：WorkBuddy、Cline 通过 Windows 实机验证。
+- **修复**：Windows 托盘点击、面板显示/隐藏、无边框窗口与悬浮气泡的生命周期，修复面板不可见与残留表面。
 
-## Data & privacy
+## 数据与隐私
 
-Only counts get indexed, never content — your code and prompts are not stored. What lands in the index is each request's token counts, model name, and project path. Scanning is read-only throughout; no telemetry, no third-party proxies. The index lives in your system data directory (`~/Library/Application Support/tokenme/` on macOS), and each tool's log paths are listed in the [user guide](docs/USER_GUIDE.md).
+只索引计数，不碰内容——你的代码和 Prompt 不会被存储，入库的只有每次请求的 token 计数、模型名与项目路径。扫描全程只读，无遥测、无第三方代理。索引库位于系统数据目录（macOS 为 `~/Library/Application Support/tokenme/`）；各工具日志路径见[用户指南](docs/USER_GUIDE.md)。
 
-Machines can sync their indexes to each other — a file-based `tokenme export` / `tokenme import` over a channel you own (ssh/scp, Syncthing), no accounts and no cloud. Every merge is sha256- and manifest-validated before a single row lands, in one all-or-nothing transaction, and bundles are written `0600` on unix. The panel's footer server button can also provision that channel end to end: an SSH wizard takes the address and one password (or a key file), installs a dedicated key plus the static collector on the remote host, and pulls its bundle on a schedule — the password is never stored. Once more than one machine reports in, a header dropdown folds every figure, ranking and session list under **全部机器**, **本机** or any single remote by name — re-summarized from the same index, without re-ingesting — and a per-machine badge shows the newest merge. See the [user guide](docs/USER_GUIDE.md) §4.
+多机之间也可以同步各自的索引——基于文件的 `tokenme export` / `tokenme import`，走你自己的通道（ssh/scp、Syncthing），无账号、无云端。每次合并前先过 sha256 与清单校验、单事务要么全落要么全不动；unix 下 bundle 一律 `0600`。面板底栏的服务器按钮也能把这条通道一键拉起：SSH 向导用一次密码连接（或指定私钥），装上专用密钥、投放静态采集器，之后按周期自动拉取合并；密码不落盘。只要有一台以上机器在报数，顶部的下拉就能把每一项数字、排行和会话列表按 **全部机器**、**本机** 或按名字选任意一台远程机器 折叠——同一份索引重新汇总，不重新索引，另有每台机器最近一次合并的徽标。详见[用户指南](docs/USER_GUIDE.md) §4。
 
-## Community
+## 社区
 
 | | |
 | :--- | :--- |
-| Bug reports | [GitHub Issues](https://github.com/Bencibr/tokenme/issues) |
-| WeChat user group | <img src="docs/wechat-group.png" width="180" alt="TokenMe WeChat group"> |
-| Email | Panel → Settings → Contact us (address in `apps/tokenme-bar/src/lib/about.ts`) |
+| 问题反馈 | [GitHub Issues](https://github.com/Bencibr/tokenme/issues) |
+| 微信交流群 | <img src="docs/wechat-group.png" width="180" alt="TokenMe 微信交流群"> |
+| 邮箱 | 面板「设置 → 联系我们」直达（地址在 `apps/tokenme-bar/src/lib/about.ts`） |
 
-## License
+## 许可证
 
-Released under the [MIT](LICENSE) license.
+基于 [MIT](LICENSE) 协议开源。
