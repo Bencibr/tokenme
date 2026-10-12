@@ -1,7 +1,8 @@
 //! OpenCode Go quota: the subscription's three dollar-value windows.
 //!
 //! The key is the one the user already configured for the OpenCode Go provider,
-//! read from `OPENCODE_API_KEY` or the tool's own `auth.json`. No key, no row.
+//! read from `OPENCODE_API_KEY`, the official provider block in `opencode.json`,
+//! or the tool's own `auth.json`. No key, no row.
 //!
 //! The request shape is `GET https://opencode.ai/zen/go/v1/usage` with
 //! `Authorization: Bearer <key>` + `Accept: application/json` — identical in both
@@ -28,6 +29,7 @@ use crate::http::get_json;
 use crate::QuotaProbe;
 
 const ENDPOINT: &str = "https://opencode.ai/zen/go/v1/usage";
+const OFFICIAL_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const USER_AGENT: &str = concat!("tokenme/", env!("CARGO_PKG_VERSION"));
 
 /// The provider ids OpenCode writes for a Go key (`opencode auth login -p
@@ -96,10 +98,47 @@ fn api_key() -> Option<String> {
     if let Some(key) = std::env::var("OPENCODE_API_KEY").ok().filter(|k| !k.is_empty()) {
         return Some(key);
     }
+    for path in official_config_paths() {
+        if let Some(key) = config_key(&path) {
+            return Some(key);
+        }
+    }
     let root = std::env::var_os("OPENCODE_DATA_DIR")
         .map(std::path::PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode")))?;
     auth_key(&root.join("auth.json"))
+}
+
+fn official_config_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(root) = std::env::var_os("XDG_CONFIG_HOME") {
+        paths.push(std::path::PathBuf::from(root).join("opencode/opencode.json"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".config/opencode/opencode.json"));
+    }
+    if let Some(root) = dirs::config_dir() {
+        paths.push(root.join("opencode/opencode.json"));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Only the official OpenCode Go endpoint is accepted; custom proxies are not
+/// quota credentials for this provider.
+pub(crate) fn config_key(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let providers = value.get("provider")?.as_object()?;
+    providers.values().find_map(|provider| {
+        let options = provider.get("options")?.as_object()?;
+        let base = options.get("baseURL").and_then(Value::as_str)?.trim_end_matches('/');
+        if base != OFFICIAL_BASE_URL {
+            return None;
+        }
+        options.get("apiKey").and_then(Value::as_str).map(str::trim).filter(|key| !key.is_empty()).map(str::to_string)
+    })
 }
 
 /// `auth.json` maps a provider id to `{type, key}`. The Go usage endpoint only
@@ -237,6 +276,24 @@ mod tests {
         assert_eq!(auth_key(&path), None, "an oauth entry under the Go id is not a Go key");
         std::fs::write(&path, b"{").unwrap();
         assert_eq!(auth_key(&path), None, "a torn auth.json is not a crash");
+    }
+
+    #[test]
+    fn only_the_official_provider_block_supplies_a_config_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{"provider":{"proxy":{"options":{"baseURL":"https://proxy.example/v1","apiKey":"sk-proxy"}},"go":{"options":{"baseURL":"https://opencode.ai/zen/go/v1/","apiKey":" sk-go "}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(config_key(&path).as_deref(), Some("sk-go"));
+        std::fs::write(
+            &path,
+            r#"{"provider":{"proxy":{"options":{"baseURL":"https://proxy.example/v1","apiKey":"sk-proxy"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(config_key(&path), None, "a custom proxy must not become an official quota credential");
     }
 
     #[test]
