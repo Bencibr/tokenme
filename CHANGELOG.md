@@ -6,12 +6,14 @@ All notable changes to TokenMe are documented in this file. The format follows [
 
 ### Changed
 
+- **仓库首页优先中文** — `README.md` 换为中文版（原 `README_CN.md`），英文版移至 `README_EN.md`，顶部语言互链对调；适配器计数测试的文件映射随行，gitea 与 GitHub 两个入口的默认阅读顺序一致。
 - Activity view now uses real 15-minute buckets for today's heatmap.
 
 ## [Unreleased]
 
 ### Added
 
+- **Oh My Pi（omp）加入适配器注册表（社区贡献，by lscho，[PR #1](https://github.com/Bencibr/tokenme/pull/1)）** — 借 Pi 的转录引擎按自己的产品身份接入：会话落在 `~/.omp/agent/sessions/<mangled-cwd>/*.jsonl`，沿用 Pi 的逐行 `type:"message"` 记账形状（input/output/cacheRead/cacheWrite/reasoning/totalTokens），`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` 可改路径。注册表与 UI 一并跟上：`TOOL_IDS`、内置适配器、256px 图标、`TOOL_ORDER` 与面板显示位、主题色板 `--cat-25`，两份 README 的支持列表、USER_GUIDE、ARCHITECTURE、verify-totals 与 hero 横幅的计数随行至 27。
 - **每日签到，三家风（Trae CN / Qoder / MiniMax Code）** — 一个注册表（`CHECKIN_TOOLS`）同时驱动三处：引擎的宿主退出豁免（高级 → 自动签到，开启后关着 IDE 也不错过当天——领取是对账号的 HTTPS 调用，不是读宿主状态）、面板的工具头按钮、底栏的控件渲染；按钮只把真实领取变成"已签到"徽标，排队中、未到点都保持按钮并把原因写明。**Qoder** 的读取按客户端实测定案：请求头带无横线的 `Cosy-ClientType` 才返回活动列表（横线版服务端答空列表，曾把"有活动"误读成"无活动"）；每日行 10:00 开门，开门前按钮置灰写明时刻；领取有客户端设备指纹门槛（第三方面部伪造应答 503 SAME_PERSON），TokenMe 把状态读对、把"需在 Qoder 内领取"说清楚——用户在 Qoder 里领完，下一次轮询面板即亮已签到。**MiniMax Code** 的协议取自厂商自己的开源客户端（`MiniMax-AI/minimax-code`）逐字实现：7 天面板的 `status 2` 即可领日、`claim` 幂等，请求带厂商公开定义为 wire 常量的归因签名头（授权仍是面板本就代为续期的 bearer token），账号 id 按客户端同款三级阶梯解析（运行时快照 → 指纹钉住的 CLI 身份文件 → 账号端点）。**Trae CN** 的积分包把已用份额真正送进仪表（原先恒 0%），签到包 id 带日期作用域——上周的积分包不再把"今日已签到"点亮；匿名积分包各持唯一 id，不再互相串状态。
 - **CodeBuddy CN 桌面版** 加入适配器注册表——会话流与配额照注册表契约一并接入。
 - **Windows 宠物皮肤可配置** — 桌面宠物从内置注册表选择模型与皮肤（`PetModel` 组件 + 皮肤注册表），配独立的一致性校验脚本进构建门禁。

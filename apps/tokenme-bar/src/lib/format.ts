@@ -30,6 +30,7 @@ const TOOL_ORDER = [
   "trae_cn",
   "kimicode",
   "minimaxcode",
+  "omp",
 ];
 
 const DISPLAY: Record<string, string> = {
@@ -61,6 +62,7 @@ const DISPLAY: Record<string, string> = {
   trae_cn: "Trae CN",
   kimicode: "Kimi Code",
   minimaxcode: "MiniMax Code",
+  omp: "Oh My Pi",
   gemini: "Gemini CLI",
   cursor: "Cursor",
 };

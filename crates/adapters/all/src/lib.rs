@@ -38,6 +38,7 @@ pub const TOOL_IDS: &[&str] = &[
     "trae_cn",
     "kimicode",
     "minimaxcode",
+    "omp",
 ];
 
 pub fn builtin_adapters() -> Vec<Box<dyn SourceAdapter>> {
@@ -68,6 +69,7 @@ pub fn builtin_adapters() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(usage_adapter_trae::TraeAdapter::china()),
         Box::new(usage_adapter_kimicode::KimiCodeAdapter),
         Box::new(usage_adapter_minimaxcode::MiniMaxCodeAdapter),
+        Box::new(usage_adapter_pi::OmpAdapter),
     ]
 }
 
@@ -135,8 +137,8 @@ mod tests {
         let adapters = builtin_adapters();
         let mut previous: Option<usize> = None;
         for (name, header, count_form) in [
-            ("README.md", "| Tool | Live quota |", "{} of them"),
-            ("README_CN.md", "| 工具 | 实时配额 |", "共 {} 款"),
+            ("README_EN.md", "| Tool | Live quota |", "{} of them"),
+            ("README.md", "| 工具 | 实时配额 |", "共 {} 款"),
         ] {
             let text = std::fs::read_to_string(root.join(name))
                 .unwrap_or_else(|e| panic!("{name} must be readable at the repo root: {e}"));
