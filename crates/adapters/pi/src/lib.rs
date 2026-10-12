@@ -36,6 +36,11 @@ pub struct PiAdapter;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ColaAdapter;
 
+/// OMP (Oh My Pi) keeps its transcripts in `~/.omp/agent/sessions/<mangled-cwd>/<ISO>_<uuid>.jsonl`
+/// with Pi's record shape; only [`paths::OMP`] differs.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OmpAdapter;
+
 /// The one implementation of the transcript dialect, parameterised by product
 /// coordinates.
 #[derive(Debug, Clone, Copy)]
@@ -129,6 +134,7 @@ macro_rules! transcript_adapter {
 
 transcript_adapter!(PiAdapter => paths::PI);
 transcript_adapter!(ColaAdapter => paths::COLA);
+transcript_adapter!(OmpAdapter => paths::OMP);
 
 fn discover_in(root: &Path, filter: &DateFilter) -> Vec<SourceFile> {
     let mut files: Vec<SourceFile> = log_entries(root)
@@ -211,6 +217,14 @@ mod tests {
         assert_eq!(ColaAdapter.display_name(), "Cola");
         assert_eq!(ColaAdapter.semantics(), PiAdapter.semantics());
         assert_ne!(ColaAdapter.id(), TOOL_ID);
+    }
+
+    #[test]
+    fn omp_shares_the_dialect_and_carries_its_own_identity() {
+        assert_eq!(OmpAdapter.id(), "omp");
+        assert_eq!(OmpAdapter.display_name(), "Oh My Pi");
+        assert_eq!(OmpAdapter.semantics(), PiAdapter.semantics());
+        assert_ne!(OmpAdapter.id(), TOOL_ID);
     }
 
     #[test]

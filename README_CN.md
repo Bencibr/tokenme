@@ -154,7 +154,7 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 
 配额条来自各工具自己的接口或本地凭据——探测只读，绝不代替你的登录。有三处是有意之外的例外，因为这些工具在磁盘上存的是短时效访问令牌，不续期额度条就会长期空白：MiniMax Code（约 1 小时）、Kimi Code（厂商自己的 15 分钟令牌）以及 Cline 的 gateway 令牌。三者都只拿同一份文件里的 refresh token 去换，并把轮换后的新对子按该工具自己的格式原子性地写回——没有落盘的轮换等于已经被消耗掉的轮换，应用下一次自己刷新时就会发现登录已经死了。换取失败则什么都不改。其余所有探测只读凭据、绝不写回。宿主应用退出后自动暂停对应工具的探测、保留最后数值，重新启动即恢复——设置里的"退出后暂停配额"开关可控制这一行为。
 
-以下工具全部内置适配器——共 26 款，直接从各工具自己落盘的日志与数据库建立索引：
+以下工具全部内置适配器——共 27 款，直接从各工具自己落盘的日志与数据库建立索引：
 
 | 工具 | 实时配额 | 兼容性测试 | 平台验证 |
 | :--- | :--- | :--- | :--- |
@@ -162,6 +162,7 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 | <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT 速率窗口 — 官方后端 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | Go 订阅三窗口（美元额度） | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 — Cline 账号 API | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 — IDE 同款配额接口 + cookie 本地解密 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 — 官方用量接口，本地加密快照兜底；支持每日签到状态 | ✅ | macOS ✅ · Windows ⏳ |

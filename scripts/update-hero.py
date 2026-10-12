@@ -91,7 +91,7 @@ def patch_svg(path: Path, version: str, count: int) -> bool:
     s = group_pat.sub(lambda m: m.group(1) + relayout_group(m.group(2)) + m.group(3), s)
     if s == before:
         return False
-    path.write_text(s, encoding="utf-8", newline="\n")
+    path.write_text(s, encoding="utf-8")
     return True
 
 
