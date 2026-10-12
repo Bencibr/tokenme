@@ -145,11 +145,7 @@ tokenme quota           # live quotas and reset countdowns
 
 ## Supported tools & live quota
 
-The quota bars come from each tool's own API or local credentials — probes that read, and never log you in. Three probes are deliberate exceptions, because those tools keep a short-lived access token on disk and the bar goes dead without a renewal: MiniMax Code (~1 h), Kimi Code (the vendor's own 15-minute token) and Cline's gateway token. Each exchanges the refresh token sitting in that same file and writes the rotated pair straight back, in that tool's own format and atomically — a rotation that is not persisted is a rotation consumed, and the app's own next refresh would then find its login dead. A failed exchange changes nothing. Every other probe reads credentials and never writes them. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
-
-OpenCode quota reads only the official OpenCode Go provider (credential id `opencode-go`, with the legacy `opencode` id supported); `OPENCODE_API_KEY` is the explicit environment override. API keys for other providers in `auth.json` are ignored.
-
-Every tool below ships as a built-in adapter — 27 of them, indexed straight from the logs and databases each one writes to disk:
+Every tool below ships as a built-in adapter — 27 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
 
 | Tool | Live quota | Check-in | Fixtures | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
