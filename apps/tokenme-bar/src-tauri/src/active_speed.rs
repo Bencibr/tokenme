@@ -360,6 +360,25 @@ mod tests {
         assert!(!matches!("dsh", "codex" | "claude_code"));
     }
 
+    // Live checks against the real CLIs: one short API turn each, and they
+    // need the tools logged in on this machine, so they stay behind #[ignore]
+    // — `cargo test --lib live_ -- --ignored` runs them by hand.
+    #[test]
+    #[ignore]
+    fn live_codex_speed_check_returns_a_sample() {
+        let sample = run_codex().expect("codex live speed check");
+        assert!(sample.ttft_ms > 0.0, "ttft must be measured, got {:?}", sample.ttft_ms);
+        assert_eq!(sample.measurement, "codex_stream");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_claude_speed_check_returns_a_sample() {
+        let sample = run_claude().expect("claude live speed check");
+        assert!(sample.ttft_ms > 0.0, "ttft must be measured, got {:?}", sample.ttft_ms);
+        assert_eq!(sample.measurement, "claude_otel");
+    }
+
     #[test]
     fn claude_fallback_matches_the_host_executable_name() {
         let path = resolve_claude_executable().unwrap();
