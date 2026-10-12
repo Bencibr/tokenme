@@ -60,12 +60,9 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   const sub = [t(granularityKey), latest?.model ?? null,
     comparable.length > 0 ? t("ttft.samples", { n: comparable.length }) : null].filter(Boolean).join(" · ");
   return (
-    <li className="speed">
-      <ToolIcon tool={tool} size={20} />
-      <span className="speed-name">
-        <span className="speed-provider">{t(nameKey)}</span>
-        <span className="ttft-granularity">{sub}</span>
-      </span>
+    <li className="speed" title={t(nameKey)}>
+      <span className="speed-ic"><ToolIcon tool={tool} size={20} /></span>
+      <span className="speed-sub ttft-granularity">{sub}</span>
       <SpeedCell
         value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
         cap={latest ? metricLabel(latest.metric) : t("ttft.no_data")}

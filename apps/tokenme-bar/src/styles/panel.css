@@ -937,23 +937,25 @@
   border-top: 1px solid var(--hair);
 }
 
-.speed-name,
 .speed-cell {
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   min-width: 0;
 }
 
-.speed-provider {
-  color: var(--ink);
-  font-size: var(--t-body);
-  font-weight: 550;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+/* The row is icon-led: the provider's own mark is the identity (its name is
+   the hover title), and the sub-line rides the icon column to its right. */
+.speed-ic {
+  display: inline-flex;
+  align-items: center;
 }
 
-.speed-cell { align-items: flex-end; }
+.speed-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .speed-num {
   font-size: var(--t-meta);
   font-weight: 650;
@@ -973,7 +975,8 @@
 }
 
 .speed-time {
-  font-size: 10px;
+  align-self: end;
+  font-size: 9px;
   color: var(--ink-3);
   white-space: nowrap;
   text-align: right;
