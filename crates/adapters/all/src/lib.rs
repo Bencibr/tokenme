@@ -131,10 +131,6 @@ mod tests {
     /// "never refreshes" credentials after that probe started renewing tokens,
     /// and a tool ended up in the table twice because a count keyed on the rows
     /// that carry an icon could not see the one row that does not.
-    /// Adapters the README documents below the table rather than in it —
-    /// listed here keeps the table to plain, no-asterisks support.
-    const NOTE_ONLY: &[&str] = &["AgnesCode"];
-
     #[test]
     fn both_readmes_list_every_adapter_once_and_count_them_honestly() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -153,18 +149,13 @@ mod tests {
                 .skip(2)
                 .take_while(|line| line.starts_with("| "))
                 .collect();
-            // AgnesCode's quota needs a manually injected, memory-only token —
-            // advertising it as plain support would oversell it, so it is
-            // documented in the note below the table instead of listed in it.
-            let note_only: Vec<_> = adapters.iter().filter(|a| NOTE_ONLY.contains(&a.display_name())).collect();
-            let table_adapters: Vec<_> = adapters.iter().filter(|a| !NOTE_ONLY.contains(&a.display_name())).collect();
             assert_eq!(
                 rows.len(),
-                table_adapters.len(),
-                "{name}: the tool table holds {} rows for {} advertised adapters — one row each, \
-                 and a quota-only or manual-step source belongs in the note below the table, not in it",
+                adapters.len(),
+                "{name}: the tool table holds {} rows for {} adapters — one row each, \
+                 and a quota-only source belongs in the note below the table, not in it",
                 rows.len(),
-                table_adapters.len()
+                adapters.len()
             );
             if let Some(previous) = previous {
                 assert_eq!(
@@ -173,27 +164,12 @@ mod tests {
                 );
             }
             previous = Some(rows.len());
-            for adapter in &table_adapters {
+            for adapter in &adapters {
                 let cell = format!("**{}**", adapter.display_name());
                 let listed = rows.iter().filter(|row| row.contains(&cell)).count();
                 assert_eq!(
                     listed, 1,
                     "{name} lists {} {listed} times; it must appear exactly once",
-                    adapter.display_name()
-                );
-            }
-            for adapter in &note_only {
-                let cell = format!("**{}**", adapter.display_name());
-                let in_rows = rows.iter().filter(|row| row.contains(&cell)).count();
-                assert_eq!(
-                    in_rows, 0,
-                    "{name}: {} is documented in the note below the table and must not be listed in it",
-                    adapter.display_name()
-                );
-                let in_text = text.matches(&cell).count();
-                assert_eq!(
-                    in_text, 1,
-                    "{name}: the note must mention {} exactly once, found {in_text}",
                     adapter.display_name()
                 );
             }
@@ -210,7 +186,7 @@ mod tests {
                 rows_named,
                 listed.len()
             );
-            let stated = count_form.replace("{}", &table_adapters.len().to_string());
+            let stated = count_form.replace("{}", &adapters.len().to_string());
             assert!(
                 text.contains(&stated),
                 "{name} does not state the {stated} the registry actually has"
