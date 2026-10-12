@@ -34,12 +34,11 @@ function metricLabel(metric: TtftSample["metric"]): string {
   return metric === "first_content" ? t("ttft.first_content") : t("ttft.ttft");
 }
 
-function SpeedCell({ value, cap, cap2, stage }: { value: string; cap: string; cap2?: string; stage: "ok" | "mid" | "bad" | null }) {
+function SpeedCell({ value, cap, stage }: { value: string; cap: string; stage: "ok" | "mid" | "bad" | null }) {
   return (
     <span className="speed-cell">
       <span className="speed-num num" data-stage={stage ?? undefined}>{value}</span>
       <span className="speed-cap">{cap}</span>
-      {cap2 ? <span className="speed-cap">{cap2}</span> : null}
     </span>
   );
 }
@@ -58,16 +57,19 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   const recent = comparable.slice(0, AVG_WINDOW);
   const avgMs = average(recent.map((sample) => sample.ttft_ms));
   const avgTps = average(recent.map((sample) => sample.tps).filter((tps): tps is number => typeof tps === "number" && Number.isFinite(tps)));
-  const sub = [latest?.model ?? null,
+  // Provider-constant facts (name, granularity, sample count) are metadata,
+  // not per-sample data: they live in the hover title, and the row face
+  // carries only the model and the three figures.
+  const title = [t(nameKey), t(granularityKey),
     comparable.length > 0 ? t("ttft.samples", { n: comparable.length }) : null].filter(Boolean).join(" · ");
+  const sub = latest?.model ?? "—";
   return (
-    <li className="speed" title={t(nameKey)}>
+    <li className="speed" title={title}>
       <span className="speed-ic"><ToolIcon tool={tool} size={20} /></span>
       <span className="speed-sub ttft-granularity">{sub}</span>
       <SpeedCell
         value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
-        cap={latest ? metricLabel(latest.metric) : t("ttft.no_data")}
-        cap2={latest ? `${t(granularityKey)} · ${relativeTime(latest.sampled_at_ms, now)}` : undefined}
+        cap={latest ? `${metricLabel(latest.metric)} · ${relativeTime(latest.sampled_at_ms, now)}` : t("ttft.no_data")}
         stage={latest ? stageOfMs(latest.ttft_ms) : null}
       />
       <SpeedCell
