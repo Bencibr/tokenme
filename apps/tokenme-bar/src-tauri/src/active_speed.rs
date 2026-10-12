@@ -124,7 +124,7 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
             "threadId": thread_id,
             "input": [{ "type": "text", "text": PROMPT }],
             "approvalPolicy": "never",
-            "sandboxPolicy": { "type": "readOnly", "networkAccess": "restricted" },
+            "sandboxPolicy": { "type": "readOnly", "networkAccess": false },
             "effort": "low"
         }
     }))?;
@@ -284,14 +284,14 @@ fn resolve_executable(executable: &str, fallback: &str) -> Option<std::path::Pat
 fn resolve_claude_executable() -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path) {
-        for candidate in [
-            directory.join("claude.exe"),
-            directory.join("node_modules").join("@anthropic-ai").join("claude-code").join("bin").join("claude.exe"),
-        ] {
+        for name in ["claude", "claude.exe"] {
+            let candidate = directory.join(name);
+            if candidate.is_file() { return Some(candidate); }
+            let candidate = directory.join("node_modules").join("@anthropic-ai").join("claude-code").join("bin").join(name);
             if candidate.is_file() { return Some(candidate); }
         }
     }
-    Some(std::path::PathBuf::from("claude.exe"))
+    Some(std::path::PathBuf::from(if cfg!(windows) { "claude.exe" } else { "claude" }))
 }
 
 fn now_ms() -> i64 {
@@ -316,5 +316,17 @@ mod tests {
         assert!(matches!("codex", "codex" | "claude_code"));
         assert!(matches!("claude_code", "codex" | "claude_code"));
         assert!(!matches!("dsh", "codex" | "claude_code"));
+    }
+
+    #[test]
+    fn claude_fallback_matches_the_host_executable_name() {
+        let path = resolve_claude_executable().unwrap();
+        if std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| {
+            ["claude", "claude.exe"].iter().any(|name| dir.join(name).is_file())
+        })) {
+            assert!(path.file_name().is_some_and(|name| name == "claude" || name == "claude.exe"));
+        } else {
+            assert_eq!(path, std::path::PathBuf::from(if cfg!(windows) { "claude.exe" } else { "claude" }));
+        }
     }
 }
