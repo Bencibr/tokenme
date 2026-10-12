@@ -373,7 +373,8 @@ const zh = {
   "sess.more.recent": "只看最近 6 个会话",
 
   /* 数据源 ---------------------------------------------------------------- */
-  "src.section": "数据源",
+    "src.section": "数据源",
+  "src.scoped": "数据来源检测仅在本机运行 —— 当前显示的是 {name} 同步导入的数据。",
   "src.meta": "{d}/{s} 已检测 · {e} 事件",
   "src.rows": "{n} 条",
   "src.missing": "未检测到",
@@ -912,7 +913,8 @@ const en: Record<StrKey, string> = {
   "sess.more.all": "Show all {n} sessions",
   "sess.more.recent": "Recent 6 only",
 
-  "src.section": "Data sources",
+    "src.section": "Data sources",
+  "src.scoped": "Source detection runs on this machine only — you are viewing data synced from {name}.",
   "src.meta": "{d}/{s} detected · {e} events",
   "src.rows": "{n}",
   "src.missing": "Not found",

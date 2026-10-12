@@ -499,7 +499,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "detail" ? (
                 <>
                   <Sessions rows={report.recent_sessions} now={now} />
-                  <Sources sources={report.sources} allTime={report.all_time} />
+                  <Sources sources={report.sources} allTime={report.all_time} scope={scope} />
                 </>
               ) : null}
               {page === "speed" ? <SpeedPage snapshot={ttftSnapshot} now={now} scope={scope} /> : null}
