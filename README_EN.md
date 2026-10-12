@@ -101,7 +101,7 @@ sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 
 ### Windows
 
-Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/latest). The installer supports an all-users install: on shared machines choose **All users**, and use the same mode for upgrades — the machine-wide installation is then replaced in place for every Windows account. The CLI ships no Windows installer yet; use `cargo install` via [build from source](#build-from-source) when you need it.
+Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/latest). The installer supports an all-users install: on shared machines choose **All users**, and use the same mode for upgrades — the machine-wide installation is then replaced in place for every Windows account. The setup also installs the `tokenme` CLI and adds its `bin` directory to the user PATH (Only me) or system PATH (All users). Open a new terminal after installation to use `tokenme --help`, `tokenme daily`, and `tokenme quota`. Upgrades do not duplicate the PATH entry; uninstall removes only this installation's entry.
 
 ### Linux
 

@@ -101,7 +101,7 @@ sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 
 ### Windows
 
-到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载安装程序。安装器支持"所有用户"模式：共享电脑上请选择**所有用户**，升级时也保持同一模式——这样会原地替换机器级安装，并对所有 Windows 账户生效。CLI 暂无 Windows 安装包，需要时走[源码构建](#从源码构建)的 `cargo install`。
+到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载安装程序。安装器支持"所有用户"模式：共享电脑上请选择**所有用户**，升级时也保持同一模式——这样会原地替换机器级安装，并对所有 Windows 账户生效。安装包同时包含 `tokenme` 命令行工具，并自动将其 `bin` 目录加入用户 PATH（只为我）或系统 PATH（所有用户）。安装后重新打开终端，即可运行 `tokenme --help`、`tokenme daily` 和 `tokenme quota`。升级不会重复添加 PATH 项，卸载时会移除该安装目录的 PATH 项。
 
 ### Linux
 

@@ -1,0 +1,11 @@
+{
+  "build": {
+    "beforeBuildCommand": "node ../../scripts/bundle-windows-cli.mjs && pnpm build"
+  },
+  "bundle": {
+    "resources": {
+      "resources/cli/tokenme.exe": "bin/tokenme.exe",
+      "../../../scripts/windows-cli-path.ps1": "bin/windows-cli-path.ps1"
+    }
+  }
+}
