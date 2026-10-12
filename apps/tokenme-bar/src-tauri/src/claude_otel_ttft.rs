@@ -345,9 +345,12 @@ struct Attribute {
 
 /// The span's wall duration in milliseconds, when both ends parse.
 fn span_ms(span: &Span) -> Option<f64> {
-    let start = span.start_time_unix_nano.as_ref()?.parse::<f64>().ok()?;
-    let end = span.end_time_unix_nano.as_ref()?.parse::<f64>().ok()?;
-    (end >= start).then_some((end - start) / 1_000_000.0)
+    // Nanosecond timestamps exceed f64's exact integer range (~9e15), so the
+    // subtraction happens in u64 and only the final quotient goes float —
+    // subtracting the parsed floats first loses up to ~0.25 µs per span.
+    let start: u64 = span.start_time_unix_nano.as_ref()?.parse().ok()?;
+    let end: u64 = span.end_time_unix_nano.as_ref()?.parse().ok()?;
+    (end >= start).then_some(((end - start) as f64) / 1_000_000.0)
 }
 
 /// Output tokens per generation second: the window is the span's own minus the
@@ -394,7 +397,7 @@ impl<'de> Deserialize<'de> for Attribute {
                 let mut number = None;
                 let mut text = None;
                 match key.as_str() {
-                    "ttft_ms" | "first_content_ms" => {
+                    "ttft_ms" | "first_content_ms" | "gen_ai.usage.output_tokens" | "output_tokens" => {
                         number = serde_json::from_value::<AttributeValue>(value).ok().and_then(|value| value.number());
                     }
                     "gen_ai.request.model" => {
