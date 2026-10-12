@@ -426,7 +426,7 @@ fn cn_credit_windows(login: &Login) -> Vec<QuotaSample> {
     } else {
         "Linux"
     };
-    let Ok(resp) = ureq::AgentBuilder::new()
+    let Ok(resp) = crate::http::agent_builder()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()
@@ -594,7 +594,7 @@ fn cn_daily_checkin(login: &Login, force: bool) -> Option<TraeCheckinOutcome> {
 
     let device = device_id_of(&mut state);
     let url = format!("{}{CLAIM_PATH}", login.host);
-    let claimed: Option<(i64, f64)> = ureq::AgentBuilder::new()
+    let claimed: Option<(i64, f64)> = crate::http::agent_builder()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()
@@ -671,7 +671,7 @@ pub fn manual_checkin() -> Result<(bool, String), String> {
     let path = checkin_state_path().ok_or_else(|| "无法写入签到状态".to_string())?;
     let mut state = load_checkin_state(&path);
     let url = format!("{}{CLAIM_PATH}", login.host);
-    let resp = ureq::AgentBuilder::new()
+    let resp = crate::http::agent_builder()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()
@@ -1141,7 +1141,7 @@ mod tests {
                 "{}{USAGE_PATH}",
                 record.get("host").and_then(Value::as_str).unwrap_or(DEFAULT_HOST)
             );
-            let resp = ureq::AgentBuilder::new()
+            let resp = crate::http::agent_builder()
                 .timeout_connect(std::time::Duration::from_secs(3))
                 .timeout_read(std::time::Duration::from_secs(6))
                 .build()
@@ -1314,7 +1314,7 @@ fn cn_credits_dump() {
             ("/api/v1/commercial/get_session_usage", json!({ "session_id": "" })),
         ] {
             let url = format!("{}{path}", login.host);
-            let resp = ureq::AgentBuilder::new()
+            let resp = crate::http::agent_builder()
                 .timeout_connect(std::time::Duration::from_secs(5))
                 .timeout_read(std::time::Duration::from_secs(10))
                 .build()

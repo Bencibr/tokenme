@@ -121,6 +121,8 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             logging::init();
+            #[cfg(windows)]
+            logging::info("quota TLS: session resumption disabled on Windows");
             notify::init(app.handle());
             // The check-in ledger rides the panel's own log dir; the probes
             // themselves call through this hook, so usage-quota stays
