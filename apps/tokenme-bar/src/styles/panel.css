@@ -922,19 +922,26 @@
 }
 
 .speed {
-  display: grid;
-  /* Fixed tracks on every axis: each row is its own grid, and `auto` tracks
-     would size to that row's figures — the rows' columns would never line up.
-     Three figure columns (最近 / 平均 / TPS) share one width so the numbers
-     read as a table without being one. */
-  grid-template-columns: 20px minmax(0, 1fr) 100px 64px 48px;
-  column-gap: var(--s2);
-  align-items: center;
   padding: 6px 0;
 }
 
 .speed + .speed {
   border-top: 1px solid var(--hair);
+}
+
+/* The figure block: fixed tracks on every axis, so every row's numbers land
+   on the same grid lines; the latest column rides the wide track and hugs
+   its right edge. */
+.speed-top {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 64px 48px;
+  column-gap: var(--s2);
+  align-items: center;
+}
+
+.speed-ic {
+  display: inline-flex;
+  align-items: center;
 }
 
 .speed-cell {
@@ -944,18 +951,6 @@
   min-width: 0;
 }
 
-/* The row is icon-led: the provider's own mark is the identity (its name is
-   the hover title), and the sub-line rides the icon column to its right. */
-.speed-ic {
-  display: inline-flex;
-  align-items: center;
-}
-
-.speed-sub {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .speed-num {
   font-size: var(--t-meta);
   font-weight: 650;
@@ -974,6 +969,30 @@
   white-space: nowrap;
 }
 
+/* The footer: the model owns the left edge — full remaining width, so long
+   names survive — and the sample age sits at the right corner. */
+.speed-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s2);
+  margin-top: 3px;
+  font-size: 10px;
+}
+
+.speed-model {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.speed-time {
+  flex: none;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
 
 .ttft-state,
 .ttft-granularity {

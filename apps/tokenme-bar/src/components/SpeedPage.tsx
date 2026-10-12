@@ -59,30 +59,35 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   const avgMs = average(recent.map((sample) => sample.ttft_ms));
   const avgTps = average(recent.map((sample) => sample.tps).filter((tps): tps is number => typeof tps === "number" && Number.isFinite(tps)));
   // Provider-constant facts (name, granularity, sample count) are metadata,
-  // not per-sample data: they live in the hover title, and the row face
-  // carries only the model and the three figures.
+  // not per-sample data: they live in the hover title. The row is a card:
+  // the figure block up top, a footer line under it — model left, sample age
+  // right — so a long model name gets the row's full width.
   const title = [t(nameKey), t(granularityKey),
     comparable.length > 0 ? t("ttft.samples", { n: comparable.length }) : null].filter(Boolean).join(" · ");
-  const sub = latest?.model ?? "—";
   return (
     <li className="speed" title={title}>
-      <span className="speed-ic"><ToolIcon tool={tool} size={20} /></span>
-      <span className="speed-sub ttft-granularity">{sub}</span>
-      <SpeedCell
-        value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
-        cap={latest ? `${metricLabel(latest.metric)} · ${relativeTime(latest.sampled_at_ms, now)}` : t("ttft.no_data")}
-        stage={latest ? stageOfMs(latest.ttft_ms) : null}
-      />
-      <SpeedCell
-        value={avgMs != null ? `${Math.round(avgMs)} ms` : "—"}
-        cap={t("ttft.head.avg")}
-        stage={avgMs != null ? stageOfMs(avgMs) : null}
-      />
-      <SpeedCell
-        value={avgTps != null ? avgTps.toFixed(1) : "—"}
-        cap={t("ttft.head.tps")}
-        stage={avgTps != null ? stageOfTps(avgTps) : null}
-      />
+      <div className="speed-top">
+        <span className="speed-ic"><ToolIcon tool={tool} size={20} /></span>
+        <SpeedCell
+          value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
+          cap={latest ? metricLabel(latest.metric) : t("ttft.no_data")}
+          stage={latest ? stageOfMs(latest.ttft_ms) : null}
+        />
+        <SpeedCell
+          value={avgMs != null ? `${Math.round(avgMs)} ms` : "—"}
+          cap={t("ttft.head.avg")}
+          stage={avgMs != null ? stageOfMs(avgMs) : null}
+        />
+        <SpeedCell
+          value={avgTps != null ? avgTps.toFixed(1) : "—"}
+          cap={t("ttft.head.tps")}
+          stage={avgTps != null ? stageOfTps(avgTps) : null}
+        />
+      </div>
+      <div className="speed-bottom">
+        <span className="speed-model">{latest?.model ?? "—"}</span>
+        <span className="speed-time">{latest ? relativeTime(latest.sampled_at_ms, now) : ""}</span>
+      </div>
     </li>
   );
 }
