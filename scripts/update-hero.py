@@ -24,6 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
 SVGS = [ASSETS / "tokenme-hero-dark.svg", ASSETS / "tokenme-hero-light.svg"]
+READMES = [ROOT / "README.md", ROOT / "README_EN.md"]
 
 # Edge headless is the one renderer guaranteed on every Windows dev box here;
 # the install roots arrive via the environment, never spelled as drive paths.
@@ -115,10 +116,25 @@ def render(path: Path) -> Path:
     return png
 
 
+def patch_readme_taglines(count: int) -> bool:
+    """The tagline under the hero states the same tool count — patch it here
+    so the sentence never outlives the registry."""
+    changed = False
+    for path in READMES:
+        s = path.read_text()
+        t = re.sub(r"\d+ 款 AI 编程工具", f"{count} 款 AI 编程工具", s)
+        t = re.sub(r"\d+ AI coding tools", f"{count} AI coding tools", t)
+        if t != s:
+            path.write_text(t)
+            print(f"patched {path.name}: tagline follows the registry — {count} tools")
+            changed = True
+    return changed
+
+
 def main() -> None:
     force = "--force" in sys.argv
     version, count = tree_version(), tree_tool_count()
-    changed = force
+    changed = force or patch_readme_taglines(count)
     for svg in SVGS:
         if patch_svg(svg, version, count):
             print(f"patched {svg.name}: v{version} · {count} AI Tools")
