@@ -1,154 +1,205 @@
-# TokenMe User Guide
+# TokenMe 使用指南
 
-> Version: 0.1.5 · Updated: 2026-10-07 · Audience: daily users · Covers both the CLI and the menu-bar panel
+> 版本：0.1.7 · 更新：2026-10-12 · 读者：日常用户 · 面板与 CLI 都在覆盖范围内 · [English](USER_GUIDE_EN.md)（0.1.5 旧版，待同步）
 
-## 1. Install
+## 功能清单
+
+| 能做什么 | 在哪用 |
+| :--- | :--- |
+| 看今天/本周/本月/今年的 token、费用、缓存率 | 面板 → 概览（右滑翻上周、上月、去年；「活动」页签是全年热力图） |
+| 看每款 AI 编程工具的用量明细 | 面板 → 工具（27 款，一行一个，行配色取自应用图标） |
+| 找出最贵的会话 | 面板 → 排行 |
+| 按模型、项目查单次请求 | 面板 → 明细 |
+| 测 TTFT（首 token 延迟）与 TPS | 面板 → 速度（被动测量；Codex / Claude Code 可主动发起一次短请求实测） |
+| 看各家订阅剩余额度与重置倒计时 | 面板 → 概览下方的配额条（窗口跨 80% 或耗尽时弹系统通知） |
+| 每日签到一键代领 | 面板 → 工具页行头（Trae CN、Qoder、Qoder CN、MiniMax Code、WorkBuddy 国内版） |
+| 把服务器、容器上的用量汇总进来 | 面板底栏「服务器」一键部署，或 Linux 采集端手动安装（见 §4） |
+| 给无限额的工具设成本上限 | `tokenme budget set`（见 §5） |
+| 在菜单栏常驻数字或图标 | 托盘显示模式，六种任选（见 §3） |
+| 数据不出本机 | 全程只读索引，无遥测、无第三方代理（见 §7） |
+
+## 1. 安装
+
+macOS（Homebrew，推荐）：
 
 ```bash
-git clone https://github.com/sp/tokenme.git
-cd tokenme
-cargo install --path crates/usage-cli --bin tokenme   # the CLI
+brew tap Bencibr/tokenme https://github.com/Bencibr/homebrew-tokenme
+brew trust bencibr/tokenme        # 一次即可——brew 6 对第三方 cask 有信任确认
+brew install --cask tokenme       # 菜单栏面板
+brew install tokenme-cli          # CLI
 ```
 
-Linux machines use the release tarball instead — `tokenme-cli-<v>-<arch>-linux-musl.tar.gz` (fully static, no Rust/Python needed on that machine):
+Windows：到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载 `TokenMe_<v>_x64-setup.exe`。安装器同时装面板和 CLI，CLI 位于 `<安装目录>\bin\tokenme.exe`，安装时自动加入 PATH（"只为我"加用户 PATH，"所有用户"加系统 PATH）；装完开一个新终端跑 `tokenme --help` 即可。升级沿用同一条 PATH；卸载只删自己这次装的条目。
+
+Linux（无头采集端）：下载 `tokenme-cli-<v>-<arch>-linux-musl.tar.gz`（完全静态，机器上不需要 Rust/Python）：
 
 ```bash
 tar xzf tokenme-cli-<v>-x86_64-linux-musl.tar.gz && cd tokenme-cli-<v>-x86_64-linux-musl
 ./install-linux.sh --every 15 --push you@display-host
 ```
 
-That single line puts the binary in `~/.local/bin`, installs a timer to export every 15 minutes into `~/tokenme-sync`, and scp's each fresh bundle to the display machine's `~/tokenme-sync`; the panel there merges it on its next pass and shows it in the **多端同步 / Multi-device sync** badge. The timer is a systemd `--user` unit, falling back to an equivalent cron job on boxes without a reachable user manager (containers, bare ssh) — either way it runs without a login session once lingering is on for the user (on a headless server the installer says the one `loginctl enable-linger` line to run). `--uninstall` removes the binary, the generated export and push scripts, the systemd `--user` units and timer (or the cron entry, on a fallback box) — your data (index, bundles) stays, and so does the `~/.local/bin` PATH line the installer added to `~/.profile`, which is harmless to leave and easy to delete by hand. Without `--push`, sync that folder however you like (Syncthing, a mount, a nightly rsync) — any copy of the bundles works, imports are idempotent.
+这一行把二进制装进 `~/.local/bin`，并装一个每 15 分钟导出一次的定时器，把 bundle scp 到展示机的 `~/tokenme-sync`；展示机面板下一轮自动合并，显示在「多端同步」徽标里。定时器是 systemd `--user` 单元，在没有 user manager 的机器（容器、裸 ssh）上自动退化为等价 cron——`loginctl enable-linger` 打开后无需登录会话也会跑（无头机器上安装器会把要跑的那行命令打印出来）。`--uninstall` 移除二进制、生成的脚本与定时器，数据（索引、bundle）保留。不加 `--push` 的话，`~/tokenme-sync` 目录随你怎么搬（Syncthing、挂载、每夜 rsync 都行）——bundle 的合并是幂等的。
 
-macOS menu-bar panel (optional, ad-hoc signed — right-click → Open on first launch):
+macOS 面板也可从源码构建（ad-hoc 签名，首次打开右键 → 打开）：
 
 ```bash
-./scripts/build-macos.sh          # produces TokenMe.app + a drag-install DMG
+./scripts/build-macos.sh          # 产出 TokenMe.app 与拖拽安装的 DMG
 ```
 
-On Windows, `pnpm tauri build --bundles nsis` in `apps/tokenme-bar` produces `TokenMe_<v>_x64-setup.exe` with both the panel and CLI. The console binary lives in `<install directory>\bin\tokenme.exe`; installation adds that `bin` directory to the user PATH (Only me) or system PATH (All users). Open a new terminal after installation and run `tokenme --help`. Upgrades keep one PATH entry; uninstall removes only this installation's entry. `scripts/build-windows.ps1` also builds the standalone CLI.
-
-## 2. First run
+## 2. 首次运行
 
 ```bash
-tokenme detect        # 1. which of your tools were found
+tokenme detect        # 1. 看本机装了哪些工具、日志在哪
 tokenme daily --days 7
 tokenme quota
 ```
 
-## 3. The menu-bar panel (macOS · Windows)
+## 3. 菜单栏面板（macOS · Windows）
 
-Built by `scripts/build-macos.sh` on macOS and by `pnpm tauri build --bundles nsis` in `apps/tokenme-bar` on Windows. Left-click the dual-ring icon toggles the panel; right-click opens the menu (refresh, data dir, autostart, quit).
+macOS 由 `scripts/build-macos.sh` 构建，Windows 由 `apps/tokenme-bar` 下的 `pnpm tauri build --bundles nsis` 构建。左键点双环图标开关面板；右键打开菜单（刷新、数据目录、开机自启、退出）。
 
-Display modes — each click on the chip in the panel's bottom bar moves to the next:
+### 3.1 五个页面
 
-| Mode | Menu bar shows |
+- **概览**——当天的 token、费用与缓存命中率，按小时分布的用量柱状图；「活动」页签是 GitHub 式的年度热力图，右滑翻看上周、上月与去年。下方是各家配额条与通知。
+- **速度**——TTFT（首 token 延迟）与 TPS 的被动测量：Codex 从本地 rollout 流读取，Claude Code 走 OpenTelemetry span，DSH 读本地会话日志；Codex 与 Claude Code 还能主动发起一次短请求实测。
+- **工具**——每个工具的请求数、会话数、token 量与缓存率，一行一个，行配色取自应用图标；支持签到的工具在行头一键领取。
+- **排行**——按会话排名，一眼找出最贵的那几个。
+- **明细**——单次请求级的记录，可以按模型、项目筛选。
+
+### 3.2 托盘显示模式
+
+面板底栏的显示芯片每点一次切换一格：
+
+| 模式 | 菜单栏显示 |
 | :--- | :--- |
-| 仅托盘 (tray) | icon only |
-| 仅Token | token total, no icon |
-| 仅花费 | cost, no icon |
-| 托盘·Token | icon + tokens (default) |
-| 托盘·花费 | icon + cost |
-| 托盘·Token·花费 | icon + tokens + cost |
+| 仅托盘 | 只显示图标 |
+| 仅 Token | token 总数，无图标 |
+| 仅花费 | 花费，无图标 |
+| 托盘·Token | 图标 + token（默认） |
+| 托盘·花费 | 图标 + 花费 |
+| 托盘·Token·花费 | 图标 + token + 花费 |
 
-**Settings.** The gear in the bottom bar opens a sheet fixed at 65% of the panel's height: the body scrolls inside the selected tab and the footer (版本 · 检查更新 · 退出) never scrolls away. Four tabs, none of them carrying an entry count — 通用 (自动刷新 cadence, 外观, 金额折算, 显示零会话工具), 提醒 (系统通知 status, 提醒档位, 静默工具), 高级 (自动探测配额, 逐工具探测, 开机自动启动, 自动检查更新, 服务器与同步) and 关于 (build, updater manifest, 检查更新, 联系我们). Two of them open a list *inside* the same sheet: `›` means a page in this sheet, `↗` means another surface, and `‹ 返回` comes back. A list whose master switch is closed greys every switch on it and says why, rather than showing toggles that look live.
+### 3.3 设置
 
-Refresh cadence controls index re-scanning; vendor quota answers are cached for 5 minutes so probes stay polite. **Polling is now yours to stop** — 自动探测配额 is the master gate, 逐工具探测 the per-vendor list. A stopped probe sends no request but its cache is still read, so the row keeps its last answer on screen instead of vanishing, and while the gate is off the quota section says **已停止探测 · 数据停在 N 分钟前** rather than pretending the numbers are fresh. The per-tool list defaults to the probes this machine has actually answered, with 显示全部 to reach the ones it never has; four of them (Copilot, Gemini CLI, Kimi Code, MiniMax Code) have no menu-bar process to key off, so this list is the only way to stop those, and their rows are tagged 无退出门. Neither switch forces a refresh, deliberately: a forced pass would throw away the answer you just chose to keep. Switching one back on resumes at the next scheduled pass (within 60 s), or at once from the refresh button. The status-bar refresh button is a full refresh: it re-scans logs, forces a fresh quota probe for every vendor (bypassing that cache) and pulls a new price table. The footer's left corner always says when the figures on screen were last recomputed — **最后刷新 · N 秒前**, restarting at 刚刚 the moment a refresh publishes, with 刷新中 spinning while a manual pass is still on its way, and hovering gives the exact time and the scanning cadence. Settings live in `settings.json` under the OS config directory.
+底栏齿轮打开设置面板（固定为面板高度 65%，内部滚动，底部 版本 · 检查更新 · 退出 常驻）。四个页签：**通用**（自动刷新节奏、外观、金额折算、显示零会话工具）、**提醒**（系统通知开关、提醒档位、静默工具）、**高级**（自动探测配额、逐工具探测、开机自启、自动检查更新、服务器与同步）、**关于**。`›` 表示在本面板内展开子页，`↗` 表示跳往别的界面，`‹ 返回` 返回。总闸关闭时，子页里的开关全部置灰并说明原因，而不是摆着看似可用的假开关。
 
-Some tools store their login as a short-lived access token — MiniMax Code's file lasts about an hour, Kimi Code's on the vendor's 15-minute schedule, and Cline's gateway credential one hour out. Three probes renew that credential in place as it expires: each exchanges the refresh token already sitting in the tool's own credential file and writes the rotated pair straight back into that same store, atomically and in the app's own format — MiniMax's `auth.json` beside `auth-state.json`, under the vendor's lock directory and generation bump; Kimi's `~/.kimi-code/credentials/<name>.json`, its rotated `refresh_token` included; Cline's `~/.cline/data/settings/providers.json`, where only the three rotated fields move and the file's own permissions carry over. So the app and the panel stay signed in together and the quota rows stay live without you opening the app. Writing back is what makes the refresh safe rather than rude: a rotation that is not persisted is a rotation consumed, and the tool's own next refresh then finds its login dead. Each probe does this only for the login it is actually reading — a static API key, or the Kimi desktop app's own key, is read and never rewritten. A failed exchange changes nothing — whether a login is dead is the app's call, not a probe's — and the row then keeps the last real number for up to six hours (the probe cache's grace) before disappearing until you sign in again. Every other probe reads credentials and never writes them — the WorkBuddy credential tokenme does store comes from `tokenme workbuddy-login`, a command you ran, not from a probe.
+### 3.4 刷新与探测开关
 
-**WorkBuddy editions.** Domestic **WorkBuddy** (`workbuddy_cn`) reads `~/.workbuddy`; international **WorkBuddy AI** (`workbuddy`) reads `~/.workbuddy-ai`. Their usage, quota cache and host-exit gates are separate. Domestic quota polling checks the daily activity and claims only an eligible, unclaimed day; its group also has a manual check-in button. Enable 自动签到 in Advanced settings to continue domestic claims after closing WorkBuddy, while TokenMe remains running. The master quota switch and the domestic per-tool switch still stop requests. A confirmed day is remembered per account until Beijing midnight, and failed requests retry on later polls. New encrypted login records are read through the corresponding installed client runtime without refreshing or rewriting the client's login. Custom installs can set `WORKBUDDY_CN_EXE` (domestic) or `WORKBUDDY_EXE` (international); the domestic credential and data overrides are `WORKBUDDY_CN_AUTH_FILE` and `WORKBUDDY_CN_CONFIG_DIR`. An expired login needs reauthorization in the client.
+刷新节奏控制索引重扫；厂商配额的应答缓存 5 分钟，探测保持克制。**探测完全由你控制**：自动探测配额是总闸，逐工具探测是分开关。关掉的探测不发请求，但缓存仍被读取——那行保留最后一次答案而不是消失；总闸关闭时配额区直接写明 **已停止探测 · 数据停在 N 分钟前**，不假装数字是新的。逐工具列表默认只列本机真的应答过的探测（显示全部可看从未应答过的）；Copilot、Gemini CLI、Kimi Code、MiniMax Code 这四个没有菜单栏进程可依托，想停它们只能从这里，行上标着 无退出门。两个开关都不会触发强制刷新——强制会扔掉你刚选择保留的答案。重新打开后 60 秒内的下一轮自动恢复，或点刷新立即生效。底栏刷新按钮是全量刷新：重扫日志、绕过缓存强制探测全部厂商、拉取新价格表。底栏左角的 **最后刷新 · N 秒前** 说明屏上数字的新旧。
 
-**Quota banners.** When a metered window crosses **80% used**, the panel posts a native notification the moment it happens — `Qoder · 5 小时` · 已用 83%（剩余 17%） — and one more when the window is **used up** (`额度已用完（100%）`). The title names the tool and its window, and the language follows the panel's own. Only windows the vendors actually meter get banners — the same sources as the quota strip; your §5 budgets stay panel-only. Which lines fire is a setting: **提醒档位** chooses 80% 与 100% / 仅 100% / 关闭, and **静默工具** mutes chosen windows while their numbers keep refreshing — a muted window still advances the tier recorded for it, so un-muting never replays a crossing that happened while you were quiet. The banner marks the crossing, not the state: each line fires once per window per instance, the fact survives restarts (`notify-state.json` beside the index), a renewed window re-arms both lines silently (a credit top-up does the same), and a window first seen already past 80% is baselined quietly — only an already-exhausted window announces itself on first sight. Monitoring is the live panel's: while it is quit nothing is probed, and a crossing that happened in the gap is not replayed. The first banner that is actually due raises the system permission prompt once; if banners never arrive after that, the fix is the OS toggle — macOS 系统设置 → 通知 → TokenMe, Windows 设置 → 系统 → 通知. On macOS the panel points at that toggle itself: while banners cannot post and there is a vendor window to warn about, the quota section shows a one-line guide above its windows — **开启通知** raises the system prompt when it was never asked, **去开启** opens System Settings right on TokenMe's notification row after a denial, and 忽略 dismisses the line until the permission state changes. Banners need the installed app: a bare `cargo run` has no app identity and never posts (it says so in the log).
+### 3.5 OpenCode 官方配额
 
-A report older than five cadences (5 minutes at the default 30 s) swaps the footer's freshness clock for **数据已停止更新 · Updates stopped** with the age of the last pass — frozen numbers and quiet numbers look identical otherwise, and this panel once served a six-hour-old "today" without saying so. One case is deliberately excluded: while the panel is showing a report restored from the previous run (below), the warning stays off, because a second-old engine that is mid-scan is not a dead one; that report says so in the same corner instead — **上次扫描的数据 · From the last scan** with the age the numbers actually have.
+TokenMe 只读取官方 OpenCode Go provider 的配额：优先 `OPENCODE_API_KEY`，其次 `~/.config/opencode/opencode.json` 中任意 `provider.<id>.options.apiKey`（该 provider 的 `options.baseURL` 必须是 `https://opencode.ai/zen/go/v1`），最后回退 `~/.local/share/opencode/auth.json`。自定义代理地址不会被当作官方配额凭据。OpenCode 行显示 5 小时、7 天与月度三个窗口。行没出现时，依次检查 高级 → 自动探测配额、逐工具探测的 OpenCode 开关，以及 `panel.log` 的 quota poll 记录。
 
-Once a Linux machine syncs in, a **多端同步 / Multi-device sync** badge appears on its own line under the figures (it names a machine, an age and a row count, so it no longer shares the numbers' line): newest bundle per machine, warning-hued if the freshest merge is over 24 h old. Hover it for every machine's window and file name. No bundles have been imported → no badge; existing machines see nothing change.
+### 3.6 令牌自动续期
 
-**Switching between machines.** With more than one origin reporting, the header's dropdown folds the whole panel — every period, the model and project rankings, the call series and the session list — under **全部机器**, **本机**, or any single remote by its own name. This re-summarizes the same index rather than re-scanning anything, so it is instant, and the totals keep their identity: 全部 is the sum of the machines. The trigger line shows what is inside the current fold: under **全部机器** it carries the cluster of up to three machine colour chips and the share of the figures that came from remote machines (远程 42%), while **本机** or a single remote gets one dot in that scope's own colour beside the name and its share — with that machine's age after it for a remote. A warn mark appears on the 全部机器 line when any machine is overdue. The menu's footer counts the remote machines, the total share and the most recent successful import. While nothing has been imported the control is not rendered at all — a single-machine panel looks exactly as it did before.
+MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline（gateway 令牌一小时）三家把短时效令牌存在磁盘上，tokenme 在其过期时就地续期：拿同一份凭据文件里的 refresh token 去换新对，再按该工具自己的格式原子性写回原处。写回是安全性的前提——没有落盘的轮换等于已被消耗的轮换，工具自己下次刷新就会发现登录死了。每个探测只续自己正在读的那份登录；静态 API key 只读不写。换取失败则什么都不改，该行最多保留六小时（探测缓存的宽限）的最后真实数字。其余所有探测只读凭据、绝不写回——tokenme 存的那份 WorkBuddy 凭据来自你亲自跑过的 `tokenme workbuddy-login`，不是探测写的。
 
-**First open after launch.** The panel now has numbers on screen about a second after it can paint, because the first report is the previous run's own report read back off disk (`report.json`, next to the index) — 3–22 ms, no scan, no vendor, no query. That report is labelled for what it is: a **上次扫描的数据 / From the last scan** chip in the footer's left corner carries the age the numbers actually have, and the quota strip shows 探测中 instead of last run's windows. The scan's own fold then lands behind it as the second frame. A cached report is only used when it can be described honestly — same machine scope, same local day, under an hour old, not written by a restore — and on a fresh install or an overnight gap there is nothing to restore, so the wait is the old one and these two layers are what fills it: the native window draws a spinner above one teal line, 正在索引本机用量…, because the sheet before the page paints is the **window's own backing** (its colour follows 外观, which is why the same wait reads as a white card under 浅色 and as a dark one under 深色 or 跟随系统) and no markup can reach it (under 浅色 that backing is a literal white card, which is what people describe as a white screen; 外观 → 跟随系统 changes its colour, not its length); then `index.html`'s own loading card takes over as the page paints. `panel.log` keeps the milestones apart — `the page booted N ms after launch` is the bundle running, `the page reported content N ms after launch` is figures on screen, and `boot: restored last-known report folded N ms ago` says whether this open had something to restore — because the gap between them is where the wait lives.
+### 3.7 WorkBuddy 双版本
 
-## 4. Cross-machine sync (Linux collector → macOS/Windows panel)
+国内版 WorkBuddy（`workbuddy_cn`）读 `~/.workbuddy`，国际版 WorkBuddy AI（`workbuddy`）读 `~/.workbuddy-ai`，用量、配额缓存与宿主退出门控互相独立。国内版轮询会检查每日活动并代领符合条件的日子；开启 高级 → 自动签到 后，关掉 WorkBuddy 客户端、只要 TokenMe 在跑就继续领。总闸与逐工具开关照常止住请求。已确认的日子按账号记住，北京时间零点过期。
 
-Numbers from any machine can meet in one panel. A **collector** — the fully static Linux CLI — exports a window of its index into a folder; every **display machine** (macOS or Windows panel) merges that folder automatically. The transport is any file copy you already trust: tokenme never opens a port and has no accounts of its own.
+### 3.8 额度横幅
 
-Collector side, the minimal path (one line — same as §1):
+窗口用到 **80%** 的那一刻弹一条系统通知（`Qoder · 5 小时` · 已用 83%），用尽（100%）再弹一条。只有厂商真正计量的窗口才有横幅；§5 的自设预算只在面板里显示。**提醒档位**可选 80% 与 100% / 仅 100% / 关闭；**静默工具**单独静音某些窗口——静音期间档位照常记录，取消静音不会补发错过的横幅。横幅标记的是"越过"而非"状态"：每窗口每实例只发一次，事实持久化（索引旁的 `notify-state.json`），窗口重置后静默重 arm。面板退出期间不探测，错过的越过不补发。第一条真正到期的横幅会带出一次系统通知权限请求；之后收不到就去系统设置开（macOS 系统设置 → 通知 → TokenMe）。macOS 上配额区会自己给出引导行：**开启通知** / **去开启** / 忽略。裸 `cargo run` 没有应用身份，永远弹不出横幅（日志里会说明）。
+
+### 3.9 数据的新旧标识
+
+底栏左角常驻 **最后刷新 · N 秒前**；连续五个节奏没有新发布时，它换成 **数据已停止更新** 并注明最后一次的时间——引擎会自行重启循环（退避，原因在 `panel.log`）。面板刚启动、还在显示上一次运行恢复的报告时，同一位置显示的是 **上次扫描的数据** 加数据实际年龄——引擎活着，正在扫，这不是"停了"。
+
+### 3.10 多端同步徽标
+
+有 Linux 机器同步进来后，数字下方出现 **多端同步** 徽标：最新合并的机器名、时间与行数，超过 24 小时未合并转为警示色。悬停可看每台机器的窗口与文件名。没有导入过任何 bundle 就没有徽标。
+
+### 3.11 机器切换
+
+一台以上机器报数时，头部下拉把整个面板——每个周期、模型与项目排行、调用序列、会话列表——折叠到 **全部机器**、**本机** 或按名字选任意一台远程机器。这是对同一份索引的重新汇总，瞬间完成：全部 = 各机之和。触发行显示当前范围：全部机器 带最多三枚机器色点与远程占比（远程 42%），单机带自己的色点、占比与最近合并时间。有机器超期时 全部机器 行出现警示标记。没有任何导入时这个控件整个不渲染——单机面板与从前一模一样。
+
+### 3.12 启动首屏
+
+面板能在可绘制后约一秒出数字：第一帧是上一次运行自己发布的报告（索引旁的 `report.json`，3–22 ms 读回，不扫描、不探测、不查询）。它如实标注身份——左角 **上次扫描的数据** 芯片带数据实际年龄，配额区显示 探测中 而非上一次的窗口。缓存报告只在能如实描述时才被使用（同机器范围、同一本地日、一小时以内、非恢复写入）；全新安装或隔夜间隙没有可恢复的，等待分两层：窗口原生底上的一枚转圈加一行 正在索引本机用量…（颜色随 外观），页面接管后是 `index.html` 自己的加载卡。`panel.log` 把里程碑分得清清楚楚：`the page booted N ms after launch` 是 bundle 跑起来，`the page reported content N ms after launch` 是数字上屏，`boot: restored …` 说明这次启动有没有可恢复的报告。
+
+## 4. 多机汇总（Linux 采集端 → macOS/Windows 面板）
+
+任何机器的数字都能在同一个面板相遇。**采集端**（完全静态的 Linux CLI）把索引的一个窗口导出成文件；每台**展示机**（macOS / Windows 面板）自动合并这个目录。通道是你已经信任的任何文件拷贝——tokenme 不开端口、没有自己的账号。
+
+采集端最短路径（一行，同 §1）：
 
 ```bash
 ./install-linux.sh --every 15 --push you@display-host
 ```
 
-The timer (systemd `--user`, cron fallback) exports `~/tokenme-sync/tokenme-<host>.jsonl.gz` every 15 minutes and scp's each fresh bundle to the display machine's `~/tokenme-sync`. No push target? Drop `--push` and move that folder your own way (Syncthing, a mount, a nightly rsync) — or skip the installer entirely and run `tokenme export` by hand (defaults: last 30 days into `~/tokenme-sync`). A quiet or logless machine still produces a valid bundle (`rows 0`) — the timer never fails on a slow day.
+定时器（systemd `--user`，cron 兜底）每 15 分钟导出 `~/tokenme-sync/tokenme-<host>.jsonl.gz` 并 scp 到展示机的 `~/tokenme-sync`。没有推送目标就去掉 `--push`，目录随你搬（Syncthing、挂载、每夜 rsync）；也可以完全跳过安装器手动跑 `tokenme export`（默认最近 30 天导到 `~/tokenme-sync`）。安静的一天照样产出合法 bundle（rows 0），定时器不会因为没数据而失败。
 
-Display side needs no setup: every panel pass merges any `tokenme-*.jsonl.gz` it finds in `~/tokenme-sync`, and the badge (above) shows the newest merge per machine. Merges are idempotent — re-importing the same file changes nothing. To rehearse or go manual: `tokenme import <bundle>` (add `--dry-run` to parse and reconcile, then roll back).
+展示侧零配置：面板每轮自动合并 `~/tokenme-sync` 里的 `tokenme-*.jsonl.gz`，徽标（§3.10）显示每台机器的最新合并。合并幂等——重复导入同一文件不产生任何变化。想预演或手动：`tokenme import <bundle>`（加 `--dry-run` 解析对账后回滚）。
 
-**The panel can do the SSH half for you.** Click the server icon in the panel footer and add a machine: address, user, and the SSH password once (a private-key file works too, and both accept `~`). The wizard pins the host's SSH fingerprint on first connect, generates a dedicated key pair, plants its public half in the remote `~/.ssh/authorized_keys`, uploads the static collector to `~/.tokenme/bin/`, runs the first export, and pulls + merges the bundle — the whole install is one guided flow with a per-step log. After that the panel re-pulls every 15 minutes (configurable per server), and each fresh merge shows up like any file-based source, per machine. The password is used for that single setup connection and is never written anywhere. Removing a server cleans up both ends: the collector binary and the key line are deleted on the remote machine, and the pinned fingerprint and history are dropped locally.
+**面板可以替你跑完 SSH 这半边。** 点面板底栏的服务器图标添加机器：地址、用户名、SSH 密码输一次（私钥文件也行，都支持 `~`）。向导首次连接即钉住主机指纹、生成专用密钥对、把公钥装进远端 `~/.ssh/authorized_keys`、上传静态采集器到 `~/.tokenme/bin/`、跑首次导出并拉取合并——整个过程是一条带分步日志的引导流。此后面板每 15 分钟（可按服务器配置）重新拉取，新的合并像任何文件来源一样按机器出现。密码只用于那一次安装连接，永不落盘。删除服务器时两端一起清理：远端的采集器二进制与密钥行被删除，本地钉住的指纹与历史被丢弃。
 
-**Security & limits**
+**安全与边界**
 
-- No listener, no cloud, no sync account: authentication is entirely the channel you pick (ssh keys for scp, Syncthing TLS + device IDs, …). tokenme stores no sync credentials. The in-panel SSH flow keeps that property: one password authenticates one setup connection, the host key is pinned on first sight (shown in the sheet), and steady-state trust is a single dedicated key line in the remote `authorized_keys` — revocable by deleting that line or removing the server in the panel.
-- Every import is validated before a single row lands: the bundle's sha256 against its manifest, the batch's token sums against the manifest, and a format + schema-version gate. The merge runs in one transaction — any failure rolls back whole, the file is kept on disk, and nothing merges.
-- Row counts are capped (the manifest's count plus slack), so a corrupt file can't exhaust memory. A bundle can only move a row forward — the growth predicate refuses lower counts — and imports never delete: rows a collector purged later are reported as stale, not removed.
-- On unix, bundles and manifests are written `0600`. A bundle carries what the index already carries — token counts, model/session/project names, local log paths — never code, prompts or credentials. Treat `~/tokenme-sync` like the index itself: whoever can write into that folder (your account, or anyone you share it with) can inject usage rows — merges are duplicate-safe, not signed.
+- 无监听、无云端、无同步账号：认证完全由你选的通道承担（scp 的 ssh 密钥、Syncthing 的 TLS + 设备 ID）。tokenme 不存任何同步凭据。面板内 SSH 流程保持同一性质：一次密码只认证一次安装连接，主机指纹首连即钉（面板里可见），长期信任只是远端 `authorized_keys` 里的一行专用公钥——删掉那行或在面板移除服务器即吊销。
+- 每次导入先验证后落库：bundle 的 sha256 对清单、批次 token 和对清单、格式与 schema 版本门。合并在单一事务里——任何失败整体回滚，文件保留在磁盘，什么都不进。
+- 行数有上限（清单计数加余量），坏文件撑不爆内存。bundle 只能让行向前走（增长谓词拒绝更低计数）；导入从不删除——采集端后来清理的行会被报告为 stale，不会消失。
+- unix 上 bundle 与清单一律 `0600`。bundle 携带的与索引一致——token 计数、模型/会话/项目名、本地日志路径——绝无代码、Prompt 或凭据。把 `~/tokenme-sync` 当索引本身对待：能写进这个目录的人（你的账号，或你共享给的任何账号）就能注入用量行——合并去重，但不签名。
 
-## 5. Budgets
+## 5. 预算
 
-For tools whose vendor publishes no limit (Cline, ZCode, …), set your own caps — tokenme measures them against its own cost math and raises a quota bar:
+厂商不公布上限的工具（Cline、ZCode 等），自己设帽——tokenme 按自己的费用数学衡量并画出一根配额条：
 
 ```bash
 tokenme budget set zcode --daily 5 --monthly 50
 ```
 
-## 6. Supported tools & data sources
-| Tool | Metric | Local data source |
+## 6. 支持的工具与数据源
+
+| 工具 | 计量 | 本地数据源 |
 | :--- | :--- | :--- |
 | Claude Code | Tokens | `~/.claude/projects/**/*.jsonl` |
 | Codex | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | Tokens | `~/.local/share/opencode/opencode.db` |
 | Pi | Tokens | `~/.pi/agent/sessions/**` |
 | Oh My Pi | Tokens | `~/.omp/agent/sessions/**`（`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` 可改） |
-| Cline | Tokens | `~/.cline/data/sessions/**` (the desktop app writes a sub-agent's transcript inside its parent session dir and its meta into a sibling `<session>__agent_<uuid>/`; each is attributed to the session's own workspace) |
+| Cline | Tokens | `~/.cline/data/sessions/**`（桌面版把子代理的转录写在父会话目录内、元数据写在旁边的 `<session>__agent_<uuid>/`，各自归到自己的工作区） |
 | ZCode | Tokens | `~/.zcode/cli/db/db.sqlite` |
 | Antigravity CLI | Tokens | `~/.gemini/antigravity-cli/conversations/*.db` |
-| Qoder CN | Credits + Tokens | `~/.qoder-cn/projects/**/*.jsonl` (credits) · `~/Library/Application Support/QoderCN/SharedClientCache/cache/db/local.db` (tokens); separate account, quota and daily check-in |
-| Qoder | Credits + Tokens | `~/.qoder/projects/**/*.jsonl` (credits) · `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` (tokens) |
+| Qoder CN | Credits + Tokens | `~/.qoder-cn/projects/**/*.jsonl`（credits）· `~/Library/Application Support/QoderCN/SharedClientCache/cache/db/local.db`（tokens）；独立账号、配额与每日签到 |
+| Qoder | Credits + Tokens | `~/.qoder/projects/**/*.jsonl`（credits）· `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db`（tokens） |
 | WorkBuddy AI | Tokens + credits | `~/.workbuddy-ai/projects/**/<session>.jsonl` |
-| WorkBuddy (China) | Tokens + credits | `~/.workbuddy/projects/**/<session>.jsonl` |
-| AgnesCode / AtomCode / Crow5 / Mimocode / Cola / DSH | Tokens | auto-discovered, same shape as their parent tools |
-| Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl` (legacy `~/.kimi`; the desktop app's embedded runtime home under `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` is read too) |
-| MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl` (legacy `~/.mavis`) |
+| WorkBuddy（中国版） | Tokens + credits | `~/.workbuddy/projects/**/<session>.jsonl` |
+| AgnesCode / AtomCode / Crow5 / Mimocode / Cola / DSH | Tokens | 自动发现，与其同形 |
+| Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl`（旧 `~/.kimi`；桌面端内嵌 runtime 的 `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` 也在读取范围） |
+| MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl`（旧 `~/.mavis`） |
 
-Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are not supported locally.
+只有云端记录、本地没有逐请求日志的工具（Cursor、VS Code Copilot）本地不支持。
 
-## 7. Privacy
+## 7. 隐私
 
-- Only per-request token counts, model names and project paths are indexed — never your code or prompts.
-- Scanning is read-only: probes read credentials, and the only ones that hand a refreshed one back are the three logins §3 names, each into that tool's own store. No telemetry, no third-party proxies.
-- The only network calls: live quota probes against your own vendor accounts, the models.dev price list, and (if you click it) the mail/release links in the panel.
-- Cross-machine sync (§4) moves only that same metadata between your machines — bundles carry no code, prompts or credentials — over a channel you own (ssh/scp, Syncthing, a mounted disk). tokenme opens no ports, stores no sync credentials, and validates every bundle (sha256 + sums + schema) before merging.
+- 入库的只有每次请求的 token 计数、模型名与项目路径——绝不碰你的代码和 Prompt。
+- 扫描全程只读：探测读凭据，会把续期后的凭据写回的只有 §3 点名的那三家，且各自只写自己的存储。无遥测、无第三方代理。
+- 网络调用只有三处：对你自己厂商账号的实时配额探测、models.dev 价格表、以及你亲自点击的面板内邮件/发布链接。
+- 多机同步（§4）在你的机器之间搬运的也只有这些元数据——bundle 里没有代码、Prompt 或凭据——通道由你选择（ssh/scp、Syncthing、挂载盘）。tokenme 不开端口、不存同步凭据，每个 bundle 合并前都过验证（sha256 + 计数 + schema）。
 
-## 8. Troubleshooting
+## 8. 故障排查
 
-| Symptom | Fix |
+| 症状 | 处理 |
 | :--- | :--- |
-| `no supported AI tool logs found` | Run one of your tools once, then `tokenme detect` |
-| Costs look wrong | `tokenme pricing explain <model>` — check which listing won; override with `--pricing-override` |
-| Numbers seem stale | `tokenme index --status`; another tokenme process may hold the ingest lease — `tokenme index --force` |
-| A quota row stopped moving | 设置 → 高级 → 自动探测配额 (master gate) or 逐工具探测 turned that probe off: with a gate closed the row is the cache's last answer, not a live one, and while the master gate is off the whole section says **已停止探测 · 数据停在 …**. Open the switch again — the next scheduled pass (within 60 s) or the refresh button replaces the number |
-| The footer's left corner reads **数据已停止更新 / Updates stopped** | The engine is not publishing, so the figures are a snapshot of the last pass — the same corner the live 最后刷新 clock occupies, swapped in with its age once five cadences pass without a publish. The panel restarts the loop itself (backoff, reason in `panel.log`); press refresh to force a pass, and read `panel.log` if the badge outlives a minute. Not to be confused with the **上次扫描的数据** chip the same corner shows instead while a restored report is up: that one means the engine is alive and still scanning, showing the report the previous run published |
-| Index corrupted | `tokenme index --rebuild` (quarantines the old file automatically) |
-| Panel shows no data | Check `tokenme detect` finds sources; the panel reads the same index |
-| First open after launch shows a blank card for seconds | Usually it does not: the first frame is last run's report read off `report.json`, so figures are there the moment the page can paint. When you do see the card — fresh install, or nothing cached that this panel would show (different scope, another local day, older than an hour) — what you are looking at is the window's **native backing** (white under 浅色, dark under 深色), not a page that failed to paint: the web layer adds nothing until the engine's first report lands. 外观 → 跟随系统 changes the colour of the wait; the length of it is the first report, and `panel.log` names the phase that cost the time — `boot: restored …` for the disk read, then `boot: published the index fold …` with `restore / detect / pricing / index open / has-events / sources / report`. That second line is written only when the index already holds events, so a fresh install has neither to read. `panel: the page reported content N ms after launch` says when the page was alive. `scripts/verify-cold-start.py` measures the whole thing from pixels: the first frame the panel appears in, the first that draws anything, and where it landed |
-| The panel opened in a screen corner, not under the menu bar | That open had no tray rectangle *and* the session exposed no monitors — a relaunch while the screen is locked or the display is asleep (`panel.log` says `no monitor to anchor to`). The next open anchors to the menu bar normally |
-| Quota banners never arrive | Allow notifications for TokenMe first (macOS 系统设置 → 通知 → TokenMe; Windows 设置 → 系统 → 通知) — a denial is logged once per window as `notify: [<window>] blocked`; the system prompt itself is only raised the first time a banner is actually due. On macOS the quota section's own guide line (开启通知 / 去开启) is the in-panel shortcut to that toggle and disappears by itself once banners can post. Prove the plumbing on a relaunch with `TOKENME_TEST_NOTIFY=1`: `panel.log` then answers `notify test: posted`, `notify test: blocked …` or `notify test: permission was just requested`. A bare `cargo run` has no app identity and never posts |
-| Sync badge is old or absent | On the collector: `systemctl --user list-timers tokenme-export.timer` (is the timer alive?) and `tokenme export` by hand; on the display machine the bundles must land in `~/tokenme-sync` — `tokenme import <file> --dry-run` shows what a merge would do |
-| A bundle was rejected | The import message names the reason (sha256 mismatch = corrupted or truncated in transit; format/schema mismatch = version skew between the machines). The file is kept, nothing was merged — fix the transport or update the older side, then it retries by itself |
+| `no supported AI tool logs found` | 先跑一次你的工具，再 `tokenme detect` |
+| 费用不对 | `tokenme pricing explain <model>` 看哪条价格记录赢了；`--pricing-override` 可覆盖 |
+| 数字像是旧的 | `tokenme index --status`；可能有另一个 tokenme 进程占着 ingest 租约——`tokenme index --force` |
+| 某条配额不动了 | 设置 → 高级 → 自动探测配额（总闸）或 逐工具探测 关掉了它：闸关闭时该行显示的是缓存的最后答案；总闸关闭时整个区域显示 **已停止探测 · 数据停在 …**。重新打开开关，60 秒内的下一轮或刷新按钮即恢复 |
+| 底栏左角显示 **数据已停止更新** | 引擎没有发布，屏上是上一轮的快照——五个节奏没有发布会自动换上并带时间。面板会自行重启循环（退避，原因在 `panel.log`）；点刷新可强制一轮，徽标超过一分钟还在就读 `panel.log`。别与 **上次扫描的数据** 芯片混淆：那颗说明引擎活着还在扫，显示的是上一次运行发布的报告 |
+| 索引损坏 | `tokenme index --rebuild`（旧文件自动隔离） |
+| 面板没数据 | 先确认 `tokenme detect` 能找到来源；面板读的是同一份索引 |
+| 启动后白卡几秒 | 通常不会：第一帧读的是 `report.json` 里的上次报告，页面能画时数字就在。真看到白卡——全新安装，或没有可恢复的报告——那是窗口的**原生底**（浅色下白、深色下黑），不是页面没画出来；`panel.log` 会写明耗时在哪一段 |
+| 面板出现在屏幕角落而不是菜单栏下 | 那次打开既没有托盘矩形、会话也没暴露显示器——锁屏或显示器睡眠时的重启（`panel.log` 写着 `no monitor to anchor to`）。下次打开会正常锚定 |
+| 额度横幅收不到 | 先允许 TokenMe 发通知（macOS 系统设置 → 通知 → TokenMe；Windows 设置 → 系统 → 通知）——被拒会在日志留一次 `notify: [<window>] blocked`。用 `TOKENME_TEST_NOTIFY=1` 重启面板可验证链路：`panel.log` 答 `notify test: posted` / `blocked` / `permission was just requested` |
+| 同步徽标过期或缺失 | 采集端：`systemctl --user list-timers tokenme-export.timer` 看定时器活着没，手动 `tokenme export`；展示机：bundle 必须落在 `~/tokenme-sync`——`tokenme import <file> --dry-run` 可预演合并 |
+| bundle 被拒 | 导入消息里写明原因（sha256 不符 = 传输损坏或截断；格式/schema 不符 = 两端版本差）。文件保留、什么都没合——修好通道或升级旧的一端，它会自己重试 |
 
+## 桌面宠物问候（Windows）
 
-## Desktop pet greetings (Windows)
+通用设置里有宠物问候、休息提醒与动作的独立开关，外加提醒间隔和 打招呼 预览。问候跟随本地时间：早晨 06:00–11:00、中午 11:00–14:00、晚间 18:00–22:00、22:00–06:00 是轻声的夜间问候。每个时段每个本地日只问候一次；午夜前后算同一个夜晚。
 
-General settings has separate switches for pet greetings, break reminders and motions, plus the reminder interval and a Say hello preview. Greetings follow local time: morning 06:00–11:00, noon 11:00–14:00, evening 18:00–22:00 and a gentle night greeting from 22:00–06:00. Each period greets once per local day; the hours around midnight belong to one night.
+休息提醒默认 60 分钟活跃使用。三分钟空闲、锁屏、宠物隐藏或睡眠都会重置计数。全屏时自动投放等待，22:00–06:00 休息提醒保持安静。休息 5 分钟暂停计数；10 分钟后再提醒推迟下一次。问候卡自动关闭，待在宠物旁边不抢焦点；既有的点击打开、拖拽与边缘停靠都还在。打招呼是显式交互，全屏下也能用；锁屏与宠物总开关照常生效。
 
-Break reminders default to 60 minutes of active use. Three minutes idle, a screen lock, a hidden pet or sleep restarts the counter. Automatic delivery waits during fullscreen, and break reminders stay quiet between 22:00 and 06:00. Rest for 5 min pauses the counter; Remind in 10 min postpones the next reminder. The greeting card closes automatically, stays beside the pet without stealing focus, and the existing click-to-open, drag and edge docking remain available. Say hello is an explicit interaction and works during fullscreen; lock and the pet master switch still apply.
-
-All existing visible skins have transient greeting, hop, stretch, sleepy and landing reactions. The kitten also has an additional four-pose reaction atlas for an energetic hello, caring cup of tea, sleepy yawn and overhead stretch. The atlas is optional per skin and declared by `reactionAtlas` in `pet-skins.json`. Motions respect the system reduced-motion preference. All timing and notices run locally; no language-model call is involved.
+现有可见皮肤都有瞬态的问候、跳跃、伸懒腰、犯困与落地反应。小猫另有四姿态反应图集：活力打招呼、贴心端茶、困倦哈欠与举手伸展。图集按皮肤可选，由 `pet-skins.json` 的 `reactionAtlas` 声明。动作尊重系统"减弱动态效果"偏好。所有计时与提示都在本地运行，没有任何语言模型调用。
