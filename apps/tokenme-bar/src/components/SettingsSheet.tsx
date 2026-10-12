@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import type { BubbleSkin, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, ThemeKey, UpdateStatus } from "../types";
-import { bridge, isWindows } from "../lib/bridge";
+import type { BubbleSkin, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, QuotaDisplayMode, ThemeKey, UpdateStatus } from "../types";
+import { bridge, isMac, isWindows } from "../lib/bridge";
 import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
 import { t } from "../lib/i18n";
 import { toolDisplay } from "../lib/format";
@@ -26,6 +26,11 @@ const TIERS: { key: NotifyTierKey; label: () => string }[] = [
   { key: "off", label: () => t("set.tiers.off") },
 ];
 
+const QUOTA_MODES: { key: QuotaDisplayMode; label: () => string }[] = [
+  { key: "used", label: () => t("quota.mode.used") },
+  { key: "remaining", label: () => t("quota.mode.remaining") },
+];
+
 type Tab = "general" | "alert" | "advanced" | "about";
 // Label keys are literals rather than a `set.tab.${k}` template so the parity
 // gate (scripts/check-i18n-parity.py) can see each tab's copy is reached.
@@ -37,7 +42,7 @@ const TABS: { key: Tab; label: () => string }[] = [
 ];
 type List = "probe" | "mute";
 
-/** The engine's own name when it has one (CatPaw, not the frontend's Catpaw);
+/** The engine's own name when it has one (妙手, not the frontend's fallback);
  *  the probes with no log adapter — copilot, gemini — fall back to the map. */
 function nameOf(p: ProbeTool, displays: Record<string, string>): string {
   return displays[p.id] ?? toolDisplay(p.id);
@@ -61,6 +66,7 @@ export function SettingsSheet({
   onRefreshSecs,
   onMoney,
   onPolling,
+  onQuotaDisplayMode,
   displays,
 }: {
   onClose: () => void;
@@ -71,6 +77,7 @@ export function SettingsSheet({
   onMoney: (on: boolean) => void;
   /** The master switch, so the quota section can say it stopped immediately. */
   onPolling: (on: boolean) => void;
+  onQuotaDisplayMode: (mode: QuotaDisplayMode) => void;
   displays: Record<string, string>;
 }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
@@ -85,6 +92,12 @@ export function SettingsSheet({
   const [probes, setProbes] = useState<ProbeTool[]>([]);
   const [showAll, setShowAll] = useState(false);
   const [notify, setNotify] = useState<NotifyState>("unknown");
+  const [petBusy, setPetBusy] = useState(false);
+  const [petError, setPetError] = useState<string | null>(null);
+  const [quotaModeBusy, setQuotaModeBusy] = useState(false);
+  const [quotaModeError, setQuotaModeError] = useState(false);
+  const [ttftBusy, setTtftBusy] = useState(false);
+  const [ttftError, setTtftError] = useState(false);
 
   useEffect(() => bridge.onUpdateProgress((p) => setProgress(p.percent)), []);
 
@@ -136,6 +149,35 @@ export function SettingsSheet({
     void bridge.setShowMoney(on);
   };
 
+  const setQuotaMode = async (mode: QuotaDisplayMode) => {
+    if (quotaModeBusy || settings?.quota_display_mode === mode) return;
+    setQuotaModeBusy(true);
+    setQuotaModeError(false);
+    try {
+      await bridge.setQuotaDisplayMode(mode);
+      patch((s) => ({ ...s, quota_display_mode: mode }));
+      onQuotaDisplayMode(mode);
+    } catch {
+      setQuotaModeError(true);
+    } finally {
+      setQuotaModeBusy(false);
+    }
+  };
+
+  const setTtft = async (on: boolean) => {
+    if (ttftBusy || settings?.ttft_enabled === on) return;
+    setTtftBusy(true);
+    setTtftError(false);
+    try {
+      await bridge.setTtftEnabled(on);
+      patch((s) => ({ ...s, ttft_enabled: on }));
+    } catch {
+      setTtftError(true);
+    } finally {
+      setTtftBusy(false);
+    }
+  };
+
   const setShowEmptyTools = (on: boolean) => {
     patch((s) => ({ ...s, show_empty_tools: on }));
     onEmptyTools(on);
@@ -159,6 +201,15 @@ export function SettingsSheet({
     } finally {
       setSkinBusy(false);
     }
+  };
+
+  const setPetPreference = async (changes: Partial<PanelSettings["pet_companion"]>) => {
+    if (!settings || petBusy) return;
+    const next = { ...settings.pet_companion, ...changes };
+    setPetBusy(true); setPetError(null);
+    try { await bridge.setPetPreferences(next); patch((s) => ({ ...s, pet_companion: next })); }
+    catch { setPetError(t("pet.save.failed")); }
+    finally { setPetBusy(false); }
   };
 
   const setAutostart = (on: boolean) => {
@@ -441,9 +492,31 @@ export function SettingsSheet({
                 ))}
               </div>
             </div>
+            <div className="sheet-row">
+              <div>
+                <div className="sheet-label">{t("set.quota.mode")}</div>
+                <div className="sheet-hint">{t("set.quota.hint")}</div>
+              </div>
+              <div className="seg" role="radiogroup" aria-label={t("set.quota.mode")}>
+                {QUOTA_MODES.map((mode) => (
+                  <button
+                    key={mode.key}
+                    type="button"
+                    role="radio"
+                    className="seg-btn"
+                    aria-checked={settings.quota_display_mode === mode.key}
+                    disabled={quotaModeBusy}
+                    onClick={() => void setQuotaMode(mode.key)}
+                  >
+                    {mode.label()}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {quotaModeError ? <p className="sheet-hint" role="alert">{t("set.quota.failed")}</p> : null}
             {switchRow(t("set.money"), t("set.money.hint"), settings.show_money, setMoney)}
             {switchRow(t("set.showempty"), t("set.showempty.hint"), settings.show_empty_tools, setShowEmptyTools)}
-            {isWindows ? (
+            {isWindows || isMac ? (
               <>
                 {switchRow(t("set.bubble"), t("set.bubble.hint"), settings.bubble_enabled, setBubble)}
                 <div className="sheet-row">
@@ -457,6 +530,29 @@ export function SettingsSheet({
                     onChange={(skin) => void setBubbleSkin(skin)}
                   />
                 </div>
+                {switchRow(t("set.pet.greetings"), t("set.pet.greetings.hint"), settings.pet_companion.greetings,
+                  (on) => void setPetPreference({ greetings:on }), petBusy || !settings.bubble_enabled)}
+                {switchRow(t("set.pet.rest"), t("set.pet.rest.hint"), settings.pet_companion.rest_reminders,
+                  (on) => void setPetPreference({ rest_reminders:on }), petBusy || !settings.bubble_enabled)}
+                <div className="sheet-row">
+                  <div><label className="sheet-label" htmlFor="pet-rest-interval">{t("set.pet.interval")}</label>
+                    <div className="sheet-hint">{t("set.pet.interval.hint")}</div></div>
+                  <select id="pet-rest-interval" className="sheet-select" value={settings.pet_companion.rest_interval_minutes}
+                    disabled={petBusy || !settings.bubble_enabled || !settings.pet_companion.rest_reminders}
+                    onChange={(event) => void setPetPreference({ rest_interval_minutes:Number(event.target.value) })}>
+                    {[30,45,60,90,120].map((minutes) => <option key={minutes} value={minutes}>{t("set.pet.minutes", { minutes })}</option>)}
+                  </select>
+                </div>
+                {switchRow(t("set.pet.motions"), t("set.pet.motions.hint"), settings.pet_companion.motions,
+                  (on) => void setPetPreference({ motions:on }), petBusy || !settings.bubble_enabled)}
+                <div className="sheet-row">
+                  <div><div className="sheet-label">{t("set.pet.preview")}</div><div className="sheet-hint">{t("set.pet.preview.hint")}</div></div>
+                  <button type="button" className="sheet-action" disabled={!settings.bubble_enabled || petBusy}
+                    onClick={() => { void bridge.previewPetNotice().then((notice) => { if (!notice) setPetError(t("pet.preview.wait")); }).catch(() => setPetError(t("pet.save.failed"))); }}>
+                    {t("set.pet.preview.button")}
+                  </button>
+                </div>
+                {petError && <p className="sheet-hint sheet-pet-error" role="alert">{petError}</p>}
               </>
             ) : null}
           </>
@@ -507,6 +603,8 @@ export function SettingsSheet({
         {tab === "advanced" ? (
           <>
             {switchRow(t("set.polling"), t("set.polling.hint"), settings.quota_polling, setQuotaPolling)}
+            {switchRow(t("set.ttft"), t("set.ttft.hint"), settings.ttft_enabled, (on) => void setTtft(on), ttftBusy)}
+            {ttftError ? <p className="sheet-hint" role="alert">{t("set.ttft.failed")}</p> : null}
             {/* Master off ⇒ no claim can fire at all, so the guarantee would be
                 a promise the app cannot keep; the row locks like set.pause does. */}
             {switchRow(t("set.checkin"), t("set.checkin.hint"), settings.auto_checkin, setAutoCheckin, !settings.quota_polling)}

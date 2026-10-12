@@ -154,7 +154,7 @@ Or skip the timer and move `~/tokenme-sync` yourself — Syncthing, a shared mou
 
 The quota bars come from each tool's own API or local credentials — probes that read, and never log you in. Three probes are deliberate exceptions, because those tools keep a short-lived access token on disk and the bar goes dead without a renewal: MiniMax Code (~1 h), Kimi Code (the vendor's own 15-minute token) and Cline's gateway token. Each exchanges the refresh token sitting in that same file and writes the rotated pair straight back, in that tool's own format and atomically — a rotation that is not persisted is a rotation consumed, and the app's own next refresh would then find its login dead. A failed exchange changes nothing. Every other probe reads credentials and never writes them. When a host app quits, its probes pause and the last numbers stay on screen; relaunch the app and they resume. The "pause quota on exit" setting controls this.
 
-Every tool below ships as a built-in adapter — 24 of them, indexed straight from the logs and databases each one writes to disk:
+Every tool below ships as a built-in adapter — 26 of them, indexed straight from the logs and databases each one writes to disk:
 
 | Tool | Live quota | Fixtures | Verified on |
 | :--- | :--- | :--- | :--- |
@@ -165,14 +165,16 @@ Every tool below ships as a built-in adapter — 24 of them, indexed straight fr
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | Account window limits — Cline account API | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour/cycle windows + session budgets — the IDE's own quota API + local cookie decryption | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | Subscription windows — vendor usage API, local encrypted snapshot fallback; daily check-in state | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | Credits from its own CN logs; plan/resource-pack quota and daily check-in through the CN API | ✅ | macOS ⏳ · Windows ✅ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | Self-computed — runs the CLI's `/usage` | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | Membership points — needs a one-time token (see below) | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota — local daemon | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** | Member credits — the desktop app's billing API / local broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI** (international) | Member credits — the desktop app's billing API / local broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** (China) | Credit packages + daily check-in — its own account API / local broker | ✅ | macOS ⏳ · Windows ✅ |
 | <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft credits — the plans-usage billing meter; usage from the IDE history | ✅ | Windows ✅ |
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points — cloud points API | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | Points balance — points portal API | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手** (formerly CatPaw) | Points balance — points portal API | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance — official user/balance + desktop credential file | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
 | **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
@@ -189,9 +191,26 @@ Every tool below ships as a built-in adapter — 24 of them, indexed straight fr
 >
 > Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 
+## TTFT & TPS measurements
+
+TokenMe can passively measure **TTFT** (time to first token) and **TPS** (generated tokens per second) from local client activity. These are observed client-side timings, not provider benchmarks. Collection begins when enabled; earlier activity is not backfilled.
+
+| Host | Passive measurements | User-triggered test |
+| :--- | :--- | :--- |
+| **Codex** | Turn-level TTFT from local Codex rollout streams; TPS when the stream provides output-token and timing data | Yes — one short request through the Codex CLI app-server |
+| **Claude Code CLI** | Request-level TTFT and TPS from Claude Code OpenTelemetry spans; first-content timing is labeled separately and is not TTFT | Yes — one short CLI request with temporary, process-scoped telemetry |
+| **DSH (DeepSeek Harness)** | Request-level TTFT and TPS from local compressed session logs, when the stream contains first-token timestamps | No — passive collection only |
+
+DSH follows its session statistics: the latest session's captured requests are grouped together, TTFT is averaged per request, and TPS is calculated as total output tokens divided by total decode time (completion minus first-token time). Older DSH log formats without first-token timestamps cannot produce these measurements. Active tests send a short prompt only after you click, use plan quota, and are kept separate from passive averages. The speed collector does not retain prompt or response text.
+
 > **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
 
 Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+
+## What's new in 0.1.7
+
+- **New**: passive TTFT/TPS measurements for Codex, Claude Code and DSH; DSH results now aggregate by session using its output-weighted TPS formula. Optional one-shot speed tests are available for Codex and Claude Code.
+- **New**: Qoder CN as a separate usage and quota adapter, with credit-pack windows and daily check-in.
 
 ## What's new in 0.1.6
 

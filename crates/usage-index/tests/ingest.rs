@@ -1,7 +1,8 @@
 mod common;
 
-/// The heatmap in `usage-core::report` spans 371 days; an index that forgets
-/// more than that would show holes at the left edge, forever.
+/// The heatmap in `usage-core::report` spans two years (742 days — the year
+/// view's last-year page); an index that forgets more than that would show
+/// holes at the left edge, forever.
 const _: () = assert!(usage_index::RETENTION_DAYS > usage_core::report::HEATMAP_DAYS);
 
 use common::{adapters_for, append_fixture, count_of, replace_file, staged, Mock};
@@ -288,7 +289,7 @@ fn an_on_disk_index_reopens_with_its_events() {
 
 #[test]
 fn retention_and_default_path_look_sane() {
-    assert_eq!(RETENTION_DAYS, 400);
+    assert_eq!(RETENTION_DAYS, 750);
     if let Some(path) = Index::default_path() {
         assert!(path.ends_with("tokenme/index.db") || path.ends_with("tokenme\\index.db"), "{path:?}");
     }
@@ -715,4 +716,209 @@ fn the_trae_split_rehomes_cn_rows_without_colliding_on_twins() {
         .query_row("SELECT COUNT(*) FROM event WHERE dedupe_key = 'trae#later'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(back, 1, "the split never runs twice");
+}
+
+/// The trae adapter keyed each event's session by turn id, so the panel's
+/// 会话 count read one chat conversation as N one-turn sessions. The repair
+/// drops the local trae rows wholesale — the turn→session mapping lives in
+/// the encrypted store, and a re-emit under the same dedupe key would be
+/// IGNOREd beside the old rows — with their file_state (an unchanged store
+/// must still re-read, or Trae idle for days leaves the tools empty), while
+/// merged rows are another machine's truth and stay.
+#[test]
+fn the_trae_turn_session_repair_drops_local_rows_and_keeps_merged_ones_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        // Undo the repair a fresh open already ran, to stage the pre-shape.
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:trae-turn-session-1'", [])
+            .unwrap();
+        for (id, tool, key, source) in [
+            (1, "trae", "trae#t1", "/Users/x/Library/Application Support/Trae/ModularData/ai-agent/database.db"),
+            (2, "trae_cn", "trae_cn#t2", "/Users/x/Library/Application Support/Trae CN/ModularData/ai-agent/database.db"),
+            (3, "trae_cn", "trae_cn#t3", "linux:o1:/home/x/.trae/database.db"),
+        ] {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+                     VALUES(?1, ?2, 10, 's', 'tokens', 100.0, ?3, ?4)",
+                    rusqlite::params![id, tool, key, source],
+                )
+                .unwrap();
+        }
+        idx.conn().execute("INSERT INTO call(event_id, kind, name) VALUES(1, 'tool', 't1')", []).unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO quota(event_id, used_percent, window_minutes, resets_at_ms, label) \
+                 VALUES(2, 5.0, 300, 20, 'w')",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                 VALUES('2026-10-11', '', 'trae', 't1', '', '', 'tokens', \
+                     0, 0, 100, 0, 0, 0, 1, 1, 10, 10)",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                 VALUES('2026-10-11', 'o1', 'trae_cn', 't3', '', '', 'tokens', \
+                     0, 0, 100, 0, 0, 0, 1, 1, 10, 10)",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                 VALUES('trae:db', 'trae', 10, 1, 10, 1, 1)",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                 VALUES('trae_cn:db', 'trae_cn', 10, 1, 10, 1, 1)",
+                [],
+            )
+            .unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE tool IN ('trae','trae_cn') AND source NOT LIKE 'linux:%'"),
+        0,
+        "local rows go for the re-read"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE source LIKE 'linux:%'"),
+        1,
+        "merged rows are another machine's truth and stay"
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM call"), 0, "the local row's call goes with it");
+    assert_eq!(count("SELECT COUNT(*) FROM quota"), 0, "the local row's quota goes with it");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE tool IN ('trae','trae_cn') AND origin=''"),
+        0,
+        "the local rollup groups go"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE tool='trae_cn' AND origin='o1'"),
+        1,
+        "the merged rollup group stays"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM file_state WHERE tool IN ('trae','trae_cn')"),
+        0,
+        "an unchanged store must still re-read"
+    );
+    assert_eq!(idx.meta_value("repair:trae-turn-session-1").unwrap().as_deref(), Some("1"));
+
+    // One-shot: rows written after the repair survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+             VALUES(9, 'trae_cn', 11, 's2', 'tokens', 7.0, 'trae_cn#later', '/u/Trae CN/database.db')",
+            [],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM event WHERE dedupe_key = 'trae_cn#later'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 1, "the repair never runs twice");
+}
+
+#[test]
+fn the_workbuddy_split_preserves_other_editions_and_replays_domestic_cursors() {
+    let dir = tempfile::tempdir().unwrap(); let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn().execute("DELETE FROM meta WHERE key = 'repair:workbuddy-split-1'", []).unwrap();
+        for (id, tool, key, source) in [
+            (1,"workbuddy","workbuddy#unix","/home/demo/.workbuddy/projects/session.jsonl"),
+            (2,"workbuddy","workbuddy#win",r"C:\Users\demo\.workbuddy\projects\session.jsonl"),
+            (3,"workbuddy","workbuddy#global","/home/demo/.workbuddy-ai/projects/session.jsonl"),
+            (4,"workbuddy","workbuddy#remote","linux:server:/home/demo/.workbuddy/projects/session.jsonl"),
+            (5,"workbuddy","workbuddy#twin","/home/demo/.workbuddy/projects/twin.jsonl"),
+            (6,"workbuddy_cn","workbuddy_cn#twin","/home/demo/.workbuddy/projects/twin.jsonl"),
+        ] {
+            idx.conn().execute("INSERT INTO event(id,tool,ts_ms,session,meter,in_tok,dedupe_key,source) VALUES(?1,?2,10,'s','tokens',100,?3,?4)", rusqlite::params![id,tool,key,source]).unwrap();
+            idx.conn().execute("INSERT OR REPLACE INTO file_state(source_key,tool,cursor) VALUES(?1,?2,999)", rusqlite::params![source,tool]).unwrap();
+        }
+        idx.conn().execute("INSERT INTO call(event_id,kind,name) VALUES(5,'tool','test')", []).unwrap();
+        idx.conn().execute("INSERT INTO quota(event_id,used_percent,window_minutes,resets_at_ms) VALUES(5,10,60,100)", []).unwrap();
+        idx.conn().execute("INSERT INTO event_rollup(day,origin,tool,session,project,model,meter,in_tok,cc_tok,cr_tok,out_tok,reason_tok,credits,n,nonzero,min_ts,max_ts) VALUES('2026-10-10','','claude','s','','','tokens',1,0,0,0,0,0,1,1,10,10)", []).unwrap();
+        idx.conn().execute("INSERT INTO meta(key,value) VALUES('sync:linux:server','keep')", []).unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT count(*) FROM event WHERE tool='workbuddy_cn'"),3);
+    assert_eq!(count("SELECT count(*) FROM event WHERE tool='workbuddy'"),2);
+    assert_eq!(count("SELECT count(*) FROM event WHERE dedupe_key IN ('workbuddy_cn#unix','workbuddy_cn#win','workbuddy_cn#twin')"),3);
+    assert_eq!(count("SELECT count(*) FROM event WHERE id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM call WHERE event_id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM quota WHERE event_id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE tool='workbuddy' AND instr(replace(source_key,char(92),'/'),'/.workbuddy/')>0 AND source_key NOT LIKE 'linux:%'"),0);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE source_key LIKE '%/.workbuddy-ai/%'"),1);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE source_key LIKE 'linux:%'"),1,"remote cursors survive");
+    assert_eq!(count("SELECT count(*) FROM event_rollup"),0,"rollup must rebuild all groups together");
+    assert_eq!(idx.meta_value("sync:linux:server").unwrap().as_deref(),Some("keep"));
+    assert_eq!(idx.meta_value("repair:workbuddy-split-1").unwrap().as_deref(),Some("1"));
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    assert_eq!(idx.conn().query_row("SELECT count(*) FROM event", [], |r| r.get::<_,i64>(0)).unwrap(),5);
+}
+
+#[test]
+fn the_qoder_split_preserves_other_editions_and_replays_domestic_cursors() {
+    let dir = tempfile::tempdir().unwrap(); let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn().execute("DELETE FROM meta WHERE key = 'repair:qoder-split-1'", []).unwrap();
+        for (id, tool, key, source) in [
+            (1,"qoder","qoder#unix","/home/demo/.qoder-cn/projects/session.jsonl"),
+            (2,"qoder","qoder#win",r"C:\Users\demo\QoderCN\SharedClientCache\session.jsonl"),
+            (3,"qoder","qoder#global","/home/demo/.qoder/projects/session.jsonl"),
+            (4,"qoder","qoder#remote","linux:server:/home/demo/.qoder-cn/projects/session.jsonl"),
+            (5,"qoder","qoder#twin","/home/demo/.qoder-cn/projects/twin.jsonl"),
+            (6,"qoder_cn","qoder_cn#twin","/home/demo/.qoder-cn/projects/twin.jsonl"),
+            (7,"qoder","session#message","/home/demo/.qoder-cn/projects/fallback.jsonl"),
+        ] {
+            idx.conn().execute("INSERT INTO event(id,tool,ts_ms,session,meter,in_tok,dedupe_key,source) VALUES(?1,?2,10,'s','tokens',100,?3,?4)", rusqlite::params![id,tool,key,source]).unwrap();
+            idx.conn().execute("INSERT OR REPLACE INTO file_state(source_key,tool,cursor) VALUES(?1,?2,999)", rusqlite::params![source,tool]).unwrap();
+        }
+        idx.conn().execute("INSERT INTO call(event_id,kind,name) VALUES(5,'tool','test')", []).unwrap();
+        idx.conn().execute("INSERT INTO quota(event_id,used_percent,window_minutes,resets_at_ms) VALUES(5,10,60,100)", []).unwrap();
+        idx.conn().execute("INSERT INTO event_rollup(day,origin,tool,session,project,model,meter,in_tok,cc_tok,cr_tok,out_tok,reason_tok,credits,n,nonzero,min_ts,max_ts) VALUES('2026-10-10','','claude','s','','','tokens',1,0,0,0,0,0,1,1,10,10)", []).unwrap();
+        idx.conn().execute("INSERT INTO meta(key,value) VALUES('sync:linux:server','keep')", []).unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT count(*) FROM event WHERE tool='qoder_cn'"),4);
+    assert_eq!(count("SELECT count(*) FROM event WHERE dedupe_key='qoder_cn#session#message'"),1);
+    assert_eq!(count("SELECT count(*) FROM event WHERE tool='qoder'"),2);
+    assert_eq!(count("SELECT count(*) FROM event WHERE dedupe_key IN ('qoder_cn#unix','qoder_cn#win','qoder_cn#twin')"),3);
+    assert_eq!(count("SELECT count(*) FROM event WHERE id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM call WHERE event_id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM quota WHERE event_id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE tool='qoder' AND instr(replace(source_key,char(92),'/'),'/.qoder-cn/')>0 AND source_key NOT LIKE 'linux:%'"),0);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE source_key LIKE '%/.qoder/%'"),1);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE source_key LIKE 'linux:%'"),1,"remote cursors survive");
+    assert_eq!(count("SELECT count(*) FROM event_rollup"),0,"rollup must rebuild all groups together");
+    assert_eq!(idx.meta_value("sync:linux:server").unwrap().as_deref(),Some("keep"));
+    assert_eq!(idx.meta_value("repair:qoder-split-1").unwrap().as_deref(),Some("1"));
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    assert_eq!(idx.conn().query_row("SELECT count(*) FROM event", [], |r| r.get::<_,i64>(0)).unwrap(),6);
 }

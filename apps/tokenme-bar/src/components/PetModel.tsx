@@ -502,7 +502,7 @@ export function PetModel({ skin, config, dock, hovered, dragging, tokens, gaze, 
       data-ready={ready} style={modelStyle(config, dock)} aria-hidden="true">
       <span className="pet-pose">
         <canvas ref={canvas} className="pet-model-canvas" aria-hidden="true"
-          title="拖动旋转模型，点击切换动作"
+          title={t("bubble.pet_model_hint")}
           onPointerDown={onModelPointerDown}
           onPointerMove={onModelPointerMove}
           onPointerUp={onModelPointerUp}

@@ -40,11 +40,12 @@ const MAX_FRAME: usize = 1_048_576;
 
 /// `{endpoint, ticket}` discovery file — the broker's one public contract.
 /// Same ladder as the adapter's `paths::config_root`.
-fn discovery_path() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("WORKBUDDY_CONFIG_DIR") {
+fn discovery_path(cn: bool) -> Option<PathBuf> {
+    let env = if cn { "WORKBUDDY_CN_CONFIG_DIR" } else { "WORKBUDDY_CONFIG_DIR" };
+    if let Some(dir) = std::env::var_os(env).filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(dir).join("wbipc").join("endpoint.json"));
     }
-    dirs::home_dir().map(|h| h.join(".workbuddy-ai").join("wbipc").join("endpoint.json"))
+    dirs::home_dir().map(|h| h.join(if cn { ".workbuddy" } else { ".workbuddy-ai" }).join("wbipc").join("endpoint.json"))
 }
 
 use crate::providers::hmac_sha256;
@@ -73,7 +74,14 @@ fn ticket_id(ticket: &str) -> String {
 /// One meter call through the app. `body` is the vendor envelope the direct
 /// token chain would have POSTed; the answer is the same envelope, parsed.
 pub(crate) fn meter_envelope(body: &Value) -> Option<Value> {
-    let disc = std::fs::read_to_string(discovery_path()?).ok()?;
+    let (status, data) = request(false, "/billing/meter/get-user-resource", body)?;
+    (200..300).contains(&status).then_some(data)
+}
+
+/// An edition's own broker supplies the account headers. Non-2xx bodies are
+/// retained: daily-checkin's 400/code 10001 means the day is already claimed.
+pub(crate) fn request(cn: bool, path: &str, body: &Value) -> Option<(u16, Value)> {
+    let disc = std::fs::read_to_string(discovery_path(cn)?).ok()?;
     let disc: Value = serde_json::from_str(&disc).ok()?;
     let endpoint = disc.get("endpoint")?.as_str()?.to_string();
     let ticket = disc.get("ticket")?.as_str()?.to_string();
@@ -90,18 +98,15 @@ pub(crate) fn meter_envelope(body: &Value) -> Option<Value> {
         &format!("{channel}/{FETCH_METHOD}"),
         json!({
             "method": "POST",
-            "path": "/billing/meter/get-user-resource",
+            "path": path,
             "headers": {"content-type": "application/json"},
             "body_b64": base64::engine::general_purpose::STANDARD.encode(body.to_string()),
         }),
     )?;
-    let status = result.get("status")?.as_u64()?;
-    if !(200..300).contains(&status) {
-        return None;
-    }
+    let status = u16::try_from(result.get("status")?.as_u64()?).ok()?;
     let body_b64 = result.get("body_b64")?.as_str()?;
     let raw = base64::engine::general_purpose::STANDARD.decode(body_b64).ok()?;
-    serde_json::from_slice(&raw).ok()
+    Some((status, serde_json::from_slice(&raw).ok()?))
 }
 
 struct Connection {

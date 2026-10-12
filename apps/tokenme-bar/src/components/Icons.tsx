@@ -98,6 +98,16 @@ export function IconMissing(p: IconProps) {
     </Svg>
   );
 }
+/** The speed page's about badge: an exclamation alone — the button's own
+ *  circular border is the circle, so the glyph stays one mark, not two. */
+export function IconInfo(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M12 5.5v8" />
+      <path d="M12 17.5v.2" />
+    </Svg>
+  );
+}
 
 /** Status bar's settings gear. */
 export function IconSettings(p: IconProps) {

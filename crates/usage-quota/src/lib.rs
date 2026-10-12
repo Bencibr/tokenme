@@ -13,6 +13,7 @@ pub mod host;
 mod http;
 mod providers;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use usage_core::{QuotaSample, QuotaView};
@@ -29,7 +30,9 @@ pub use providers::workbuddy_login;
 pub const CHECKIN_TOOLS: &[(&str, fn() -> Result<(bool, String), String>)] = &[
     ("trae_cn", providers::trae_manual_checkin),
     ("qoder", providers::qoder_manual_checkin),
+    ("qoder_cn", providers::qoder_cn_manual_checkin),
     ("minimaxcode", providers::minimaxcode_manual_checkin),
+    ("workbuddy_cn", providers::workbuddy_cn_manual_checkin),
 ];
 
 /// The check-in tool ids, in registry order.
@@ -41,6 +44,23 @@ pub fn checkin_tool_ids() -> impl Iterator<Item = &'static str> {
 /// this.
 pub fn is_checkin_tool(tool: &str) -> bool {
     CHECKIN_TOOLS.iter().any(|(id, _)| *id == tool)
+}
+
+/// The automatic check-in master switch, read by every provider's daily path
+/// right before a claim would leave the process. On by default: the CLI
+/// collector has no settings and its daily `export` pass is what keeps a
+/// headless server's streak alive; the panel engine writes
+/// `settings.auto_checkin` into it at every quota pass, so the switch in the
+/// sheet governs this within one cadence tick. The manual 签到 button never
+/// consults it — an explicit click is the user asking again.
+static AUTO_CHECKIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_auto_checkin_enabled(on: bool) {
+    AUTO_CHECKIN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn auto_checkin_enabled() -> bool {
+    AUTO_CHECKIN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// One forced claim right now, by tool id — the panel's check-in button.
@@ -58,6 +78,25 @@ pub fn manual_checkin(tool: &str) -> Result<(bool, String), String> {
 /// earliest, so five minutes is well inside any meaningful resolution.
 pub const TTL: Duration = Duration::from_secs(300);
 
+/// The sink a host process hands the check-in paths: one line per attempt,
+/// wherever the host logs (the panel's `checkin.log`). The CLI installs
+/// nothing and the calls stay silent there.
+pub type CheckinLog = Arc<dyn Fn(&str) + Send + Sync>;
+
+static CHECKIN_LOG: std::sync::OnceLock<CheckinLog> = std::sync::OnceLock::new();
+
+/// Install the host's check-in sink. Called once at setup; later calls win.
+pub fn set_checkin_log(f: CheckinLog) {
+    let _ = CHECKIN_LOG.set(f);
+}
+
+/// One line into the host's check-in ledger, if it installed a sink.
+pub fn log_checkin(msg: &str) {
+    if let Some(f) = CHECKIN_LOG.get() {
+        f(msg);
+    }
+}
+
 pub trait QuotaProbe: Send + Sync {
     /// Must match an adapter `TOOL_ID` so the panel can group quota with spend.
     fn tool(&self) -> &'static str;
@@ -65,6 +104,17 @@ pub trait QuotaProbe: Send + Sync {
     /// Best-effort live read. Return an empty vec when the tool is absent, not
     /// signed in, or the endpoint is down — the caller keeps the last answer.
     fn fetch(&self) -> Vec<QuotaSample>;
+
+    /// Whether this probe also carries a once-a-day task (Qoder's check-in)
+    /// that must run even while the host gate pauses the live read. A paused
+    /// read is silent because the number cannot change while the app is
+    /// closed; a daily claim is a state change on the vendor side that only
+    /// this process can make, and skipping it for a closed window loses the
+    /// day (measured 2026-10-11: the check-in never ran because Qoder was
+    /// closed all morning).
+    fn daily_task(&self) -> bool {
+        false
+    }
 
     /// Probes shell out and hit the network; neither may take the menu-bar
     /// process down with them.
@@ -193,7 +243,12 @@ fn collect_probes_gated(
         let cache = Arc::clone(&cache);
         let shared = Arc::clone(&shared);
         let done_count = Arc::clone(&done);
-        let gated_off = !gate(probe.tool());
+        // A once-a-day task riding a probe (Qoder's check-in) outranks the
+        // host gate: the gate pauses a *read* whose number cannot change while
+        // the app is closed, but the daily claim is a vendor-side state change
+        // this process alone can make. `cache::probe`'s own TTL still bounds
+        // it — the task runs at the first pass past its window, not per poll.
+        let gated_off = !gate(probe.tool()) && !probe.daily_task();
         let spawned = std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(move || {
@@ -283,7 +338,8 @@ mod tests {
     fn the_checkin_registry_names_real_probes_and_refuses_strangers() {
         let probes: Vec<&str> = built_in().iter().map(|p| p.tool()).collect();
         let ids: Vec<&str> = checkin_tool_ids().collect();
-        assert_eq!(ids, vec!["trae_cn", "qoder", "minimaxcode"], "the claim-bearing probes");
+        assert_eq!(ids, vec!["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn"], "the claim-bearing probes");
+        assert!(!is_checkin_tool("workbuddy"), "WorkBuddy AI never claims a CN grant");
         for id in &ids {
             assert!(probes.contains(id), "check-in tool {id:?} has no probe to run under");
             assert!(is_checkin_tool(id));

@@ -867,6 +867,9 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
     }
     let poll_started = Instant::now();
     let settings = app.state::<Shared>().settings();
+    // The check-in master switch rides the settings into the probes: it is
+    // read inside their fetches, past this pass's host-gate decisions.
+    usage_quota::set_auto_checkin_enabled(settings.auto_checkin);
     let mut q = usage_core::report::poll_quota(adapters);
     // Two gates, one pass. The user's own word (`quota_polling`,
     // `quota_probes_off`) is the standing instruction; the host-exit test is
@@ -1083,6 +1086,8 @@ mod tests {
         assert!(!host_gate_open("trae_cn", false, &alive), "off keeps today's rule");
         assert!(host_gate_open("trae_cn", true, &alive), "on: the claim fires with the IDE closed");
         assert!(host_gate_open("qoder", true, &alive));
+        assert!(host_gate_open("qoder_cn", true, &alive));
+        assert!(!host_gate_open("qoder_cn", false, &alive));
         assert!(!host_gate_open("claude", true, &alive), "not a claim bearer");
         assert!(!host_gate_open("zcode", true, &alive));
         assert!(host_gate_open("copilot", true, &alive), "no host mapping — never paused");

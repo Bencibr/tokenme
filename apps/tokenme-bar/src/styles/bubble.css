@@ -142,6 +142,24 @@
   transform: translateX(-50%);
 }
 
+/* A greeting keeps its expression until the notice closes, even after the
+   one-shot body motion ends. The undocked face temporarily replaces numbers. */
+.bubble-app[data-emotion]:not([data-emotion="idle"]):not([data-emotion="settle"])[data-dock="none"] .bubble-face {
+  display:flex; left:0; right:0; top:24px; justify-content:center;
+}
+.bubble-app[data-emotion]:not([data-emotion="idle"]):not([data-emotion="settle"]) :is(.bubble-value,.bubble-unit) { visibility:hidden; }
+.bubble-cheek { display:none; position:absolute; top:17px; width:8px; height:4px; border-radius:50%; background:rgba(255,183,185,.7); }
+.bubble-cheek-left { left:calc(50% - 24px); }
+.bubble-cheek-right { right:calc(50% - 24px); }
+.bubble-app:is([data-emotion="hello"],[data-emotion="cheer"],[data-emotion="care"]) .bubble-cheek { display:block; }
+.bubble-app:is([data-emotion="hello"],[data-emotion="cheer"]) .bubble-mouth { height:7px; border-radius:2px 2px 8px 8px; }
+.bubble-app[data-emotion="care"] .bubble-eye { height:13px; margin-top:3px; border-radius:8px 8px 6px 6px; }
+.bubble-app[data-emotion="care"] .bubble-mouth { height:5px; width:10px; border-radius:0 0 8px 8px; }
+.bubble-app:is([data-emotion="sleep"],[data-emotion="stretch"]) .bubble-eye { height:3px; margin-top:7px; animation:none; }
+.bubble-app:is([data-emotion="sleep"],[data-emotion="stretch"]) .bubble-pupil { display:none; }
+.bubble-app[data-emotion="sleep"] .bubble-mouth { width:6px; height:8px; border-radius:50%; }
+.bubble-app[data-emotion="stretch"] .bubble-mouth { width:14px; height:6px; border-radius:2px 2px 10px 10px; }
+
 @keyframes bubble-blink {
   0%, 90%, 100% {
     transform: scaleY(1);
@@ -228,6 +246,104 @@
     animation: none;
   }
 }
+
+/* Transient reactions use the existing atlas and leave the native pet box alone. */
+.pet-skin[data-action="hello"] .pet-pose { animation: pet-hello 1.8s ease-in-out; }
+.pet-skin[data-action="care"] .pet-pose { animation: pet-care 2.2s ease-in-out; }
+.pet-skin[data-action="cheer"] .pet-pose { animation: pet-cheer 1.4s ease-in-out; }
+.pet-skin[data-action="stretch"] .pet-pose { animation: pet-stretch 2.2s ease-in-out; }
+.pet-skin[data-action="settle"] .pet-pose { animation: pet-settle .8s ease-out; }
+.pet-skin[data-action="sleep"] .pet-pose { animation: pet-sleep 3s ease-in-out infinite; }
+.pet-skin[data-action="sleep"][data-dock="none"] .pet-sprite {
+  animation: none; background-position: var(--pet-blink-closed); clip-path: var(--pet-closed-clip);
+}
+.pet-skin[data-action="sleep"][data-dock="none"] .pet-eyes { display:none; }
+.pet-skin[data-action="sleep"] .pet-eyelid { animation:none; transform:scaleY(1); }
+.pet-skin[data-emotion="sleep"][data-dock="none"] .pet-sprite { animation:none; background-position:var(--pet-blink-closed); clip-path:var(--pet-closed-clip); }
+.pet-skin[data-emotion="sleep"][data-dock="none"] .pet-eyes { display:none; }
+.pet-skin[data-emotion="sleep"] .pet-eyelid { animation:none; transform:scaleY(1); }
+.pet-skin[data-motion="happy"][data-action="idle"] .pet-pose { animation:pet-greet .9s ease-in-out 2; }
+.bubble-app[data-action="hello"] .bubble-core { animation:pet-hello 1.8s ease-in-out; }
+.bubble-app[data-action="care"] .bubble-core { animation:pet-care 2.2s ease-in-out; }
+.bubble-app[data-action="cheer"] .bubble-core { animation:pet-cheer 1.4s ease-in-out; }
+.bubble-app[data-action="stretch"] .bubble-core { animation:pet-stretch 2.2s ease-in-out; }
+.bubble-app[data-action="settle"] .bubble-core { animation:pet-settle .8s ease-out; }
+.bubble-app[data-action="sleep"] .bubble-core { animation:pet-sleep 3s ease-in-out infinite; }
+.bubble-app[data-action="sleep"] .bubble-eye { height:3px; margin-top:7px; }
+.pet-skin[data-animations="false"] .pet-pose,
+.pet-skin[data-animations="false"] .pet-sprite,
+.pet-skin[data-animations="false"] .pet-eyelid,
+.bubble-app[data-animations="false"],
+.bubble-app[data-animations="false"] .bubble-core,
+.bubble-app[data-animations="false"] .bubble-face,
+.bubble-app[data-animations="false"] .bubble-eye,
+.bubble-app[data-animations="false"] .bubble-ripple { animation:none !important; }
+@keyframes pet-hello {
+  0%,100% { transform:rotate(0); }
+  20%,60% { transform:translateY(-2px) rotate(-7deg); }
+  40%,80% { transform:translateY(-2px) rotate(7deg); }
+}
+@keyframes pet-cheer {
+  0%,100% { transform:translateY(0) scale(1); }
+  18%,58% { transform:translateY(1px) scale(1.04,.96); }
+  35%,75% { transform:translateY(-9px) scale(.98,1.03); }
+}
+@keyframes pet-care {
+  0%,100% { transform:rotate(0); }
+  30%,65% { transform:translateY(1px) rotate(-3deg); }
+}
+@keyframes pet-stretch {
+  0%,100% { transform:scale(1) rotate(0); }
+  30% { transform:scale(.96,1.08) rotate(-5deg); }
+  65% { transform:scale(.96,1.08) rotate(5deg); }
+}
+@keyframes pet-settle {
+  0% { transform:translateY(-5px) rotate(-5deg); }
+  45% { transform:translateY(2px) scale(1.04,.96); }
+  100% { transform:none; }
+}
+@keyframes pet-sleep {
+  0%,100% { transform:translateY(1px) rotate(-3deg) scale(1); }
+  50% { transform:translateY(2px) rotate(-3deg) scale(1.015); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble-app .bubble-core, .bubble-app, .bubble-ripple { animation:none !important; }
+}
+
+body[data-surface="pet-notice"], body[data-surface="pet-notice"] #root {
+  width:100vw; height:100vh; overflow:hidden; background:transparent;
+}
+.pet-notice-app { display:grid; place-items:center; width:100vw; height:100vh; padding:10px; }
+.pet-notice-card {
+  position:relative; display:grid; grid-template-columns:30px minmax(0,1fr); gap:9px 11px;
+  width:100%; max-width:260px; padding:15px 14px 12px; border:1px solid var(--hair-2);
+  border-radius:18px; background:var(--surface); color:var(--ink);
+  box-shadow:0 4px 14px rgba(0,0,0,.18); animation:pet-notice-in 180ms ease-out;
+}
+.pet-notice-icon { display:grid; place-items:center; align-self:start; width:30px; height:30px;
+  border-radius:10px; color:var(--accent); background:var(--accent-soft); font-size:24px; line-height:30px; }
+.pet-notice-copy { min-width:0; padding-right:11px; }
+.pet-notice-copy strong { display:block; font-size:13px; line-height:19px; font-weight:650; }
+.pet-notice-copy p { margin:5px 0 0; color:var(--ink-2); font-size:11px; line-height:16px; overflow-wrap:anywhere; }
+.pet-notice-close { position:absolute; top:7px; right:8px; width:25px; height:25px; border:0;
+  border-radius:8px; background:transparent; color:var(--ink-3); font-size:19px; cursor:pointer; }
+.pet-notice-close:hover { background:var(--fill-hover); color:var(--ink); }
+.pet-notice-actions { grid-column:1 / -1; display:flex; justify-content:flex-end; gap:7px; }
+.pet-notice-actions button { min-height:28px; padding:4px 9px; border:1px solid var(--hair-2); border-radius:9px;
+  background:transparent; color:var(--ink-2); font-size:11px; cursor:pointer; white-space:nowrap; }
+.pet-notice-actions button.pet-notice-primary { border-color:transparent; background:var(--accent-soft); color:var(--accent); }
+.sheet-select { padding:5px 7px; border:1px solid var(--hair-2); border-radius:7px; background:var(--surface); color:var(--ink); font-size:11px; }
+.pet-notice-actions button:hover { filter:brightness(1.12); }
+.pet-notice-actions button:focus-visible, .pet-notice-close:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.sheet-pet-error { padding:0 16px; color:var(--warn); }
+@keyframes pet-notice-in { from {opacity:0; transform:translateY(4px);} to {opacity:1; transform:none;} }
+@media (prefers-reduced-motion: reduce) { .pet-notice-card { animation:none; } }
+.pet-preview-stage { min-height:100vh; display:flex; justify-content:center; align-items:center; gap:28px; padding:20px; }
+.pet-preview-picks { position:fixed; bottom:10px; display:flex; gap:5px; }
+.pet-preview-waterdrop { width:96px; height:96px; flex:none; }
+.pet-preview-gallery { padding:24px; display:grid; grid-template-columns:160px repeat(4, 1fr); gap:16px; align-items:center; background:var(--surface); }
+.pet-preview-cell { height:340px; display:grid; place-items:center; }
+.pet-preview-heading { color:var(--ink); font-size:16px; }
 
 /* Pet art declares its own layout box. BubbleApp measures this box and gives
    the native window matching headroom, so a taller skin is never squeezed
@@ -435,11 +551,13 @@
   top: calc(var(--pet-layout-size) + 4px);
   left: 50%;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: baseline;
   gap: 4px;
   padding: 3px 7px;
   width: max-content;
-  max-width: 128px;
+  max-width: 176px;
   border: 1px solid rgba(255, 255, 255, .2);
   border-radius: 8px;
   background: rgba(22, 30, 27, .94);
@@ -452,6 +570,12 @@
 }
 
 .pet-token-badge strong { font-size: 12px; line-height: 16px; }
+.pet-badge-summary {
+  flex-basis: 100%;
+  text-align: center;
+  letter-spacing: .01em;
+  white-space: pre-line;
+}
 .pet-token-badge small { font-size: 8px; line-height: 12px; opacity: .8; }
 .pet-skin[data-motion="happy"][data-dock="none"] .pet-token-badge {
   opacity: 1;
@@ -479,4 +603,26 @@
 @media (prefers-reduced-motion: reduce) {
   .pet-pose, .pet-sprite, .pet-eyes, .pet-eyelid { animation: none !important; }
   .pet-token-badge, .pet-pupil { transition: none; }
+}
+
+/* ---------------------------------------------------------------- macOS
+   The pet sits steady on this platform: the perpetual peek bob and the
+   pulsing ripple read as jitter next to the menu bar, so the mac keeps the
+   drop-in entrance, the blink and the cursor gaze, and drops the loops. */
+.bubble-app[data-platform="mac"] .bubble-face,
+.bubble-app[data-platform="mac"] .bubble-ripple {
+  animation: none;
+}
+.bubble-app[data-platform="mac"][data-dock="none"] .bubble-ripple {
+  opacity: 0;
+}
+/* The mac breathe is a fifth of the Windows bob: a whisper of life, not a
+   wobble — measured 2026-10-10, the full-strength loop read as ±1.7px of
+   constant jitter at 2x. */
+.bubble-app[data-platform="mac"] .pet-pose {
+  animation: pet-breathe-mac 5.6s ease-in-out infinite;
+}
+@keyframes pet-breathe-mac {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-0.5px) scale(1.008, 1.012); }
 }

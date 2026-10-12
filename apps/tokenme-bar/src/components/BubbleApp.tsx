@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { availableMonitors, currentMonitor, cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
+import { isMac } from "../lib/bridge";
 import type { Monitor } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import type { BubbleSkin, Report } from "../types";
 import { bridge, inTauri } from "../lib/bridge";
 import { ballTokens } from "../lib/format";
+import { WaterdropPet } from "./WaterdropPet";
 import { t } from "../lib/i18n";
 import { getPetSkinConfig, isPetSkinName } from "../lib/petSkinRegistry";
 import { PetSkin } from "./PetSkin";
+import { usePetCompanion } from "../lib/usePetCompanion";
 
 type Dock = "left" | "right" | "top";
 
@@ -61,6 +64,7 @@ function dockPosition(edge: Dock, anchor: DockAnchor, layout: BubbleGeometry, si
 }
 
 export function BubbleApp() {
+  const companion = usePetCompanion();
   const window = useMemo(() => getCurrentWindow(), []);
   const [report, setReport] = useState<Report | null>(null);
   const [dock, setDock] = useState<Dock | null>(null);
@@ -68,6 +72,8 @@ export function BubbleApp() {
   const [gaze, setGaze] = useState<{ x: number; y: number } | null>(null);
   const [skin, setSkin] = useState<BubbleSkin>("waterdrop");
   const [hovered, setHovered] = useState(false);
+  const hovering = useRef(false);
+  hovering.current = hovered;
   const [petDragging, setPetDragging] = useState(false);
   const [petAssetFailed, setPetAssetFailed] = useState(false);
   const onPetAssetError = useCallback(() => setPetAssetFailed(true), []);
@@ -88,6 +94,10 @@ export function BubbleApp() {
   // Set while a drag is running (whichever side of the bridge drives it) so
   // hover timers and expand can never fight the drag loop for the window.
   const dragging = useRef(false);
+  // mac: the native drag session arms on the first real move, never on the
+  // press — a press that ran startDragging raced the webview's own pointerup
+  // and the click contract ran twice (panel flashes open, then closes).
+  const macDragStarted = useRef(false);
   // The pet owns its layout size. Keep the latest measured geometry in refs so
   // native hover/drag callbacks never use a stale render value.
   const geometry = useRef<BubbleGeometry>(DEFAULT_GEOMETRY);
@@ -172,7 +182,23 @@ export function BubbleApp() {
 
   const dockMonitor = async () => {
     const saved = dockAnchor.current?.monitor;
-    if (!dockRef.current || !saved) return currentMonitor();
+    if (!dockRef.current || !saved) {
+      // macOS: currentMonitor() answers null for a window hanging past the
+      // screen edge — exactly where a pet docks. Resolve the display that
+      // holds the window's centre, then the first known one.
+      const current = await currentMonitor();
+      if (current) return current;
+      const [pos, size, monitors] = await Promise.all([
+        window.outerPosition(), window.outerSize(), availableMonitors(),
+      ]);
+      const cx = pos.x + size.width / 2;
+      const cy = pos.y + size.height / 2;
+      return (
+        monitors.find((m) => cx >= m.position.x && cx < m.position.x + m.size.width
+          && cy >= m.position.y && cy < m.position.y + m.size.height)
+        ?? monitors[0]
+      );
+    }
     // A mostly off-screen HWND can be assigned to a neighbouring display.
     // Resolve the recorded display again to pick up layout and DPI changes.
     const monitors = await availableMonitors();
@@ -195,8 +221,15 @@ export function BubbleApp() {
     const pet = document.querySelector<HTMLElement>(".pet-skin");
     // offsetWidth/offsetHeight intentionally ignore dock translations. They
     // describe the skin's own box, which is the source of truth for the
-    // window size and remains stable while the pet peeks from an edge.
-    const content = pet ? Math.max(pet.offsetWidth, pet.offsetHeight) : DEFAULT_CONTENT;
+    // window size and remains stable while the pet peeks from an edge. The
+    // quota badge hangs BELOW that box, so the window's height must cover it
+    // too — a summary line clipped by the window's bottom edge was exactly
+    // what the first hover showed.
+    const badge = document.querySelector<HTMLElement>(".pet-token-badge");
+    const badgeDrop = badge ? badge.offsetTop + badge.offsetHeight - (pet?.offsetHeight ?? 0) : 0;
+    const content = pet
+      ? Math.max(pet.offsetWidth, pet.offsetHeight + Math.max(0, badgeDrop))
+      : DEFAULT_CONTENT;
     const contentLogical = Math.max(1, Math.ceil(content));
     const next: BubbleGeometry = {
       contentLogical,
@@ -258,6 +291,7 @@ export function BubbleApp() {
     })().catch(reportGeometryError);
     geometrySync.current = run;
     void run.then(() => { if (geometrySync.current === run) geometrySync.current = null; });
+    if (companion.noticeVisible.current) void run.then(() => bridge.repositionPetNotice()).catch(() => {});
     return run;
   };
 
@@ -319,7 +353,7 @@ export function BubbleApp() {
   };
 
   const dockToEdge = async (afterDrag = false) => {
-    if (dragging.current) return;
+    if (isMac || dragging.current) return;
     if (afterDrag) {
       dockRef.current = null;
       dockAnchor.current = null;
@@ -372,11 +406,20 @@ export function BubbleApp() {
   };
 
   const scheduleDock = () => {
+    if (isMac) return; // dragging into an edge trips the system's stage gesture
     clearLeaveTimer();
+    if (companion.noticeVisible.current) return;
     leaveTimer.current = setTimeout(() => {
       if (!dragging.current) void dockToEdge(false).catch(reportGeometryError);
     }, 260);
   };
+
+  useEffect(() => bridge.onPetNotice((notice) => {
+    if (notice && !dragging.current) void expand().catch(reportGeometryError);
+    else if (!notice && !dragging.current && !hovering.current) scheduleDock();
+    // Native position is reconciled after expansion and again by the gaze poll.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []);
 
   useEffect(() => {
     // The native move loop consumes the pointer events while a drag is in
@@ -397,6 +440,7 @@ export function BubbleApp() {
     void listen("bubble-drag-ended", () => {
       dragging.current = false;
       setPetDragging(false);
+      companion.play("settle");
       press.current = null;
       void dockToEdge(true).catch(reportGeometryError);
     }).then((fn) => {
@@ -458,6 +502,12 @@ export function BubbleApp() {
         const centerY = pos.y + (eyes.length ? eyes.reduce((sum, eye) => sum + eye.top + eye.height / 2, 0) / eyes.length * scale : size.height / 2);
         const cursor = await cursorPosition().catch(() => null);
         if (!cursor) break;
+        // The mac pet has no DOM mouseenter to lean on (a non-activating
+        // window sees no mouse-moved events): this poll IS the hover — the
+        // cursor inside the window means greet mode, outside means idle.
+        const inside = cursor.x >= pos.x && cursor.x < pos.x + size.width
+          && cursor.y >= pos.y && cursor.y < pos.y + size.height;
+        setHovered(inside);
         const dx = cursor.x - centerX;
         const dy = cursor.y - centerY;
         const dist = Math.hypot(dx, dy);
@@ -480,6 +530,17 @@ export function BubbleApp() {
     clearLeaveTimer();
     moved.current = false;
     press.current = { x: event.clientX, y: event.clientY };
+    if (isMac) {
+      // mac: the press arms nothing. The click contract (open the panel)
+      // runs ONCE, from pointerup; the drag session arms on the first real
+      // move in onPointerMove. Running the contract from both the press
+      // continuation and the release is what toggled twice per click and
+      // flashed the panel (2026-10-11). The pet keeps its skin — no expand
+      // on the press, whose collapse read as a state flicker.
+      dragging.current = false;
+      macDragStarted.current = false;
+      return;
+    }
     dragging.current = true;
     setPetDragging(true);
     await expand();
@@ -496,12 +557,39 @@ export function BubbleApp() {
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const start = press.current;
-    if (start && (Math.abs(event.clientX - start.x) > 4 || Math.abs(event.clientY - start.y) > 4)) {
+    if (!start) return;
+    if (Math.abs(event.clientX - start.x) > 6 || Math.abs(event.clientY - start.y) > 6) {
       moved.current = true;
+      if (isMac && !macDragStarted.current) {
+        // The move is real: hand the pointer to the native drag session. The
+        // webview sees no further pointer events until release, and mac has
+        // no edge dock to return to (scheduleDock bows out on mac).
+        macDragStarted.current = true;
+        dragging.current = true;
+        setPetDragging(true);
+        void getCurrentWindow().startDragging().catch(() => {
+          dragging.current = false;
+          setPetDragging(false);
+        });
+      }
     }
   };
 
   const onPointerUp = () => {
+    if (isMac) {
+      // The single click contract on mac: a press that never became a drag
+      // toggles the panel — once, here, and nowhere else.
+      const dragged = macDragStarted.current;
+      macDragStarted.current = false;
+      dragging.current = false;
+      setPetDragging(false);
+      press.current = null;
+      if (!dragged) {
+        void bridge.showPanel();
+        setExpanded(false);
+      }
+      return;
+    }
     if (!dragging.current) return;
     const wasMoved = moved.current;
     dragging.current = false;
@@ -514,6 +602,7 @@ export function BubbleApp() {
       // click that follows startDragging(). Treat an unmoved pointer-up as the
       // click action so opening the panel is deterministic.
       void bridge.showPanel();
+      companion.play("cheer");
       setExpanded(false);
     }
   };
@@ -524,9 +613,13 @@ export function BubbleApp() {
   return (
     <div
       className="bubble-app"
+      data-platform={isMac ? "mac" : "windows"}
       data-dock={dock ?? "none"}
       data-expanded={expanded}
       data-skin={skin}
+      data-action={companion.motion}
+      data-emotion={companion.emotion === "idle" ? companion.motion : companion.emotion}
+      data-animations={companion.motions}
       onMouseEnter={() => { setHovered(true); if (!suppressExpand.current) void expand().catch(reportGeometryError); }}
       onMouseLeave={() => { setHovered(false); scheduleDock(); }}
       onPointerDown={(event) => void onPointerDown(event)}
@@ -539,25 +632,8 @@ export function BubbleApp() {
     >
       {petSkin && petSkinName && !petAssetFailed ? (
         <PetSkin key={petSkinName} skin={petSkinName} dock={dock} hovered={hovered} dragging={petDragging}
-          tokens={tokens} gaze={gaze} onAssetError={onPetAssetError} />
-      ) : <>
-      <span className="bubble-ripple" aria-hidden="true" />
-      <span className="bubble-core">
-        <span className="bubble-value">{ballTokens(tokens)}</span>
-        <span className="bubble-unit">{t("bubble.today")} tokens</span>
-        {/* Docked, the ball turns into a robot pet peeking over the edge; the
-            pupils point at the cursor via the --gx/--gy vars set on the face. */}
-        <span
-          className="bubble-face"
-          aria-hidden="true"
-          style={gaze ? ({ "--gx": `${gaze.x}px`, "--gy": `${gaze.y}px` } as React.CSSProperties) : undefined}
-        >
-          <span className="bubble-eye"><span className="bubble-pupil" /></span>
-          <span className="bubble-eye"><span className="bubble-pupil" /></span>
-          <span className="bubble-mouth" />
-        </span>
-      </span>
-      </>}
+          tokens={tokens} gaze={gaze} onAssetError={onPetAssetError} action={companion.motion} emotion={companion.emotion} motions={companion.motions} />
+      ) : <WaterdropPet tokens={tokens} gaze={gaze} />}
     </div>
   );
 }

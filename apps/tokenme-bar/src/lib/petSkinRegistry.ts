@@ -71,6 +71,7 @@ type RawRasterSkin = {
     artOffset: number;
   };
   frames: { open: Point; half: Point; closed: Point; happy: Point };
+  reactionAtlas: { file: string; frames: Record<"hello" | "care" | "sleep" | "stretch", Point> };
   // Atlas blink is suitable for baked eyes; overlay blink keeps the same body
   // in place for skins whose empty eye sockets are filled by tracked pupils.
   animation?: { blink: "atlas" | "overlay" };
@@ -89,12 +90,11 @@ type RawSkin = RawRasterSkin | RawModelSkin;
 type RawManifest = { version: number; skins: Record<string, RawSkin> };
 
 const rawManifest = manifest as unknown as RawManifest;
-const petPngs = import.meta.glob("../assets/pets/*.png", {
-  eager: true,
-  query: "?url",
-  import: "default",
-}) as Record<string, string>;
-const petModels = import.meta.glob("../assets/pets/**/*.{glb,vrm}", {
+const petPngs = import.meta.glob([
+  "../assets/pets/*.png",
+  "../assets/pets/*.webp",
+  "!../assets/pets/kitten-edge-top.png", // superseded pose, kept as source reference
+], {
   eager: true,
   query: "?url",
   import: "default",
@@ -116,43 +116,31 @@ const assetUrl = (skin: string, file: string) => {
   return url;
 };
 
-const modelUrl = (skin: string, file: string) => {
-  const key = `../assets/pets/${file}`;
-  const url = petModels[key];
-  if (!url) throw new Error(`Pet skin "${skin}" references missing model "${file}"`);
-  return url;
-};
-
-const compileSkin = ([name, raw]: [string, RawSkin]): [string, PetSkinConfig] => [name, {
+const compileSkin = ([name, raw]: [string, RawRasterSkin]): [string, RasterPetSkinConfig] => [name, {
   ...raw,
-  ...(raw.render === "model" ? {
-    model: { ...raw.model, url: modelUrl(name, raw.model.file) },
-  } : {
-    assets: {
-      atlas: assetUrl(name, raw.assets.atlas),
-      side: assetUrl(name, raw.assets.side),
-      left: assetUrl(name, raw.assets.left),
-      top: assetUrl(name, raw.assets.top),
-    },
-  }),
-} as PetSkinConfig];
+  reactionAtlas: { ...raw.reactionAtlas, file: assetUrl(name, raw.reactionAtlas.file) },
+  assets: {
+    atlas: assetUrl(name, raw.assets.atlas),
+    side: assetUrl(name, raw.assets.side),
+    left: assetUrl(name, raw.assets.left),
+    top: assetUrl(name, raw.assets.top),
+  },
+}];
 
+// Model packages are archived source, outside the shipping asset graph. Keep
+// their IDs recognizable without importing their files into every installer.
+const rasterSkins = Object.entries(rawManifest.skins)
+  .filter((entry): entry is [string, RawRasterSkin] => entry[1].render !== "model");
 export const PET_SKINS = Object.fromEntries(
-  Object.entries(rawManifest.skins).map(compileSkin),
-) as Record<PetSkinName, PetSkinConfig>;
+  rasterSkins.map(compileSkin),
+) as Partial<Record<PetSkinName, RasterPetSkinConfig>>;
 
-// Keep model packages registered for the archived TODO path, but do not expose
-// them in the user-facing selector until the model/material/action contract is
-// production-ready. Old saved model values can therefore be recognized and
-// safely migrated by the UI without deleting the assets or renderer.
-export const PET_SKIN_NAMES = Object.entries(PET_SKINS)
-  .filter(([, config]) => config.render !== "model")
-  .map(([name]) => name) as PetSkinName[];
-export const PET_MODEL_SKIN_NAMES = Object.entries(PET_SKINS)
+export const PET_SKIN_NAMES = Object.keys(PET_SKINS) as PetSkinName[];
+export const PET_MODEL_SKIN_NAMES = Object.entries(rawManifest.skins)
   .filter(([, config]) => config.render === "model")
   .map(([name]) => name) as PetSkinName[];
 
-export function getPetSkinConfig(skin: string): PetSkinConfig | undefined {
+export function getPetSkinConfig(skin: string): RasterPetSkinConfig | undefined {
   return PET_SKINS[skin as PetSkinName];
 }
 

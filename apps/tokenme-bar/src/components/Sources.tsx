@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { SourceStatus, Summary } from "../types";
+import type { MachineScope, SourceStatus, Summary } from "../types";
 import { compactTokens, count, money } from "../lib/format";
 import { IconMissing } from "./Icons";
 import { MoreRow, Section } from "./Section";
@@ -13,13 +13,18 @@ import { t } from "../lib/i18n";
  * but they move behind a toggle, because on a machine with nine of fourteen tools
  * installed the dead rows were the majority of the section's height.
  */
-export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime: Summary }) {
+export function Sources({ sources, allTime, scope }: { sources: SourceStatus[]; allTime: Summary; scope: MachineScope }) {
   const [showMissing, setShowMissing] = useState(false);
   // One tooltip at a time, keyed on the row: the root paths truncate hard, and
   // hover titles exist but a non-activating panel is exactly where nobody
   // waits for a hover delay — same click-to-reveal idiom as the rank rows.
   const [tipKey, setTipKey] = useState<string | null>(null);
   const showMoney = useMoney();
+  // Source detection runs on this machine only — the adapters probe local
+  // paths, and a sync bundle's events carry no paths to re-probe. Scoped to
+  // a remote machine, listing this machine's sources would misattribute the
+  // scoped data, so the section says so instead (the speed page's pattern).
+  const scopedAway = scope.kind === "origin";
   const detected = sources.filter((s) => s.detected);
   const missing = sources.filter((s) => !s.detected);
   const events = sources.reduce((acc, s) => acc + s.events_ingested, 0);
@@ -30,6 +35,7 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
       label={t("src.section")}
       meta={t("src.meta", { d: detected.length, s: sources.length, e: count(events) })}
     >
+      {scopedAway ? <p className="ttft-note">{t("src.scoped", { name: scope.name })}</p> : (
       <ol className="src-list">
         {listed.map((s, idx) => (
           <li
@@ -65,14 +71,15 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
           </li>
         ))}
       </ol>
-      <MoreRow
+      )}
+      {!scopedAway && <MoreRow
         open={showMissing}
         total={sources.length}
         preview={detected.length}
         onToggle={() => setShowMissing((v) => !v)}
         closedLabel={t("src.more.show", { n: missing.length })}
         openLabel={t("src.more.hide")}
-      />
+      />}      {!scopedAway &&
       <p className="src-total">
         {t("src.total")}
         <span className="num"> {compactTokens(allTime.total_tokens)}</span>
@@ -90,7 +97,7 @@ export function Sources({ sources, allTime }: { sources: SourceStatus[]; allTime
             <span> credits</span>
           </>
         ) : null}
-      </p>
+      </p>}
     </Section>
   );
 }

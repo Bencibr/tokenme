@@ -11,6 +11,7 @@ use rusqlite::{params, params_from_iter, OptionalExtension};
 use usage_core::{
     local_day_of, AggregatePlan, CallFact, FactGroup, MachineScope, QuotaFact, QuotaSample,
     ReportFacts, Result, RollupRow, SessionFact, SessionGroup, TokenCounts, LIVE_HOUR0, LIVE_PREV,
+    LIVE_PREV_HOUR0, LIVE_QUARTER0,
     LIVE_TODAY,
 };
 
@@ -204,9 +205,9 @@ impl Index {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
     }
 
-    /// Today, the four prev-slice heads and the 24 hourly buckets, grouped
-    /// straight out of `event`. One statement, 29 bucket rows in a VALUES CTE;
-    /// the bounds all come from the plan.
+    /// Today, the four prev-slice heads, the 24 hourly buckets of today and of
+    /// yesterday, grouped straight out of `event`. One statement, 53 bucket
+    /// rows in a VALUES CTE; the bounds all come from the plan.
     fn fetch_live(&self, plan: &AggregatePlan) -> Result<Vec<FactGroup>> {
         // (bucket, lo, hi) — half-open, like every other range in the pipeline.
         let mut buckets: Vec<(u32, i64, i64)> =
@@ -216,6 +217,16 @@ impl Index {
         }
         for h in 0..24usize {
             buckets.push((LIVE_HOUR0 + h as u32, plan.hour_start_ms[h], plan.hour_start_ms[h + 1]));
+        }
+        for h in 0..24usize {
+            buckets.push((
+                LIVE_PREV_HOUR0 + h as u32,
+                plan.prev_hour_start_ms[h],
+                plan.prev_hour_start_ms[h + 1],
+            ));
+        }
+        for q in 0..96usize {
+            buckets.push((LIVE_QUARTER0 + q as u32, plan.quarter_start_ms[q], plan.quarter_start_ms[q + 1]));
         }
         // The bucket id is our own constant, so it inlines as a literal; only
         // the (lo, hi) bounds bind, two parameters per bucket.
@@ -316,7 +327,11 @@ impl Index {
     /// Log-derived quota samples in event-id order, with the obvious dead rows
     /// dropped before they reach Rust. `merge_quotas` re-applies the full
     /// expiry rules; this pre-filter only keeps a month-old index from hauling
-    /// every historical sample out of storage on every publish.
+    /// every historical sample out of storage on every publish. The contract is
+    /// therefore one-directional: this WHERE must stay a *superset* of
+    /// `merge_quotas`' survival predicates — anything the fold would keep
+    /// (including windowed rows inside [`usage_core::report::LOG_SAMPLE_MAX_AGE_MS`])
+    /// must survive this query, or the two report paths silently diverge.
     fn fetch_quotas(&self, now_ms: i64) -> Result<Vec<QuotaFact>> {
         let mut stmt = self
             .conn
@@ -604,8 +619,13 @@ mod golden {
                 ],
                 ..ev("claude", ms_of(2026, 9, 30, 11) + 30 * 60_000, "s1", Some("glm-4.7"), Some("/work/app"), counts(800.0))
             },
-            quota_ev("codex", day(12), "s2", 20.0, 300, now_fixture() + 3_600_000, None),
-            quota_ev("codex", day(12) + 30 * 60_000, "s2", 45.0, 300, now_fixture() + 3_000_000, None),
+            // E20/E21 sit inside the hour: a windowed log row older than
+            // LOG_SAMPLE_MAX_AGE_MS is not this run's answer (report.rs), so
+            // the tie's subjects must be fresh to reach merge_quotas at all.
+            // E22 stays outside it on purpose — its no-reset arm is judged by
+            // the day horizon, and it is the canary for arm-order regressions.
+            quota_ev("codex", day(13) + 5 * 60_000, "s2", 20.0, 300, now_fixture() + 3_600_000, None),
+            quota_ev("codex", day(13) + 35 * 60_000, "s2", 45.0, 300, now_fixture() + 3_000_000, None),
             quota_ev("zcode", day(12) + 40 * 60_000, "s10", 38.0, 300, 0, Some("5 小时")),
             quota_ev("zcode", ms_of(2026, 9, 29, 9), "s10", 99.0, 216_000, 0, Some("ZCode MCP")),
         ]
@@ -802,6 +822,13 @@ mod golden {
             assert_eq!(x.requests, y.requests, "hourly[{h}].requests");
             assert_f64(&format!("hourly[{h}].tokens"), x.total_tokens, y.total_tokens);
             assert_f64(&format!("hourly[{h}].cost"), x.cost, y.cost);
+        }
+        assert_eq!(a.hourly_prev.len(), b.hourly_prev.len());
+        assert_eq!(a.hourly_prev.len(), 24, "hourly_prev is always the full day");
+        for (h, (x, y)) in a.hourly_prev.iter().zip(&b.hourly_prev).enumerate() {
+            assert_eq!(x.requests, y.requests, "hourly_prev[{h}].requests");
+            assert_f64(&format!("hourly_prev[{h}].tokens"), x.total_tokens, y.total_tokens);
+            assert_f64(&format!("hourly_prev[{h}].cost"), x.cost, y.cost);
         }
         assert_eq!(a.quotas.len(), b.quotas.len(), "quotas {:?} vs {:?}", a.quotas.iter().map(|q| (&q.tool, q.window_minutes, q.used_percent)).collect::<Vec<_>>(), b.quotas.iter().map(|q| (&q.tool, q.window_minutes, q.used_percent)).collect::<Vec<_>>());
         for (i, (x, y)) in a.quotas.iter().zip(&b.quotas).enumerate() {

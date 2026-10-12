@@ -9,7 +9,7 @@ use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
-use crate::settings::{BubbleSkin, NotifyTier, Theme, TrayMode};
+use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Theme, TrayMode};
 use crate::tray;
 
 /// Terminates the tray application, rather than merely hiding its panel.
@@ -151,9 +151,12 @@ pub struct PanelSettings {
     pub refresh_secs: u64,
     pub theme: Theme,
     pub show_money: bool,
+    pub quota_display_mode: QuotaDisplayMode,
+    pub ttft_enabled: bool,
     pub show_empty_tools: bool,
     pub bubble_enabled: bool,
     pub bubble_skin: BubbleSkin,
+    pub pet_companion: crate::settings::PetPreferences,
     pub host_exit_pause: bool,
     pub auto_checkin: bool,
     pub quota_polling: bool,
@@ -246,9 +249,12 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         refresh_secs: settings.refresh_secs,
         theme: settings.theme,
         show_money: settings.show_money,
+        quota_display_mode: settings.quota_display_mode,
+        ttft_enabled: settings.ttft_enabled,
         show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
         bubble_skin: settings.bubble_skin,
+        pet_companion: settings.pet_companion,
         host_exit_pause: settings.host_exit_pause,
         auto_checkin: settings.auto_checkin,
         quota_polling: settings.quota_polling,
@@ -346,12 +352,21 @@ pub async fn set_host_exit_pause(app: AppHandle, on: bool) -> Result<(), String>
 /// change lands within one cadence tick.
 #[tauri::command]
 pub async fn set_auto_checkin(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".to_string());
-    };
-    settings.auto_checkin = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    {
+        let shared = app.state::<Shared>();
+        let Ok(mut settings) = shared.settings.lock() else {
+            return Err("settings busy".to_string());
+        };
+        settings.auto_checkin = on;
+        settings.clone().save().map_err(|e| e.to_string())?;
+    }
+    // The switch is the probes' master gate now: it takes effect this pass,
+    // not on the next settings re-read, so a fresh pass runs with it.
+    usage_quota::set_auto_checkin_enabled(on);
+    if let Some(channel) = app.try_state::<EngineChannel>() {
+        let _ = channel.0.send(Msg::Refresh);
+    }
+    Ok(())
 }
 
 /// The master switch: off, no vendor request leaves on the next pass. It is
@@ -426,6 +441,41 @@ pub async fn set_show_money(app: AppHandle, on: bool) -> Result<(), String> {
     settings.clone().save().map_err(|e| e.to_string())
 }
 
+/// Persist the gauge direction without waking probes or clearing cached answers.
+#[tauri::command]
+pub async fn set_quota_display_mode(app: AppHandle, mode: QuotaDisplayMode) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
+    let mut next = settings.clone();
+    next.quota_display_mode = mode;
+    next.save().map_err(|e| e.to_string())?;
+    *settings = next;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_ttft_snapshot(app: AppHandle) -> crate::ttft::TtftSnapshot {
+    app.state::<crate::ttft::TtftState>().snapshot()
+}
+
+#[tauri::command]
+pub fn set_ttft_enabled(app: AppHandle, on: bool) -> Result<(), String> {
+    let ttft = app.state::<crate::ttft::TtftState>();
+    let shared = app.state::<Shared>();
+    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
+    let previous = settings.ttft_enabled;
+    if previous == on { return Ok(()); }
+    ttft.set_enabled(on)?;
+    let mut next = settings.clone();
+    next.ttft_enabled = on;
+    if let Err(error) = next.clone().save() {
+        let _ = ttft.set_enabled(previous);
+        return Err(error.to_string());
+    }
+    *settings = next;
+    Ok(())
+}
+
 
 /// Windows-only edge bubble. The command remains available on every target so
 /// the frontend bridge stays platform-neutral; non-Windows is a no-op.
@@ -440,6 +490,7 @@ pub async fn set_bubble_enabled(app: AppHandle, on: bool) -> Result<(), String> 
         settings.clone().save().map_err(|e| e.to_string())?;
     }
     bubble::set_enabled(&app, on);
+    if !on { crate::pet_notice::dismiss(&app, None); }
     Ok(())
 }
 
@@ -461,8 +512,38 @@ pub async fn set_bubble_skin(app: AppHandle, skin: BubbleSkin) -> Result<(), Str
 
 /// Called by the Windows bubble when it is clicked.
 #[tauri::command]
+pub async fn set_pet_preferences(app:AppHandle, prefs:crate::settings::PetPreferences) -> Result<(), String> {
+    let mut prefs = prefs;
+    prefs.rest_interval_minutes = prefs.rest_interval_minutes.clamp(15,180);
+    {
+        let shared = app.state::<Shared>();
+        let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
+        let mut next = settings.clone(); next.pet_companion = prefs.clone();
+        next.save().map_err(|e| e.to_string())?; *settings = next;
+    }
+    if crate::pet_notice::get_pet_notice(app.clone()).is_some_and(|n|
+        if n.kind == crate::pet_notice::Kind::Rest { !prefs.rest_reminders } else { !prefs.greetings }) {
+        crate::pet_notice::dismiss(&app, None);
+    }
+    app.emit("pet-preferences-changed", prefs).map_err(|e| e.to_string())
+}
+
+/// The pet's click: a toggle, not a one-way show — the second click takes
+/// the panel back down (user: 点击弹出菜单，再次点击隐藏菜单).
+#[tauri::command]
 pub fn show_panel(app: AppHandle) {
-    panel::show(&app, None);
+    if crate::panel::is_panel_hidden() {
+        panel::show(&app, None);
+    } else {
+        panel::hide(&app);
+    }
+}
+
+/// The panel's own visibility, as the hide/show paths record it.
+fn panel_hidden(app: &AppHandle) -> bool {
+    app.get_webview_window(crate::panel::LABEL)
+        .and_then(|w| w.is_visible().ok())
+        != Some(true)
 }
 
 /// Dismisses the panel while keeping the native and Rust visibility state in

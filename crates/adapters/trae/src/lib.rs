@@ -29,7 +29,17 @@
 //! Turns only ever count once: `turn_status = 'completed'` is the terminal
 //! state the status column itself declares, `deleted_at = 0` excludes removed
 //! ones, and all-zero usage is silence, not a session. The dedupe key
-//! `trae#<turn-id>` makes the full rescan each pass idempotent.
+//! `trae#<turn-id>` makes the full rescan each pass idempotent — keyed by
+//! turn, not session, because one chat session completes many turns and each
+//! turn meters its own exchange.
+//!
+//! ## What the event's session is
+//!
+//! The real `chat_turn.session_id`, not the turn id: the panel's 会话 count
+//! folds events by their session key, so keying events by turn_id read one
+//! chat conversation as N sessions (one completed turn each) — 3 messages in
+//! one Trae CN chat showed as 3 sessions on 2026-10-11. The dedupe key stays
+//! at turn granularity, which is what the request count wants.
 
 pub mod crypto;
 
@@ -243,7 +253,7 @@ impl SourceAdapter for TraeAdapter {
 /// burned the decrypt and inflated `deduped`. `MAX` is the same value
 /// grow-on-write would keep of the copies.
 const TURN_QUERY: &str = "\
-SELECT t.turn_id, t.created_at, t.context,
+SELECT t.turn_id, t.created_at, t.context, t.session_id,
        hu.token_usage, ho.token_usage,
        p.absolute_path, p.name
 FROM chat_turn t
@@ -279,10 +289,11 @@ fn read_turns(
                 turn_id: row.get::<_, String>(0).unwrap_or_default(),
                 created_at: row.get::<_, i64>(1).unwrap_or(0),
                 context: row.get::<_, String>(2).unwrap_or_default(),
-                prompt_history: row.get::<_, Option<i64>>(3).ok().flatten(),
-                reply_history: row.get::<_, Option<i64>>(4).ok().flatten(),
-                absolute_path: row.get::<_, Option<String>>(5).ok().flatten(),
-                project_name: row.get::<_, Option<String>>(6).ok().flatten(),
+                session_id: row.get::<_, String>(3).unwrap_or_default(),
+                prompt_history: row.get::<_, Option<i64>>(4).ok().flatten(),
+                reply_history: row.get::<_, Option<i64>>(5).ok().flatten(),
+                absolute_path: row.get::<_, Option<String>>(6).ok().flatten(),
+                project_name: row.get::<_, Option<String>>(7).ok().flatten(),
             })
         })
         .map_err(|e| format!("usage query failed: {e}"))?;
@@ -311,6 +322,8 @@ fn read_turns(
 
 struct TurnRow {
     turn_id: String,
+    /// The chat conversation the turn belongs to — the event's session key.
+    session_id: String,
     created_at: i64,
     context: String,
     /// `history_v2.token_usage` of the turn's user message — the prompt sent.
@@ -331,7 +344,13 @@ impl TurnRow {
         if counts.is_zero() {
             return None;
         }
-        let mut event = UsageEvent::new(tool_id, self.created_at.saturating_mul(1000), &self.turn_id);
+        let mut event = UsageEvent::new(
+            tool_id,
+            self.created_at.saturating_mul(1000),
+            // The real conversation, not the turn: the panel folds 会话 by this
+            // key, and keying it by turn_id read one chat as N sessions.
+            if self.session_id.is_empty() { &self.turn_id } else { &self.session_id },
+        );
         event.counts = counts;
         event.meter = Meter::Tokens;
         event.model = model_from(&ctx);
@@ -343,7 +362,8 @@ impl TurnRow {
             .filter(|p| !p.is_empty());
         // `trae#<turn-id>` / `trae_cn#<turn-id>`: the full rescan each pass
         // stays idempotent, and the CN turns never collide with the
-        // international ones.
+        // international ones. Turn-granular on purpose — one session completes
+        // many turns, and each is its own request.
         event.dedupe_key = Some(format!("{tool_id}#{}", self.turn_id));
         Some(event)
     }
@@ -431,16 +451,73 @@ mod tests {
         conn.execute("UPDATE chat_turn SET context = ?1 WHERE turn_id = 't1'", [turn_context])
             .unwrap();
         drop(conn);
-        // Declare the vendor's 80-byte per-page reserve, then let SQLite
-        // itself rewrite the file to it (cells move below 4016) — the true
-        // plaintext `encrypt_image` expects.
-        let mut plain = std::fs::read(&db).unwrap();
+        seal_fixture(&db)
+    }
+
+    /// Declares the vendor's 80-byte per-page reserve and seals the plaintext
+    /// db into the bytes `encrypt_image` expects.
+    fn seal_fixture(db: &std::path::Path) -> Vec<u8> {
+        let mut plain = std::fs::read(db).unwrap();
         plain[20] = 80;
-        std::fs::write(&db, &plain).unwrap();
-        let conn = Connection::open(&db).unwrap();
+        std::fs::write(db, &plain).unwrap();
+        let conn = Connection::open(db).unwrap();
         conn.execute_batch("VACUUM;").unwrap();
         drop(conn);
-        std::fs::read(&db).unwrap()
+        std::fs::read(db).unwrap()
+    }
+
+    /// Two completed turns inside one chat session: the shape that misread as
+    /// "3 sessions" on 2026-10-11 — several messages of one conversation.
+    fn fixture_two_turns(turn_context: &str) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("plain.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "PRAGMA page_size = 4096;
+             CREATE TABLE chat_session (session_id TEXT, project_id TEXT, deleted_at BIGINT DEFAULT 0);
+             CREATE TABLE project (project_id TEXT, absolute_path TEXT, name TEXT);
+             CREATE TABLE chat_turn (turn_id TEXT, session_id TEXT, turn_status TEXT,
+               context TEXT, created_at BIGINT, deleted_at BIGINT DEFAULT 0,
+               reply_to_message_id TEXT, response_message_id TEXT);
+             CREATE TABLE history_v2 (session_id TEXT, message_id TEXT, token_usage BIGINT, deleted_at BIGINT DEFAULT 0);
+             INSERT INTO project VALUES ('p1', '/Users/me/workspace/bug-hunter', 'hunter');
+             INSERT INTO chat_session VALUES ('s1', 'p1', 0);
+             INSERT INTO chat_turn VALUES ('t1', 's1', 'completed', '{}', 1790609380, 0, 'm-user-1', 'm-bot-1');
+             INSERT INTO chat_turn VALUES ('t2', 's1', 'completed', '{}', 1790609500, 0, 'm-user-2', 'm-bot-2');
+             INSERT INTO history_v2 VALUES ('s1', 'm-user-1', 1852, 0);
+             INSERT INTO history_v2 VALUES ('s1', 'm-bot-1', 29, 0);
+             INSERT INTO history_v2 VALUES ('s1', 'm-user-2', 400, 0);
+             INSERT INTO history_v2 VALUES ('s1', 'm-bot-2', 60, 0);",
+        )
+        .unwrap();
+        conn.execute("UPDATE chat_turn SET context = ?1 WHERE turn_id IN ('t1','t2')", [turn_context])
+            .unwrap();
+        drop(conn);
+        seal_fixture(&db)
+    }
+
+    /// The events of one conversation carry its session id — the panel's 会话
+    /// count folds them into one session — while the dedupe keys stay
+    /// per-turn, because each turn is its own request.
+    #[test]
+    fn turns_of_one_session_share_the_session_key() {
+        let _env = crate::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let plain = fixture_two_turns("{}");
+        let db = dir.path().join("database.db");
+        std::fs::write(&db, encrypt_image(&plain)).unwrap();
+        std::env::set_var(ENV_TRAE_AGENT_DB, &db);
+        let adapter = TraeAdapter::default();
+        let sources = adapter.discover(&DateFilter::default());
+        let out = adapter.read(&sources[0], ReadCursor(0)).unwrap();
+        assert_eq!(out.events.len(), 2, "{:?}", out.events);
+        let sessions: Vec<&str> = out.events.iter().map(|e| e.session.as_str()).collect();
+        assert_eq!(sessions, ["s1", "s1"], "one conversation reads as one session");
+        let mut keys: Vec<&str> =
+            out.events.iter().map(|e| e.dedupe_key.as_deref().unwrap_or("")).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["trae#t1", "trae#t2"], "dedupe stays per-turn");
+        std::env::remove_var(ENV_TRAE_AGENT_DB);
     }
 
     #[test]
@@ -460,7 +537,7 @@ mod tests {
         assert_eq!(out.events.len(), 1, "streaming and deleted turns stay out: {:?}", out.events);
         let e = &out.events[0];
         assert_eq!(e.tool, "trae");
-        assert_eq!(e.session, "t1");
+        assert_eq!(e.session, "s1", "the event's session is the chat session, not the turn");
         assert_eq!(e.counts.input, 1852.0, "{:?}", e.counts);
         assert_eq!(e.counts.output, 29.0);
         assert_eq!(e.dedupe_key.as_deref(), Some("trae#t1"));

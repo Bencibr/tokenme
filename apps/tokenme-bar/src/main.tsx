@@ -5,6 +5,7 @@ import { bridge, inTauri, isWindows } from "./lib/bridge";
 import "./styles/theme.css";
 import "./styles/panel.css";
 import "./styles/bubble.css";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 document.body.dataset.env = inTauri ? "tauri" : "web";
 
@@ -17,7 +18,8 @@ if (isWindows) {
 
 // Cold-start telemetry, stage 1: how long the page took to get here. The second
 // stage (real figures) is reported from App.tsx, where the note is retired.
-void bridge.reportBoot();
+if (inTauri && getCurrentWindow().label === "pet-notice") document.body.dataset.surface = "pet-notice";
+else void bridge.reportBoot();
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

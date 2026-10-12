@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { MachineScope, PageKey, PanelSettings, PeriodKey, Report, ServerView, TrayMode, TrayState } from "./types";
+import type { MachineScope, PageKey, PanelSettings, PeriodKey, QuotaDisplayMode, Report, ServerView, TrayMode, TrayState, TtftSnapshot } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
@@ -23,6 +23,9 @@ import { IconProvider } from "./components/ToolIcon";
 import { StatusBar } from "./components/StatusBar";
 import { ToolsSection } from "./components/ToolsSection";
 import { BubbleApp } from "./components/BubbleApp";
+import { PetNoticeApp } from "./components/PetNoticeApp";
+import { PetPreview } from "./components/PetPreview";
+import { SpeedPage } from "./components/SpeedPage";
 
 /** 托盘显示模式循环顺序:仅托盘 → 仅Token → 仅花费 → 三个托盘组合。 */
 const MODES: TrayMode[] = ["tray_only", "tokens_only", "cost_only", "tray_tokens", "tray_cost", "tray_tokens_cost"];
@@ -32,6 +35,8 @@ export default function App() {
   // entrypoint. Keeping it in a separate component prevents panel hooks from
   // ever running in the utility window.
   const isBubble = inTauri && getCurrentWindow().label === "bubble";
+  if (!inTauri && new URLSearchParams(location.search).has("pet-preview")) return <PetPreview />;
+  if ((inTauri && getCurrentWindow().label === "pet-notice") || (!inTauri && new URLSearchParams(location.search).has("pet-notice"))) return <PetNoticeApp />;
   return isBubble ? <BubbleApp /> : <PanelApp />;
 }
 
@@ -46,7 +51,7 @@ const [period, setPeriod] = useState<PeriodKey>(() => {
   // Dev/QA affordance: ?page=ranks deep-links a page; anything unknown is overview.
 const [page, setPage] = useState<PageKey>(() => {
   const p = new URLSearchParams(location.search).get("page");
-  return p === "tools" || p === "ranks" || p === "detail" ? p : "overview";
+  return p === "tools" || p === "ranks" || p === "detail" || p === "speed" ? p : "overview";
 });
   const scroll = useRef<HTMLElement | null>(null);
   const [tray, setTray] = useState<TrayState | null>(null);
@@ -84,6 +89,8 @@ const [page, setPage] = useState<PageKey>(() => {
   // The quota section must say when the numbers stopped moving because the user
   // asked them to — a frozen figure with no explanation reads as a broken panel.
   const [quotaPolling, setQuotaPolling] = useState(true);
+  const [quotaDisplayMode, setQuotaDisplayMode] = useState<QuotaDisplayMode>("used");
+  const [ttftSnapshot, setTtftSnapshot] = useState<TtftSnapshot>({ revision: 0, enabled: false, claude_receiver: "disabled", claude_config_status: "disabled", samples: [] });
   // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
   // switch without touching persistence.
   const [showEmptyTools, setShowEmptyTools] = useState(() => {
@@ -96,6 +103,13 @@ const [page, setPage] = useState<PageKey>(() => {
   // configured cadence (floored at 5s, capped at 30s) — a 15s setting read
   // through a 30s tick is how "最后刷新" could look a minute stale.
   const tick = useTicker(Math.min(30_000, Math.max(5_000, refreshSecs * 1000)));
+
+  useEffect(() => {
+    let alive = true;
+    void bridge.ttftSnapshot().then((snapshot) => { if (alive) setTtftSnapshot(snapshot); }).catch(() => {});
+    const un = bridge.onTtftUpdated((snapshot) => setTtftSnapshot(snapshot));
+    return () => { alive = false; un(); };
+  }, []);
 
   useEffect(() => {
     // The native chrome (tray menu, tooltip, updater copy) cannot see the
@@ -138,6 +152,7 @@ const [page, setPage] = useState<PageKey>(() => {
       applyMoney(s.show_money);
       setShowMoney(s.show_money);
       setQuotaPolling(s.quota_polling);
+      setQuotaDisplayMode(s.quota_display_mode);
       // The idle cadence is what the "updates stopped" line measures against.
       setRefreshSecs(s.refresh_secs);
       if (new URLSearchParams(location.search).get("showempty") === null) {
@@ -469,8 +484,8 @@ const [page, setPage] = useState<PageKey>(() => {
             <div className="page" key={page}>
               {page === "overview" ? (
                 <>
-                  <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} period={period} />
-                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} />
+                  <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} hoursPrev={report.hourly_prev} period={period} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
@@ -484,9 +499,10 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "detail" ? (
                 <>
                   <Sessions rows={report.recent_sessions} now={now} />
-                  <Sources sources={report.sources} allTime={report.all_time} />
+                  <Sources sources={report.sources} allTime={report.all_time} scope={scope} />
                 </>
               ) : null}
+              {page === "speed" ? <SpeedPage snapshot={ttftSnapshot} now={now} scope={scope} /> : null}
             </div>
           )}
         </main>
@@ -514,6 +530,7 @@ const [page, setPage] = useState<PageKey>(() => {
             onRefreshSecs={setRefreshSecs}
             onMoney={setShowMoney}
             onPolling={setQuotaPolling}
+            onQuotaDisplayMode={setQuotaDisplayMode}
             displays={Object.fromEntries(report.sources.map((s) => [s.id, s.display]))}
           />
         ) : null}

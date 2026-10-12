@@ -92,21 +92,34 @@ fn an_unopenable_index_is_exit_1() {
 
 #[test]
 fn an_unknown_tool_is_rejected() {
-    let out = run(&["--tool", "not-a-tool", "detect"]);
+    // A `--db` even though the bad tool is rejected before the index opens:
+    // the default path is the operator's live index, and no test may touch it.
+    let db = temp_db("reject-tool");
+    let out = run(&["--db", &db.to_string_lossy(), "--tool", "not-a-tool", "detect"]);
+    remove_db(&db);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("unknown --tool"), "{}", stderr(&out));
 }
 
 #[test]
 fn a_malformed_price_override_is_rejected() {
-    let out = run(&["--pricing-override", "glm-5.2", "report", "--no-ingest"]);
+    // Same rule: the override parses before the index opens, but the default
+    // path is the live index and the parse order is an implementation detail.
+    let db = temp_db("reject-price");
+    let out = run(&["--db", &db.to_string_lossy(), "--pricing-override", "glm-5.2", "report", "--no-ingest"]);
+    remove_db(&db);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("--pricing-override"), "{}", stderr(&out));
 }
 
 #[test]
 fn a_malformed_date_is_rejected() {
-    let out = run(&["--since", "last-tuesday", "daily", "--no-ingest"]);
+    // The date parses AFTER the index opens (context::build), so without a
+    // --db this probe opened the operator's live index on every run — and a
+    // fresh one-shot repair there would fire from a test bench.
+    let db = temp_db("reject-date");
+    let out = run(&["--db", &db.to_string_lossy(), "--since", "last-tuesday", "daily", "--no-ingest"]);
+    remove_db(&db);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("YYYY-MM-DD"), "{}", stderr(&out));
 }
@@ -174,7 +187,7 @@ fn report_json_is_the_whole_usage_core_report() {
     for key in ["day", "week", "month", "heatmap", "quotas", "sources", "pricing", "recent_sessions", "all_time"] {
         assert!(value.get(key).is_some(), "Report.{key} missing");
     }
-    assert_eq!(value["heatmap"].as_array().map(Vec::len), Some(371));
+    assert_eq!(value["heatmap"].as_array().map(Vec::len), Some(742));
     assert_eq!(value["day"]["summary"]["requests"], 0);
     remove_db(&db);
 }

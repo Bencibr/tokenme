@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 use serde_json::Value;
-use usage_adapter_qoder::{QoderAdapter, TOOL_ID};
+use usage_adapter_qoder::{QoderAdapter, QoderCnAdapter, TOOL_ID};
 use usage_core::{
     parse_ts_ms, DateFilter, Error, FileKind, Meter, ModelAttr, ReadCursor, ReadOutcome, Semantics,
     SourceAdapter, SourceFile, UsageEvent, UsageForm,
@@ -78,6 +78,62 @@ impl Drop for EnvRoot {
 }
 
 const WORKSPACE: &str = "-Users-demo-proj";
+
+#[test]
+fn cn_and_global_logs_keep_their_credits_and_keys_separate() {
+    let intl = Install::new();
+    let file = intl.place("credits.jsonl", "same.jsonl", None);
+    let global_db = intl.place_cache_db();
+    let _env = EnvRoot::point_at(&intl.root());
+    let cn = tempfile::tempdir().unwrap();
+    let cnfile = cn.path().join("projects").join(WORKSPACE).join("same.jsonl");
+    fs::create_dir_all(cnfile.parent().unwrap()).unwrap();
+    fs::copy(&file.path, &cnfile).unwrap();
+    std::env::set_var("QODERCN_CONFIG_DIR", cn.path());
+    std::env::set_var("QODER_CN_HOME", cn.path());
+    let cn_db = cn.path().join("SharedClientCache/cache/db/local.db");
+    fs::create_dir_all(cn_db.parent().unwrap()).unwrap();
+    fs::copy(&global_db.path, &cn_db).unwrap();
+    let global_files = QoderAdapter.discover(&DateFilter::default());
+    let cn_files = QoderCnAdapter.discover(&DateFilter::default());
+    assert_eq!(global_files.len(), 2);
+    assert_eq!(cn_files.len(), 2);
+    assert_eq!(global_files[0].path, file.path);
+    assert_eq!(cn_files[0].path, cnfile);
+    assert_eq!(QoderCnAdapter.probe().unwrap().id, "qoder_cn");
+    let global = QoderAdapter.read(&global_files[0], ReadCursor(0)).unwrap();
+    let china = QoderCnAdapter.read(&cn_files[0], ReadCursor(0)).unwrap();
+    assert!(!global.events.is_empty());
+    assert_eq!(china.events.len(), global.events.len());
+    for (a, b) in global.events.iter().zip(&china.events) {
+        assert_eq!(a.counts, b.counts);
+        assert_eq!(b.tool, "qoder_cn");
+        assert_ne!(a.dedupe_key, b.dedupe_key);
+        assert!(b.dedupe_key.as_ref().unwrap().starts_with("qoder_cn#"));
+    }
+    assert!(QoderCnAdapter.read(&cn_files[0], china.cursor).unwrap().events.is_empty());
+    let db_events = QoderCnAdapter.read(&cn_files[1], ReadCursor(0)).unwrap().events;
+    assert!(!db_events.is_empty());
+    assert!(db_events.iter().all(|e| e.tool == "qoder_cn" && e.meter == Meter::Tokens));
+    assert!(db_events.iter().any(|e| china.events.iter().any(|log| log.dedupe_key == e.dedupe_key)),
+        "CN transcript and IDE records still fold the same request");
+}
+
+#[test]
+#[ignore = "reads the real Qoder CN transcript and IDE cache on this machine"]
+fn live_cn_usage_is_collected_separately() {
+    let _env = EnvRoot::cleared();
+    let detected = QoderCnAdapter.probe().expect("Qoder CN usage source exists");
+    assert_eq!(detected.id, "qoder_cn");
+    let files = QoderCnAdapter.discover(&DateFilter::default());
+    let events: Vec<_> = files.iter().flat_map(|file| QoderCnAdapter.read(file, ReadCursor(0)).unwrap().events).collect();
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|e| e.tool == "qoder_cn"));
+    let total = events.iter().map(|e| e.counts.credits).sum::<f64>();
+    assert!(total > 0.0);
+    assert!(events.iter().all(|e| e.dedupe_key.as_ref().unwrap().starts_with("qoder_cn#")));
+    println!("[qoder_cn] {} files, {} events, {total:.9} credits", files.len(), events.len());
+}
 const SESSION: &str = "6f1d2c3b-9a8b-4c7d-8e9f-0a1b2c3d4e5f";
 const SIDE_SESSION: &str = "2b2b2b2b-0000-4000-8000-000000000002";
 

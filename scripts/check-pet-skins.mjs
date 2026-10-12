@@ -35,6 +35,22 @@ function readPng(file) {
   }
 }
 
+function readReaction(file) {
+  if (file.endsWith(".png")) return readPng(file);
+  const bytes = readFileSync(new URL(file, petsDir));
+  if (bytes.toString("ascii",0,4) !== "RIFF" || bytes.toString("ascii",8,12) !== "WEBP") throw new Error("expected a WebP image");
+  for (let at = 12; at + 8 <= bytes.length;) {
+    const kind = bytes.toString("ascii",at,at+4), n = bytes.readUInt32LE(at+4), offset = at+8;
+    if (offset+n > bytes.length) throw new Error("truncated WebP chunk");
+    if (kind === "VP8X" && n >= 10) return { width:bytes.readUIntLE(offset+4,3)+1, height:bytes.readUIntLE(offset+7,3)+1 };
+    if (kind === "VP8L" && n >= 5 && bytes[offset] === 0x2f) {
+      const bits = bytes.readUInt32LE(offset+1); return { width:(bits & 0x3fff)+1, height:((bits >>> 14) & 0x3fff)+1 };
+    }
+    at = offset+n+(n % 2);
+  }
+  throw new Error("WebP image dimensions missing");
+}
+
 function readModel(file) {
   if (!existsSync(new URL(file, petsDir))) {
     const error = new Error("file does not exist");
@@ -200,6 +216,28 @@ function validate(manifest, labels, loadPng = readPng, loadModel = readModel) {
         }
       }
     }
+    if (object(skin.reactionAtlas, `${path}.reactionAtlas`)) {
+      const file = skin.reactionAtlas.file;
+      if (typeof file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.(png|webp)$/.test(file) || file.includes("..")) {
+        fail(`${path}.reactionAtlas.file`, "expected a local PNG or WebP atlas filename");
+      } else {
+        try {
+          const size = readReaction(file);
+          if (size.width !== size.height || size.width % 2) fail(`${path}.reactionAtlas.file`, "expected an even square 2x2 atlas");
+        } catch (error) { fail(`${path}.reactionAtlas.file`, error.message); }
+      }
+      const frames = skin.reactionAtlas.frames;
+      if (object(frames, `${path}.reactionAtlas.frames`)) {
+        if (Object.keys(frames).sort().join(",") !== "care,hello,sleep,stretch") fail(`${path}.reactionAtlas.frames`, "expected exactly hello, care, sleep and stretch");
+        for (const [index,name] of ["hello","care","sleep","stretch"].entries()) {
+          const field = `${path}.reactionAtlas.frames.${name}`;
+          if (point(frames[name],field) && positive(skin.layout?.art)) {
+            const expected = [-(index % 2)*skin.layout.art,-Math.floor(index/2)*skin.layout.art];
+            if (frames[name].some((n,axis) => n !== expected[axis])) fail(field, "reaction frames must address their complete reading-order tile");
+          }
+        }
+      }
+    }
     const layout = skin.layout;
     if (object(layout, `${path}.layout`)) {
       for (const field of ["content", "art", "atlas"]) number(layout[field], `${path}.layout.${field}`, true);
@@ -293,6 +331,10 @@ function selfTest(manifest, labels, source) {
     [`${path}.assets.top`, (m) => { m.skins[id].assets.top = "missing-pet-skin-self-test.png"; }],
     [`${path}.labelKey`, (m) => { m.skins[id].labelKey = "missing.skin.label"; }],
     [`${path}.animation.blink`, (m) => { m.skins[id].animation = { blink: "unknown" }; }],
+    [`${path}.reactionAtlas`, (m) => { delete m.skins[id].reactionAtlas; }],
+    [`${path}.reactionAtlas.file`, (m) => { m.skins[id].reactionAtlas.file = "../escape.webp"; }],
+    [`${path}.reactionAtlas.frames`, (m) => { delete m.skins[id].reactionAtlas.frames.care; }],
+    [`${path}.reactionAtlas.frames.sleep`, (m) => { m.skins[id].reactionAtlas.frames.sleep = [0,0]; }],
     ['skins["../escape"]', (m) => { m.skins["../escape"] = m.skins[id]; delete m.skins[id]; }],
   ];
   for (const [field, mutate] of cases) {

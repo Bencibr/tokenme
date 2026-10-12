@@ -3,7 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import { FIXTURE, makeFixtureReport } from "../fixture";
 import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
-import type { Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState } from "../types";
+import { DEFAULT_PET_PREFERENCES } from "./petCompanion";
+import type { PetNotice, PetPreferences, PetResponse } from "./petCompanion";
+import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -11,6 +13,15 @@ export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 /** The dismiss control is a Windows tray-panel affordance; macOS uses the
  * native non-activating panel behavior and should not show a duplicate close. */
 export const isWindows = inTauri && /Windows/i.test(navigator.userAgent);
+export const isMac = inTauri && /Macintosh|Mac OS X/i.test(navigator.userAgent);
+
+function petListen<T>(name: string, handler: (payload: T) => void): () => void {
+  if (!inTauri) return () => {};
+  let cancelled = false;
+  let off: (() => void) | undefined;
+  void listen<T>(name, (event) => { if (!cancelled) handler(event.payload); }).then((fn) => { if (cancelled) fn(); else off = fn; }).catch(() => {});
+  return () => { cancelled = true; off?.(); };
+}
 
 /** `system` hands the media query back to the OS; a pin sets `data-theme`. */
 export function applyTheme(theme: ThemeKey): void {
@@ -95,7 +106,7 @@ export const bridge: Bridge = {
    *  badge; `message` is the reason (未到签到时间 / 排队中) or the success
    *  copy, and the button shows it until the next sample refresh. */
   async checkinNow(tool: string): Promise<CheckinResult> {
-    if (!inTauri) return { ok: true, message: "签到成功" };
+    if (!inTauri) return { ok: true, message: "签到成功，+30 积分" };
     return invoke<CheckinResult>("checkin_now", { tool });
   },
 
@@ -250,6 +261,46 @@ export const bridge: Bridge = {
     await invoke<void>("set_show_money", { on });
   },
 
+  async setQuotaDisplayMode(mode: QuotaDisplayMode): Promise<void> {
+    if (!inTauri) {
+      browserSettings.quota_display_mode = mode;
+      return;
+    }
+    await invoke<void>("set_quota_display_mode", { mode });
+  },
+
+  async ttftSnapshot(): Promise<TtftSnapshot> {
+    if (!inTauri) {
+      // QA samples so the 访问速度 page reviews with rows on it.
+      const now = Date.now();
+      const samples = [
+        { provider: "codex" as const, granularity: "turn" as const, metric: "ttft" as const, ttft_ms: 1240, sampled_at_ms: now - 90_000, model: "gpt-5.2-codex", tps: 96.4 },
+        { provider: "codex" as const, granularity: "turn" as const, metric: "ttft" as const, ttft_ms: 1120, sampled_at_ms: now - 300_000, model: "gpt-5.2-codex", tps: 88.2 },
+        { provider: "claude_code" as const, granularity: "request" as const, metric: "first_content" as const, ttft_ms: 980, sampled_at_ms: now - 60_000, model: "glm-5.2" },
+        { provider: "dsh" as const, granularity: "request" as const, metric: "ttft" as const, ttft_ms: 740, sampled_at_ms: now - 45_000, model: "deepseek-flash", tps: 82.5, output_tokens: 660, decode_ms: 8_000 },
+      ];
+      return { revision: 0, enabled: browserSettings.ttft_enabled, claude_receiver: "disabled", claude_config_status: "disabled", samples, hosts: { codex: true, claude_code: true, dsh: true } };
+    }
+    return invoke<TtftSnapshot>("get_ttft_snapshot");
+  },
+
+  async runActiveSpeedTest(provider: ActiveSpeedTest["provider"]): Promise<ActiveSpeedTest> {
+    if (!inTauri) {
+      const now = Date.now();
+      return { provider, model: provider === "codex" ? "gpt-5.6-codex" : "claude-sonnet", ttftMs: 820, tps: 72.4, outputTokens: 42, durationMs: 1420, sampledAtMs: now, measurement: provider === "codex" ? "codex_stream" : "claude_otel" };
+    }
+    return invoke<ActiveSpeedTest>("run_active_speed_test", { provider });
+  },
+
+  async setTtftEnabled(on: boolean): Promise<void> {
+    if (!inTauri) { browserSettings.ttft_enabled = on; return; }
+    await invoke<void>("set_ttft_enabled", { on });
+  },
+
+  onTtftUpdated(handler) {
+    return inTauri ? once<TtftSnapshot>("ttft-updated", handler) : () => {};
+  },
+
   async setHostExitPause(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.host_exit_pause = on;
@@ -331,6 +382,30 @@ export const bridge: Bridge = {
     if (!inTauri) return;
     await invoke<void>("install_update");
   },
+
+  async setPetPreferences(prefs: PetPreferences): Promise<void> {
+    if (!inTauri) { browserSettings.pet_companion = prefs; return; }
+    await invoke<void>("set_pet_preferences", { prefs });
+  },
+  onPetPreferences: (handler: (prefs: PetPreferences) => void) => petListen("pet-preferences-changed", handler),
+  async petActivity() {
+    return inTauri ? invoke<import("./petCompanion").PetActivity>("pet_activity")
+      : { idle_ms: 0, locked:false, fullscreen:false, visible:true };
+  },
+  async showPetNotice(kind: import("./petCompanion").PetNoticeKind, minutes: number) {
+    return inTauri ? invoke<PetNotice | null>("show_pet_notice", { kind, minutes }) : { id:Date.now(), kind, minutes };
+  },
+  async previewPetNotice() {
+    return inTauri ? invoke<PetNotice | null>("preview_pet_notice") : { id:Date.now(), kind:"hello" as const, minutes:0 };
+  },
+  async getPetNotice() { return inTauri ? invoke<PetNotice | null>("get_pet_notice") : null; },
+  onPetNotice: (handler: (notice: PetNotice | null) => void) => petListen("pet-notice-changed", handler),
+  async petNoticeReady(id: number) { if (inTauri) await invoke<void>("pet_notice_ready", { id }); },
+  async respondPetNotice(id: number, action: PetResponse["action"]) {
+    if (inTauri) await invoke<void>("respond_pet_notice", { id, action });
+  },
+  onPetResponse: (handler: (response: PetResponse) => void) => petListen("pet-response", handler),
+  async repositionPetNotice() { if (inTauri) await invoke<void>("reposition_pet_notice"); },
 
   onUpdateProgress(handler: (progress: DownloadProgress) => void): () => void {
     if (!inTauri) return () => {};
@@ -482,9 +557,12 @@ const browserSettings: PanelSettings = {
   refresh_secs: 30,
   theme: "dark",
   show_money: false,
+  quota_display_mode: "used",
+  ttft_enabled: false,
   show_empty_tools: false,
   bubble_enabled: true,
   bubble_skin: "waterdrop",
+  pet_companion: { ...DEFAULT_PET_PREFERENCES },
   host_exit_pause: true,
   auto_checkin: false,
   quota_polling: true,
@@ -501,7 +579,7 @@ const browserSettings: PanelSettings = {
  *  mirrors the ten tools with a cached answer on this machine. */
 const browserProbes: ProbeTool[] = [
   "claude", "agnes", "antigravity", "atomcode", "cola", "kimicode", "minimaxcode", "funide",
-  "cline", "opencode", "codex", "copilot", "gemini", "joycode", "qoder", "workbuddy", "catpaw",
+  "cline", "opencode", "codex", "copilot", "gemini", "joycode", "qoder", "qoder_cn", "workbuddy", "workbuddy_cn", "catpaw",
   "zcode", "dsh", "trae",
 ].map((id) => ({
   id,

@@ -854,6 +854,11 @@ fn minimax_daily_checkin(cred: &Credential, force: bool) -> Option<CheckinOutcom
             points: state.last_points,
         });
     }
+
+    // Master switch off and not an explicit click: no claim leaves.
+    if !force && !crate::auto_checkin_enabled() {
+        return None;
+    }
     let Some(real_user_id) =
         real_user_id(cred, (!state.real_user_id.is_empty()).then_some(state.real_user_id.as_str()))
     else {

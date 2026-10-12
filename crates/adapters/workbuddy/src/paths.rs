@@ -2,11 +2,9 @@
 //!
 //! The desktop app (com.workbuddy.workbuddy-ai) uses `~/.workbuddy-ai` as its
 //! user-data dir (`customUserDataDir` in the shipped product config); the
-//! `WORKBUDDY_CONFIG_DIR` env var overrides it, mirroring the vendor's own
-//! convention. `~/.workbuddy` is the sibling the CLI-shaped install uses, and
-//! third-party WorkBuddy readers default to it, so both roots get walked — one
-//! machine can hold either, both, or neither. CN/CodeBuddy editions are separate
-//! products with their own stores — not this adapter's business.
+//! `WORKBUDDY_CONFIG_DIR` overrides the international store. The domestic
+//! WorkBuddy app uses `~/.workbuddy`, overridden by `WORKBUDDY_CN_CONFIG_DIR`.
+//! Each edition walks only its own store, including on side-by-side installs.
 
 use std::path::PathBuf;
 #[cfg(test)]
@@ -18,12 +16,13 @@ pub const DB_NAME: &str = "workbuddy.db";
 pub const ENV_CONFIG_DIR: &str = "WORKBUDDY_CONFIG_DIR";
 
 /// Every data root that exists here, env override first, in walk order.
-pub fn config_roots() -> Vec<PathBuf> {
-    if let Some(dir) = std::env::var_os(ENV_CONFIG_DIR).filter(|dir| !dir.is_empty()) {
+pub fn config_roots_for(cn: bool) -> Vec<PathBuf> {
+    let env = if cn { "WORKBUDDY_CN_CONFIG_DIR" } else { ENV_CONFIG_DIR };
+    if let Some(dir) = std::env::var_os(env).filter(|dir| !dir.is_empty()) {
         return vec![PathBuf::from(dir)];
     }
     let Some(home) = dirs::home_dir() else { return Vec::new() };
-    [".workbuddy-ai", ".workbuddy"]
+    [if cn { ".workbuddy" } else { ".workbuddy-ai" }]
         .iter()
         .map(|name| home.join(name))
         .filter(|root| root.is_dir())
@@ -32,7 +31,11 @@ pub fn config_roots() -> Vec<PathBuf> {
 
 /// The database path, preferring the first root that has one.
 pub fn db_path() -> Option<PathBuf> {
-    config_roots()
+    db_path_for(false)
+}
+
+pub fn db_path_for(cn: bool) -> Option<PathBuf> {
+    config_roots_for(cn)
         .into_iter()
         .map(|root| root.join(DB_NAME))
         .find(|path| path.is_file())

@@ -297,6 +297,11 @@ export interface Report {
   heatmap: HeatCell[];
   /** Today by local hour, 24 slots. Older snapshots may omit it (empty). */
   hourly: HourCell[];
+  /** Yesterday by local hour, 24 slots — the day chart's one-day swipe-back.
+      Older engines omit it (undefined) and the chart hides the swipe; a
+      present-but-zero day is honest data, not absence. */
+  hourly_prev?: HourCell[];
+  quarter_hourly: HourCell[];
   quotas: QuotaView[];
   /** True until the quota probes have run (boot publishes without them). */
   quotas_pending?: boolean;
@@ -320,8 +325,8 @@ export interface Report {
 
 export type PeriodKey = "day" | "week" | "month" | "year";
 
-/** The panel is four pages rather than one long scroll; see `App.tsx`. */
-export type PageKey = "overview" | "tools" | "ranks" | "detail";
+/** The panel is five pages rather than one long scroll; see `App.tsx`. */
+export type PageKey = "overview" | "tools" | "ranks" | "detail" | "speed";
 
 /** Tray label modes, mirrored from `tokenme::TrayMode` (snake_case). */
 export type TrayMode =
@@ -381,10 +386,26 @@ export interface Bridge {
   setRefreshSecs: (secs: number) => Promise<void>;
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
+  setQuotaDisplayMode: (mode: QuotaDisplayMode) => Promise<void>;
+  ttftSnapshot: () => Promise<TtftSnapshot>;
+  runActiveSpeedTest: (provider: ActiveSpeedTest["provider"]) => Promise<ActiveSpeedTest>;
+  setTtftEnabled: (on: boolean) => Promise<void>;
+  onTtftUpdated: (handler: (snapshot: TtftSnapshot) => void) => () => void;
   setShowEmptyTools: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setBubbleSkin: (skin: BubbleSkin) => Promise<void>;
   onBubbleSkin: (handler: (skin: BubbleSkin) => void) => () => void;
+  setPetPreferences: (prefs: import("./lib/petCompanion").PetPreferences) => Promise<void>;
+  onPetPreferences: (handler: (prefs: import("./lib/petCompanion").PetPreferences) => void) => () => void;
+  petActivity: () => Promise<import("./lib/petCompanion").PetActivity>;
+  showPetNotice: (kind: import("./lib/petCompanion").PetNoticeKind, minutes: number) => Promise<import("./lib/petCompanion").PetNotice | null>;
+  previewPetNotice: () => Promise<import("./lib/petCompanion").PetNotice | null>;
+  getPetNotice: () => Promise<import("./lib/petCompanion").PetNotice | null>;
+  onPetNotice: (handler: (notice: import("./lib/petCompanion").PetNotice | null) => void) => () => void;
+  petNoticeReady: (id: number) => Promise<void>;
+  respondPetNotice: (id: number, action: import("./lib/petCompanion").PetResponse["action"]) => Promise<void>;
+  onPetResponse: (handler: (response: import("./lib/petCompanion").PetResponse) => void) => () => void;
+  repositionPetNotice: () => Promise<void>;
   setHostExitPause: (on: boolean) => Promise<void>;
   /** On, the host-exit pause stops applying to the check-in tools, so their
    *  daily claim fires and their rows stay live with the host app closed. */
@@ -441,14 +462,58 @@ export type BubbleSkin = "waterdrop" | keyof typeof petSkinManifest.skins;
 /** Which banner lines fire: both lines, only exhaustion, or nothing at all. */
 export type NotifyTierKey = "both" | "exhausted" | "off";
 
+export type QuotaDisplayMode = "used" | "remaining";
+
+export interface TtftSample {
+  provider: "codex" | "claude_code" | "dsh";
+  granularity: "turn" | "request";
+  metric: "ttft" | "first_content";
+  ttft_ms: number;
+  sampled_at_ms: number;
+  model: string | null;
+  /** Output tokens per generation second, when the source could name the
+      window; samples from before the field existed omit it. */
+  tps?: number | null;
+  /** DSH-only inputs for output-weighted TPS aggregation. */
+  output_tokens?: number | null;
+  decode_ms?: number | null;
+  session_id?: string | null;
+}
+
+export interface TtftSnapshot {
+  revision: number;
+  enabled: boolean;
+  claude_receiver: string;
+  claude_config_status: string;
+  samples: TtftSample[];
+  /** Whether each collector's IDE is open right now; absent on older
+      engines — the page then shows every row. */
+  hosts?: { codex: boolean; claude_code: boolean; dsh?: boolean };
+}
+
+/** A user-triggered one-shot probe. Kept separate from passive samples. */
+export interface ActiveSpeedTest {
+  provider: "codex" | "claude_code";
+  model: string | null;
+  ttftMs: number;
+  tps: number | null;
+  outputTokens: number | null;
+  durationMs: number | null;
+  sampledAtMs: number;
+  measurement: "codex_stream" | "claude_otel";
+}
+
 export interface PanelSettings {
   autostart: boolean;
   refresh_secs: number;
   theme: ThemeKey;
   show_money: boolean;
+  quota_display_mode: QuotaDisplayMode;
+  ttft_enabled: boolean;
   show_empty_tools: boolean;
   bubble_enabled: boolean;
   bubble_skin: BubbleSkin;
+  pet_companion: import("./lib/petCompanion").PetPreferences;
   host_exit_pause: boolean;
   /** The check-in guarantee: on, Trae CN / Qoder keep being probed — and
    *  claimed — while their host app is closed. */

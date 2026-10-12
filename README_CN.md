@@ -154,7 +154,7 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 
 配额条来自各工具自己的接口或本地凭据——探测只读，绝不代替你的登录。有三处是有意之外的例外，因为这些工具在磁盘上存的是短时效访问令牌，不续期额度条就会长期空白：MiniMax Code（约 1 小时）、Kimi Code（厂商自己的 15 分钟令牌）以及 Cline 的 gateway 令牌。三者都只拿同一份文件里的 refresh token 去换，并把轮换后的新对子按该工具自己的格式原子性地写回——没有落盘的轮换等于已经被消耗掉的轮换，应用下一次自己刷新时就会发现登录已经死了。换取失败则什么都不改。其余所有探测只读凭据、绝不写回。宿主应用退出后自动暂停对应工具的探测、保留最后数值，重新启动即恢复——设置里的"退出后暂停配额"开关可控制这一行为。
 
-以下工具全部内置适配器——共 24 款，直接从各工具自己落盘的日志与数据库建立索引：
+以下工具全部内置适配器——共 26 款，直接从各工具自己落盘的日志与数据库建立索引：
 
 | 工具 | 实时配额 | 兼容性测试 | 平台验证 |
 | :--- | :--- | :--- | :--- |
@@ -165,14 +165,16 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 — Cline 账号 API | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 — IDE 同款配额接口 + cookie 本地解密 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 — 官方用量接口，本地加密快照兜底；支持每日签到状态 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | 独立采集国内版 Credits 用量；国内区套餐、资源包配额与自动签到 | ✅ | macOS ⏳ · Windows ✅ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算配额 — 调用其 CLI 的 `/usage` | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | 会员点数 — 需注入一次令牌（见下） | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan 配额 — 本地守护进程 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy** | 会员点数 — 桌面 app 同款计费接口 / 本地 broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI**（国际版） | 会员点数 — 桌面 app 同款计费接口 / 本地 broker | ✅ | macOS ✅ · Windows ✅ |
+| <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy**（国内版） | 积分包配额与每日签到 — 国内账号接口 / 本地 broker | ✅ | macOS ⏳ · Windows ✅ |
 | <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft 积分 — plans-usage 计费接口；用量取自 IDE history | ✅ | Windows ✅ |
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | ✅ | macOS ✅ · Windows ⏳ |
 | <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 — 云端点数接口 | ✅ | macOS ✅ · Windows ⏳ |
-| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **CatPaw** | 积分余额 — 积分门户接口 | ✅ | macOS ✅ · Windows ⏳ |
+| <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手**（原 CatPaw）| 积分余额 — 积分门户接口；新版本地凭据解密 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek 账户余额 — 官方 user/balance + 桌面端凭据文件 | ✅ | macOS ✅ · Windows ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | ✅ | macOS ✅ · Windows ⏳ |
 | **Mimocode** | — | ✅ | macOS ✅ · Windows ⏳ |
@@ -189,9 +191,26 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 >
 > 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——实测其落盘 OAuth 令牌已过期，要续期就得用 Gemini CLI 自带包里的 client id/secret 去提交表单，而磁盘上也找不到该接口要的 project id（`crates/usage-quota/src/providers/gemini.rs`）。
 
+## TTFT 与 TPS 测量
+
+TokenMe 可以从本地客户端活动中被动测量 **TTFT**（首 token 延迟）和 **TPS**（每秒生成 token 数）。这些是客户端实际观测值，不是厂商基准测试。启用采集后才开始记录，不会补录此前的活动。
+
+| 宿主 | 被动测量 | 用户主动测试 |
+| :--- | :--- | :--- |
+| **Codex** | 从本地 Codex rollout 流中读取轮次级 TTFT；流中提供输出 token 数和计时信息时计算 TPS | 支持：通过 Codex CLI app-server 发起一次短请求 |
+| **Claude Code CLI** | 从 Claude Code OpenTelemetry span 读取请求级 TTFT 和 TPS；首段内容耗时单独标记，不等同于 TTFT | 支持：通过临时、仅对该进程生效的遥测配置发起一次短请求 |
+| **DSH（DeepSeek Harness）** | 从本地压缩会话日志读取请求级 TTFT 和 TPS；日志包含首 token 时间时才可测量 | 暂不支持，仅被动采集 |
+
+DSH 按会话统计：将最新会话中已采集的请求汇总，TTFT 按请求求平均；TPS 按输出 token 总数除以解码总耗时计算（完成时间减首 token 时间）。不包含首 token 时间的旧版 DSH 日志无法提供这些指标。主动测试仅在点击后发送一条短提示，会消耗套餐额度，结果与被动均值分开显示。速度采集器不会保存提示词或回复文本。
+
 > **AgnesCode 令牌注入**：其登录令牌只存在于应用内存，无法静默读取。登录 agnescode.agnes-ai.cn 后从请求头取 `access_token`，写入 tokenme 系统配置目录下的 `agnes.token`（macOS 为 `~/Library/Application Support/tokenme/agnes.token`，Linux 为 `~/.config/tokenme/agnes.token`，Windows 为 `%APPDATA%\tokenme\agnes.token`），或设置 `AGNES_TOKEN` 即可启用。
 
 完整参考：**[docs/COMMANDS.md](docs/COMMANDS.md)** · 场景指南：**[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · 架构总览：**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+
+## 0.1.7 更新内容
+
+- **新增**：支持被动采集 Codex、Claude Code 与 DSH 的 TTFT/TPS；DSH 按会话汇总，并采用输出 token 加权的 TPS 公式。Codex 与 Claude Code 支持用户主动发起单次测速。
+- **新增**：Qoder CN 独立用量与配额适配器，支持积分包窗口和每日签到。
 
 ## 0.1.6 更新内容
 

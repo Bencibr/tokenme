@@ -37,6 +37,7 @@ mod doctor;
 mod loader;
 mod parser;
 mod paths;
+mod speed;
 
 /// The accuracy audit surface: doctor::ledger reads this.
 
@@ -48,6 +49,7 @@ pub const TOOL_ID: &str = "dsh";
 
 pub use doctor::ledger;
 pub use paths::diagnostic_candidates;
+pub use speed::{read_speed_samples, DshSpeedSample};
 pub(crate) const DISPLAY_NAME: &str = "DSH";
 
 #[derive(Debug, Default, Clone, Copy)]

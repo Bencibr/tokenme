@@ -141,7 +141,9 @@ in [pure-summer-beauty-prompts.md](pure-summer-beauty-prompts.md).
 
 The 3D model path is currently archived as a TODO and is hidden from the
 Windows skin selector. Existing model files and the renderer remain in this
-directory for a later, deliberate redesign; an older saved model selection is
+directory for a later, deliberate redesign, but the default runtime imports
+neither the models nor `PetModel`, so they are excluded from the installer.
+An older saved model selection is
 automatically shown as the classic waterdrop instead of opening the unfinished
 path. Do not add new model entries to the user-facing list until the package
 contract has explicit materials, parts, actions, head/eye tracking, and a
@@ -155,8 +157,9 @@ installer, then exported as `.glb` or `.vrm`. TokenMe only loads that local
 asset with Three.js; it does not ship Python, CUDA or an image-to-3D model.
 
 Put the model below `src/assets/pets/models/` and add a `render: "model"`
-entry to `pet-skins.json`. The build gate checks the model path before Vite
-bundles it. A VRM model uses its own humanoid and look-at metadata for head and
+entry to `pet-skins.json`. The source gate checks the archived model path;
+making it a shipping feature requires deliberately restoring the runtime
+entry and updating the bundle gate. A VRM model uses its own humanoid and look-at metadata for head and
 eye tracking; a plain GLB can name a custom head node in `model.head.bone`.
 
 The shipped `seed_san_3d` package embeds the official Seed-san VRM sample from
@@ -231,7 +234,7 @@ Use `animation.blink: "overlay"` for empty-eye atlases: only the eyelids blink,
 so independently generated character frames cannot make the body jump. Use
 `"atlas"` for aligned atlases with baked eyes, with `eyes.none.enabled: false`.
 During a skin switch the whole pet, including its eyes and token badge, stays
-hidden until all four images finish decoding. Completions from replaced skins
+hidden until all base images and the reaction atlas load. Completions from replaced skins
 are ignored; the layout box remains measurable while the images load.
 The renderer clips aligned frames to their original tile, preventing a nearby
 tile's shoes or hair from leaking into the chosen pose. Size and motion always
@@ -242,7 +245,17 @@ gate checks referenced PNGs, dimensions, frame offsets, eye geometry and label
 translations. Run `node scripts/check-pet-skins.mjs --self-test` from the repo
 root to check the rejection paths for malformed packages.
 
-To add a skin, add its four transparent PNGs, add one entry under
+After Vite builds, `scripts/check-pet-bundle.mjs` checks the actual output:
+each visible skin image appears exactly once, and no archived GLB/VRM,
+`PetModel` chunk or unreferenced pet PNG is shipped. Its `--self-test` checks the
+missing, duplicate and unexpected-payload rejection paths.
+
+`python scripts/optimize-pet-pngs.py` reports lossless PNG savings;
+`--write` applies only smaller files. It preserves dimensions, every decoded
+RGBA pixel and every non-image PNG chunk, including color profiles. Source
+artwork is never resized or quantized by this command.
+
+To add a skin, add its four transparent PNGs and a transparent reaction atlas, add one entry under
 `pet-skins.json -> skins`, and add the two translation strings referenced by
 `labelKey`. The atlas must be a 2x2 sheet in open / half-blink / closed-blink /
 happy order. Edge images are separate because their silhouettes and eye lines
@@ -255,6 +268,7 @@ The entry shape is intentionally small and explicit:
 {
   "labelKey": "set.bubble.skin.example",
   "assets": { "atlas": "example-sprites.png", "side": "example-edge-side.png", "left": "example-edge-left.png", "top": "example-edge-top.png" },
+  "reactionAtlas": { "file": "example-reactions-v1.webp", "frames": { "hello": [0, 0], "care": [-112, 0], "sleep": [0, -112], "stretch": [-112, -112] } },
   "layout": { "content": 112, "art": 112, "atlas": 224, "artOffset": 0, "dockShift": { "right": -35, "left": 35, "top": 34 } },
   "frames": { "open": [0, 0], "half": [-112, 0], "closed": [0, -112], "happy": [-112, -112] },
   "animation": { "blink": "overlay" },
@@ -272,3 +286,8 @@ The entry shape is intentionally small and explicit:
 ```text
 Image 1 is the EDIT TARGET. Correct this kitten specifically for peeking DOWN from the TOP border of a desktop. Current front-facing upright flat portrait is WRONG. Change the perspective: head tips and bows DOWN into the screen, looking down toward the viewer's mouse BELOW the top border. Show more of the top of the forehead/head, chin tucked slightly back, ears farther up and back, muzzle angled downward, lower eye placement / slightly foreshortened eyes consistent with the downward head tilt. The kitten is above the desktop, forepaws cling to the horizontal TOP edge, head leans OVER it looking DOWN. Both forepaws remain at the top left and top right, higher than the head. Body stays mostly out of view. This must visually read as a kitten leaning over a high ledge looking down, NOT a front portrait with paws raised. No upside-down whole-image flip. Keep the same cream-and-ginger kitten, fur markings, cute friendly face and soft illustrated style. Keep white eye sockets with NO iris/pupils so a separate live pupil layer can be placed toward their lower part. Square PNG with genuine alpha transparency; all ears/paws/head fully visible within padding. DO NOT draw any actual edge, ledge, monitor, horizontal bar, border, background, text, props or scenery.
 ```
+
+
+### Reaction atlases
+
+Every selectable raster skin requires a 2×2 `reactionAtlas` for hello, care, sleep and stretch, with reading-order frame offsets in CSS pixels. These atlases supplement the original four base poses. The [kitten prompt](kitten-reactions.prompt.md) and [remaining skin prompts](skin-reactions.prompt.md) record the built-in image_gen references and delivery encoding. The renderer preloads the atlas with the skin; tracked pupils stay off while the painted expression is shown. The classic waterdrop uses its existing LED face with four expressions in CSS. Notices expand docked pets before showing the full pose and keep them expanded until dismissed. `check-pet-skins.mjs` rejects missing atlases or tones, and `check-pet-bundle.mjs` pins every delivered image. Browser QA at `?pet-preview=all` shows all seven selectable skins in each tone without changing saved preferences.

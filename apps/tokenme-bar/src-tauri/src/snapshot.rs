@@ -177,6 +177,8 @@ mod tests {
             year: window("2026", "本年"),
             heatmap: Vec::new(),
             hourly: Vec::new(),
+            hourly_prev: Vec::new(),
+            quarter_hourly: Vec::new(),
             quotas: Vec::new(),
             quotas_pending: false,
             from_previous_run: restored,
@@ -214,10 +216,10 @@ mod tests {
     #[test]
     fn an_older_payload_without_the_new_field_still_reads() {
         // The snapshot outlives the schema that wrote it: a report from before
-        // `from_previous_run` (and before `machines`, and before `hourly`) reads as
-        // "live, no restore", not as an unusable file.
+        // `from_previous_run` (and before `machines`, and before `hourly`, and
+        // before `hourly_prev`) reads as "live, no restore", not as an unusable file.
         let mut json = serde_json::to_value(live(TODAY, 60_000)).unwrap();
-        for field in ["from_previous_run", "machines", "hourly"] {
+        for field in ["from_previous_run", "machines", "hourly", "hourly_prev"] {
             json.as_object_mut().unwrap().remove(field);
         }
         let report: Report = serde_json::from_value(json).expect("a pre-restore schema still reads");

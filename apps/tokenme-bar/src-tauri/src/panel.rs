@@ -42,6 +42,14 @@ const VISIBILITY_DEBOUNCE_MS: u64 = 160;
 /// A focus-loss event can be emitted as the panel is being shown. Do not let it
 /// immediately undo the show request.
 const SHOW_FOCUS_GRACE_MS: u64 = 220;
+/// macOS delivers `Focused(false)` a beat after the programmatic `set_focus`
+/// every show performs (the panel is a non-activating accessory window; the
+/// system hands focus back). Treating that beat as a dismissal is what made a
+/// pet click flash the panel — shown, then gone before a frame could settle.
+/// The focus-loss hide waits this out; a genuine outside click arrives later
+/// than any focus hand-back and hides as before.
+#[cfg(not(target_os = "windows"))]
+const FOCUS_HANDBACK_MS: u64 = 700;
 
 static LAST_VISIBILITY_REQUEST_MS: AtomicU64 = AtomicU64::new(0);
 static SHOW_FOCUS_GRACE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
@@ -302,7 +310,14 @@ fn show_window_on_ui(window: &WebviewWindow, rect: Option<Rect>) {
         now_ms().saturating_add(SHOW_FOCUS_GRACE_MS),
         Ordering::Release,
     );
+    #[cfg(not(target_os = "windows"))]
+    FOCUS_HANDBACK_UNTIL_MS.store(now_ms().saturating_add(FOCUS_HANDBACK_MS), Ordering::Release);
 }
+
+/// macOS only: until this instant a `Focused(false)` is read as the system's
+/// own focus hand-back after a show, not as the user clicking elsewhere.
+#[cfg(not(target_os = "windows"))]
+static FOCUS_HANDBACK_UNTIL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Keeps the WebView2 controller in sync with the host window.
 ///
@@ -412,6 +427,11 @@ fn hide_window_on_ui(window: &WebviewWindow) {
 fn panel_hidden() -> &'static std::sync::atomic::AtomicBool {
     static CELL: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
     CELL.get_or_init(|| std::sync::atomic::AtomicBool::new(true))
+}
+
+/// The recorded state, for callers deciding show-vs-hide (the pet's toggle).
+pub fn is_panel_hidden() -> bool {
+    panel_hidden().load(std::sync::atomic::Ordering::Acquire)
 }
 
 fn now_ms() -> u64 {
@@ -1551,6 +1571,16 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         if !matches!(event, WindowEvent::Focused(false)) {
             return;
         }
+        // Within the handback window this event is the system returning focus
+        // after the show's own set_focus, not a dismissal (see the constant).
+        let handback = now_ms() < FOCUS_HANDBACK_UNTIL_MS.load(Ordering::Acquire);
+        crate::logging::info(&format!(
+            "panel: Focused(false) — {}",
+            if handback { "within the handback window, ignored" } else { "treating as dismissal" }
+        ));
+        if handback {
+            return;
+        }
         let app = window.app_handle().clone();
         if let Some(panel) = app.get_webview_window(LABEL) {
             if panel.is_visible().unwrap_or(false) {
@@ -1597,6 +1627,7 @@ fn start_click_away_monitor(app: &AppHandle) {
                             && has_point
                             && !window_contains_point(&panel, point.x, point.y)
                             && !tray_contains_point(&app, point.x, point.y)
+                            && !crate::pet_notice::contains_point(&app, point.x, point.y)
                         {
                             // Tauri's visibility cache can lag for a
                             // non-activating window immediately after a native
@@ -2102,6 +2133,36 @@ fn observe_context_switches(app: &AppHandle) {
             let observer: id = &*block as *const _ as id;
             let _: id = msg_send![center, addObserverForName: ns_name object: nil queue: nil usingBlock: observer];
         }
+    }
+}
+
+/// Whether the current cursor sits inside the pet's on-screen frame.
+#[cfg(target_os = "macos")]
+fn cursor_on_pet(app: &AppHandle) -> bool {
+    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        // [NSEvent mouseLocation] is a CLASS method: it is called on the
+        // class object itself, and its point is in bottom-left screen
+        // coordinates while the pet's frame is top-left (tauri). The frame's
+        // own bottom edge converts directly: point.y is measured from the
+        // MAIN screen's bottom, so compare inside the frame's AppKit-space
+        // rect instead of translating through a screen height (a secondary
+        // display makes that wrong — this machine's panel lives on one).
+        let point: tauri_nspanel::cocoa::foundation::NSPoint =
+            msg_send![class!(NSEvent), mouseLocation];
+        let Some((x, y, w, h)) = crate::bubble::visible_frame(app) else { return false };
+        let main: id = msg_send![class!(NSScreen), mainScreen];
+        let frame: tauri_nspanel::cocoa::foundation::NSRect = msg_send![main, frame];
+        let screen_h = frame.size.height;
+        // The window's top-left tauri y maps to AppKit top y = screen_h - y.
+        let ak_top = screen_h - y;
+        let ak_bottom = ak_top - h;
+        crate::logging::info(&format!(
+            "panel: cursor_on_pet probe — cursor ({:.0},{:.0}) frame ak_top {:.0} ak_bottom {:.0}",
+            point.x, point.y, ak_top, ak_bottom
+        ));
+        point.x >= x && point.x <= x + w && point.y >= ak_bottom && point.y <= ak_top
     }
 }
 
