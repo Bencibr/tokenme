@@ -25,9 +25,9 @@ TokenMe is a menu bar app that tracks token usage, spend, and subscription quota
 - How much is left on each subscription, and when does it reset?
 - Which tool owns this month's spend — and how much did caching actually save me?
 
-Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index.
+Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index; headless servers and containers run the collector and report home on a schedule, rolling every machine into the same ledger. Quota probes read each vendor's own API or local credentials — read-only — and the five tools with daily check-in can claim right from the panel.
 
-## Sound familiar?
+## What can TokenMe do?
 
 Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
 
@@ -36,7 +36,7 @@ Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
 - Points, credits, dollar windows — every subscription ships its own dashboard, and none of them talk to each other.
 - At month's end you want the per-tool breakdown, and the only way to get it is parsing logs by hand.
 
-TokenMe puts all of it in one panel, a click away.
+TokenMe puts all of it in one panel, a click away — usage, spend, quota, check-in and speed on one screen, with servers and containers rolled into the same ledger.
 
 ## Screenshots
 
@@ -47,12 +47,13 @@ TokenMe puts all of it in one panel, a click away.
   <img alt="TokenMe panel — Tools tab, dark" src="docs/screenshots/panel-en-tools-dark.png" width="24%">
 </p>
 
-## Inside the panel
+## Core features
 
-The panel opens with four pages, each one drilling deeper:
+The panel opens with five pages, each one drilling deeper:
 
-- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; each vendor's quota bar with remaining share and reset countdown; and a native banner when a window crosses 80% used or runs out — thresholds, and which vendors are asked at all, are settings.
-- **Tools** — one row per tool: requests, sessions, tokens, cache rate — with each tool's share painted into the row itself.
+- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; an Activity tab with a GitHub-style year heatmap (swipe for last week, last month, last year). Below, each vendor's quota bar with remaining share and reset countdown — tools with daily check-in claim right from the row header; and a native banner when a window crosses 80% used or runs out. Thresholds, and which vendors are asked at all, are settings.
+- **Speed** — passive TTFT and TPS measurement, plus one-shot active probes for Codex and Claude Code.
+- **Tools** — one row per tool: requests, sessions, tokens, cache rate — tinted with each tool's own app icon.
 - **Rankings** — sessions ranked, so the expensive ones surface immediately.
 - **Details** — per-request records, filterable by model and project.
 
@@ -178,6 +179,8 @@ Every tool below ships as a built-in adapter — 27 of them, indexed straight fr
 > **Fixtures**: every adapter carries a fixture test suite, run in full on CI for each commit, and every integration was verified against a real machine's data before it landed.
 >
 > **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
+
+OpenCode quota supports the official provider only. TokenMe reads `OPENCODE_API_KEY`, `provider.<id>.options.apiKey` from `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json` when `baseURL` is `https://opencode.ai/zen/go/v1`, and finally API entries in `~/.local/share/opencode/auth.json`. Custom proxy providers are ignored.
 >
 > Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 
@@ -225,4 +228,4 @@ Multi-machine roll-ups move data over your own channels too — ssh/scp, or the 
 
 Released under the [MIT](LICENSE) license.
 
-Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+Full reference: **[docs/COMMANDS_EN.md](docs/COMMANDS_EN.md)** · Task guides: **[docs/USER_GUIDE_EN.md](docs/USER_GUIDE_EN.md)** · Architecture: **[docs/ARCHITECTURE_EN.md](docs/ARCHITECTURE_EN.md)**
