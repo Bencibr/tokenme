@@ -57,13 +57,19 @@ pub async fn run_active_speed_test(provider: String) -> Result<ActiveSpeedTest, 
 fn run_codex() -> Result<ActiveSpeedTest, String> {
     let executable = resolve_executable("codex.exe", "codex")
         .ok_or_else(|| "Codex CLI was not found on PATH.".to_string())?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(["app-server", "--listen", "stdio://"])
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn()
         .map_err(|_| "Could not start Codex app-server.".to_string())?;
 
     let result = run_codex_protocol(&mut child);
@@ -124,7 +130,7 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
             "threadId": thread_id,
             "input": [{ "type": "text", "text": PROMPT }],
             "approvalPolicy": "never",
-            "sandboxPolicy": { "type": "readOnly", "networkAccess": "restricted" },
+            "sandboxPolicy": { "type": "readOnly", "networkAccess": false },
             "effort": "low"
         }
     }))?;
@@ -204,7 +210,8 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
     let server = claude_otel_ttft::start_server(0, move |samples| { let _ = tx.send(samples); })
         .map_err(|_| "Could not start the temporary Claude telemetry receiver.".to_string())?;
     let endpoint = format!("http://{}/v1/traces", server.local_addr());
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(["-p", "--output-format", "json", "--max-turns", "1", "--no-session-persistence", "--restricted", "--tools", "", PROMPT])
         .current_dir(std::env::temp_dir())
         .env("CLAUDE_CODE_ENABLE_TELEMETRY", "1")
@@ -214,8 +221,13 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
         .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint)
         .env("OTEL_TRACES_EXPORT_INTERVAL", "1000")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let child = command.spawn();
     let result = match child {
         Ok(mut child) => run_claude_child(&mut child, &rx),
         Err(_) => Err("Could not start Claude Code CLI.".into()),
@@ -284,14 +296,14 @@ fn resolve_executable(executable: &str, fallback: &str) -> Option<std::path::Pat
 fn resolve_claude_executable() -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path) {
-        for candidate in [
-            directory.join("claude.exe"),
-            directory.join("node_modules").join("@anthropic-ai").join("claude-code").join("bin").join("claude.exe"),
-        ] {
+        for name in ["claude", "claude.exe"] {
+            let candidate = directory.join(name);
+            if candidate.is_file() { return Some(candidate); }
+            let candidate = directory.join("node_modules").join("@anthropic-ai").join("claude-code").join("bin").join(name);
             if candidate.is_file() { return Some(candidate); }
         }
     }
-    Some(std::path::PathBuf::from("claude.exe"))
+    Some(std::path::PathBuf::from(if cfg!(windows) { "claude.exe" } else { "claude" }))
 }
 
 fn now_ms() -> i64 {
@@ -316,5 +328,17 @@ mod tests {
         assert!(matches!("codex", "codex" | "claude_code"));
         assert!(matches!("claude_code", "codex" | "claude_code"));
         assert!(!matches!("dsh", "codex" | "claude_code"));
+    }
+
+    #[test]
+    fn claude_fallback_matches_the_host_executable_name() {
+        let path = resolve_claude_executable().unwrap();
+        if std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| {
+            ["claude", "claude.exe"].iter().any(|name| dir.join(name).is_file())
+        })) {
+            assert!(path.file_name().is_some_and(|name| name == "claude" || name == "claude.exe"));
+        } else {
+            assert_eq!(path, std::path::PathBuf::from(if cfg!(windows) { "claude.exe" } else { "claude" }));
+        }
     }
 }
