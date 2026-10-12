@@ -113,7 +113,7 @@ cd tokenme-cli-*-linux-musl
 ./install-linux.sh --every 15 --push you@display-host
 ```
 
-One command puts `tokenme` in `~/.local/bin` and wires up scheduled reporting. The full story — timers, the cron fallback, multi-machine roll-up — lives in [Linux — the headless collector](#linux--the-headless-collector) below.
+One command puts `tokenme` in `~/.local/bin` and wires up scheduled reporting. The panel's **Servers** entry can also do the ssh half for you — probes the host, pins the fingerprint, deploys the collector, pulls and merges on schedule. Details in the [user guide](docs/USER_GUIDE.md) §4.
 
 ### Build from source
 
@@ -131,29 +131,6 @@ tokenme detect          # find every installed tool and where its logs live
 tokenme daily --days 7  # the last week's daily usage and spend
 tokenme quota           # live quotas and reset countdowns
 ```
-
-## Linux — the headless collector
-
-The menu-bar panel is macOS and Windows. **Linux is where the work actually happens** — the box you SSH into, the container your agent runs in, the build machine that never shows a GUI — so Linux ships as a first-class collector rather than an afterthought: one fully static binary (musl, `x86_64` and `aarch64`, so there is no glibc version to match and no Rust or Python to install on the machine), plus one command to make it report home.
-
-```bash
-tar xzf tokenme-cli-*-linux-musl.tar.gz
-cd tokenme-cli-*-linux-musl
-./install-linux.sh --every 15 --push you@display-host
-```
-
-That puts `tokenme` in `~/.local/bin` (appending the PATH line to `~/.profile` when it is missing) and installs a **systemd `--user` timer** that runs `tokenme export --days 30` every 15 minutes into `~/tokenme-sync`, then scp's each fresh bundle to the display machine — whose panel merges it on its next pass and shows it as that machine's numbers, under its own name. No user manager reachable (a container, a bare ssh session)? The installer falls back to a **cron job running the same generated script**, and `--uninstall` cleans up either one while keeping your data. On a headless box the installer also turns on lingering (or prints the one `loginctl enable-linger $USER` line to run) so the timer keeps firing with nobody logged in. `--days 400` once pulls the whole retention window in as a backfill; `--prefix <dir>` moves the binary.
-
-Run it interactively and the same numbers are available in a terminal, with no display at all:
-
-```bash
-tokenme detect          # what is installed here, and where each tool's logs live
-tokenme daily --days 7  # a week of usage and spend
-tokenme quota           # live quotas and reset countdowns
-tokenme export          # one bundle into ~/tokenme-sync
-```
-
-Or skip the timer and move `~/tokenme-sync` yourself — Syncthing, a shared mount, a nightly rsync. The transport is yours: tokenme opens no port, runs no daemon beyond that timer, and holds no accounts. The panel can also do the SSH half for you — its footer 服务器 entry probes a host, pins its fingerprint, installs the collector and pulls bundles on a schedule. See the [user guide](docs/USER_GUIDE.md) §4.
 
 ## Common commands
 

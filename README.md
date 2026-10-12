@@ -113,7 +113,7 @@ cd tokenme-cli-*-linux-musl
 ./install-linux.sh --every 15 --push you@display-host
 ```
 
-一条命令装进 `~/.local/bin` 并挂上定时上报。定时器、cron 退化、多机汇总的完整故事见下方 [Linux —— 无头采集端](#linux--无头采集端)。
+一条命令装进 `~/.local/bin` 并挂上定时上报。面板底栏的「服务器」入口还能把 ssh 这半边代办掉：探测主机、固定指纹、投放采集器、按周期拉取合并——细节见[用户指南](docs/USER_GUIDE.md) §4。
 
 ### 从源码构建
 
@@ -131,29 +131,6 @@ tokenme detect          # 自动探测本机装了哪些工具、日志在哪
 tokenme daily --days 7  # 最近一周的每日消耗与账单
 tokenme quota           # 各家订阅的实时额度与重置倒计时
 ```
-
-## Linux —— 无头采集端
-
-菜单栏面板只有 macOS 和 Windows。而**真正干活的机器往往是 Linux**——你 ssh 上去的服务器、跑 agent 的容器、不出图形的构建机——所以 Linux 不是"能用命令行"的附庸，而是一等采集端：一个完全静态的二进制（musl，`x86_64` 与 `aarch64` 两种，不用对齐 glibc 版本，机器上也不需要装 Rust 或 Python），加一条命令就能把数据报回家。
-
-```bash
-tar xzf tokenme-cli-*-linux-musl.tar.gz
-cd tokenme-cli-*-linux-musl
-./install-linux.sh --every 15 --push you@display-host
-```
-
-这条命令把 `tokenme` 装进 `~/.local/bin`（`~/.profile` 里缺 PATH 时会补上），并装一个 **systemd `--user` 定时器**：每 15 分钟执行一次 `tokenme export --days 30`，把 bundle 写进 `~/tokenme-sync`，再 scp 给展示机——面板下一轮自动合并，并把这台机器当成独立来源按名字显示。如果机器上没有可用的 user manager（容器、裸 ssh 会话），安装器**退化成 cron 任务跑同一个脚本**；`--uninstall` 两种都会清理，且保留你的数据。无头机器上安装器还会打开 lingering（不行时就打印出那行要你自己跑的 `loginctl enable-linger $USER`），让定时器在无人登录时照样触发。首次想补齐历史就单独跑一次 `--days 400`（整个保留窗口），`--prefix <dir>` 可以换安装目录。
-
-在终端里直接用它，不接显示器也能拿到同一套数字：
-
-```bash
-tokenme detect          # 这台机器装了哪些工具、各自日志在哪
-tokenme daily --days 7  # 最近一周用量与花费
-tokenme quota           # 实时额度与重置倒计时
-tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
-```
-
-也可以完全不用定时器，自己搬 `~/tokenme-sync`——Syncthing、共享挂载、每晚 rsync 都行。传输通道由你决定：tokenme 不监听端口、除这个定时器外不驻留守护进程、也不持有任何账号。面板底栏的「服务器」入口还能把 SSH 这半边代办掉：探测主机、固定指纹、投放采集器并按周期拉取合并。详见[用户指南](docs/USER_GUIDE.md) §4。
 
 ## 常用命令
 
