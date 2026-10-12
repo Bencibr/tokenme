@@ -58,24 +58,6 @@ The panel opens with four pages, each one drilling deeper:
 
 The UI follows the system language: English and Chinese. Costs are converted, not billed — token counts times the [models.dev](https://models.dev) price list. It won't match a vendor invoice to the cent, but it answers where the money went and whether it was well spent. The index handles hundreds of thousands of events, builds in seconds, and each incremental scan after that takes tens of milliseconds.
 
-## The CLI
-
-When the panel stays closed, the CLI reads the same index:
-
-```text
-$ tokenme daily --days 3
-
-┌────────────┬──────────┬──────────┬────────┬────────────┬────────┬────────┬─────────┬────────┐
-│ Day        │ sessions │ requests │  input │ cache read │ output │  total │    cost │ cached │
-├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
-│ 2026-09-25 │      216 │   12,900 │  56.2M │      1.68B │   4.5M │  1.74B │  $99.15 │  96.8% │
-│ 2026-09-26 │       45 │    4,592 │  30.5M │      704.9M │   1.8M │ 737.1M │  $54.53 │  95.9% │
-│ 2026-09-27 │        6 │    2,534 │  25.1M │      377.1M │   1.1M │ 403.4M │  $46.49 │  93.8% │
-├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
-│ total      │      256 │   20,026 │ 111.8M │      2.76B │   7.4M │  2.88B │ $200.18 │  96.1% │
-└────────────┴──────────┴──────────┴────────┴────────────┴────────┴────────┴─────────┴────────┘
-```
-
 ## Install
 
 Pick your platform: [macOS](#macos) · [Windows](#windows) · [Linux](#linux) · [Build from source](#build-from-source)
@@ -132,7 +114,23 @@ tokenme daily --days 7  # the last week's daily usage and spend
 tokenme quota           # live quotas and reset countdowns
 ```
 
-## Common commands
+## The CLI
+
+When the panel stays closed, the CLI reads the same index:
+
+```text
+$ tokenme daily --days 3
+
+┌────────────┬──────────┬──────────┬────────┬────────────┬────────┬────────┬─────────┬────────┐
+│ Day        │ sessions │ requests │  input │ cache read │ output │  total │    cost │ cached │
+├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
+│ 2026-09-25 │      216 │   12,900 │  56.2M │      1.68B │   4.5M │  1.74B │  $99.15 │  96.8% │
+│ 2026-09-26 │       45 │    4,592 │  30.5M │      704.9M │   1.8M │ 737.1M │  $54.53 │  95.9% │
+│ 2026-09-27 │        6 │    2,534 │  25.1M │      377.1M │   1.1M │ 403.4M │  $46.49 │  93.8% │
+├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
+│ total      │      256 │   20,026 │ 111.8M │      2.76B │   7.4M │  2.88B │ $200.18 │  96.1% │
+└────────────┴──────────┴──────────┴────────┴────────────┴────────┴────────┴─────────┴────────┘
+```
 
 | Command | What it does |
 | :--- | :--- |
