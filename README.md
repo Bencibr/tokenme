@@ -78,7 +78,11 @@ $ tokenme daily --days 3
 
 ## 安装
 
-**Homebrew（macOS）**——tap 一次，之后用短名：
+按平台选择：[macOS](#macos) · [Windows](#windows) · [Linux](#linux) · [从源码构建](#从源码构建)
+
+### macOS
+
+**Homebrew（推荐）**——tap 一次，之后用短名：
 
 ```bash
 brew tap Bencibr/tokenme https://github.com/Bencibr/homebrew-tokenme
@@ -89,17 +93,29 @@ brew install tokenme-cli          # CLI
 
 tap 随每次发布自动更新，`brew upgrade` 即可升级；cask 安装不带隔离标记，Gatekeeper 不会拦。
 
-**安装包**：到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载，里面有 macOS 菜单栏应用（拖入 Applications）、Windows 安装程序，以及 Linux 静态采集端压缩包（`x86_64` / `aarch64`，包内已附 `install-linux.sh`）。
+**手动装 DMG**：到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载，拖入 Applications。安装包是 ad-hoc 签名（没有开发者证书），Gatekeeper 可能拦一下——右键打开即可，或清掉隔离标记后正常启动：
 
-**Windows 安装**：安装器支持“所有用户”模式。共享电脑上请选择“所有用户”，升级时也保持同一模式，这样会原地替换机器级安装，并对所有 Windows 账户生效。
+```bash
+sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
+```
 
-> **macOS 首次打开**（仅手动装 DMG 时）：安装包是 ad-hoc 签名（没有开发者证书），Gatekeeper 可能拦一下——右键打开即可，或者清掉隔离标记后正常启动：
->
-> ```bash
-> sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
-> ```
+### Windows
 
-想从源码构建：
+到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载安装程序。安装器支持"所有用户"模式：共享电脑上请选择**所有用户**，升级时也保持同一模式——这样会原地替换机器级安装，并对所有 Windows 账户生效。CLI 暂无 Windows 安装包，需要时走[源码构建](#从源码构建)的 `cargo install`。
+
+### Linux
+
+没有菜单栏面板，但 Linux 是一等采集端：完全静态的二进制（musl，`x86_64` / `aarch64`，不需要 glibc 对齐，机器上也不用装 Rust 或 Python）。到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载压缩包（内附 `install-linux.sh`）：
+
+```bash
+tar xzf tokenme-cli-*-linux-musl.tar.gz
+cd tokenme-cli-*-linux-musl
+./install-linux.sh --every 15 --push you@display-host
+```
+
+一条命令装进 `~/.local/bin` 并挂上定时上报。定时器、cron 退化、多机汇总的完整故事见下方 [Linux —— 无头采集端](#linux--无头采集端)。
+
+### 从源码构建
 
 ```bash
 git clone https://github.com/Bencibr/tokenme.git

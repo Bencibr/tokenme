@@ -78,7 +78,11 @@ $ tokenme daily --days 3
 
 ## Install
 
-**Homebrew (macOS)** — tap once, then short names:
+Pick your platform: [macOS](#macos) · [Windows](#windows) · [Linux](#linux) · [Build from source](#build-from-source)
+
+### macOS
+
+**Homebrew (recommended)** — tap once, then short names:
 
 ```bash
 brew tap Bencibr/tokenme https://github.com/Bencibr/homebrew-tokenme
@@ -89,23 +93,35 @@ brew install tokenme-cli          # the CLI
 
 The tap is bumped automatically on every release, so `brew upgrade` keeps you current, and cask installs carry no quarantine flag — Gatekeeper never steps in.
 
-**Installers**: grab one from [Releases](https://github.com/Bencibr/tokenme/releases/latest) — the macOS menu-bar app (drag to Applications), a Windows setup, and the static Linux collector tarballs (`x86_64` / `aarch64`, each with `install-linux.sh` beside it).
+**Manual DMG**: grab it from [Releases](https://github.com/Bencibr/tokenme/releases/latest) and drag to Applications. The bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in — right-click → Open works, or clear the quarantine flag:
 
-**Windows installation**: the setup supports an all-users install for shared machines. Choose **All users** in the installer when TokenMe should be available to every Windows account; use the same mode for upgrades so the machine-wide installation is replaced in place.
+```bash
+sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
+```
 
-> **First launch on macOS** (manual DMG only): the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in. Right-click → Open works, or clear the quarantine flag:
->
-> ```bash
-> sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
-> ```
+### Windows
 
-Build from source instead:
+Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/latest). The installer supports an all-users install: on shared machines choose **All users**, and use the same mode for upgrades — the machine-wide installation is then replaced in place for every Windows account. The CLI ships no Windows installer yet; use `cargo install` via [build from source](#build-from-source) when you need it.
+
+### Linux
+
+No menu-bar panel here — but Linux is a first-class collector: a fully static binary (musl, `x86_64` / `aarch64`, no glibc to align, no Rust or Python on the box). Grab the tarball from [Releases](https://github.com/Bencibr/tokenme/releases/latest) (`install-linux.sh` rides inside):
+
+```bash
+tar xzf tokenme-cli-*-linux-musl.tar.gz
+cd tokenme-cli-*-linux-musl
+./install-linux.sh --every 15 --push you@display-host
+```
+
+One command puts `tokenme` in `~/.local/bin` and wires up scheduled reporting. The full story — timers, the cron fallback, multi-machine roll-up — lives in [Linux — the headless collector](#linux--the-headless-collector) below.
+
+### Build from source
 
 ```bash
 git clone https://github.com/Bencibr/tokenme.git
 cd tokenme
-cargo install --path crates/usage-cli --bin tokenme   # CLI
-./scripts/build-macos.sh                              # macOS panel
+cargo install --path crates/usage-cli --bin tokenme   # the CLI
+./scripts/build-macos.sh                              # the macOS panel
 ```
 
 Once it's in, run a detection pass and look at the last week:
