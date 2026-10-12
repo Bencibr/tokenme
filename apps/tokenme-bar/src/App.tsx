@@ -502,7 +502,7 @@ const [page, setPage] = useState<PageKey>(() => {
                   <Sources sources={report.sources} allTime={report.all_time} />
                 </>
               ) : null}
-              {page === "speed" ? <SpeedPage snapshot={ttftSnapshot} now={now} /> : null}
+              {page === "speed" ? <SpeedPage snapshot={ttftSnapshot} now={now} scope={scope} /> : null}
             </div>
           )}
         </main>

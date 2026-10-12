@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { TtftSample, TtftSnapshot } from "../types";
+import type { MachineScope, TtftSample, TtftSnapshot } from "../types";
 import { relativeTime } from "../lib/format";
 import { t } from "../lib/i18n";
 import { IconInfo } from "./Icons";
@@ -21,9 +21,10 @@ function stageOfTps(tps: number): "ok" | "mid" | "bad" {
   return tps >= 50 ? "ok" : tps >= 20 ? "mid" : "bad";
 }
 
-const PROVIDERS: { id: "codex" | "claude_code"; tool: string; nameKey: "ttft.codex" | "ttft.claude"; granularityKey: "ttft.turn" | "ttft.request" }[] = [
+const PROVIDERS: { id: "codex" | "claude_code" | "dsh"; tool: string; nameKey: "ttft.codex" | "ttft.claude" | "ttft.dsh"; granularityKey: "ttft.turn" | "ttft.request" }[] = [
   { id: "codex", tool: "codex", nameKey: "ttft.codex", granularityKey: "ttft.turn" },
   { id: "claude_code", tool: "claude", nameKey: "ttft.claude", granularityKey: "ttft.request" },
+  { id: "dsh", tool: "dsh", nameKey: "ttft.dsh", granularityKey: "ttft.request" },
 ];
 
 function average(values: number[]): number | null {
@@ -45,7 +46,7 @@ function SpeedCell({ value, cap, stage }: { value: string; cap: string; stage: "
 }
 
 function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
-  nameKey: "ttft.codex" | "ttft.claude";
+  nameKey: "ttft.codex" | "ttft.claude" | "ttft.dsh";
   granularityKey: "ttft.turn" | "ttft.request";
   tool: string;
   samples: TtftSample[];
@@ -57,7 +58,12 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   const comparable = latest ? samples.filter((sample) => sample.metric === latest.metric) : [];
   const recent = comparable.slice(0, AVG_WINDOW);
   const avgMs = average(recent.map((sample) => sample.ttft_ms));
-  const avgTps = average(recent.map((sample) => sample.tps).filter((tps): tps is number => typeof tps === "number" && Number.isFinite(tps)));
+  const dshWeighted = recent.filter((sample) => typeof sample.output_tokens === "number" && typeof sample.decode_ms === "number" && sample.decode_ms > 0);
+  const dshOutput = dshWeighted.reduce((sum, sample) => sum + sample.output_tokens!, 0);
+  const dshDecodeMs = dshWeighted.reduce((sum, sample) => sum + sample.decode_ms!, 0);
+  const avgTps = tool === "dsh" && dshDecodeMs > 0
+    ? dshOutput / (dshDecodeMs / 1000)
+    : average(recent.map((sample) => sample.tps).filter((tps): tps is number => typeof tps === "number" && Number.isFinite(tps)));
   // Provider-constant facts (name, granularity, sample count) are metadata,
   // not per-sample data: they live in the hover title, and the row face
   // carries only the model and the three figures.
@@ -87,12 +93,19 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   );
 }
 
-export function SpeedPage({ snapshot, now }: { snapshot: TtftSnapshot; now: number }) {
+export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; now: number; scope: MachineScope }) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const byProvider = useMemo(() => ({
     codex: snapshot.samples.filter((sample) => sample.provider === "codex").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
     claude_code: snapshot.samples.filter((sample) => sample.provider === "claude_code").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
+    dsh: snapshot.samples.filter((sample) => sample.provider === "dsh").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
   }), [snapshot.samples]);
+  // TTFT is collected on this machine only — the OTLP receiver and the
+  // Codex rollouts are local files, and no sync bundle carries samples.
+  // Scoped to a remote machine, the local rows would silently contradict
+  // every other page's numbers, so the page says so instead (the same
+  // honesty the quota strip's 本机·与筛选无关 note uses).
+  const scopedAway = scope.kind === "origin";
   // Only an open IDE earns a row: the snapshot's host flags are the same
   // running-process signal the quota strip's gate reads; engines older than
   // the field omit it and the page then shows every row.
@@ -116,13 +129,15 @@ export function SpeedPage({ snapshot, now }: { snapshot: TtftSnapshot; now: numb
       }
     >
       {aboutOpen ? <p className="ttft-about-note" id="ttft-about-note" role="note">{t("ttft.about")}</p> : null}
-      {visible.length === 0 ? <p className="ttft-note">{t("ttft.no_host")}</p> : (
+      {scopedAway ? <p className="ttft-note">{t("ttft.scoped", { name: scope.name })}</p> : null}
+      {!scopedAway && visible.length === 0 ? <p className="ttft-note">{t("ttft.no_host")}</p> : null}
+      {!scopedAway && visible.length > 0 ? (
         <ol className="speed-list">
           {visible.map((p) => (
             <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} tool={p.tool} samples={byProvider[p.id]} now={now} />
           ))}
         </ol>
-      )}
+      ) : null}
       {snapshot.claude_config_status === "error" ? <p className="ttft-note" role="status">{t("ttft.claude_config_error")}</p> : null}
       {snapshot.enabled && snapshot.claude_receiver === "unavailable" ? <p className="ttft-note" role="status">{t("ttft.receiver_unavailable")}</p> : null}
       {snapshot.enabled ? <p className="ttft-note">{t("ttft.passive_hint")}</p> : null}
