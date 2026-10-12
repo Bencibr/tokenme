@@ -388,6 +388,7 @@ export interface Bridge {
   setShowMoney: (on: boolean) => Promise<void>;
   setQuotaDisplayMode: (mode: QuotaDisplayMode) => Promise<void>;
   ttftSnapshot: () => Promise<TtftSnapshot>;
+  runActiveSpeedTest: (provider: ActiveSpeedTest["provider"]) => Promise<ActiveSpeedTest>;
   setTtftEnabled: (on: boolean) => Promise<void>;
   onTtftUpdated: (handler: (snapshot: TtftSnapshot) => void) => () => void;
   setShowEmptyTools: (on: boolean) => Promise<void>;
@@ -464,7 +465,7 @@ export type NotifyTierKey = "both" | "exhausted" | "off";
 export type QuotaDisplayMode = "used" | "remaining";
 
 export interface TtftSample {
-  provider: "codex" | "claude_code";
+  provider: "codex" | "claude_code" | "dsh";
   granularity: "turn" | "request";
   metric: "ttft" | "first_content";
   ttft_ms: number;
@@ -473,6 +474,10 @@ export interface TtftSample {
   /** Output tokens per generation second, when the source could name the
       window; samples from before the field existed omit it. */
   tps?: number | null;
+  /** DSH-only inputs for output-weighted TPS aggregation. */
+  output_tokens?: number | null;
+  decode_ms?: number | null;
+  session_id?: string | null;
 }
 
 export interface TtftSnapshot {
@@ -483,7 +488,19 @@ export interface TtftSnapshot {
   samples: TtftSample[];
   /** Whether each collector's IDE is open right now; absent on older
       engines — the page then shows every row. */
-  hosts?: { codex: boolean; claude_code: boolean };
+  hosts?: { codex: boolean; claude_code: boolean; dsh?: boolean };
+}
+
+/** A user-triggered one-shot probe. Kept separate from passive samples. */
+export interface ActiveSpeedTest {
+  provider: "codex" | "claude_code";
+  model: string | null;
+  ttftMs: number;
+  tps: number | null;
+  outputTokens: number | null;
+  durationMs: number | null;
+  sampledAtMs: number;
+  measurement: "codex_stream" | "claude_otel";
 }
 
 export interface PanelSettings {

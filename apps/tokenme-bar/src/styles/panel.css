@@ -956,6 +956,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.speed-meta { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+.ttft-test-button { margin-top: 3px; padding: 1px 5px; border: 1px solid var(--hair); border-radius: 4px; background: var(--surface); color: var(--accent-ink); font: inherit; font-size: 9px; line-height: 1.3; cursor: pointer; }
+.ttft-test-button:hover:not(:disabled) { border-color: var(--page-accent); background: var(--accent-soft); }
+.ttft-test-button:disabled { opacity: .6; cursor: wait; }
+.ttft-active-result { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); margin: 4px 0 0; padding: 4px 6px; border-radius: 5px; background: var(--accent-soft); color: var(--accent-ink); font-size: 10px; }
+.ttft-active-result strong { white-space: nowrap; }
 .speed-num {
   font-size: var(--t-meta);
   font-weight: 650;

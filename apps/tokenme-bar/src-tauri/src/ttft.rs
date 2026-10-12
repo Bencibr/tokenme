@@ -1,7 +1,8 @@
 //! Opt-in TTFT collection and a small independent snapshot channel.
 //!
-//! Codex is sampled from local rollout completion records. Claude Code may
-//! POST OTLP/HTTP JSON to a loopback-only receiver. When enabled, TokenMe
+//! Codex is sampled from local rollout completion records; DSH is sampled from
+//! its local compressed session streams. Claude Code may POST OTLP/HTTP JSON
+//! to a loopback-only receiver. When enabled, TokenMe
 //! safely merges the required trace variables into the user's Claude settings
 //! and removes only its own unchanged values when disabled.
 
@@ -33,6 +34,12 @@ pub struct TtftSample {
     /// Output tokens per generation second, when both collectors could name
     /// the window; `None` on samples recorded before the field existed.
     pub tps: Option<f64>,
+    /// DSH-only aggregation inputs for a weighted recent TPS.
+    pub output_tokens: Option<f64>,
+    pub decode_ms: Option<f64>,
+    /// DSH's persisted session key; its UI aggregates speed within one session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,7 +49,7 @@ pub struct TtftSnapshot {
     pub claude_receiver: String,
     pub claude_config_status: String,
     pub samples: Vec<TtftSample>,
-    /// Whether each collector's IDE is running right now; the speed page
+    /// Whether each collector's host tool is running right now; the speed page
     /// shows a row only for an open IDE, the same signal the quota strip's
     /// host gate reads.
     pub hosts: TtftHosts,
@@ -52,6 +59,7 @@ pub struct TtftSnapshot {
 pub struct TtftHosts {
     pub codex: bool,
     pub claude_code: bool,
+    pub dsh: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -106,6 +114,7 @@ impl TtftState {
         } else { false };
         if enabled { self.configure_claude_on_start(); }
         start_codex_scanner(self.clone());
+        start_dsh_scanner(self.clone());
     }
 
     fn configure_claude_on_start(&self) {
@@ -219,7 +228,8 @@ impl TtftState {
                 TtftSample {
                     provider: "claude_code".into(), granularity: "request".into(), metric: metric.into(),
                     ttft_ms: millis, sampled_at_ms: sample.sampled_at_ms.min(i64::MAX as u64) as i64, model: sample.model,
-                    tps: sample.tps,
+                    tps: sample.tps, output_tokens: None, decode_ms: None,
+                    session_id: None,
                 }
             }).collect();
             state.add_samples(samples);
@@ -283,9 +293,12 @@ impl TtftState {
 fn valid_sample(sample: &TtftSample) -> bool {
     sample.ttft_ms.is_finite() && (0.0..=600_000.0).contains(&sample.ttft_ms)
         && sample.tps.is_none_or(|tps| tps.is_finite() && (0.1..=2000.0).contains(&tps))
-        && matches!(sample.provider.as_str(), "codex" | "claude_code")
+        && sample.output_tokens.is_none_or(|tokens| tokens.is_finite() && (0.0..=10_000_000.0).contains(&tokens))
+        && sample.decode_ms.is_none_or(|millis| millis.is_finite() && (0.0..=600_000.0).contains(&millis))
+        && matches!(sample.provider.as_str(), "codex" | "claude_code" | "dsh")
         && matches!(sample.metric.as_str(), "ttft" | "first_content")
         && sample.model.as_ref().is_none_or(|model| model.len() <= 128 && !model.chars().any(char::is_control))
+        && sample.session_id.as_ref().is_none_or(|id| id.len() <= 512 && !id.chars().any(char::is_control))
         && sample.sampled_at_ms <= now_ms().saturating_add(300_000)
 }
 
@@ -335,10 +348,82 @@ fn start_codex_scanner(state: TtftState) {
                                     sampled_at_ms: sample.completed_at_ms.unwrap_or_else(now_ms),
                                     model: sample.model.filter(|model| model.len() <= 128 && !model.chars().any(char::is_control)),
                                     tps: sample.tps,
+                                    output_tokens: None,
+                                    decode_ms: None,
+                                    session_id: None,
                                 }).collect();
                             state.add_samples(samples);
                         }
                         Err(error) => crate::logging::error(&format!("ttft: Codex rollout read failed: {error}")),
+                    }
+                }
+                was_enabled = true;
+            } else {
+                was_enabled = false;
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+}
+
+fn start_dsh_scanner(state: TtftState) {
+    let _ = std::thread::Builder::new().name("dsh-ttft-scan".into()).spawn(move || {
+        let adapter = usage_adapter_dsh::DshAdapter;
+        let mut files = Vec::<usage_core::SourceFile>::new();
+        let mut signatures = HashMap::<String, (u64, i64)>::new();
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut last_discover = std::time::Instant::now() - Duration::from_secs(60);
+        let mut initial_discovery = true;
+        let mut enabled_at_ms = 0i64;
+        let mut was_enabled = false;
+        loop {
+            let enabled = state.is_enabled();
+            if enabled {
+                if !was_enabled {
+                    initial_discovery = true;
+                    signatures.clear();
+                    seen.clear();
+                    enabled_at_ms = now_ms();
+                    last_discover = std::time::Instant::now() - Duration::from_secs(60);
+                }
+                if last_discover.elapsed() >= Duration::from_secs(30) {
+                    files = adapter.discover(&DateFilter::new(None, None));
+                    last_discover = std::time::Instant::now();
+                    if initial_discovery {
+                        for file in &files { signatures.insert(file.key(), (file.size, file.mtime_ms)); }
+                        initial_discovery = false;
+                    }
+                }
+                for file in &files {
+                    let Some(current) = file.clone().restat() else { continue };
+                    let key = current.key();
+                    let signature = (current.size, current.mtime_ms);
+                    match signatures.get(&key) {
+                        Some(previous) if *previous == signature => continue,
+                        None if initial_discovery => { signatures.insert(key, signature); continue; }
+                        _ => {}
+                    }
+                    signatures.insert(key.clone(), signature);
+                    match usage_adapter_dsh::read_speed_samples(&current.path) {
+                        Ok(samples) => {
+                            let session_id = current.path.file_name().and_then(|name| name.to_str()).unwrap_or("dsh-session").to_owned();
+                            let samples = samples.into_iter()
+                                .filter(|sample| sample.completed_at_ms >= enabled_at_ms)
+                                .filter_map(|sample| {
+                                    let dedupe = format!("{key}:{}:{}:{}", sample.completed_at_ms, sample.ttft_ms, sample.model.as_deref().unwrap_or(""));
+                                    if !seen.insert(dedupe) { return None; }
+                                    Some(TtftSample {
+                                        provider: "dsh".into(), granularity: "request".into(), metric: "ttft".into(),
+                                        ttft_ms: sample.ttft_ms, sampled_at_ms: sample.completed_at_ms,
+                                        model: sample.model, tps: sample.tps,
+                                        output_tokens: Some(sample.output_tokens),
+                                        decode_ms: Some((sample.duration_ms - sample.ttft_ms).max(0.0)),
+                                        session_id: Some(session_id.clone()),
+                                    })
+                                }).collect();
+                            state.add_samples(samples);
+                        }
+                        Err(error) => crate::logging::error(&format!("ttft: DSH session read failed: {error}")),
                     }
                 }
                 was_enabled = true;
@@ -367,6 +452,7 @@ fn running_hosts() -> TtftHosts {
     let hosts = TtftHosts {
         codex: usage_quota::host::any_host_running("codex", &alive),
         claude_code: usage_quota::host::any_host_running("claude", &alive),
+        dsh: usage_quota::host::any_host_running("dsh", &alive),
     };
     if let Ok(mut guard) = CACHE.lock() {
         *guard = Some((std::time::Instant::now(), hosts));

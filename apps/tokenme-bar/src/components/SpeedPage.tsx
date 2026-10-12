@@ -1,14 +1,14 @@
 import { useMemo, useState } from "react";
-import type { MachineScope, TtftSample, TtftSnapshot } from "../types";
+import type { ActiveSpeedTest, MachineScope, TtftSample, TtftSnapshot } from "../types";
 import { relativeTime } from "../lib/format";
 import { t } from "../lib/i18n";
+import { bridge } from "../lib/bridge";
 import { IconInfo } from "./Icons";
 import { Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
 
-/** The window the averages cover: the old table's median window, kept — a
- *  provider's older entries say more about yesterday's network than about the
- *  access speed the user is reading. */
+/** Non-DSH providers use a rolling window; DSH's reference UI aggregates the
+ *  complete active session, so its window is selected by session_id below. */
 const AVG_WINDOW = 20;
 
 /** 快中慢 bands, the quota gauge's colour language: TTFT lower is faster
@@ -45,18 +45,23 @@ function SpeedCell({ value, cap, stage }: { value: string; cap: string; stage: "
   );
 }
 
-function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
+function SpeedRow({ nameKey, granularityKey, tool, samples, now, canTest, testing, onTest }: {
   nameKey: "ttft.codex" | "ttft.claude" | "ttft.dsh";
   granularityKey: "ttft.turn" | "ttft.request";
   tool: string;
   samples: TtftSample[];
   now: number;
+  canTest: boolean;
+  testing: boolean;
+  onTest: () => void;
 }) {
   const latest = samples[0];
   // Only like compares with like: the two metrics answer different questions
   // (first token vs first content), and one provider may emit both.
   const comparable = latest ? samples.filter((sample) => sample.metric === latest.metric) : [];
-  const recent = comparable.slice(0, AVG_WINDOW);
+  const recent = tool === "dsh" && latest?.session_id
+    ? comparable.filter((sample) => sample.session_id === latest.session_id)
+    : comparable.slice(0, AVG_WINDOW);
   const avgMs = average(recent.map((sample) => sample.ttft_ms));
   const dshWeighted = recent.filter((sample) => typeof sample.output_tokens === "number" && typeof sample.decode_ms === "number" && sample.decode_ms > 0);
   const dshOutput = dshWeighted.reduce((sum, sample) => sum + sample.output_tokens!, 0);
@@ -68,12 +73,17 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   // not per-sample data: they live in the hover title, and the row face
   // carries only the model and the three figures.
   const title = [t(nameKey), t(granularityKey),
-    comparable.length > 0 ? t("ttft.samples", { n: comparable.length }) : null].filter(Boolean).join(" · ");
+    recent.length > 0 ? t("ttft.samples", { n: recent.length }) : null].filter(Boolean).join(" · ");
   const sub = latest?.model ?? "—";
   return (
     <li className="speed" title={title}>
       <span className="speed-ic"><ToolIcon tool={tool} size={20} /></span>
-      <span className="speed-sub ttft-granularity">{sub}</span>
+      <span className="speed-meta">
+        <span className="speed-sub ttft-granularity">{sub}</span>
+        {canTest ? <button type="button" className="ttft-test-button" onClick={onTest} disabled={testing}>
+          {testing ? t("ttft.active.running") : t("ttft.active.button")}
+        </button> : null}
+      </span>
       <SpeedCell
         value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
         cap={latest ? `${metricLabel(latest.metric)} · ${relativeTime(latest.sampled_at_ms, now)}` : t("ttft.no_data")}
@@ -95,6 +105,9 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
 
 export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; now: number; scope: MachineScope }) {
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [activeTest, setActiveTest] = useState<ActiveSpeedTest | null>(null);
+  const [activeError, setActiveError] = useState<string | null>(null);
+  const [testing, setTesting] = useState<ActiveSpeedTest["provider"] | null>(null);
   const byProvider = useMemo(() => ({
     codex: snapshot.samples.filter((sample) => sample.provider === "codex").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
     claude_code: snapshot.samples.filter((sample) => sample.provider === "claude_code").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
@@ -109,7 +122,16 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
   // Only an open IDE earns a row: the snapshot's host flags are the same
   // running-process signal the quota strip's gate reads; engines older than
   // the field omit it and the page then shows every row.
-  const visible = PROVIDERS.filter((p) => snapshot.hosts?.[p.id] !== false);
+  const visible = PROVIDERS.filter((p) => p.id === "codex" || p.id === "claude_code" || snapshot.hosts?.[p.id] !== false);
+  const runTest = async (provider: ActiveSpeedTest["provider"]) => {
+    if (testing) return;
+    setTesting(provider);
+    setActiveError(null);
+    try { setActiveTest(await bridge.runActiveSpeedTest(provider)); }
+    catch { setActiveError(t("ttft.active.error")); }
+    finally { setTesting(null); }
+  };
+  const activeProvider = activeTest?.provider === "claude_code" ? "ttft.claude" : "ttft.codex";
   return (
     <Section
       label={t("ttft.title")}
@@ -134,10 +156,18 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
       {!scopedAway && visible.length > 0 ? (
         <ol className="speed-list">
           {visible.map((p) => (
-            <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} tool={p.tool} samples={byProvider[p.id]} now={now} />
+            <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} tool={p.tool} samples={byProvider[p.id]} now={now}
+              canTest={p.id !== "dsh"} testing={testing === p.id} onTest={() => p.id !== "dsh" && void runTest(p.id)} />
           ))}
         </ol>
       ) : null}
+      {!scopedAway && activeTest ? <p className="ttft-active-result" role="status">
+        <span>{t("ttft.active.result", { provider: t(activeProvider), age: relativeTime(activeTest.sampledAtMs, now) })}</span>
+        <strong>{Math.round(activeTest.ttftMs)} ms</strong>
+        {activeTest.tps != null ? <strong>{activeTest.tps.toFixed(1)} TPS</strong> : null}
+      </p> : null}
+      {!scopedAway && activeError ? <p className="ttft-note" role="alert">{activeError}</p> : null}
+      {!scopedAway ? <p className="ttft-note">{t("ttft.active.hint")}</p> : null}
       {snapshot.claude_config_status === "error" ? <p className="ttft-note" role="status">{t("ttft.claude_config_error")}</p> : null}
       {snapshot.enabled && snapshot.claude_receiver === "unavailable" ? <p className="ttft-note" role="status">{t("ttft.receiver_unavailable")}</p> : null}
       {snapshot.enabled ? <p className="ttft-note">{t("ttft.passive_hint")}</p> : null}

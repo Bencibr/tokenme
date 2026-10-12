@@ -12,6 +12,7 @@ mod pet_notice;
 mod claude_otel_config;
 mod claude_otel_ttft;
 mod ttft;
+mod active_speed;
 mod snapshot;
 mod tray;
 mod updater;
@@ -66,6 +67,7 @@ pub fn run() {
             commands::set_quota_display_mode,
             commands::get_ttft_snapshot,
             commands::set_ttft_enabled,
+            active_speed::run_active_speed_test,
             commands::set_show_empty_tools,
             commands::set_report_scope,
             servers::commands::get_servers,

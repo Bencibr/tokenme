@@ -191,12 +191,25 @@ tokenme export          # 手动产出一个 bundle 到 ~/tokenme-sync
 >
 > 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——实测其落盘 OAuth 令牌已过期，要续期就得用 Gemini CLI 自带包里的 client id/secret 去提交表单，而磁盘上也找不到该接口要的 project id（`crates/usage-quota/src/providers/gemini.rs`）。
 
+## TTFT 与 TPS 测量
+
+TokenMe 可以从本地客户端活动中被动测量 **TTFT**（首 token 延迟）和 **TPS**（每秒生成 token 数）。这些是客户端实际观测值，不是厂商基准测试。启用采集后才开始记录，不会补录此前的活动。
+
+| 宿主 | 被动测量 | 用户主动测试 |
+| :--- | :--- | :--- |
+| **Codex** | 从本地 Codex rollout 流中读取轮次级 TTFT；流中提供输出 token 数和计时信息时计算 TPS | 支持：通过 Codex CLI app-server 发起一次短请求 |
+| **Claude Code CLI** | 从 Claude Code OpenTelemetry span 读取请求级 TTFT 和 TPS；首段内容耗时单独标记，不等同于 TTFT | 支持：通过临时、仅对该进程生效的遥测配置发起一次短请求 |
+| **DSH（DeepSeek Harness）** | 从本地压缩会话日志读取请求级 TTFT 和 TPS；日志包含首 token 时间时才可测量 | 暂不支持，仅被动采集 |
+
+DSH 按会话统计：将最新会话中已采集的请求汇总，TTFT 按请求求平均；TPS 按输出 token 总数除以解码总耗时计算（完成时间减首 token 时间）。不包含首 token 时间的旧版 DSH 日志无法提供这些指标。主动测试仅在点击后发送一条短提示，会消耗套餐额度，结果与被动均值分开显示。速度采集器不会保存提示词或回复文本。
+
 > **AgnesCode 令牌注入**：其登录令牌只存在于应用内存，无法静默读取。登录 agnescode.agnes-ai.cn 后从请求头取 `access_token`，写入 tokenme 系统配置目录下的 `agnes.token`（macOS 为 `~/Library/Application Support/tokenme/agnes.token`，Linux 为 `~/.config/tokenme/agnes.token`，Windows 为 `%APPDATA%\tokenme\agnes.token`），或设置 `AGNES_TOKEN` 即可启用。
 
 完整参考：**[docs/COMMANDS.md](docs/COMMANDS.md)** · 场景指南：**[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · 架构总览：**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 
 ## 0.1.7 更新内容
 
+- **新增**：支持被动采集 Codex、Claude Code 与 DSH 的 TTFT/TPS；DSH 按会话汇总，并采用输出 token 加权的 TPS 公式。Codex 与 Claude Code 支持用户主动发起单次测速。
 - **新增**：Qoder CN 独立用量与配额适配器，支持积分包窗口和每日签到。
 
 ## 0.1.6 更新内容

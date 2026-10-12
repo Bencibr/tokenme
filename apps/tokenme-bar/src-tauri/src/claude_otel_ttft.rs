@@ -40,6 +40,10 @@ pub struct TtftSample {
     /// attribute and the span times; a `first_content` sample never carries
     /// one, because that window answers a different question.
     pub tps: Option<f64>,
+    /// Full request span duration and output count when the export includes
+    /// them. These values are kept only for the transient active-test result.
+    pub duration_ms: Option<f64>,
+    pub output_tokens: Option<u64>,
 }
 
 /// Binds strictly to IPv4 loopback. The caller owns and must lifecycle-manage
@@ -210,8 +214,8 @@ where
                         let (seen, slot) = match attribute.key.as_str() {
                             "ttft_ms" => (&mut saw_ttft, &mut ttft),
                             "first_content_ms" => (&mut saw_first_content, &mut first_content),
-                            "gen_ai.usage.output_tokens" => (&mut saw_output, &mut output_tokens),
-                            "gen_ai.request.model" => {
+                            "gen_ai.usage.output_tokens" | "output_tokens" => (&mut saw_output, &mut output_tokens),
+                            "gen_ai.request.model" | "model" => {
                                 if saw_model { duplicate = true; break; }
                                 saw_model = true;
                                 model = attribute.text.clone();
@@ -238,9 +242,11 @@ where
                     // is a fallback with a related but distinct definition; do
                     // not emit both for one request or mix them in medians.
                     if let Some(millis) = ttft {
-                        samples.push(TtftSample { field: MetricField::TtftMs, millis, sampled_at_ms, model, tps: tps_of(output_tokens, span_ms(&span), millis) });
+                        let duration_ms = span_ms(&span);
+                        let output_token_count = output_tokens.filter(|n| n.is_finite() && *n >= 0.0 && *n <= u64::MAX as f64).map(|n| n as u64);
+                        samples.push(TtftSample { field: MetricField::TtftMs, millis, sampled_at_ms, model, tps: tps_of(output_tokens, duration_ms, millis), duration_ms, output_tokens: output_token_count });
                     } else if let Some(millis) = first_content {
-                        samples.push(TtftSample { field: MetricField::FirstContentMs, millis, sampled_at_ms, model, tps: None });
+                        samples.push(TtftSample { field: MetricField::FirstContentMs, millis, sampled_at_ms, model, tps: None, duration_ms: span_ms(&span), output_tokens: None });
                     }
                     if samples.len() >= MAX_SAMPLES_PER_EXPORT { break; }
                 }
@@ -490,6 +496,8 @@ mod tests {
         assert!(rx.try_recv().is_err(), "one export produces one callback batch");
         assert_eq!(sample.model.as_deref(), Some("claude-sonnet"));
         assert_eq!(sample.tps, Some(250.0), "250 output tokens over the 1000 ms generation window");
+        assert_eq!(sample.duration_ms, Some(1137.0));
+        assert_eq!(sample.output_tokens, Some(250));
         assert!(sample.sampled_at_ms > 0);
         server.shutdown();
     }
