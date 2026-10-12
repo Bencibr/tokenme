@@ -216,9 +216,15 @@ where
                             "first_content_ms" => (&mut saw_first_content, &mut first_content),
                             "gen_ai.usage.output_tokens" | "output_tokens" => (&mut saw_output, &mut output_tokens),
                             "gen_ai.request.model" | "model" => {
-                                if saw_model { duplicate = true; break; }
+                                // The CLI ships the gen_ai standard attribute
+                                // and its own "model" twin, same value — an
+                                // echo is normal, a conflict is the anomaly.
+                                if model.is_some() && model.as_deref() != attribute.text.as_deref() {
+                                    duplicate = true;
+                                    break;
+                                }
                                 saw_model = true;
-                                model = attribute.text.clone();
+                                if model.is_none() { model = attribute.text.clone(); }
                                 continue;
                             }
                             _ => continue,
@@ -407,16 +413,24 @@ impl<'de> Deserialize<'de> for Attribute {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AttributeValue {
-    int_value: Option<String>,
+    // OTLP's JSON shape quotes 64-bit integers, but the CLI also ships bare
+    // numbers ("intValue": 996) — accept both, the deserializer is all-or-
+    // nothing per attribute and a form mismatch would silently drop it.
+    int_value: Option<serde_json::Value>,
     double_value: Option<f64>,
     string_value: Option<String>,
 }
 
 impl AttributeValue {
     fn number(&self) -> Option<f64> {
+        let int_number = self.int_value.as_ref().and_then(|value| match value {
+            serde_json::Value::Number(number) => number.as_f64(),
+            serde_json::Value::String(text) => text.parse::<f64>().ok(),
+            _ => None,
+        });
         let number = self
             .double_value
-            .or_else(|| self.int_value.as_deref()?.parse::<f64>().ok())
+            .or(int_number)
             .or_else(|| self.string_value.as_deref()?.parse::<f64>().ok())?;
         (number.is_finite() && (0.0..=MAX_METRIC_MS).contains(&number)).then_some(number)
     }
