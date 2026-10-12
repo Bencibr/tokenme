@@ -13,7 +13,7 @@ use usage_core::{Meter, ReadCursor, ReadOutcome, SourceFile, TokenCounts, UsageE
 
 use crate::parser::{
     conversation_meta, counts_for, decode_generation, step_stamp, Conversation, Generation,
-    Lifetime, Skip, Stages, StepStamp,
+    Skip, Stages, StepStamp,
 };
 use crate::paths;
 use crate::TOOL_ID;
@@ -177,7 +177,6 @@ pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit) -> ReadOutcome {
     let conn = db.conn();
     let conv = conversation(conn);
     let stamps = step_stamps(conn);
-    let lifetime = Lifetime::new(conv.created_ms, scan_ms().max(file.mtime_ms));
     let mut window = Window::default();
     // A database without `gen_metadata` is not an Antigravity CLI database.
     if let Ok(mut stmt) = conn.prepare_cached(SELECT_GENS) {
@@ -191,7 +190,7 @@ pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit) -> ReadOutcome {
                 let Ok(row) = row else { break };
                 let Some((idx, blob)) = row else { continue };
                 audit.rows += 1;
-                let decoded = match decode_generation(idx, &blob, lifetime) {
+                let decoded = match decode_generation(idx, &blob, None) {
                     Ok(decoded) => decoded,
                     Err(skip) => {
                         let (reason, offset) = describe(&skip);
@@ -289,19 +288,16 @@ struct Stamps {
 
 /// A turn's timestamp, most-evidenced first: its own explicit stamp, then the
 /// `steps` row for the same responseId, then for the same gen index, then the
-/// lifetime-gated inference, then the conversation's created-at, then the file's
-/// mtime. Never 0, so no record lands in a 1970 bucket.
+/// conversation's created-at, then the file's mtime. Never 0, so no record
+/// lands in a 1970 bucket. The opaque modern `#9.#10` payload is never treated
+/// as a timestamp.
 ///
-/// `steps` outranks the inference on purpose: a `steps` row is an explicitly
-/// typed Timestamp read off a real table, whereas the inference is a guess about
-/// eight bytes no source documents.
 fn timestamp_for(gen: &Generation, stamps: &Stamps, conv: &Conversation, file: &SourceFile) -> i64 {
     let by_response = gen.response_id.as_deref().and_then(|id| stamps.by_response.get(id));
     let by_gen = stamps.by_gen.get(&gen.idx);
     gen.own_timestamp
         .or(by_response.copied())
         .or(by_gen.copied())
-        .or(gen.inferred_timestamp)
         .or(conv.created_ms)
         .or((file.mtime_ms > 0).then_some(file.mtime_ms))
         .unwrap_or_else(scan_ms)
