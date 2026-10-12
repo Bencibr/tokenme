@@ -4,7 +4,7 @@
 //!
 //! * the **transcript tree** `<root>/projects/**` in the Claude-Code layout, under
 //!   `$QODER_CONFIG_DIR` (the CN build spells it `QODERCN_CONFIG_DIR`), both
-//!   pointing at `~/.qoder`. Qoder exports its own root to every subprocess, which
+//!   pointing at `~/.qoder` and `~/.qoder-cn`, respectively. Qoder exports its own root to every subprocess, which
 //!   is why the env var beats the home directory here.
 //! * the **IDE cache db** `<App Support>/Qoder{,CN}/SharedClientCache/cache/db/local.db`,
 //!   which is where the IDE's chat/Quest path writes real per-call tokens. The CN
@@ -42,46 +42,46 @@ pub(crate) const PROJECTS_DIR: &str = "projects";
 pub(crate) const IDE_HOME_ENV: &str = "QODER_HOME";
 pub(crate) const CN_IDE_HOME_ENV: &str = "QODER_CN_HOME";
 /// The application-support directory each edition writes into.
-pub(crate) const IDE_APP_DIRS: [&str; 2] = ["Qoder", "QoderCN"];
+pub(crate) const IDE_APP_DIRS: [&str; 1] = ["Qoder"];
 /// …and the db lives this deep below it.
 const CACHE_DB_REL: [&str; 4] = ["SharedClientCache", "cache", "db", "local.db"];
 /// …and one of the two ladders resolves `QODER_HOME` to the *parent* of
 /// `SharedClientCache` instead, so both spellings are candidates.
 const CACHE_DB_SHORT_REL: [&str; 3] = ["cache", "db", "local.db"];
 
-/// `$QODER_CONFIG_DIR`, else `$QODERCN_CONFIG_DIR`, else `~/.qoder`. `None` when
-/// nothing resolves lets every entry point bail without touching the filesystem.
-pub(crate) fn config_root() -> Option<PathBuf> {
-    root_from(
-        std::env::var_os(CONFIG_DIR_ENV).as_deref(),
-        std::env::var_os(CN_CONFIG_DIR_ENV).as_deref(),
-        dirs::home_dir().as_deref(),
-    )
+/// Each edition honours only its own override and default transcript directory.
+pub(crate) fn config_root_for(cn: bool) -> Option<PathBuf> {
+    config_root_from(cn, std::env::var_os(CONFIG_DIR_ENV).as_deref(),
+        std::env::var_os(CN_CONFIG_DIR_ENV).as_deref(), dirs::home_dir().as_deref())
 }
 
+fn config_root_from(cn: bool, qoder: Option<&OsStr>, qodercn: Option<&OsStr>, home: Option<&Path>) -> Option<PathBuf> {
+    let named = if cn { qodercn } else { qoder };
+    // The desktop runtime exports both config variables to its children.
+    // Recognizable roots still belong to one edition when inherited that way.
+    named.filter(|v| !v.is_empty()).map(PathBuf::from).filter(|p| {
+        let foreign = if cn { ".qoder" } else { ".qoder-cn" };
+        !p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(foreign))
+    })
+        .or_else(|| home.map(|h| h.join(if cn { ".qoder-cn" } else { ".qoder" })))
+}
+
+#[cfg(test)]
 pub(crate) fn root_from(
     qoder: Option<&OsStr>,
     qodercn: Option<&OsStr>,
     home: Option<&Path>,
 ) -> Option<PathBuf> {
-    if let Some(dir) = qoder.filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
-    if let Some(dir) = qodercn.filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
-    home.map(|h| h.join(".qoder"))
+    config_root_from(false, qoder, qodercn, home)
 }
 
 pub(crate) fn projects_dir(root: &Path) -> PathBuf {
     root.join(PROJECTS_DIR)
 }
 
-/// The IDE cache db: `$QODER_HOME`, else `$QODER_CN_HOME`, else
-/// `<App Support>/Qoder{,CN}/SharedClientCache/cache/db/local.db`. `None` when the
-/// chosen rung holds no database.
-pub(crate) fn cache_db_path() -> Option<PathBuf> {
-    cache_db_from(
+/// The edition's IDE cache db, with no fallback to the other account.
+pub(crate) fn cache_db_path_for(cn: bool) -> Option<PathBuf> {
+    cache_db_from_for(cn,
         std::env::var_os(IDE_HOME_ENV).as_deref(),
         std::env::var_os(CN_IDE_HOME_ENV).as_deref(),
         dirs::home_dir().as_deref(),
@@ -89,26 +89,31 @@ pub(crate) fn cache_db_path() -> Option<PathBuf> {
     )
 }
 
-/// The pure half of [`cache_db_path`], so the ladder is testable without touching
+/// The pure half of [`cache_db_path_for`], so the ladder is testable without touching
 /// the real application-support directory.
 ///
 /// An env var that is set wins outright and does **not** fall through to the
 /// default directory: that is how both ladders we cross-checked behave
 /// (`vibe-cafe/vibe-usage:src/qoder-roots.js:60-62` returns from it directly,
 /// `xiufengsun/TokenTracker:src/lib/rollout.js:5763-5767` uses it as *the* root),
-/// it matches how `config_root` treats `QODER_CONFIG_DIR`, and it is what makes the
+/// it matches how `config_root_for` treats the edition's config override, and makes the
 /// var usable as a test isolation hook.
 ///
 /// The two ladders disagree on what `QODER_HOME` points *at* — one joins
 /// `cache/db/local.db` on it, the other `SharedClientCache/cache/db/local.db` — so
 /// both spellings are tried under each env value instead of one of them being
 /// guessed.
+#[cfg(test)]
 pub(crate) fn cache_db_from(
     ide_home: Option<&OsStr>,
     cn_ide_home: Option<&OsStr>,
     home: Option<&Path>,
     app_support: Option<&Path>,
 ) -> Option<PathBuf> {
+    cache_db_from_for(false, ide_home, cn_ide_home, home, app_support)
+}
+
+fn cache_db_from_for(cn: bool, ide_home: Option<&OsStr>, cn_ide_home: Option<&OsStr>, home: Option<&Path>, app_support: Option<&Path>) -> Option<PathBuf> {
     let under = |dir: &Path, rel: &[&str]| {
         let candidate = rel.iter().fold(dir.to_path_buf(), |acc, seg| acc.join(seg));
         candidate.is_file().then_some(candidate)
@@ -116,7 +121,7 @@ pub(crate) fn cache_db_from(
     let in_dir = |dir: &Path| {
         under(dir, CACHE_DB_REL.as_slice()).or_else(|| under(dir, CACHE_DB_SHORT_REL.as_slice()))
     };
-    let named = [ide_home, cn_ide_home]
+    let named = [if cn { cn_ide_home } else { ide_home }]
         .into_iter()
         .flatten()
         .filter(|v| !v.is_empty())
@@ -127,7 +132,8 @@ pub(crate) fn cache_db_from(
     }
     let linux_fallback = home.map(|h| h.join(".config"));
     let support = app_support.or(linux_fallback.as_deref())?;
-    IDE_APP_DIRS
+    let names: &[&str] = if cn { &["QoderCN", "Qoder CN", "Qoder CN IDE"] } else { &IDE_APP_DIRS };
+    names
         .iter()
         .find_map(|dir| in_dir(&support.join(dir)))
 }
@@ -277,7 +283,8 @@ mod tests {
         std::fs::write(&cn, b"SQLite format 3\x00").unwrap();
         assert_eq!(none(), Some(intl.clone()));
         std::fs::remove_file(&intl).unwrap();
-        assert_eq!(none(), Some(cn.clone()), "the CN edition is a source too");
+        assert_eq!(none(), None, "the CN edition belongs to its own adapter");
+        assert_eq!(cache_db_from_for(true, None, None, Some(&home), Some(&support)), Some(cn.clone()));
 
         // $QODER_HOME beats both, whichever of the two spellings it points at.
         let ide = dir.path().join("idehome");
@@ -307,7 +314,7 @@ mod tests {
         );
         assert_eq!(
             cache_db_from(Some(OsStr::new("")), None, Some(&home), Some(&support)),
-            Some(cn.clone()),
+            None,
             "an empty override is unset, not a redirect"
         );
         // No home at all means no store.
@@ -362,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn qoder_env_beats_home_and_cn_is_the_fallback() {
+    fn edition_roots_never_fall_back_to_the_other_account() {
         let home = Some(Path::new("/home/x"));
         assert_eq!(
             root_from(Some(OsStr::new("/tmp/a")), Some(OsStr::new("/tmp/b")), home),
@@ -370,8 +377,13 @@ mod tests {
         );
         assert_eq!(
             root_from(None, Some(OsStr::new("/tmp/b")), home),
-            Some(PathBuf::from("/tmp/b"))
+            Some(PathBuf::from("/home/x/.qoder"))
         );
+        assert_eq!(config_root_from(true, Some(OsStr::new("/tmp/a")), Some(OsStr::new("/tmp/b")), home), Some(PathBuf::from("/tmp/b")));
+        assert_eq!(config_root_from(true, Some(OsStr::new("/tmp/a")), None, home), Some(PathBuf::from("/home/x/.qoder-cn")));
+        let inherited = OsStr::new("/home/x/.qoder-cn");
+        assert_eq!(config_root_from(false, Some(inherited), Some(inherited), home), Some(PathBuf::from("/home/x/.qoder")));
+        assert_eq!(config_root_from(true, Some(inherited), Some(inherited), home), Some(PathBuf::from(inherited)));
         // An empty override is not a redirect: treat it as unset.
         assert_eq!(
             root_from(Some(OsStr::new("")), Some(OsStr::new("")), home),

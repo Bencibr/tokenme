@@ -44,7 +44,7 @@ pub use joycode::JoycodeQuota;
 pub use kimicode::KimiCodeQuota;
 pub use minimaxcode::MiniMaxCodeQuota;
 pub use opencode::OpenCodeQuota;
-pub use qoder::QoderQuota;
+pub use qoder::{QoderQuota, QoderCnQuota, qoder_cn_manual_checkin};
 pub use trae::TraeQuota;
 /// The panel's check-in button entry (see `trae::manual_checkin`).
 pub fn trae_manual_checkin() -> Result<(bool, String), String> {
@@ -84,6 +84,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(GeminiQuota),
         Box::new(JoycodeQuota),
         Box::new(QoderQuota),
+        Box::new(QoderCnQuota),
         Box::new(WorkBuddyQuota),
         Box::new(WorkBuddyCnQuota),
         Box::new(CatpawQuota),

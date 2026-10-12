@@ -22,9 +22,8 @@
 //! `Summary::credit_cost` at the vendor's plan rate and the tokens go through the
 //! normal price table.
 //!
-//! The public surface (`TOOL_ID`, `QoderAdapter`, this trait impl) is frozen:
-//! `usage-adapter-all` and the CLI already link against it. One tool id it stays —
-//! the second source is a second `SourceFile`, not a second adapter.
+//! Qoder CN uses the same storage dialect in its own account directories.
+//! Each edition has its own tool id and dedupe namespace.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -77,71 +76,108 @@ impl SourceAdapter for QoderAdapter {
     }
 
     fn probe(&self) -> Option<DetectedSource> {
-        let projects = paths::config_root()
-            .map(|root| paths::projects_dir(&root))
-            .filter(|dir| dir.is_dir());
-        let db = paths::cache_db_path();
-        let log = projects.as_ref().and_then(|dir| first_log(dir));
-        let stats = db.as_deref().and_then(cache_db::stats);
-        if log.is_none() && stats.is_none() {
-            return None;
-        }
-        // One small query per store: `probe` runs at startup and must not touch all
-        // 98 MB of transcripts, and the cache db census is one scan of a table that
-        // is 675 KB on this machine.
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(log) = &log {
-            let logs = projects.as_ref().map(|dir| count_logs(dir)).unwrap_or(1).max(1);
-            match paths::version_hint(log) {
-                Some(version) => parts.push(format!("{logs} logs v{version}")),
-                None => parts.push(format!("{logs} logs")),
-            }
-        }
-        if let Some(stats) = &stats {
-            parts.push(format!(
-                "cache db {} rows, {} token messages, {} requests",
-                stats.rows, stats.usage_rows, stats.requests
-            ));
-        }
-        let mut roots: Vec<PathBuf> = projects.into_iter().collect();
-        roots.extend(db);
-        Some(DetectedSource {
-            id: TOOL_ID.to_string(),
-            display: self.display_name().to_string(),
-            roots,
-            hint: Some(parts.join(" · ")),
-        })
+        probe_for(false)
     }
 
-    fn discover(&self, filter: &DateFilter) -> Vec<SourceFile> {
-        let mut files = match paths::config_root() {
-            Some(root) => discover_in(&paths::projects_dir(&root), filter),
-            None => Vec::new(),
-        };
-        if let Some(path) = paths::cache_db_path() {
-            if let Some((size, mtime_ms)) = paths::stat_file(&path) {
-                // One database holds every session, so `DateFilter` can only bound
-                // it by the file's own last write — the same rule the transcript
-                // walk uses.
-                let sf = SourceFile { path, kind: FileKind::Sqlite, size, mtime_ms }.with_wal_activity();
-                if filter.since_ms.is_none_or(|since| sf.mtime_ms >= since) {
-                    files.push(sf);
-                }
-            }
-        }
-        files
-    }
+    fn discover(&self, filter: &DateFilter) -> Vec<SourceFile> { discover_for(false, filter) }
 
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
-        match file.kind {
-            FileKind::Jsonl => parser::read_file(file, cursor),
-            // Deliberately infallible too: Qoder owns this database while the IDE
-            // runs, and a locked file must not abort the pass for the other source.
-            FileKind::Sqlite => Ok(cache_db::read(file, cursor)?.0),
-            FileKind::Tree => Ok(ReadOutcome { events: Vec::new(), cursor }),
-        }
+        read_for(false, file, cursor)
     }
 }
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct QoderCnAdapter;
+
+impl SourceAdapter for QoderCnAdapter {
+    fn id(&self) -> &'static str { "qoder_cn" }
+    fn display_name(&self) -> &'static str { "Qoder CN" }
+    fn semantics(&self) -> Semantics { QoderAdapter.semantics() }
+    fn probe(&self) -> Option<DetectedSource> { probe_for(true) }
+    fn discover(&self, filter: &DateFilter) -> Vec<SourceFile> { discover_for(true, filter) }
+    fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
+        read_for(true, file, cursor)
+    }
+}
+
+fn probe_for(cn: bool) -> Option<DetectedSource> {
+    let projects = paths::config_root_for(cn)
+        .map(|root| paths::projects_dir(&root))
+        .filter(|dir| dir.is_dir());
+    let db = paths::cache_db_path_for(cn);
+    let log = projects.as_ref().and_then(|dir| first_log(dir));
+    let stats = db.as_deref().and_then(cache_db::stats);
+    if log.is_none() && stats.is_none() {
+        return None;
+    }
+    // One small query per store: `probe` runs at startup and must not touch all
+    // 98 MB of transcripts, and the cache db census is one scan of a table that
+    // is 675 KB on this machine.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(log) = &log {
+        let logs = projects.as_ref().map(|dir| count_logs(dir)).unwrap_or(1).max(1);
+        match paths::version_hint(log) {
+            Some(version) => parts.push(format!("{logs} logs v{version}")),
+            None => parts.push(format!("{logs} logs")),
+        }
+    }
+    if let Some(stats) = &stats {
+        parts.push(format!(
+            "cache db {} rows, {} token messages, {} requests",
+            stats.rows, stats.usage_rows, stats.requests
+        ));
+    }
+    let mut roots: Vec<PathBuf> = projects.into_iter().collect();
+    roots.extend(db);
+    Some(DetectedSource {
+        id: if cn { "qoder_cn" } else { TOOL_ID }.into(),
+        display: if cn { "Qoder CN" } else { "Qoder" }.into(),
+        roots,
+        hint: Some(parts.join(" · ")),
+    })
+}
+
+fn discover_for(cn: bool, filter: &DateFilter) -> Vec<SourceFile> {
+    let mut files = match paths::config_root_for(cn) {
+        Some(root) => discover_in(&paths::projects_dir(&root), filter),
+        None => Vec::new(),
+    };
+    if let Some(path) = paths::cache_db_path_for(cn) {
+        if let Some((size, mtime_ms)) = paths::stat_file(&path) {
+            // One database holds every session, so `DateFilter` can only bound
+            // it by the file's own last write — the same rule the transcript
+            // walk uses.
+            let sf = SourceFile { path, kind: FileKind::Sqlite, size, mtime_ms }.with_wal_activity();
+            if filter.since_ms.is_none_or(|since| sf.mtime_ms >= since) {
+                files.push(sf);
+            }
+        }
+    }
+    files
+}
+
+fn read_for(cn: bool, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
+    let mut outcome = match file.kind {
+        FileKind::Jsonl => parser::read_file(file, cursor),
+        // Deliberately infallible too: Qoder owns this database while the IDE
+        // runs, and a locked file must not abort the pass for the other source.
+        FileKind::Sqlite => Ok(cache_db::read(file, cursor)?.0),
+        FileKind::Tree => Ok(ReadOutcome { events: Vec::new(), cursor }),
+    }?;
+    if cn {
+        for event in &mut outcome.events {
+            event.tool = "qoder_cn".into();
+            if let Some(key) = &mut event.dedupe_key {
+                *key = match key.strip_prefix(DEDUPE_PREFIX) {
+                    Some(request) => format!("qoder_cn#{request}"),
+                    None => format!("qoder_cn#{key}"),
+                };
+            }
+        }
+    }
+    Ok(outcome)
+}
+
 
 /// Session logs live under the mangled project dir, in `<session>/subagents/` for
 /// sidechain transcripts and in `transcript/` for task runs, so this is a walk and

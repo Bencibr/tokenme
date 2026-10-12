@@ -16,6 +16,7 @@ use std::collections::HashSet;
 /// "the user is using this tool right now".
 pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("qoder", &["Qoder"]),
+    ("qoder_cn", &["Qoder CN", "QoderCN", "Qoder CN IDE", "qoder-cn-ide"]),
     ("atomcode", &["atomcode"]),
     ("funide", &["FunIDE"]),
     ("dsh", &["DSH Desktop", "dsh-desktop"]),
@@ -186,6 +187,9 @@ mod tests {
         let mut alive: HashSet<String> = HashSet::new();
         alive.insert("qoder.exe".to_string());
         assert!(any_host_running("qoder", &alive));
+        assert!(!any_host_running("qoder_cn", &alive));
+        alive.insert("Qoder CN.exe".to_string());
+        assert!(any_host_running("qoder_cn", &alive));
         assert!(!any_host_running("atomcode", &alive));
         assert!(!any_host_running("opencode", &alive));
         alive.insert("OpenCode".to_string());

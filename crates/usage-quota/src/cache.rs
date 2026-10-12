@@ -45,10 +45,10 @@ struct Cached {
 const VERSION: u32 = 2;
 
 fn version_for(tool: &str) -> u32 {
-    // Before the edition split this id could cache either account. Those
-    // answers cannot be relabelled WorkBuddy AI honestly; other tools' last
+    // Before the edition splits these ids could cache either account. Those
+    // answers cannot be assigned to the international edition; other tools' last
     // known answers keep their existing version and remain readable.
-    if tool == "workbuddy" { 3 } else { VERSION }
+    if matches!(tool, "workbuddy" | "qoder") { 3 } else { VERSION }
 }
 
 pub struct Cache {
@@ -261,19 +261,22 @@ mod cache_clear_tests {
     use super::Cache;
 
     #[test]
-    fn a_pre_split_workbuddy_answer_cannot_be_replayed_as_international() {
+    fn pre_split_answers_cannot_be_replayed_as_international() {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::in_dir(dir.path().to_path_buf(), crate::TTL);
-        cache.store("workbuddy", &[]);
-        cache.store("workbuddy_cn", &[]);
-        let path = dir.path().join("workbuddy.json");
-        let mut old: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        old["version"] = serde_json::json!(2);
-        std::fs::write(path, old.to_string()).unwrap();
-        assert!(cache.stale("workbuddy").is_none(), "an old combined answer has no edition");
-        assert!(cache.stale("workbuddy_cn").is_some(), "the independent CN cache remains readable");
-        cache.store("workbuddy", &[]);
-        assert!(cache.fresh("workbuddy").is_some(), "a new international answer is accepted");
+        for tool in ["workbuddy", "qoder"] {
+            let cn = format!("{tool}_cn");
+            cache.store(tool, &[]);
+            cache.store(&cn, &[]);
+            let path = dir.path().join(format!("{tool}.json"));
+            let mut old: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            old["version"] = serde_json::json!(2);
+            std::fs::write(path, old.to_string()).unwrap();
+            assert!(cache.stale(tool).is_none(), "an old combined answer has no edition");
+            assert!(cache.stale(&cn).is_some(), "the independent CN cache remains readable");
+            cache.store(tool, &[]);
+            assert!(cache.fresh(tool).is_some(), "a new international answer is accepted");
+        }
     }
 
     #[test]

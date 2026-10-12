@@ -31,6 +31,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("cline", &["Cline"]),
     ("zcode", &["ZCode"]),
     ("qoder", &["Qoder"]),
+    ("qoder_cn", &["Qoder CN", "QoderCN", "Qoder CN IDE"]),
     // 妙手 is the renamed CatPaw; both bundle names stay in the hunt.
     ("catpaw", &["妙手", "CatPawAI"]),
     ("dsh", &["DSH Desktop"]),
@@ -65,6 +66,7 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("codex", include_bytes!("../assets/codex.png")),
     ("zcode", include_bytes!("../assets/zcode.png")),
     ("qoder", include_bytes!("../assets/qoder.png")),
+    ("qoder_cn", include_bytes!("../assets/qoder.png")),
     ("catpaw", include_bytes!("../assets/catpaw.png")),
     ("dsh", include_bytes!("../assets/dsh.png")),
     ("antigravity", include_bytes!("../assets/antigravity.png")),

@@ -30,6 +30,7 @@ pub use providers::workbuddy_login;
 pub const CHECKIN_TOOLS: &[(&str, fn() -> Result<(bool, String), String>)] = &[
     ("trae_cn", providers::trae_manual_checkin),
     ("qoder", providers::qoder_manual_checkin),
+    ("qoder_cn", providers::qoder_cn_manual_checkin),
     ("minimaxcode", providers::minimaxcode_manual_checkin),
     ("workbuddy_cn", providers::workbuddy_cn_manual_checkin),
 ];
@@ -337,7 +338,7 @@ mod tests {
     fn the_checkin_registry_names_real_probes_and_refuses_strangers() {
         let probes: Vec<&str> = built_in().iter().map(|p| p.tool()).collect();
         let ids: Vec<&str> = checkin_tool_ids().collect();
-        assert_eq!(ids, vec!["trae_cn", "qoder", "minimaxcode", "workbuddy_cn"], "the claim-bearing probes");
+        assert_eq!(ids, vec!["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn"], "the claim-bearing probes");
         assert!(!is_checkin_tool("workbuddy"), "WorkBuddy AI never claims a CN grant");
         for id in &ids {
             assert!(probes.contains(id), "check-in tool {id:?} has no probe to run under");

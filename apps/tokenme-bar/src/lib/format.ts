@@ -42,6 +42,7 @@ const DISPLAY: Record<string, string> = {
   zcode: "ZCode",
   codebuddy: "CodeBuddy",
   qoder: "Qoder",
+  qoder_cn: "Qoder CN",
   antigravity: "Antigravity",
   hermes: "Hermes",
   funide: "FunIDE",
@@ -70,7 +71,7 @@ export function toolDisplay(id: string): string {
 
 /** Colour is assigned by id, never by rank, so a tool keeps its colour across periods. */
 export function toolSlot(id: string): number {
-  const exact = TOOL_ORDER.indexOf(id);
+  const exact = TOOL_ORDER.indexOf(id === "qoder_cn" ? "qoder" : id);
   if (exact >= 0) return exact;
   let hash = 0;
   for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) % 997;

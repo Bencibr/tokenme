@@ -1086,6 +1086,8 @@ mod tests {
         assert!(!host_gate_open("trae_cn", false, &alive), "off keeps today's rule");
         assert!(host_gate_open("trae_cn", true, &alive), "on: the claim fires with the IDE closed");
         assert!(host_gate_open("qoder", true, &alive));
+        assert!(host_gate_open("qoder_cn", true, &alive));
+        assert!(!host_gate_open("qoder_cn", false, &alive));
         assert!(!host_gate_open("claude", true, &alive), "not a claim bearer");
         assert!(!host_gate_open("zcode", true, &alive));
         assert!(host_gate_open("copilot", true, &alive), "no host mapping — never paused");

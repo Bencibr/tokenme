@@ -20,7 +20,7 @@ function windowName(q: QuotaView): string {
 
 /** Tools whose quota probe owns a daily check-in: the group header grows the
  *  badge/button for exactly these. */
-const CHECKIN_TOOLS = ["trae_cn", "qoder", "minimaxcode", "workbuddy_cn"];
+const CHECKIN_TOOLS = ["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn"];
 
 /** The check-in state rides the report as zero-window marker rows. They are
  *  control channel, not data: the badge and the button read them off the raw
@@ -38,6 +38,8 @@ function checkinCopy(msg: string | undefined): string | undefined {
   if (m) return t("quota.checkin.msg.claimed", { n: m[1] });
   m = msg.match(/^签到成功，领取 ([\d.]+) 积分$/);
   if (m) return t("quota.checkin.msg.claimed_credit", { n: m[1] });
+  m = msg.match(/^签到需在 (.+) 内领取$/);
+  if (m) return t("quota.checkin.gated", { tool: m[1] });
   const exact: Record<string, Parameters<typeof t>[0]> = {
     "今日已签到": "quota.checkin.msg.done",
     "签到未成功，稍后再试": "quota.checkin.msg.retry",
@@ -46,7 +48,6 @@ function checkinCopy(msg: string | undefined): string | undefined {
     "今日没有可领的签到": "quota.checkin.msg.none",
     "今日暂无可领的签到活动": "quota.checkin.msg.none",
     "签到活动未开启": "quota.checkin.msg.off",
-    "签到需在 Qoder 内领取": "quota.checkin.gated",
     "WorkBuddy 登录或签到权限已失效": "quota.checkin.msg.expired",
   };
   if (exact[msg]) return t(exact[msg]);
@@ -564,7 +565,7 @@ export function QuotaStrip({
                         {checkinBusy === g.tool
                           ? t("quota.checkin.busy")
                           : checkinGated(g.tool)
-                            ? t("quota.checkin.gated")
+                            ? t("quota.checkin.gated", { tool: toolDisplay(g.tool) })
                             : checkinWaiting(g.tool)
                               ? t("quota.checkin.wait")
                               : (checkinCopy(checkinMsg[g.tool]) ?? t("quota.checkin.btn"))}

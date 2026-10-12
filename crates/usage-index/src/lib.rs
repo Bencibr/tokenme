@@ -689,6 +689,39 @@ impl Index {
             tx.execute("INSERT INTO meta(key, value) VALUES(?1, '1')", params![REPAIR_WORKBUDDY_SPLIT]).map_err(sql_err)?;
             tx.commit().map_err(sql_err)?;
         }
+        // Older Qoder discovery could pick the CN store as its fallback.
+        // Move only identifiable local CN sources; replay their cursors to
+        // recover requests that collided with the international namespace.
+        const REPAIR_QODER_SPLIT: &str = "repair:qoder-split-1";
+        let qoder_split: Option<String> = conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1", params![REPAIR_QODER_SPLIT], |r| r.get(0),
+        ).optional().map_err(sql_err)?;
+        if qoder_split.is_none() {
+            let tx = conn.unchecked_transaction().map_err(sql_err)?;
+            let cn_path = |col: &str| format!(
+                "{col} NOT LIKE 'linux:%' AND (instr(lower(replace({col}, char(92), '/')), '/.qoder-cn/') > 0 \
+                 OR instr(lower(replace({col}, char(92), '/')), '/qodercn/') > 0 \
+                 OR instr(lower(replace({col}, char(92), '/')), '/qoder cn/') > 0 \
+                 OR instr(lower(replace({col}, char(92), '/')), '/qoder cn ide/') > 0)"
+            );
+            const CN_KEY: &str = "CASE WHEN substr(dedupe_key, 1, 6) = 'qoder#' \
+                THEN 'qoder_cn#' || substr(dedupe_key, 7) ELSE 'qoder_cn#' || dedupe_key END";
+            let twins = format!(
+                "SELECT e.id FROM event e WHERE e.tool = 'qoder' AND {} AND EXISTS \
+                 (SELECT 1 FROM event t WHERE t.tool = 'qoder_cn' AND t.dedupe_key = {})",
+                cn_path("e.source"), CN_KEY.replace("dedupe_key", "e.dedupe_key")
+            );
+            tx.execute(&format!("DELETE FROM call WHERE event_id IN ({twins})"), []).map_err(sql_err)?;
+            tx.execute(&format!("DELETE FROM quota WHERE event_id IN ({twins})"), []).map_err(sql_err)?;
+            let removed = tx.execute(&format!("DELETE FROM event WHERE id IN ({twins})"), []).map_err(sql_err)?;
+            let moved = tx.execute(&format!(
+                "UPDATE event SET tool = 'qoder_cn', dedupe_key = {CN_KEY} WHERE tool = 'qoder' AND {}", cn_path("source")
+            ), []).map_err(sql_err)?;
+            tx.execute(&format!("DELETE FROM file_state WHERE tool = 'qoder' AND {}", cn_path("source_key")), []).map_err(sql_err)?;
+            if moved + removed > 0 { tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?; }
+            tx.execute("INSERT INTO meta(key, value) VALUES(?1, '1')", params![REPAIR_QODER_SPLIT]).map_err(sql_err)?;
+            tx.commit().map_err(sql_err)?;
+        }
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);

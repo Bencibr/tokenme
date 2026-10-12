@@ -879,3 +879,46 @@ fn the_workbuddy_split_preserves_other_editions_and_replays_domestic_cursors() {
     let idx = Index::open(&db).unwrap();
     assert_eq!(idx.conn().query_row("SELECT count(*) FROM event", [], |r| r.get::<_,i64>(0)).unwrap(),5);
 }
+
+#[test]
+fn the_qoder_split_preserves_other_editions_and_replays_domestic_cursors() {
+    let dir = tempfile::tempdir().unwrap(); let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn().execute("DELETE FROM meta WHERE key = 'repair:qoder-split-1'", []).unwrap();
+        for (id, tool, key, source) in [
+            (1,"qoder","qoder#unix","/home/demo/.qoder-cn/projects/session.jsonl"),
+            (2,"qoder","qoder#win",r"C:\Users\demo\QoderCN\SharedClientCache\session.jsonl"),
+            (3,"qoder","qoder#global","/home/demo/.qoder/projects/session.jsonl"),
+            (4,"qoder","qoder#remote","linux:server:/home/demo/.qoder-cn/projects/session.jsonl"),
+            (5,"qoder","qoder#twin","/home/demo/.qoder-cn/projects/twin.jsonl"),
+            (6,"qoder_cn","qoder_cn#twin","/home/demo/.qoder-cn/projects/twin.jsonl"),
+            (7,"qoder","session#message","/home/demo/.qoder-cn/projects/fallback.jsonl"),
+        ] {
+            idx.conn().execute("INSERT INTO event(id,tool,ts_ms,session,meter,in_tok,dedupe_key,source) VALUES(?1,?2,10,'s','tokens',100,?3,?4)", rusqlite::params![id,tool,key,source]).unwrap();
+            idx.conn().execute("INSERT OR REPLACE INTO file_state(source_key,tool,cursor) VALUES(?1,?2,999)", rusqlite::params![source,tool]).unwrap();
+        }
+        idx.conn().execute("INSERT INTO call(event_id,kind,name) VALUES(5,'tool','test')", []).unwrap();
+        idx.conn().execute("INSERT INTO quota(event_id,used_percent,window_minutes,resets_at_ms) VALUES(5,10,60,100)", []).unwrap();
+        idx.conn().execute("INSERT INTO event_rollup(day,origin,tool,session,project,model,meter,in_tok,cc_tok,cr_tok,out_tok,reason_tok,credits,n,nonzero,min_ts,max_ts) VALUES('2026-10-10','','claude','s','','','tokens',1,0,0,0,0,0,1,1,10,10)", []).unwrap();
+        idx.conn().execute("INSERT INTO meta(key,value) VALUES('sync:linux:server','keep')", []).unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT count(*) FROM event WHERE tool='qoder_cn'"),4);
+    assert_eq!(count("SELECT count(*) FROM event WHERE dedupe_key='qoder_cn#session#message'"),1);
+    assert_eq!(count("SELECT count(*) FROM event WHERE tool='qoder'"),2);
+    assert_eq!(count("SELECT count(*) FROM event WHERE dedupe_key IN ('qoder_cn#unix','qoder_cn#win','qoder_cn#twin')"),3);
+    assert_eq!(count("SELECT count(*) FROM event WHERE id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM call WHERE event_id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM quota WHERE event_id=5"),0);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE tool='qoder' AND instr(replace(source_key,char(92),'/'),'/.qoder-cn/')>0 AND source_key NOT LIKE 'linux:%'"),0);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE source_key LIKE '%/.qoder/%'"),1);
+    assert_eq!(count("SELECT count(*) FROM file_state WHERE source_key LIKE 'linux:%'"),1,"remote cursors survive");
+    assert_eq!(count("SELECT count(*) FROM event_rollup"),0,"rollup must rebuild all groups together");
+    assert_eq!(idx.meta_value("sync:linux:server").unwrap().as_deref(),Some("keep"));
+    assert_eq!(idx.meta_value("repair:qoder-split-1").unwrap().as_deref(),Some("1"));
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    assert_eq!(idx.conn().query_row("SELECT count(*) FROM event", [], |r| r.get::<_,i64>(0)).unwrap(),6);
+}

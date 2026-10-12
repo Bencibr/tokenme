@@ -47,24 +47,52 @@ use crate::http::get_json;
 use crate::QuotaProbe;
 
 pub struct QoderQuota;
+pub struct QoderCnQuota;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edition { Global, China }
+
+impl Edition {
+    fn tool(self) -> &'static str { if self == Self::China { "qoder_cn" } else { "qoder" } }
+    fn name(self) -> &'static str { if self == Self::China { "Qoder CN" } else { "Qoder" } }
+    fn base(self) -> &'static str {
+        if self == Self::China { "https://openapi.qoder.com.cn" } else { "https://openapi.qoder.sh" }
+    }
+    fn support_dirs(self) -> &'static [&'static str] {
+        if self == Self::China { &["Qoder CN", "QoderCN", "Qoder CN IDE"] } else { &["Qoder"] }
+    }
+    fn profile_prefix(self) -> &'static str {
+        if self == Self::China { "com.qodercn.app." } else { "com.qoder.app." }
+    }
+    fn at(self, now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::FixedOffset> {
+        if self == Self::China { now.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()) }
+        else { now.with_timezone(&chrono::Local).fixed_offset() }
+    }
+    fn day(self) -> String { self.at(chrono::Utc::now()).format("%Y-%m-%d").to_string() }
+    fn day_open(self) -> bool { chrono::Timelike::hour(&self.at(chrono::Utc::now())) >= 10 }
+    #[cfg(any(not(windows), test))]
+    fn keychains(self) -> &'static [(&'static str, &'static str)] {
+        if self == Self::China {
+            &[("Qoder CN Safe Storage", "Qoder CN Key"), ("Qoder CN App Safe Storage", "Qoder CN App Key"),
+              ("QoderCN Safe Storage", "QoderCN Key"), ("Qoder CN IDE Safe Storage", "Qoder CN IDE Key")]
+        } else { &KEYCHAIN_IDS }
+    }
+}
 
 /// The account's login record: `token`, `refreshToken`, `expireTime`.
 const USER_KEY: &str = "secret://aicoding.auth.userInfo";
 /// The IDE's cached panel state — plan credits only, no resource packs.
 const QUOTA_KEY: &str = "secret://aicoding.auth.creditUsage";
-/// The request the IDE's own usage panel issues.
-const USAGE_URL: &str = "https://openapi.qoder.sh/sash/api/v2/me/usage";
 /// Chromium's `expiresAt` sentinel for "this plan does not expire" (year 9999).
 const NO_EXPIRY_MS: i64 = 253_402_214_400_000;
 
-/// Both editions keep their global state under their own support directory.
-const SUPPORT_DIRS: [&str; 3] = ["Qoder", "Qoder CN", "QoderCN"];
 /// The 0.4 desktop app's login record, beside its Chromium profile.
 const AUTH_FILE: &str = "auth.v1.dat";
 /// `(service, account)` as the Electron keychain entries: the desktop app's
 /// own pair first (it is the install that is actually being used), then the
 /// older VS Code-fork IDE's. A passphrase only opens the records of its own
 /// generation, so trying both is the discovery.
+#[cfg(any(not(windows), test))]
 const KEYCHAIN_IDS: [(&str, &str); 2] = [
     ("Qoder App Safe Storage", "Qoder App Key"),
     ("Qoder Safe Storage", "Qoder Key"),
@@ -73,20 +101,21 @@ const KEYCHAIN_IDS: [(&str, &str); 2] = [
 /// The login record behind one install's `auth.v1.dat` — platform keepers
 /// first (the Windows DPAPI path reads through its own helper), the macOS
 /// keychain pair second, other platforms unanswered.
-fn discover_login_info(dir: &std::path::Path) -> Option<Value> {
+fn discover_login_info(edition: Edition, dir: &std::path::Path) -> Option<Value> {
     #[cfg(windows)]
     {
+        let _ = edition;
         read_windows_user_info(dir)
     }
     #[cfg(target_os = "macos")]
     {
-        KEYCHAIN_IDS
+        edition.keychains()
             .iter()
             .find_map(|(service, account)| keychain_pass(service, account).and_then(|p| app_user_info(dir, &p)))
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        let _ = dir;
+        let _ = (edition, dir);
         None
     }
 }
@@ -104,57 +133,61 @@ impl QuotaProbe for QoderQuota {
         true
     }
 
-    fn fetch(&self) -> Vec<QuotaSample> {
-        // The desktop app's own Chromium profile (`com.qoder.app.*`) is the
-        // live install; its `auth.v1.dat` is read through each platform's
-        // safeStorage keeper.
-        for dir in app_dirs() {
-            if !dir.join(AUTH_FILE).is_file() {
-                continue;
-            }
-            #[cfg(windows)]
-            let info = read_windows_user_info(&dir);
-            #[cfg(target_os = "macos")]
-            let info = KEYCHAIN_IDS
-                .iter()
-                .find_map(|(service, account)| keychain_pass(service, account).and_then(|p| app_user_info(&dir, &p)));
-            #[cfg(not(any(windows, target_os = "macos")))]
-            let info: Option<Value> = None;
-            if let Some(info) = info {
-                let checkin = qoder_daily_checkin(&info, false);
-                if let Some(samples) = live_usage(&info).filter(|s| !s.is_empty()) {
-                    return with_checkin_mark(samples, &checkin);
-                }
-            }
-        }
+    fn fetch(&self) -> Vec<QuotaSample> { fetch_for(Edition::Global) }
+}
 
-        for db in state_dbs() {
-            let conn = match open(&db) {
-                Some(c) => c,
-                None => continue,
-            };
-            for (service, account) in KEYCHAIN_IDS {
-                let Some(pass) = keychain_pass(service, account) else { continue };
-                // The same passphrase opens both records, so one connection and
-                // one subprocess answer the live meter and its fallback.
-                if let Some(info) = read_secret(&conn, USER_KEY).and_then(|b| decrypt(&pass, &b)).and_then(|p| parse(&p))
-                {
-                    let checkin = qoder_daily_checkin(&info, false);
-                    if let Some(samples) = live_usage(&info).filter(|s| !s.is_empty()) {
-                        return with_checkin_mark(samples, &checkin);
-                    }
-                }
-                if let Some(value) =
-                    read_secret(&conn, QUOTA_KEY).and_then(|b| decrypt(&pass, &b)).and_then(|p| parse(&p))
-                {
-                    let samples = samples_from_snapshot(&value);
-                    if !samples.is_empty() {
-                        return samples;
-                    }
-                }
+impl QuotaProbe for QoderCnQuota {
+    fn tool(&self) -> &'static str { "qoder_cn" }
+    fn daily_task(&self) -> bool { true }
+    fn fetch(&self) -> Vec<QuotaSample> { fetch_for(Edition::China) }
+}
+
+fn fetch_for(edition: Edition) -> Vec<QuotaSample> {
+    let mut pending = None;
+    for dir in app_dirs_for(edition) {
+        if let Some(info) = discover_login_info(edition, &dir) {
+            let checkin = daily_checkin_for(edition, &info, false);
+            if let Some(samples) = live_usage_for(edition, &info).filter(|s| !s.is_empty()) {
+                return with_checkin_mark(edition, samples, &checkin);
             }
+            pending = checkin.or(pending);
         }
-        Vec::new()
+    }
+    for db in state_dbs_for(edition) {
+        let Some(conn) = open(&db) else { continue };
+        if let Some(info) = ide_secret(edition, &db, &conn, USER_KEY) {
+            let checkin = daily_checkin_for(edition, &info, false);
+            if let Some(samples) = live_usage_for(edition, &info).filter(|s| !s.is_empty()) {
+                return with_checkin_mark(edition, samples, &checkin);
+            }
+            pending = checkin.or(pending);
+        }
+        if let Some(value) = ide_secret(edition, &db, &conn, QUOTA_KEY) {
+            let samples = samples_from_snapshot(&value);
+            if !samples.is_empty() { return with_checkin_mark(edition, samples, &pending); }
+        }
+    }
+    // A successful claim must remain visible even if the usage API is unavailable.
+    with_checkin_mark(edition, Vec::new(), &pending)
+}
+
+fn ide_secret(edition: Edition, db: &Path, conn: &rusqlite::Connection, name: &str) -> Option<Value> {
+    let blob = read_secret(conn, name)?;
+    #[cfg(windows)]
+    {
+        let _ = edition;
+        let dir = db.parent()?.parent()?.parent()?;
+        let key = windows_storage_key(dir);
+        let plain = key.and_then(|k| decrypt_windows_v10(&k, &blob))
+            .or_else(|| super::crypto::dpapi_unprotect(&blob))?;
+        serde_json::from_slice(&plain).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = db;
+        edition.keychains().iter().find_map(|(service, account)| {
+            keychain_pass(service, account).and_then(|p| decrypt(&p, &blob)).and_then(|p| parse(&p))
+        })
     }
 }
 
@@ -162,7 +195,10 @@ impl QuotaProbe for QoderQuota {
 /// bundle id (`com.qoder.app.stable`) rather than the product. Kept tolerant
 /// of beta/dev channels, and of an explicit `APPDATA` fallback on Windows,
 /// because `dirs` can be unavailable in a restricted service environment.
-fn app_dirs() -> Vec<std::path::PathBuf> {
+#[cfg(test)]
+fn app_dirs() -> Vec<std::path::PathBuf> { app_dirs_for(Edition::Global) }
+
+fn app_dirs_for(edition: Edition) -> Vec<std::path::PathBuf> {
     let mut bases = Vec::new();
     if let Some(base) = dirs::data_dir() {
         bases.push(base);
@@ -178,12 +214,8 @@ fn app_dirs() -> Vec<std::path::PathBuf> {
 
     let mut out = Vec::new();
     for base in bases {
-        for name in [
-            "com.qoder.app.stable",
-            "com.qoder.app.beta",
-            "com.qoder.app.dev",
-        ] {
-            let candidate = base.join(name);
+        for channel in ["stable", "beta", "dev"] {
+            let candidate = base.join(format!("{}{channel}", edition.profile_prefix()));
             if !out.iter().any(|p| p == &candidate) {
                 out.push(candidate);
             }
@@ -195,7 +227,7 @@ fn app_dirs() -> Vec<std::path::PathBuf> {
                     && entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("com.qoder.app.");
+                        .starts_with(edition.profile_prefix());
                 if is_channel && !out.iter().any(|p| p == &path) {
                     out.push(path);
                 }
@@ -210,27 +242,22 @@ fn app_dirs() -> Vec<std::path::PathBuf> {
 /// the same Windows user that owns Qoder's profile.
 #[cfg(windows)]
 fn read_windows_user_info(dir: &Path) -> Option<Value> {
-    use base64::Engine;
-
-    let local_state: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("Local State")).ok()?).ok()?;
-    let encrypted_key = local_state.pointer("/os_crypt/encrypted_key")?.as_str()?;
-    let wrapped = base64::engine::general_purpose::STANDARD
-        .decode(encrypted_key)
-        .ok()?;
-    let wrapped = wrapped.strip_prefix(b"DPAPI")?;
-    let key = super::crypto::dpapi_unprotect(wrapped)?;
-    if key.len() != 32 {
-        return None;
-    }
-
+    let key = windows_storage_key(dir)?;
     let encrypted_auth = std::fs::read(dir.join(AUTH_FILE)).ok()?;
     let plaintext = decrypt_windows_v10(&key, &encrypted_auth)?;
     let info: Value = serde_json::from_slice(&plaintext).ok()?;
-    info.get("token")
-        .and_then(Value::as_str)
-        .filter(|t| !t.is_empty())?;
+    info.get("token").and_then(Value::as_str).filter(|t| !t.is_empty())?;
     Some(info)
+}
+
+#[cfg(windows)]
+fn windows_storage_key(dir: &Path) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let local_state: Value = serde_json::from_slice(&std::fs::read(dir.join("Local State")).ok()?).ok()?;
+    let encrypted_key = local_state.pointer("/os_crypt/encrypted_key")?.as_str()?;
+    let wrapped = base64::engine::general_purpose::STANDARD.decode(encrypted_key).ok()?;
+    let key = super::crypto::dpapi_unprotect(wrapped.strip_prefix(b"DPAPI")?)?;
+    (key.len() == 32).then_some(key)
 }
 
 /// The desktop app's record under its own keychain passphrase: the same
@@ -248,9 +275,12 @@ fn decrypt_windows_v10(key: &[u8], blob: &[u8]) -> Option<Vec<u8>> {
     super::crypto::decrypt_windows_v10(key, blob)
 }
 
-fn state_dbs() -> Vec<std::path::PathBuf> {
+#[cfg(test)]
+fn state_dbs() -> Vec<std::path::PathBuf> { state_dbs_for(Edition::Global) }
+
+fn state_dbs_for(edition: Edition) -> Vec<std::path::PathBuf> {
     let Some(base) = dirs::data_dir() else { return Vec::new() };
-    SUPPORT_DIRS
+    edition.support_dirs()
         .iter()
         .map(|d| base.join(d).join("User").join("globalStorage").join("state.vscdb"))
         .filter(|p| p.is_file())
@@ -290,10 +320,9 @@ fn keychain_pass(service: &str, account: &str) -> Option<String> {
 }
 
 // Qoder stores this Electron safeStorage key in the platform credential
-// manager.  Windows uses DPAPI rather than the macOS Keychain command above;
-// until a Windows DPAPI reader is available, make the limitation explicit and
-// keep the probe a quiet, read-only miss instead of spawning a Unix command.
-#[cfg(not(target_os = "macos"))]
+// manager. Windows reads DPAPI in-process; platforms without a keychain
+// reader keep a quiet read-only miss rather than spawning a macOS command.
+#[cfg(all(not(target_os = "macos"), any(not(windows), test)))]
 fn keychain_pass(_service: &str, _account: &str) -> Option<String> {
     None
 }
@@ -301,6 +330,7 @@ fn keychain_pass(_service: &str, _account: &str) -> Option<String> {
 /// Chromium's macOS `safeStorage` envelope. No per-record nonce: the IV is fixed,
 /// which is why the whole plaintext follows the 3-byte `v10` tag (measured here —
 /// unlike Linux there is no 32-byte hash prefix to skip).
+#[cfg(any(not(windows), test))]
 fn decrypt(pass: &str, blob: &[u8]) -> Option<String> {
     use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
     let ct = blob.strip_prefix(b"v10".as_slice()).unwrap_or(blob);
@@ -313,6 +343,7 @@ fn decrypt(pass: &str, blob: &[u8]) -> Option<String> {
     String::from_utf8(plain).ok()
 }
 
+#[cfg(any(not(windows), test))]
 fn parse(plain: &str) -> Option<Value> {
     serde_json::from_str(plain).ok()
 }
@@ -333,7 +364,10 @@ fn trim(n: f64) -> String {
 /// and naming. `None` is "this account answered nothing drawable" — an
 /// enterprise `displayMode` or a free account with no pack at all, which is
 /// silence rather than a made-up bar.
-fn live_usage(info: &Value) -> Option<Vec<QuotaSample>> {
+#[cfg(test)]
+fn live_usage(info: &Value) -> Option<Vec<QuotaSample>> { live_usage_for(Edition::Global, info) }
+
+fn live_usage_for(edition: Edition, info: &Value) -> Option<Vec<QuotaSample>> {
     let token = info.get("token").and_then(Value::as_str).filter(|t| !t.is_empty())?;
     // The IDE refreshes this token when it lapses; a probe must not, so an
     // expired one means "no live sample", never a refresh grant.
@@ -341,7 +375,7 @@ fn live_usage(info: &Value) -> Option<Vec<QuotaSample>> {
         return None;
     }
     let body = get_json(
-        USAGE_URL,
+        &format!("{}/sash/api/v2/me/usage", edition.base()),
         &[
             ("authorization", &format!("Bearer {token}")),
             ("cosy-client-type", "10"),
@@ -470,9 +504,8 @@ pub(crate) fn samples_from_snapshot(value: &Value) -> Vec<QuotaSample> {
 
 // ---- daily check-in ---------------------------------------------------------
 //
-// The credits campaign claim rides the same bearer token and base the usage
-// meter already answers (`openapi.qoder.sh`; the CN edition's base is the
-// fallback). Contract read out of the Qoder client's own main.log "[Campaign]"
+// The credits campaign claim uses the edition's own bearer token and API base.
+// Contract read out of the Qoder client's own main.log "[Campaign]"
 // lines and replayed by hand: the list header is `Cosy-ClientType` — NO dash;
 // the dashed `cosy-client-type` the community claimers pass is an unknown
 // client to the server, which answers an EMPTY list for it. Only
@@ -507,7 +540,7 @@ pub(crate) fn samples_from_snapshot(value: &Value) -> Vec<QuotaSample> {
 // 签到未成功.
 
 const CAMPAIGNS_PATH: &str = "/sash/api/v1/me/campaigns";
-const CHECKIN_BASES: [&str; 2] = ["https://openapi.qoder.sh", "https://openapi.qoder.com.cn"];
+
 /// How long one minted machine identity stays fresh. The client itself keeps
 /// its spawn result for an hour; 30 minutes matches what the community
 /// bridges field-verified as "briefly stale is still accepted".
@@ -531,6 +564,8 @@ struct QoderCheckinState {
     /// request is what probes into a rate limit — and reports `claim_gated`
     /// off this record; a manual click still tries again.
     last_gated_day: String,
+    /// Hash of the current login identity; a different account cannot reuse success.
+    account_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -559,8 +594,20 @@ struct QoderCheckinOutcome {
     credits: f64,
 }
 
-fn checkin_state_path() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|d| d.join("tokenme").join("quota").join("qoder_checkin.json"))
+fn checkin_state_path_for(edition: Edition) -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("tokenme").join("quota").join(format!("{}_checkin.json", edition.tool())))
+}
+
+fn account_key(info: &Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let id = ["uid", "userId", "id", "token"].iter()
+        .find_map(|k| info.get(*k).and_then(Value::as_str).filter(|v| !v.is_empty()))?;
+    Some(format!("{:x}", Sha256::digest(id.as_bytes())))
+}
+
+fn bind_checkin_account(state: &mut QoderCheckinState, info: &Value) {
+    let key = account_key(info).unwrap_or_default();
+    if state.account_key != key { *state = QoderCheckinState { account_key: key, ..Default::default() }; }
 }
 
 fn load_checkin_state(path: &std::path::Path) -> QoderCheckinState {
@@ -575,11 +622,16 @@ fn cached_checkin_is_confirmed(state: &QoderCheckinState, today: &str, force: bo
 }
 
 fn save_checkin_state(path: &std::path::Path, state: &QoderCheckinState) {
-    if let Ok(text) = serde_json::to_string(state) {
-        let _ = std::fs::write(path, text);
-    }
+    let Ok(text) = serde_json::to_string(state) else { return };
+    let Some(parent) = path.parent() else { return };
+    if std::fs::create_dir_all(parent).is_err() { return; }
+    static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{seq}.tmp", std::process::id()));
+    if std::fs::write(&tmp, text).is_ok() { let _ = usage_core::replace_file(&tmp, path); }
 }
 
+#[cfg(test)]
 fn checkin_day() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
@@ -623,12 +675,17 @@ fn claimable_campaigns(body: &Value) -> Vec<(String, f64)> {
 /// lingering row is yesterday's residue wearing a `startAt` that has already
 /// rolled to today — measured 2026-10-10 morning that exact shape read as
 /// 已签到 hours before the window opened.
+#[cfg(test)]
 fn today_benefits_all_claimed(body: &Value, day_open: bool) -> bool {
+    today_benefits_all_claimed_for(Edition::Global, body, day_open)
+}
+
+fn today_benefits_all_claimed_for(edition: Edition, body: &Value, day_open: bool) -> bool {
     if !day_open {
         return false;
     }
     let Some(rows) = body.get("campaigns").and_then(Value::as_array) else { return false };
-    let today = chrono::Local::now().date_naive();
+    let today = edition.at(chrono::Utc::now()).date_naive();
     let mut any_today = false;
     for r in rows {
         if r.get("actionType").and_then(Value::as_str) != Some("CLAIM_BENEFIT") {
@@ -638,7 +695,7 @@ fn today_benefits_all_claimed(body: &Value, day_open: bool) -> bool {
             .get("startAt")
             .and_then(Value::as_i64)
             .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
-            .map(|dt| dt.with_timezone(&chrono::Local).date_naive() == today)
+            .map(|dt| edition.at(dt).date_naive() == today)
             .unwrap_or(false);
         if !started_today {
             continue;
@@ -715,9 +772,11 @@ fn parse_machine_identity(out: &str) -> Option<QoderMachineIdentity> {
 #[cfg(target_os = "macos")]
 fn umid_candidates() -> Vec<std::path::PathBuf> {
     let rel = "Contents/Resources/umid/runtime-info";
-    let mut out: Vec<_> = ["/Applications/Qoder.app"].iter().map(|r| std::path::Path::new(r).join(rel)).collect();
+    let mut out: Vec<_> = ["/Applications/Qoder.app", "/Applications/Qoder CN.app", "/Applications/QoderCN.app"].iter().map(|r| std::path::Path::new(r).join(rel)).collect();
     if let Some(home) = dirs::home_dir() {
-        out.push(home.join("Applications").join("Qoder.app").join(rel));
+        for name in ["Qoder.app", "Qoder CN.app", "QoderCN.app"] {
+            out.push(home.join("Applications").join(name).join(rel));
+        }
     }
     out
 }
@@ -861,11 +920,15 @@ fn add_umid_root(out: &mut Vec<std::path::PathBuf>, root: std::path::PathBuf) {
 fn umid_candidates() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Some(p) = std::env::var_os("LOCALAPPDATA") {
-        add_umid_root(&mut out, std::path::PathBuf::from(p).join("Programs").join("Qoder"));
+        for name in ["Qoder", "Qoder CN", "QoderCN", "Qoder CN IDE"] {
+            add_umid_root(&mut out, std::path::PathBuf::from(&p).join("Programs").join(name));
+        }
     }
     for var in ["ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(p) = std::env::var_os(var) {
-            add_umid_root(&mut out, std::path::PathBuf::from(p).join("Qoder"));
+            for name in ["Qoder", "Qoder CN", "QoderCN", "Qoder CN IDE"] {
+                add_umid_root(&mut out, std::path::PathBuf::from(&p).join(name));
+            }
         }
     }
     for root in registry_qoder_roots() {
@@ -881,11 +944,17 @@ fn umid_candidates() -> Vec<std::path::PathBuf> {
 
 /// The app's own bridge binary; `TOKENME_QODER_UMID_BIN` overrides discovery
 /// (tests), and a missing app just means no identity — never a mock one.
-fn umid_binary() -> Option<std::path::PathBuf> {
-    if let Some(p) = std::env::var_os("TOKENME_QODER_UMID_BIN").map(std::path::PathBuf::from) {
+#[cfg(test)]
+fn umid_binary() -> Option<std::path::PathBuf> { umid_binary_for(Edition::Global) }
+
+fn umid_binary_for(edition: Edition) -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os(if edition == Edition::China { "TOKENME_QODER_CN_UMID_BIN" } else { "TOKENME_QODER_UMID_BIN" }).map(std::path::PathBuf::from) {
         return p.is_file().then_some(p);
     }
-    umid_candidates().into_iter().find(|p| p.is_file())
+    umid_candidates().into_iter().filter(|p| {
+        let cn = p.to_string_lossy().to_ascii_lowercase().replace([' ', '-', '_'], "").contains("qodercn");
+        cn == (edition == Edition::China)
+    }).find(|p| p.is_file())
 }
 
 /// One bridge run (3.1 s measured on this machine): `runtime-info prod
@@ -893,9 +962,9 @@ fn umid_binary() -> Option<std::path::PathBuf> {
 /// identity — identical across account ids on one host. The child is killed
 /// at 25 s; a killed or malformed run mints nothing and the claim falls back
 /// to the gated path.
-fn bridge_identity(uid: &str) -> Option<QoderMachineIdentity> {
+fn bridge_identity(edition: Edition, uid: &str) -> Option<QoderMachineIdentity> {
     use std::io::{Read, Write};
-    let exe = umid_binary()?;
+    let exe = umid_binary_for(edition)?;
     #[cfg(any(windows, target_os = "macos"))]
     const ACCOUNT_STDIN: bool = true;
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -942,27 +1011,28 @@ fn bridge_identity(uid: &str) -> Option<QoderMachineIdentity> {
 /// Minted identities are machine-level and accepted briefly stale, so one
 /// process keeps the last answer instead of paying a native run per poll.
 /// Losing the cache to a restart just mints once more.
-static MACHINE_IDENTITY: std::sync::Mutex<Option<(i64, QoderMachineIdentity)>> =
-    std::sync::Mutex::new(None);
+static MACHINE_IDENTITY: std::sync::Mutex<Vec<(Edition, String, i64, QoderMachineIdentity)>> =
+    std::sync::Mutex::new(Vec::new());
 
-fn machine_identity(uid: &str) -> Option<QoderMachineIdentity> {
+fn machine_identity(edition: Edition, uid: &str) -> Option<QoderMachineIdentity> {
     let now = chrono::Local::now().timestamp_millis();
     let mut cache = MACHINE_IDENTITY.lock().ok()?;
-    if let Some((at, id)) = cache.as_ref() {
+    if let Some((_, _, at, id)) = cache.iter().find(|(ed, account, _, _)| *ed == edition && account == uid) {
         if now - at < IDENTITY_TTL_MS {
             return Some(id.clone());
         }
     }
-    let id = bridge_identity(uid)?;
-    *cache = Some((now, id.clone()));
+    let id = bridge_identity(edition, uid)?;
+    cache.retain(|(ed, _, at, _)| *ed != edition && now - at < IDENTITY_TTL_MS);
+    cache.push((edition, uid.into(), now, id.clone()));
     Some(id)
 }
 
 /// The persistent machine UUID the app writes once. Read only: creating one
 /// here would mint a device identity the real client would then adopt — a
 /// decision that belongs to the app, not this probe.
-fn machine_id_file() -> Option<String> {
-    app_dirs()
+fn machine_id_file(edition: Edition) -> Option<String> {
+    app_dirs_for(edition)
         .iter()
         .map(|d| d.join("auth.machine-id"))
         .find_map(|p| std::fs::read_to_string(p).ok())
@@ -1004,12 +1074,12 @@ fn machine_hostname() -> Option<String> {
 /// Assemble the full set the claim adds beyond the bearer, or nothing when a
 /// half is missing (no app, no bridge answer, no machine id): the claim then
 /// goes out bare and the vendor's answer decides the outcome as before.
-fn claim_identity(uid: &str) -> Option<QoderClaimIdentity> {
+fn claim_identity(edition: Edition, uid: &str) -> Option<QoderClaimIdentity> {
     Some(QoderClaimIdentity {
-        machine_id: machine_id_file()?,
+        machine_id: machine_id_file(edition)?,
         machine_os: machine_os(),
         hostname: machine_hostname(),
-        identity: machine_identity(uid)?,
+        identity: machine_identity(edition, uid)?,
     })
 }
 
@@ -1077,16 +1147,19 @@ fn checkin_claim(base: &str, token: &str, campaign: &str, ident: Option<&QoderCl
 
 /// Fire today's claim (unless today is already spent) and report the outcome.
 /// `None` = no usable token or no state file: the probe then never claims.
-fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome> {
-    let path = checkin_state_path()?;
+fn daily_checkin_for(edition: Edition, info: &Value, force: bool) -> Option<QoderCheckinOutcome> {
+    let path = checkin_state_path_for(edition)?;
+    if !token_is_fresh(info, chrono::Utc::now().timestamp_millis()) { return None; }
     let token = info.get("token").and_then(Value::as_str).filter(|t| !t.is_empty())?;
     let mut state = load_checkin_state(&path);
-    let today = checkin_day();
+    bind_checkin_account(&mut state, info);
+    let tool = edition.tool();
+    let today = edition.day();
     // Only a result confirmed by this reader may skip today's live check. Old
     // state files have `confirmed=false`, so a stale zero-credit marker is
     // revalidated against the vendor instead of hiding a still-claimable row.
     if cached_checkin_is_confirmed(&state, &today, force) {
-        crate::log_checkin(&format!("qoder: {today} already claimed (cached, +{:.0}){}", state.last_credits, if force { " — forced re-check" } else { "" }));
+        crate::log_checkin(&format!("{tool}: {today} already claimed (cached, +{:.0}){}", state.last_credits, if force { " — forced re-check" } else { "" }));
         return Some(QoderCheckinOutcome {
             done_today: true,
             was_already: false,
@@ -1100,7 +1173,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     // Master switch off and this is not an explicit click: the day stays
     // untouched — no claim, no marker row speaking for it.
     if !force && !crate::auto_checkin_enabled() {
-        crate::log_checkin(&format!("qoder: {today} skipped — 自动签到 off"));
+        crate::log_checkin(&format!("{}: {today} skipped — 自动签到 off", edition.tool()));
         return None;
     }
     // The day's campaign opens at 10:00 local: before that a claimable list
@@ -1109,7 +1182,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     // yesterday's under a startAt that has already rolled to today (measured
     // 2026-10-10 morning: the badge said 已签到 before the window opened).
     // The next pass after ten retries an open day on its own.
-    let day_open = chrono::Timelike::hour(&chrono::Local::now()) >= 10;
+    let day_open = edition.day_open();
     let may_claim = force || day_open;
     let mut outcome = QoderCheckinOutcome {
         done_today: false,
@@ -1122,7 +1195,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     };
     let mut answered = false; // a base returned a parseable campaigns envelope
     let mut attempted = false; // a claim POST actually went out
-    'bases: for base in CHECKIN_BASES {
+    'bases: for base in [edition.base()] {
         // Bare read first: it resolves the uid the mint needs without paying
         // the bridge run, and it is believed about what it *shows* — a
         // claimable row, today's row already CLAIMED.
@@ -1133,8 +1206,8 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         // nothing claimable and nothing closed is re-asked with the minted
         // identity before the day is read as closed or empty. The mint is
         // cached for 30 min, so this costs one bridge run per half hour.
-        let ident = if claimable_campaigns(&body).is_empty() && !today_benefits_all_claimed(&body, day_open) {
-            body.get("uid").and_then(Value::as_str).and_then(claim_identity)
+        let ident = if claimable_campaigns(&body).is_empty() && !today_benefits_all_claimed_for(edition, &body, day_open) {
+            body.get("uid").and_then(Value::as_str).and_then(|uid| claim_identity(edition, uid))
         } else {
             None
         };
@@ -1145,7 +1218,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         }
         for (id, amount) in claimable_campaigns(&body) {
             if !may_claim {
-                crate::log_checkin(&format!("qoder: {today} claimable but before 10:00 — waiting"));
+                crate::log_checkin(&format!("{tool}: {today} claimable but before 10:00 — waiting"));
                 outcome.too_early = true; // claimable but too early: day open, button greys
                 break 'bases;
             }
@@ -1160,7 +1233,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
             attempted = true;
             // The claim reuses the identity the re-list minted; a bare list
             // that already showed the row mints it here instead.
-            let ident = ident.clone().or_else(|| body.get("uid").and_then(Value::as_str).and_then(claim_identity));
+            let ident = ident.clone().or_else(|| body.get("uid").and_then(Value::as_str).and_then(|uid| claim_identity(edition, uid)));
             match checkin_claim(base, token, &id, ident.as_ref()) {
                 Some((true, credits, _)) => {
                     let credits = if credits > 0.0 { credits } else { amount };
@@ -1171,7 +1244,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
                     state.last_ok_day = today.clone();
                     state.last_credits = credits;
                     state.confirmed = true;
-                    crate::log_checkin(&format!("qoder: {today} claimed +{credits:.0} credits (auto)"));
+                    crate::log_checkin(&format!("{tool}: {today} claimed +{credits:.0} credits (auto)"));
                     outcome = QoderCheckinOutcome {
                         done_today: true,
                         was_already: false,
@@ -1188,7 +1261,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
                 // stop — retrying a gated claim is what probes into a rate
                 // limit.
                 Some((false, _, true)) => {
-                    crate::log_checkin(&format!("qoder: {today} claim refused by the device gate (SAME_PERSON) — claim in the client"));
+                    crate::log_checkin(&format!("{tool}: {today} claim refused by the device gate (SAME_PERSON) — claim in the client"));
                     state.last_gated_day = today.clone();
                     outcome.claim_gated = true;
                     break 'bases;
@@ -1204,8 +1277,8 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         // reading stamped the day paid off that flap — the badge said 已签到
         // while the client still showed the benefit unclaimed. Only rows
         // whose window started *today* may speak for today at all.
-        if today_benefits_all_claimed(&body, day_open) {
-            crate::log_checkin(&format!("qoder: {today} already claimed (the row is CLAIMED)"));
+        if today_benefits_all_claimed_for(edition, &body, day_open) {
+            crate::log_checkin(&format!("{tool}: {today} already claimed (the row is CLAIMED)"));
             state.last_attempt_day = today.clone();
             state.last_ok_day = today.clone();
             state.last_credits = 0.0;
@@ -1224,10 +1297,10 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
     }
     if answered && !outcome.done_today && !outcome.too_early && !outcome.claim_gated {
         if attempted {
-            crate::log_checkin(&format!("qoder: {today} claim failed (the POST was refused) — will retry"));
+            crate::log_checkin(&format!("{tool}: {today} claim failed (the POST was refused) — will retry"));
             outcome.claim_failed = true; // we asked and were refused for other reasons
         } else {
-            crate::log_checkin(&format!("qoder: {today} no claimable campaign — day stays open"));
+            crate::log_checkin(&format!("{tool}: {today} no claimable campaign — day stays open"));
             outcome.no_campaign = true; // the server spoke and had nothing to claim
         }
     }
@@ -1238,7 +1311,7 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
         state.confirmed = false;
     }
     if !answered {
-        crate::log_checkin(&format!("qoder: {today} check-in skipped — the campaigns endpoint answered nothing"));
+        crate::log_checkin(&format!("{tool}: {today} check-in skipped — the campaigns endpoint answered nothing"));
     }
     save_checkin_state(&path, &state);
     Some(outcome)
@@ -1248,33 +1321,34 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
 /// gate and the day lock (a manual click is the user asking again). The bool
 /// says whether the day actually closed, so the button only turns into the
 /// done badge for a real claim — "queued" or "too early" stay buttons.
-pub fn qoder_manual_checkin() -> Result<(bool, String), String> {
-    let info = app_dirs()
-        .iter()
-        .find(|d| d.join(AUTH_FILE).is_file())
-        .and_then(|dir| discover_login_info(dir))
-        .ok_or_else(|| "未找到 Qoder 登录".to_string())?;
-    if chrono::Timelike::hour(&chrono::Local::now()) < 10 && !state_says_done_today() {
-        return Ok((false, "未到签到时间，10:00 后可领".into()));
-    }
-    match qoder_daily_checkin(&info, true) {
-        Some(o) if o.done_today && !o.was_already && o.credits > 0.0 => {
-            Ok((true, format!("签到成功，+{:.0} 积分", o.credits)))
-        }
-        Some(o) if o.done_today => Ok((true, "今日已签到".to_string())),
-        Some(o) if o.claim_gated => Ok((false, "请在 Qoder 客户端内领取".into())),
-        Some(o) if o.no_campaign => Ok((false, "今日暂无可领的签到活动".into())),
-        _ => Ok((false, "签到未成功，稍后再试".to_string())),
-    }
+pub fn qoder_manual_checkin() -> Result<(bool, String), String> { manual_checkin_for(Edition::Global) }
+pub fn qoder_cn_manual_checkin() -> Result<(bool, String), String> { manual_checkin_for(Edition::China) }
+
+fn login_for(edition: Edition) -> Option<Value> {
+    app_dirs_for(edition).iter().find_map(|dir| discover_login_info(edition, dir)).or_else(|| {
+        state_dbs_for(edition).iter().find_map(|db| {
+            let conn = open(db)?;
+            ide_secret(edition, db, &conn, USER_KEY)
+        })
+    })
 }
 
-/// Whether today is already recorded as claimed — a manual click before 10:00
-/// on a morning the panel itself claimed at 09:59 still says 已签到.
-fn state_says_done_today() -> bool {
-    checkin_state_path()
-        .map(|p| load_checkin_state(&p))
-        .map(|s| s.last_ok_day == checkin_day())
-        .unwrap_or(false)
+fn manual_checkin_for(edition: Edition) -> Result<(bool, String), String> {
+    let info = login_for(edition).ok_or_else(|| format!("未找到 {} 登录", edition.name()))?;
+    let done = checkin_state_path_for(edition).map(|p| load_checkin_state(&p)).is_some_and(|mut s| {
+        bind_checkin_account(&mut s, &info);
+        cached_checkin_is_confirmed(&s, &edition.day(), false)
+    });
+    if !edition.day_open() && !done {
+        return Ok((false, "未到签到时间，10:00 后可领".into()));
+    }
+    match daily_checkin_for(edition, &info, true) {
+        Some(o) if o.done_today && !o.was_already && o.credits > 0.0 => Ok((true, format!("签到成功，+{:.0} 积分", o.credits))),
+        Some(o) if o.done_today => Ok((true, "今日已签到".into())),
+        Some(o) if o.claim_gated => Ok((false, format!("请在 {} 客户端内领取", edition.name()))),
+        Some(o) if o.no_campaign => Ok((false, "今日暂无可领的签到活动".into())),
+        _ => Ok((false, "签到未成功，稍后再试".into())),
+    }
 }
 
 /// The row that carries the 已签到 mark into the strip: it only exists for a
@@ -1297,7 +1371,7 @@ fn checkin_marker_row(outcome: QoderCheckinOutcome) -> QuotaSample {
 }
 
 /// Append the checkin mark to a live sample set, once the day is closed.
-fn with_checkin_mark(samples: Vec<QuotaSample>, outcome: &Option<QoderCheckinOutcome>) -> Vec<QuotaSample> {
+fn with_checkin_mark(edition: Edition, samples: Vec<QuotaSample>, outcome: &Option<QoderCheckinOutcome>) -> Vec<QuotaSample> {
     match outcome {
         Some(o) if o.done_today => {
             let mut out = samples;
@@ -1325,7 +1399,7 @@ fn with_checkin_mark(samples: Vec<QuotaSample>, outcome: &Option<QoderCheckinOut
                 used_percent: 0.0,
                 window_minutes: 0,
                 resets_at_ms: 0,
-                label: Some("签到需在 Qoder 内领取".into()),
+                label: Some(format!("签到需在 {} 内领取", edition.name())),
                 id: Some("checkin-gated".into()),
             });
             out
@@ -1340,6 +1414,61 @@ fn with_checkin_mark(samples: Vec<QuotaSample>, outcome: &Option<QoderCheckinOut
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cn_checkin_uses_beijing_day_and_ten_oclock() {
+        let cn = Edition::China;
+        let before = chrono::DateTime::parse_from_rfc3339("2026-10-10T23:59:00Z").unwrap().to_utc();
+        let after = chrono::DateTime::parse_from_rfc3339("2026-10-11T02:00:00Z").unwrap().to_utc();
+        assert_eq!(cn.at(before).format("%Y-%m-%d").to_string(), "2026-10-11");
+        assert_eq!(chrono::Timelike::hour(&cn.at(before)), 7);
+        assert_eq!(chrono::Timelike::hour(&cn.at(after)), 10);
+    }
+    #[test]
+    fn cn_credentials_endpoints_and_checkin_cache_are_isolated() {
+        let global = Edition::Global;
+        let cn = Edition::China;
+        assert_ne!(global.base(), cn.base());
+        assert_ne!(checkin_state_path_for(global), checkin_state_path_for(cn));
+        assert!(app_dirs_for(global).iter().all(|d| d.file_name().unwrap().to_string_lossy().starts_with(global.profile_prefix())));
+        assert!(app_dirs_for(cn).iter().all(|d| d.file_name().unwrap().to_string_lossy().starts_with(cn.profile_prefix())));
+        assert!(global.keychains().iter().all(|k| !cn.keychains().contains(k)));
+        let today = checkin_day();
+        let first = serde_json::json!({"userId":"first", "token":"t"});
+        let second = serde_json::json!({"userId":"second", "token":"t"});
+        let mut state = QoderCheckinState { last_attempt_day: today.clone(), last_ok_day: today.clone(),
+            confirmed: true, account_key: account_key(&first).unwrap(), ..Default::default() };
+        bind_checkin_account(&mut state, &first);
+        assert!(cached_checkin_is_confirmed(&state, &today, false));
+        bind_checkin_account(&mut state, &second);
+        assert!(!cached_checkin_is_confirmed(&state, &today, false));
+        assert_eq!(state.account_key, account_key(&second).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quota/qoder_cn_checkin.json");
+        save_checkin_state(&path, &state);
+        assert_eq!(load_checkin_state(&path).account_key, state.account_key);
+    }
+
+    #[test]
+    #[ignore = "reads the installed Qoder CN login and calls its real quota and daily claim APIs"]
+    fn live_cn_quota_and_daily_checkin() {
+        crate::set_checkin_log(std::sync::Arc::new(|s| println!("{s}")));
+        let info = login_for(Edition::China).expect("Qoder CN login is readable");
+        assert!(token_is_fresh(&info, chrono::Utc::now().timestamp_millis()), "the client's token must be fresh");
+        let before = live_usage_for(Edition::China, &info).expect("CN usage API answers");
+        println!("[qoder_cn] before: {before:?}");
+        let result = daily_checkin_for(Edition::China, &info, false).expect("daily check-in returns a state");
+        println!("[qoder_cn] check-in: {result:?}");
+        let after = live_usage_for(Edition::China, &info).expect("CN usage API still answers after check-in");
+        println!("[qoder_cn] after: {after:?}");
+        assert!(!after.is_empty(), "CN quota has drawable credit packs after check-in");
+        if result.done_today {
+            let state = load_checkin_state(&checkin_state_path_for(Edition::China).unwrap());
+            assert!(cached_checkin_is_confirmed(&state, &Edition::China.day(), false));
+            assert_eq!(state.account_key, account_key(&info).unwrap());
+            let rows = QoderCnQuota.fetch();
+            assert!(rows.iter().any(|r| r.id.as_deref() == Some("checkin")), "the registered probe carries the claim to the UI");
+        }
+    }
     use serde_json::json;
 
     /// The campaigns shape the client acts on: benefit actions only, and only
@@ -1453,7 +1582,7 @@ mod tests {
         });
         assert_eq!(plain.label.as_deref(), Some("已自动签到"));
         // An open day carries no row at all.
-        let none: Vec<QuotaSample> = with_checkin_mark(
+        let none: Vec<QuotaSample> = with_checkin_mark(Edition::Global,
             vec![QuotaSample {
                 used_percent: 1.0,
                 window_minutes: 0,
@@ -1513,7 +1642,7 @@ mod tests {
             claim_failed: false,
             credits: 0.0,
         };
-        let rows: Vec<QuotaSample> = with_checkin_mark(vec![], &Some(gated_outcome));
+        let rows: Vec<QuotaSample> = with_checkin_mark(Edition::Global, vec![], &Some(gated_outcome));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id.as_deref(), Some("checkin-gated"));
         assert_eq!(rows[0].label.as_deref(), Some("签到需在 Qoder 内领取"));

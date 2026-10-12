@@ -52,6 +52,8 @@ const VENDOR_PRIORITY: &[&str] = &[
 /// Money computed this way is an **estimate of a subscription allowance**, not a
 /// bill: the vendor converts tokens into credits per model and says the rates may
 /// change, so callers surface it as such via [`crate::Summary::credit_cost`].
+// Qoder CN's credits have different CNY plan prices (docs.qoder.cn/product-overview/credits).
+// Keep them in their native unit; the international USD rate must never price them.
 pub const CREDIT_USD: &[(&str, f64, &str)] = &[("qoder", 0.01, "docs.qoder.com/zh/account/pricing · Pro $20 = 2,000 Credits (2026-09-24)")];
 
 /// `(usd_per_credit, provenance)` when this tool's credits carry a published price.
