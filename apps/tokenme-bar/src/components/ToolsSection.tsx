@@ -12,7 +12,7 @@ import {
 } from "../lib/format";
 import { Section } from "./Section";
 import { nextSortState, SortToggle, type SortState } from "./SortToggle";
-import { ToolIcon } from "./ToolIcon";
+import { ToolIcon, useToolIconTints } from "./ToolIcon";
 import { useMoney } from "../lib/display";
 import { t as tr } from "../lib/i18n";
 
@@ -26,6 +26,8 @@ import { t as tr } from "../lib/i18n";
  */
 export function ToolsSection({ tools }: { tools: Item[] }) {
   const showMoney = useMoney();
+  const iconTints = useToolIconTints();
+  const colorOf = (tool: string) => iconTints[tool] ?? toolColor(tool);
   const [sort, setSort] = useState<SortState>("default");
   const ordered = useMemo(() => {
     if (sort === "default") return tools;
@@ -69,13 +71,15 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
         {ordered.map((t) => {
           const credit = t.counts.credits > 0 && t.total_tokens === 0;
           const wash = washOf(t);
+          const iconTint = iconTints[t.key];
           return (
             <li
               className="tool"
               key={t.key}
               style={
                 {
-                  "--c": toolColor(t.key),
+                  "--c": colorOf(t.key),
+                  backgroundColor: iconTint ? `color-mix(in srgb, ${iconTint} 8%, var(--surface))` : undefined,
                   backgroundImage: "linear-gradient(90deg, color-mix(in srgb, var(--c) 9%, transparent) 0 0)",
                   backgroundSize: `${wash}% 100%`,
                 } as React.CSSProperties
@@ -131,7 +135,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
                   key={t.key}
                   style={
                     {
-                      "--c": toolColor(t.key),
+                      "--c": colorOf(t.key),
                       width: `${(t.cost / totalCost) * 100}%`,
                     } as React.CSSProperties
                   }
@@ -143,7 +147,7 @@ export function ToolsSection({ tools }: { tools: Item[] }) {
               .filter((t) => t.cost > 0)
               .map((t) => (
                 <span key={t.key} className="share-item">
-                  <i style={{ background: toolColor(t.key) }} />
+                  <i style={{ background: colorOf(t.key) }} />
                   {toolDisplay(t.key)} <b className="num">{percent(totalCost > 0 ? (t.cost / totalCost) * 100 : 0, 0)}</b>
                 </span>
               ))}
