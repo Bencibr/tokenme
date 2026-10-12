@@ -93,6 +93,8 @@ tap 随每次发布自动更新，`brew upgrade` 即可升级；cask 安装不�
 
 **Windows 安装**：安装器支持“所有用户”模式。共享电脑上请选择“所有用户”，升级时也保持同一模式，这样会原地替换机器级安装，并对所有 Windows 账户生效。
 
+Windows 安装包同时包含 `tokenme` 命令行工具，并自动将其 `bin` 目录加入 PATH。安装后重新打开终端，即可运行 `tokenme --help`、`tokenme daily` 和 `tokenme quota`。卸载时会移除该 PATH 项。
+
 > **macOS 首次打开**（仅手动装 DMG 时）：安装包是 ad-hoc 签名（没有开发者证书），Gatekeeper 可能拦一下——右键打开即可，或者清掉隔离标记后正常启动：
 >
 > ```bash

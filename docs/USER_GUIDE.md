@@ -25,7 +25,7 @@ macOS menu-bar panel (optional, ad-hoc signed — right-click → Open on first 
 ./scripts/build-macos.sh          # produces TokenMe.app + a drag-install DMG
 ```
 
-The panel is not macOS-only: on Windows `pnpm tauri build --bundles nsis` in `apps/tokenme-bar` lands `TokenMe_<v>_x64-setup.exe`, and `scripts/build-windows.ps1` builds the `tokenme.exe` CLI there.
+On Windows, `pnpm tauri build --bundles nsis` in `apps/tokenme-bar` produces `TokenMe_<v>_x64-setup.exe` with both the panel and CLI. The console binary lives in `<install directory>\bin\tokenme.exe`; installation adds that `bin` directory to the user PATH (Only me) or system PATH (All users). Open a new terminal after installation and run `tokenme --help`. Upgrades keep one PATH entry; uninstall removes only this installation's entry. `scripts/build-windows.ps1` also builds the standalone CLI.
 
 ## 2. First run
 

@@ -93,6 +93,8 @@ The tap is bumped automatically on every release, so `brew upgrade` keeps you cu
 
 **Windows installation**: the setup supports an all-users install for shared machines. Choose **All users** in the installer when TokenMe should be available to every Windows account; use the same mode for upgrades so the machine-wide installation is replaced in place.
 
+The Windows setup also installs the `tokenme` CLI and adds its `bin` directory to PATH automatically. Open a new terminal after installation to use `tokenme --help`, `tokenme daily`, and `tokenme quota`. Uninstall removes that PATH entry.
+
 > **First launch on macOS** (manual DMG only): the bundle is ad-hoc signed (no developer certificate), so Gatekeeper may step in. Right-click → Open works, or clear the quarantine flag:
 >
 > ```bash
