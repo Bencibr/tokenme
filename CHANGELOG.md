@@ -6,6 +6,7 @@ All notable changes to TokenMe are documented in this file. The format follows [
 
 ### Changed
 
+- **仓库首页优先中文** — `README.md` 换为中文版（原 `README_CN.md`），英文版移至 `README_EN.md`，顶部语言互链对调；适配器计数测试的文件映射随行，gitea 与 GitHub 两个入口的默认阅读顺序一致。
 - Activity view now uses real 15-minute buckets for today's heatmap.
 
 ## [Unreleased]
