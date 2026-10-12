@@ -45,6 +45,23 @@ pub fn is_checkin_tool(tool: &str) -> bool {
     CHECKIN_TOOLS.iter().any(|(id, _)| *id == tool)
 }
 
+/// The automatic check-in master switch, read by every provider's daily path
+/// right before a claim would leave the process. On by default: the CLI
+/// collector has no settings and its daily `export` pass is what keeps a
+/// headless server's streak alive; the panel engine writes
+/// `settings.auto_checkin` into it at every quota pass, so the switch in the
+/// sheet governs this within one cadence tick. The manual 签到 button never
+/// consults it — an explicit click is the user asking again.
+static AUTO_CHECKIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_auto_checkin_enabled(on: bool) {
+    AUTO_CHECKIN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn auto_checkin_enabled() -> bool {
+    AUTO_CHECKIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// One forced claim right now, by tool id — the panel's check-in button.
 /// `(claimed, message)`: the bool is what the button paints, the message is
 /// user-facing; a tool outside the registry never reaches a vendor.

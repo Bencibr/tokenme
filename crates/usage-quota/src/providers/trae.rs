@@ -587,6 +587,11 @@ fn cn_daily_checkin(login: &Login, force: bool) -> Option<TraeCheckinOutcome> {
         });
     }
 
+    // Master switch off and not an explicit click: no claim leaves.
+    if !force && !crate::auto_checkin_enabled() {
+        return None;
+    }
+
     let device = device_id_of(&mut state);
     let url = format!("{}{CLAIM_PATH}", login.host);
     let claimed: Option<(i64, f64)> = ureq::AgentBuilder::new()

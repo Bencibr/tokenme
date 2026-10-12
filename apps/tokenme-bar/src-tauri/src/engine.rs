@@ -867,6 +867,9 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
     }
     let poll_started = Instant::now();
     let settings = app.state::<Shared>().settings();
+    // The check-in master switch rides the settings into the probes: it is
+    // read inside their fetches, past this pass's host-gate decisions.
+    usage_quota::set_auto_checkin_enabled(settings.auto_checkin);
     let mut q = usage_core::report::poll_quota(adapters);
     // Two gates, one pass. The user's own word (`quota_polling`,
     // `quota_probes_off`) is the standing instruction; the host-exit test is

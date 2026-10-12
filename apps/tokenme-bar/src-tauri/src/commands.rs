@@ -352,12 +352,21 @@ pub async fn set_host_exit_pause(app: AppHandle, on: bool) -> Result<(), String>
 /// change lands within one cadence tick.
 #[tauri::command]
 pub async fn set_auto_checkin(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".to_string());
-    };
-    settings.auto_checkin = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    {
+        let shared = app.state::<Shared>();
+        let Ok(mut settings) = shared.settings.lock() else {
+            return Err("settings busy".to_string());
+        };
+        settings.auto_checkin = on;
+        settings.clone().save().map_err(|e| e.to_string())?;
+    }
+    // The switch is the probes' master gate now: it takes effect this pass,
+    // not on the next settings re-read, so a fresh pass runs with it.
+    usage_quota::set_auto_checkin_enabled(on);
+    if let Some(channel) = app.try_state::<EngineChannel>() {
+        let _ = channel.0.send(Msg::Refresh);
+    }
+    Ok(())
 }
 
 /// The master switch: off, no vendor request leaves on the next pass. It is

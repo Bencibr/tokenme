@@ -1097,6 +1097,12 @@ fn qoder_daily_checkin(info: &Value, force: bool) -> Option<QoderCheckinOutcome>
             credits: state.last_credits,
         });
     }
+    // Master switch off and this is not an explicit click: the day stays
+    // untouched — no claim, no marker row speaking for it.
+    if !force && !crate::auto_checkin_enabled() {
+        crate::log_checkin(&format!("qoder: {today} skipped — 自动签到 off"));
+        return None;
+    }
     // The day's campaign opens at 10:00 local: before that a claimable list
     // must not be claimed early, an empty list must not close the day, and no
     // row may speak for today at all — the lingering row's CLAIMED status is

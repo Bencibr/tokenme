@@ -138,6 +138,12 @@ fn daily_checkin(
     if !force && !account.is_empty() && state.account == account && state.day == today {
         return Ok((true, "今日已签到".into()));
     }
+
+    // Master switch off and not an explicit click: nothing leaves, and the
+    // pack renders unclaimed rather than speaking for a claim never made.
+    if !force && !crate::auto_checkin_enabled() {
+        return Ok((false, "自动签到已关闭".into()));
+    }
     let (status, body) = request(STATUS).ok_or("无法读取 WorkBuddy 签到状态，请确认已登录国内版")?;
     if !successful(status, &body) { return Err("WorkBuddy 签到状态读取失败，请确认登录有效".into()); }
     let data = payload(&body);
@@ -190,6 +196,24 @@ pub fn manual_checkin() -> Result<(bool, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The check-in master switch is the auto path's gate: off, the automatic
+    /// claim answers before any request leaves; an explicit click (force)
+    /// still reaches the transport. Serialized on the fetch lock because the
+    /// flag is process-global.
+    #[test]
+    fn the_master_switch_stops_the_auto_claim_before_any_request() {
+        let _serial = CHECKIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(crate::auto_checkin_enabled(), "the switch defaults on");
+        crate::set_auto_checkin_enabled(false);
+        let mut calls = 0;
+        let auto = daily_checkin(None, "acc", "2026-10-12", false, |_| { calls += 1; None });
+        let forced = daily_checkin(None, "acc", "2026-10-12", true, |_| { calls += 1; None });
+        crate::set_auto_checkin_enabled(true);
+        assert_eq!(auto, Ok((false, "自动签到已关闭".into())));
+        assert_eq!(calls, 1, "off stops the auto path; the forced click still went out");
+        assert!(forced.is_err(), "the dead transport proves the forced request left");
+    }
 
     #[test]
     #[ignore = "claims today's credits on the signed-in domestic WorkBuddy account"]
