@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <b>One menu bar dashboard for every AI coding tool's token usage, spend, and remaining quota — so you stop checking each vendor's console.</b>
+  <b>One menu bar dashboard for 27 AI coding tools — token usage, spend, and remaining quota from a local, read-only index. Stop checking each vendor's console.</b>
 </p>
 
 <p align="center">
