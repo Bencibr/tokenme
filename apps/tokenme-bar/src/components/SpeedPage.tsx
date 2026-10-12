@@ -34,11 +34,12 @@ function metricLabel(metric: TtftSample["metric"]): string {
   return metric === "first_content" ? t("ttft.first_content") : t("ttft.ttft");
 }
 
-function SpeedCell({ value, cap, stage }: { value: string; cap: string; stage: "ok" | "mid" | "bad" | null }) {
+function SpeedCell({ value, cap, cap2, stage }: { value: string; cap: string; cap2?: string; stage: "ok" | "mid" | "bad" | null }) {
   return (
     <span className="speed-cell">
       <span className="speed-num num" data-stage={stage ?? undefined}>{value}</span>
       <span className="speed-cap">{cap}</span>
+      {cap2 ? <span className="speed-cap">{cap2}</span> : null}
     </span>
   );
 }
@@ -57,7 +58,7 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   const recent = comparable.slice(0, AVG_WINDOW);
   const avgMs = average(recent.map((sample) => sample.ttft_ms));
   const avgTps = average(recent.map((sample) => sample.tps).filter((tps): tps is number => typeof tps === "number" && Number.isFinite(tps)));
-  const sub = [t(granularityKey), latest?.model ?? null,
+  const sub = [latest?.model ?? null,
     comparable.length > 0 ? t("ttft.samples", { n: comparable.length }) : null].filter(Boolean).join(" · ");
   return (
     <li className="speed" title={t(nameKey)}>
@@ -66,6 +67,7 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
       <SpeedCell
         value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
         cap={latest ? metricLabel(latest.metric) : t("ttft.no_data")}
+        cap2={latest ? `${t(granularityKey)} · ${relativeTime(latest.sampled_at_ms, now)}` : undefined}
         stage={latest ? stageOfMs(latest.ttft_ms) : null}
       />
       <SpeedCell
@@ -78,7 +80,6 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
         cap={t("ttft.head.tps")}
         stage={avgTps != null ? stageOfTps(avgTps) : null}
       />
-      <span className="speed-time">{latest ? relativeTime(latest.sampled_at_ms, now) : "—"}</span>
     </li>
   );
 }

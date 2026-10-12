@@ -927,7 +927,7 @@
      would size to that row's figures — the rows' columns would never line up.
      Three figure columns (最近 / 平均 / TPS) share one width so the numbers
      read as a table without being one. */
-  grid-template-columns: 20px minmax(0, 1fr) repeat(3, 72px) 52px;
+  grid-template-columns: 20px minmax(0, 1fr) 104px 72px 56px;
   column-gap: var(--s2);
   align-items: center;
   padding: 6px 0;
@@ -974,12 +974,8 @@
   white-space: nowrap;
 }
 
-.speed-time {
-  align-self: end;
-  font-size: 9px;
-  color: var(--ink-3);
-  white-space: nowrap;
-  text-align: right;
+.speed-cap + .speed-cap {
+  margin-top: 2px;
 }
 
 .ttft-state,
