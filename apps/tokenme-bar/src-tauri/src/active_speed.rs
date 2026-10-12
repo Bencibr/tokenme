@@ -213,12 +213,35 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
     let server = claude_otel_ttft::start_server(0, move |samples| { let _ = tx.send(samples); })
         .map_err(|_| "Could not start the temporary Claude telemetry receiver.".to_string())?;
     let endpoint = format!("http://{}/v1/traces", server.local_addr());
+    // The process environment cannot carry the telemetry redirect: without
+    // --restricted the CLI applies ~/.claude/settings.json's env block OVER
+    // the inherited environment, and custom-API setups keep an OTEL endpoint
+    // of their own in there — the samples never reach this ephemeral
+    // receiver. A --settings file outranks the user's settings, so the whole
+    // telemetry block rides in there instead.
+    let settings_path = std::env::temp_dir()
+        .join(format!("tokenme-claude-speed-{}.json", std::process::id()));
+    std::fs::write(&settings_path, json!({ "env": {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+        "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/json",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": endpoint,
+        "OTEL_TRACES_EXPORT_INTERVAL": "1000",
+    }}).to_string())
+        .map_err(|_| "Could not stage the Claude telemetry settings.".to_string())?;
     let mut command = Command::new(executable);
     // `--tools` is variadic: written as two args it swallows the empty value
     // AND the prompt after it, and the CLI exits "Input must be provided".
     // The joined form closes the list; `--` pins the prompt as positional.
+    // No `--restricted`: it skips settings.json's env block — exactly where
+    // custom-API setups keep ANTHROPIC_BASE_URL/AUTH_TOKEN — so restricted
+    // runs fell back to OAuth and died on an identity this machine may not
+    // even use. Tools are already off, and the turn is capped at one.
     command
-        .args(["-p", "--output-format", "json", "--max-turns", "1", "--no-session-persistence", "--restricted", "--tools=", "--", PROMPT])
+        .args(["-p", "--output-format", "json", "--max-turns", "1", "--no-session-persistence", "--tools="])
+        .arg("--settings").arg(&settings_path)
+        .arg("--").arg(PROMPT)
         .current_dir(std::env::temp_dir())
         .env("CLAUDE_CODE_ENABLE_TELEMETRY", "1")
         .env("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1")
@@ -239,6 +262,7 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
         Err(_) => Err("Could not start Claude Code CLI.".into()),
     };
     server.shutdown();
+    let _ = std::fs::remove_file(&settings_path);
     result
 }
 
