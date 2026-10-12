@@ -57,6 +57,9 @@ pub(crate) const T_OPAQUE: u32 = 10;
 pub(crate) const S_TIMESTAMP: u32 = 1;
 pub(crate) const S_USAGE: u32 = 9;
 pub(crate) const S_GEN_REF: u32 = 20;
+/// Inside [`S_GEN_REF`], the 1-based step index. The first model step has no
+/// occurrence field, so it maps to generation index zero.
+pub(crate) const G_STEP_IDX: u32 = 2;
 /// Inside [`S_GEN_REF`], the 0-indexed `gen_metadata.idx` this step generated.
 pub(crate) const G_GEN_IDX: u32 = 3;
 /// `trajectory_metadata_blob.data`: the conversation's created-at, its first
@@ -143,14 +146,11 @@ pub(crate) struct Generation {
     pub response_id: Option<String>,
     /// `#9.#4`, when this agy version still writes an explicit stamp.
     pub own_timestamp: Option<i64>,
-    /// The 1.1.18 reading of `#9`, already gated on [`Lifetime`] and therefore
-    /// only ever `Some` when it cannot be a coincidence.
-    pub inferred_timestamp: Option<i64>,
 }
 
-/// Decodes one `gen_metadata.data` blob. `lifetime` bounds the timestamp guess;
-/// `None` disables guessing rather than weakening it.
-pub(crate) fn decode_generation(idx: i64, blob: &[u8], lifetime: Option<Lifetime>) -> Result<Decoded, Skip> {
+/// Decodes one `gen_metadata.data` blob. The timestamp argument is retained for
+/// fixture compatibility; modern timestamps come from the `steps` table.
+pub(crate) fn decode_generation(idx: i64, blob: &[u8], _lifetime: Option<Lifetime>) -> Result<Decoded, Skip> {
     let chat_model = bytes_field(blob, F_CHAT_MODEL).ok_or(Skip::NoChatModel)?;
     // A torn envelope means the fields past the break were never reachable, so
     // nothing about the row can be trusted: say where it stopped and drop it.
@@ -176,7 +176,6 @@ pub(crate) fn decode_generation(idx: i64, blob: &[u8], lifetime: Option<Lifetime
         stages,
         response_id: text_field(usage, U_RESPONSE_ID),
         own_timestamp: explicit_timestamp(timing),
-        inferred_timestamp: inferred_timestamp_ms(timing, lifetime),
     };
     let retries = decode_retries(idx, chat_model, &generation);
     Ok(Decoded { generation, retries })
@@ -208,7 +207,6 @@ fn decode_retries(idx: i64, chat_model: &[u8], parent: &Generation) -> Vec<Gener
             stages,
             response_id: Some(id),
             own_timestamp: parent.own_timestamp,
-            inferred_timestamp: parent.inferred_timestamp,
         });
     }
     out
@@ -330,10 +328,8 @@ impl Lifetime {
     }
 }
 
-/// The 1.1.18 fallback. `#9.#2` says "unset" (`int64` -1, which reaches this
-/// reader as `u64::MAX`) and `#9.#10` holds bytes whose layout no source
-/// publishes, so a candidate is accepted only when it is shaped like a Timestamp
-/// *and* lands inside [`Lifetime`].
+/// Kept as a diagnostic decoder for old fixture coverage. Modern agy writes
+/// cache metadata in `#9.#10`, so callers must never use this as a timestamp.
 ///
 /// Deliberately not attempted: tokscale's raw eight-byte endianness contest. On
 /// this machine `#9.#10` is a well-formed `{#1, #4}` cache message (208 / 256 000,
@@ -392,7 +388,12 @@ pub(crate) fn step_stamp(metadata: &[u8]) -> Option<StepStamp> {
     let response_id = bytes_field(metadata, S_USAGE).and_then(|usage| text_field(usage, U_RESPONSE_ID));
     let gen_idx = bytes_field(metadata, S_GEN_REF)
         .and_then(|group| varint_field(group, G_GEN_IDX))
-        .and_then(|v| i64::try_from(v).ok());
+        .and_then(|v| i64::try_from(v).ok())
+        .or_else(|| {
+            varint_field(bytes_field(metadata, S_GEN_REF)?, G_STEP_IDX)?
+                .checked_sub(1)
+                .and_then(|v| i64::try_from(v).ok())
+        });
     Some(StepStamp { ts_ms, response_id, gen_idx })
 }
 
@@ -697,6 +698,11 @@ mod tests {
             step_stamp(&meta),
             Some(StepStamp { ts_ms: 1_786_402_450_000, response_id: Some("resp-7".into()), gen_idx: Some(41) })
         );
+        let first_step = tag_bytes(S_TIMESTAMP, &tag_varint(1, 1_786_402_450));
+        let first_ref = tag_varint(G_STEP_IDX, 1);
+        let mut first_step = first_step;
+        first_step.extend(tag_bytes(S_GEN_REF, &first_ref));
+        assert_eq!(step_stamp(&first_step).map(|s| s.gen_idx), Some(Some(0)));
         // A step that carries no gen index still dates itself.
         assert_eq!(step_stamp(&tag_bytes(S_TIMESTAMP, &tag_varint(1, 100))).map(|s| s.gen_idx), Some(None));
         assert_eq!(step_stamp(&tag_varint(1, 100)), None, "a varint where a Timestamp must be");

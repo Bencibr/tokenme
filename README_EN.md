@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <b>One menu bar dashboard for every AI coding tool's token usage, spend, and remaining quota — so you stop checking each vendor's console.</b>
+  <b>One menu bar dashboard for 27 AI coding tools — token usage, spend, and remaining quota from a local, read-only index. Stop checking each vendor's console.</b>
 </p>
 
 <p align="center">
@@ -25,9 +25,9 @@ TokenMe is a menu bar app that tracks token usage, spend, and subscription quota
 - How much is left on each subscription, and when does it reset?
 - Which tool owns this month's spend — and how much did caching actually save me?
 
-Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index.
+Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index; headless servers and containers run the collector and report home on a schedule, rolling every machine into the same ledger. Quota probes read each vendor's own API or local credentials — read-only — and the five tools with daily check-in can claim right from the panel.
 
-## Sound familiar?
+## What can TokenMe do?
 
 Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
 
@@ -36,7 +36,7 @@ Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
 - Points, credits, dollar windows — every subscription ships its own dashboard, and none of them talk to each other.
 - At month's end you want the per-tool breakdown, and the only way to get it is parsing logs by hand.
 
-TokenMe puts all of it in one panel, a click away.
+TokenMe puts all of it in one panel, a click away — usage, spend, quota, check-in and speed on one screen, with servers and containers rolled into the same ledger.
 
 ## Screenshots
 
@@ -47,34 +47,17 @@ TokenMe puts all of it in one panel, a click away.
   <img alt="TokenMe panel — Tools tab, dark" src="docs/screenshots/panel-en-tools-dark.png" width="24%">
 </p>
 
-## Inside the panel
+## Core features
 
-The panel opens with four pages, each one drilling deeper:
+The panel opens with five pages, each one drilling deeper:
 
-- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; each vendor's quota bar with remaining share and reset countdown; and a native banner when a window crosses 80% used or runs out — thresholds, and which vendors are asked at all, are settings.
-- **Tools** — one row per tool: requests, sessions, tokens, cache rate — with each tool's share painted into the row itself.
+- **Overview** — today's tokens, spend, and cache hit rate; an hour-by-hour usage chart; an Activity tab with a GitHub-style year heatmap (swipe for last week, last month, last year). Below, each vendor's quota bar with remaining share and reset countdown — tools with daily check-in claim right from the row header; and a native banner when a window crosses 80% used or runs out. Thresholds, and which vendors are asked at all, are settings.
+- **Speed** — passive TTFT and TPS measurement, plus one-shot active probes for Codex and Claude Code.
+- **Tools** — one row per tool: requests, sessions, tokens, cache rate — tinted with each tool's own app icon.
 - **Rankings** — sessions ranked, so the expensive ones surface immediately.
 - **Details** — per-request records, filterable by model and project.
 
 The UI follows the system language: English and Chinese. Costs are converted, not billed — token counts times the [models.dev](https://models.dev) price list. It won't match a vendor invoice to the cent, but it answers where the money went and whether it was well spent. The index handles hundreds of thousands of events, builds in seconds, and each incremental scan after that takes tens of milliseconds.
-
-## The CLI
-
-When the panel stays closed, the CLI reads the same index:
-
-```text
-$ tokenme daily --days 3
-
-┌────────────┬──────────┬──────────┬────────┬────────────┬────────┬────────┬─────────┬────────┐
-│ Day        │ sessions │ requests │  input │ cache read │ output │  total │    cost │ cached │
-├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
-│ 2026-09-25 │      216 │   12,900 │  56.2M │      1.68B │   4.5M │  1.74B │  $99.15 │  96.8% │
-│ 2026-09-26 │       45 │    4,592 │  30.5M │      704.9M │   1.8M │ 737.1M │  $54.53 │  95.9% │
-│ 2026-09-27 │        6 │    2,534 │  25.1M │      377.1M │   1.1M │ 403.4M │  $46.49 │  93.8% │
-├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
-│ total      │      256 │   20,026 │ 111.8M │      2.76B │   7.4M │  2.88B │ $200.18 │  96.1% │
-└────────────┴──────────┴──────────┴────────┴────────────┴────────┴────────┴─────────┴────────┘
-```
 
 ## Install
 
@@ -132,7 +115,23 @@ tokenme daily --days 7  # the last week's daily usage and spend
 tokenme quota           # live quotas and reset countdowns
 ```
 
-## Common commands
+## The CLI
+
+When the panel stays closed, the CLI reads the same index:
+
+```text
+$ tokenme daily --days 3
+
+┌────────────┬──────────┬──────────┬────────┬────────────┬────────┬────────┬─────────┬────────┐
+│ Day        │ sessions │ requests │  input │ cache read │ output │  total │    cost │ cached │
+├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
+│ 2026-09-25 │      216 │   12,900 │  56.2M │      1.68B │   4.5M │  1.74B │  $99.15 │  96.8% │
+│ 2026-09-26 │       45 │    4,592 │  30.5M │      704.9M │   1.8M │ 737.1M │  $54.53 │  95.9% │
+│ 2026-09-27 │        6 │    2,534 │  25.1M │      377.1M │   1.1M │ 403.4M │  $46.49 │  93.8% │
+├────────────┼──────────┼──────────┼────────┼────────────┼────────┼────────┼─────────┼────────┤
+│ total      │      256 │   20,026 │ 111.8M │      2.76B │   7.4M │  2.88B │ $200.18 │  96.1% │
+└────────────┴──────────┴──────────┴────────┴────────────┴────────┴────────┴─────────┴────────┘
+```
 
 | Command | What it does |
 | :--- | :--- |
@@ -180,8 +179,12 @@ Every tool below ships as a built-in adapter — 27 of them, indexed straight fr
 > **Fixtures**: every adapter carries a fixture test suite, run in full on CI for each commit, and every integration was verified against a real machine's data before it landed.
 >
 > **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
+
+OpenCode quota supports the official provider only. TokenMe reads `OPENCODE_API_KEY`, `provider.<id>.options.apiKey` from `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json` when `baseURL` is `https://opencode.ai/zen/go/v1`, and finally API entries in `~/.local/share/opencode/auth.json`. Custom proxy providers are ignored.
 >
 > Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
+
+> **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
 
 ## TTFT & TPS measurements
 
@@ -193,11 +196,8 @@ TokenMe can passively measure **TTFT** (time to first token) and **TPS** (genera
 | **Claude Code CLI** | Request-level TTFT and TPS from Claude Code OpenTelemetry spans; first-content timing is labeled separately and is not TTFT | Yes — one short CLI request with temporary, process-scoped telemetry |
 | **DSH (DeepSeek Harness)** | Request-level TTFT and TPS from local compressed session logs, when the stream contains first-token timestamps | No — passive collection only |
 
-DSH follows its session statistics: the latest session's captured requests are grouped together, TTFT is averaged per request, and TPS is calculated as total output tokens divided by total decode time (completion minus first-token time). Older DSH log formats without first-token timestamps cannot produce these measurements. Active tests send a short prompt only after you click, use plan quota, and are kept separate from passive averages. The speed collector does not retain prompt or response text.
+DSH follows its session stats: TTFT averaged per request, TPS as output tokens over decode time; older logs without first-token timestamps yield neither. An active test sends one short prompt only after you click (uses plan quota), is kept separate from passive averages, and retains no prompt or response text.
 
-> **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
-
-Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** · Architecture: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 
 ## What's new in 0.1.7
 
@@ -214,7 +214,7 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)** · Task guides: **[docs
 
 Only counts get indexed, never content — your code and prompts are not stored. What lands in the index is each request's token counts, model name, and project path. Scanning is read-only throughout; no telemetry, no third-party proxies. The index lives in your system data directory (`~/Library/Application Support/tokenme/` on macOS), and each tool's log paths are listed in the [user guide](docs/USER_GUIDE.md).
 
-Machines can sync their indexes to each other — a file-based `tokenme export` / `tokenme import` over a channel you own (ssh/scp, Syncthing), no accounts and no cloud. Every merge is sha256- and manifest-validated before a single row lands, in one all-or-nothing transaction, and bundles are written `0600` on unix. The panel's footer server button can also provision that channel end to end: an SSH wizard takes the address and one password (or a key file), installs a dedicated key plus the static collector on the remote host, and pulls its bundle on a schedule — the password is never stored. Once more than one machine reports in, a header dropdown folds every figure, ranking and session list under **全部机器**, **本机** or any single remote by name — re-summarized from the same index, without re-ingesting — and a per-machine badge shows the newest merge. See the [user guide](docs/USER_GUIDE.md) §4.
+Multi-machine roll-ups move data over your own channels too — ssh/scp, or the one-click **Servers** entry in the panel footer — no accounts, no cloud; details in the [user guide](docs/USER_GUIDE.md) §4.
 
 ## Community
 
@@ -227,3 +227,5 @@ Machines can sync their indexes to each other — a file-based `tokenme export` 
 ## License
 
 Released under the [MIT](LICENSE) license.
+
+Full reference: **[docs/COMMANDS_EN.md](docs/COMMANDS_EN.md)** · Task guides: **[docs/USER_GUIDE_EN.md](docs/USER_GUIDE_EN.md)** · Architecture: **[docs/ARCHITECTURE_EN.md](docs/ARCHITECTURE_EN.md)**
