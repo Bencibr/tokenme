@@ -159,6 +159,22 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(panel::on_window_event)
+        .on_page_load(|webview, payload| {
+            // `TOKENME_PIN_PAGE=tools` deep-links the real panel the way `?page=`
+            // does in a browser — the config window loads index.html bare, and a
+            // non-activating panel takes no synthetic clicks (same QA family as
+            // TOKENME_SHOW_PANEL). The guard keeps this navigation's own second
+            // load from looping.
+            if payload.event() != tauri::webview::PageLoadEvent::Finished || webview.label() != "main" {
+                return;
+            }
+            if let Some(p) = std::env::var_os("TOKENME_PIN_PAGE") {
+                let _ = webview.eval(&format!(
+                    "if (!location.search) location.replace('index.html?page={}')",
+                    p.to_string_lossy()
+                ));
+            }
+        })
         .build(tauri::generate_context!())
         .expect("tokenme failed to start")
         .run(|_app, _event| {})
