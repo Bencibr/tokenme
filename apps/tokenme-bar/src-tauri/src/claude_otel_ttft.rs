@@ -35,6 +35,11 @@ pub struct TtftSample {
     pub sampled_at_ms: u64,
     /// Model label only; no request identifiers or prompt/response fields.
     pub model: Option<String>,
+    /// Output tokens per generation second over the span's own window
+    /// (`duration − ttft`). Present only when the export carries the usage
+    /// attribute and the span times; a `first_content` sample never carries
+    /// one, because that window answers a different question.
+    pub tps: Option<f64>,
 }
 
 /// Binds strictly to IPv4 loopback. The caller owns and must lifecycle-manage
@@ -198,16 +203,18 @@ where
                     let mut ttft = None;
                     let mut first_content = None;
                     let mut model = None;
+                    let mut output_tokens = None;
                     let mut duplicate = false;
-                    let (mut saw_ttft, mut saw_first_content, mut saw_model) = (false, false, false);
-                    for attribute in span.attributes {
+                    let (mut saw_ttft, mut saw_first_content, mut saw_model, mut saw_output) = (false, false, false, false);
+                    for attribute in &span.attributes {
                         let (seen, slot) = match attribute.key.as_str() {
                             "ttft_ms" => (&mut saw_ttft, &mut ttft),
                             "first_content_ms" => (&mut saw_first_content, &mut first_content),
+                            "gen_ai.usage.output_tokens" => (&mut saw_output, &mut output_tokens),
                             "gen_ai.request.model" => {
                                 if saw_model { duplicate = true; break; }
                                 saw_model = true;
-                                model = attribute.text;
+                                model = attribute.text.clone();
                                 continue;
                             }
                             _ => continue,
@@ -231,9 +238,9 @@ where
                     // is a fallback with a related but distinct definition; do
                     // not emit both for one request or mix them in medians.
                     if let Some(millis) = ttft {
-                        samples.push(TtftSample { field: MetricField::TtftMs, millis, sampled_at_ms, model });
+                        samples.push(TtftSample { field: MetricField::TtftMs, millis, sampled_at_ms, model, tps: tps_of(output_tokens, span_ms(&span), millis) });
                     } else if let Some(millis) = first_content {
-                        samples.push(TtftSample { field: MetricField::FirstContentMs, millis, sampled_at_ms, model });
+                        samples.push(TtftSample { field: MetricField::FirstContentMs, millis, sampled_at_ms, model, tps: None });
                     }
                     if samples.len() >= MAX_SAMPLES_PER_EXPORT { break; }
                 }
@@ -306,17 +313,39 @@ struct ScopeSpans {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Span {
     #[serde(default)]
     name: String,
     #[serde(default)]
     attributes: Vec<Attribute>,
+    #[serde(default)]
+    start_time_unix_nano: Option<String>,
+    #[serde(default)]
+    end_time_unix_nano: Option<String>,
 }
 
 struct Attribute {
     key: String,
     number: Option<f64>,
     text: Option<String>,
+}
+
+/// The span's wall duration in milliseconds, when both ends parse.
+fn span_ms(span: &Span) -> Option<f64> {
+    let start = span.start_time_unix_nano.as_ref()?.parse::<f64>().ok()?;
+    let end = span.end_time_unix_nano.as_ref()?.parse::<f64>().ok()?;
+    (end >= start).then_some((end - start) / 1_000_000.0)
+}
+
+/// Output tokens per generation second: the window is the span's own minus the
+/// wait for the first token. Guarded to a sane band so a half-written export
+/// cannot print a five-figure speed.
+fn tps_of(output_tokens: Option<f64>, duration_ms: Option<f64>, ttft_ms: f64) -> Option<f64> {
+    let seconds = (duration_ms? - ttft_ms) / 1000.0;
+    if seconds <= 0.0 { return None; }
+    let tps = output_tokens? / seconds;
+    tps.is_finite().then_some(tps).filter(|tps| (0.1..=2000.0).contains(tps))
 }
 
 impl<'de> Deserialize<'de> for Attribute {
@@ -431,7 +460,7 @@ mod tests {
     fn server_accepts_bounded_otlp_post_and_emits_only_metric_metadata() {
         let (tx, rx) = std::sync::mpsc::channel();
         let server = start_server(0, move |samples| { let _ = tx.send(samples); }).unwrap();
-        let body = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"claude_code.llm_request","attributes":[{"key":"ttft_ms","value":{"intValue":"137"}},{"key":"first_content_ms","value":{"intValue":"139"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-sonnet"}},{"key":"prompt","value":{"stringValue":"private user content"}}]}]}]}]}"#;
+        let body = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"claude_code.llm_request","startTimeUnixNano":"1759880000000000000","endTimeUnixNano":"1759880001137000000","attributes":[{"key":"ttft_ms","value":{"intValue":"137"}},{"key":"first_content_ms","value":{"intValue":"139"}},{"key":"gen_ai.usage.output_tokens","value":{"intValue":"250"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-sonnet"}},{"key":"prompt","value":{"stringValue":"private user content"}}]}]}]}]}"#;
         // The accept loop polls on a 20ms nonblocking cycle, and under the
         // gate's load a sibling test can starve it past the backlog's patience
         // — the kernel then RSTs the queued connection mid-read. One reconnect
@@ -460,6 +489,7 @@ mod tests {
         assert_eq!(sample.millis, 137.0);
         assert!(rx.try_recv().is_err(), "one export produces one callback batch");
         assert_eq!(sample.model.as_deref(), Some("claude-sonnet"));
+        assert_eq!(sample.tps, Some(250.0), "250 output tokens over the 1000 ms generation window");
         assert!(sample.sampled_at_ms > 0);
         server.shutdown();
     }

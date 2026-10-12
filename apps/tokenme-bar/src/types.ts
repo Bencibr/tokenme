@@ -470,6 +470,9 @@ export interface TtftSample {
   ttft_ms: number;
   sampled_at_ms: number;
   model: string | null;
+  /** Output tokens per generation second, when the source could name the
+      window; samples from before the field existed omit it. */
+  tps?: number | null;
 }
 
 export interface TtftSnapshot {
@@ -478,6 +481,9 @@ export interface TtftSnapshot {
   claude_receiver: string;
   claude_config_status: string;
   samples: TtftSample[];
+  /** Whether each collector's IDE is open right now; absent on older
+      engines — the page then shows every row. */
+  hosts?: { codex: boolean; claude_code: boolean };
 }
 
 export interface PanelSettings {

@@ -923,7 +923,11 @@
 
 .speed {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  /* Fixed tracks on every axis: each row is its own grid, and `auto` tracks
+     would size to that row's figures — the rows' columns would never line up.
+     Three figure columns (最近 / 平均 / TPS) share one width so the numbers
+     read as a table without being one. */
+  grid-template-columns: 20px minmax(0, 1fr) repeat(3, 72px) 52px;
   column-gap: var(--s2);
   align-items: center;
   padding: 6px 0;
@@ -934,8 +938,7 @@
 }
 
 .speed-name,
-.speed-fig,
-.speed-meta {
+.speed-cell {
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -950,19 +953,30 @@
   text-overflow: ellipsis;
 }
 
-.speed-fig { align-items: flex-end; }
-.speed-last {
-  color: var(--accent-ink);
+.speed-cell { align-items: flex-end; }
+.speed-num {
   font-size: var(--t-meta);
   font-weight: 650;
   white-space: nowrap;
 }
-.speed-meta {
-  align-items: flex-end;
-  gap: 2px;
+
+/* 快中慢: the quota gauge's own palette — green fast, amber mid, red slow. */
+.speed-num[data-stage="ok"] { color: var(--ok); }
+.speed-num[data-stage="mid"] { color: var(--warn); }
+.speed-num[data-stage="bad"] { color: var(--bad); }
+
+.speed-cap {
+  margin-top: 1px;
+  font-size: 9px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.speed-time {
   font-size: 10px;
   color: var(--ink-3);
   white-space: nowrap;
+  text-align: right;
 }
 
 .ttft-state,

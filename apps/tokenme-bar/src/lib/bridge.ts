@@ -274,11 +274,11 @@ export const bridge: Bridge = {
       // QA samples so the 访问速度 page reviews with rows on it.
       const now = Date.now();
       const samples = [
-        { provider: "codex" as const, granularity: "turn" as const, metric: "ttft" as const, ttft_ms: 1240, sampled_at_ms: now - 90_000, model: "gpt-5.2-codex" },
-        { provider: "codex" as const, granularity: "turn" as const, metric: "ttft" as const, ttft_ms: 1120, sampled_at_ms: now - 300_000, model: "gpt-5.2-codex" },
+        { provider: "codex" as const, granularity: "turn" as const, metric: "ttft" as const, ttft_ms: 1240, sampled_at_ms: now - 90_000, model: "gpt-5.2-codex", tps: 96.4 },
+        { provider: "codex" as const, granularity: "turn" as const, metric: "ttft" as const, ttft_ms: 1120, sampled_at_ms: now - 300_000, model: "gpt-5.2-codex", tps: 88.2 },
         { provider: "claude_code" as const, granularity: "request" as const, metric: "first_content" as const, ttft_ms: 980, sampled_at_ms: now - 60_000, model: "glm-5.2" },
       ];
-      return { revision: 0, enabled: browserSettings.ttft_enabled, claude_receiver: "disabled", claude_config_status: "disabled", samples };
+      return { revision: 0, enabled: browserSettings.ttft_enabled, claude_receiver: "disabled", claude_config_status: "disabled", samples, hosts: { codex: true, claude_code: true } };
     }
     return invoke<TtftSnapshot>("get_ttft_snapshot");
   },

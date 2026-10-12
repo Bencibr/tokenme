@@ -239,7 +239,7 @@ const zh = {
   "page.ranks.hint": "模型 / 项目 / MCP / Skill 的排序",
   "page.detail": "明细",
   "page.detail.hint": "最近会话与数据来源",
-  "page.speed": "访问速度",
+    "page.speed": "速度",
   "page.speed.hint": "TTFT 与平均延时",
 
   /* 活动双视图 ------------------------------------------------------------ */
@@ -537,7 +537,7 @@ const zh = {
   "update.dev.none": "dev 无更新",
 
   /* TTFT ------------------------------------------------------------------ */
-  "ttft.title": "TTFT 探测",
+    "ttft.title": "速度",
   "ttft.about.label": "TTFT 指标说明",
   "ttft.about": "这些数据来自客户端实际使用记录，不是独立测速，首次结果可能延迟到一轮任务或遥测上报后才出现。Codex 按整轮统计，Claude Code 按请求统计，两者口径不同；Claude 的首段内容时间也不等同于 TTFT。样本少、模型缺少指标或尚未启用采集时，结果会有波动或为空，启用前没有历史数据。",
   "ttft.codex": "Codex",
@@ -547,8 +547,10 @@ const zh = {
   "ttft.ttft": "首 token",
   "ttft.first_content": "首段内容",
   "ttft.no_data": "暂无样本",
-  "ttft.avg": "平均 {ms} ms",
-    "ttft.samples": "{n} 个样本",
+  "ttft.head.avg": "平均",
+  "ttft.head.tps": "TPS",
+  "ttft.no_host": "没有检测到运行中的 IDE —— 打开 Codex 或 Claude Code 后，这里会显示它们的实时速度。",
+      "ttft.samples": "{n} 个样本",
   "ttft.local": "本机",
   "ttft.passive": "被动采集",
   "ttft.disabled": "未启用",
@@ -781,7 +783,7 @@ const en: Record<StrKey, string> = {
   "page.ranks.hint": "Top models, projects, MCP, skills",
   "page.detail": "Details",
   "page.detail.hint": "Sessions & data sources",
-  "page.speed": "Access speed",
+    "page.speed": "Speed",
   "page.speed.hint": "TTFT & average latency",
 
   "view.today": "Today",
@@ -1068,7 +1070,7 @@ const en: Record<StrKey, string> = {
   "quota.stopped": "Polling stopped · data as of {age}",
   "update.dev.none": "dev: no updates",
 
-  "ttft.title": "TTFT probes",
+    "ttft.title": "Speed",
   "ttft.about.label": "About TTFT measurements",
   "ttft.about": "These values come from actual client usage, not an independent benchmark, and may arrive after a turn or telemetry export. Codex measures a whole turn; Claude Code measures a request, so the results are not directly comparable. Claude's first-content time also differs from TTFT. Small samples, missing model metrics, or collection that has not started can make results fluctuate or remain empty; no history is available from before collection was enabled.",
   "ttft.codex": "Codex",
@@ -1078,8 +1080,10 @@ const en: Record<StrKey, string> = {
   "ttft.ttft": "First token",
   "ttft.first_content": "First content",
   "ttft.no_data": "No samples yet",
-  "ttft.avg": "avg {ms} ms",
-    "ttft.samples": "{n} samples",
+  "ttft.head.avg": "Avg",
+  "ttft.head.tps": "TPS",
+  "ttft.no_host": "No IDE is running — open Codex or Claude Code and their live speeds will show up here.",
+      "ttft.samples": "{n} samples",
   "ttft.local": "Local",
   "ttft.passive": "Passive collection",
   "ttft.disabled": "Not enabled",

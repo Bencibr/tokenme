@@ -30,6 +30,9 @@ pub struct TtftSample {
     pub ttft_ms: f64,
     pub sampled_at_ms: i64,
     pub model: Option<String>,
+    /// Output tokens per generation second, when both collectors could name
+    /// the window; `None` on samples recorded before the field existed.
+    pub tps: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,6 +42,16 @@ pub struct TtftSnapshot {
     pub claude_receiver: String,
     pub claude_config_status: String,
     pub samples: Vec<TtftSample>,
+    /// Whether each collector's IDE is running right now; the speed page
+    /// shows a row only for an open IDE, the same signal the quota strip's
+    /// host gate reads.
+    pub hosts: TtftHosts,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct TtftHosts {
+    pub codex: bool,
+    pub claude_code: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -133,7 +146,13 @@ impl TtftState {
             claude_receiver: inner.claude_receiver.clone(),
             claude_config_status: inner.claude_config_status.clone(),
             samples: inner.samples.clone(),
-        }).unwrap_or(TtftSnapshot { revision: 0, enabled: false, claude_receiver: "error".into(), claude_config_status: "error".into(), samples: Vec::new() })
+            hosts: running_hosts(),
+        }).unwrap_or(TtftSnapshot { revision: 0, enabled: false, claude_receiver: "error".into(), claude_config_status: "error".into(), samples: Vec::new(), hosts: TtftHosts::default() })
+    }
+
+    /// The scanner's cheap poll: no process table walk, just the flag.
+    pub fn is_enabled(&self) -> bool {
+        self.inner.lock().is_ok_and(|inner| inner.enabled)
     }
 
     pub fn set_enabled(&self, enabled: bool) -> Result<(), String> {
@@ -200,6 +219,7 @@ impl TtftState {
                 TtftSample {
                     provider: "claude_code".into(), granularity: "request".into(), metric: metric.into(),
                     ttft_ms: millis, sampled_at_ms: sample.sampled_at_ms.min(i64::MAX as u64) as i64, model: sample.model,
+                    tps: sample.tps,
                 }
             }).collect();
             state.add_samples(samples);
@@ -232,6 +252,7 @@ impl TtftState {
             claude_receiver: inner.claude_receiver.clone(),
             claude_config_status: inner.claude_config_status.clone(),
             samples: inner.samples.clone(),
+            hosts: running_hosts(),
         };
         drop(inner);
         self.persist();
@@ -261,6 +282,7 @@ impl TtftState {
 
 fn valid_sample(sample: &TtftSample) -> bool {
     sample.ttft_ms.is_finite() && (0.0..=600_000.0).contains(&sample.ttft_ms)
+        && sample.tps.is_none_or(|tps| tps.is_finite() && (0.1..=2000.0).contains(&tps))
         && matches!(sample.provider.as_str(), "codex" | "claude_code")
         && matches!(sample.metric.as_str(), "ttft" | "first_content")
         && sample.model.as_ref().is_none_or(|model| model.len() <= 128 && !model.chars().any(char::is_control))
@@ -276,7 +298,7 @@ fn start_codex_scanner(state: TtftState) {
         let mut initial_discovery = true;
         let mut was_enabled = false;
         loop {
-            let enabled = state.snapshot().enabled;
+            let enabled = state.is_enabled();
             if enabled {
                 if !was_enabled {
                     initial_discovery = true;
@@ -312,6 +334,7 @@ fn start_codex_scanner(state: TtftState) {
                                     ttft_ms: sample.ttft_ms as f64,
                                     sampled_at_ms: sample.completed_at_ms.unwrap_or_else(now_ms),
                                     model: sample.model.filter(|model| model.len() <= 128 && !model.chars().any(char::is_control)),
+                                    tps: sample.tps,
                                 }).collect();
                             state.add_samples(samples);
                         }
@@ -325,6 +348,30 @@ fn start_codex_scanner(state: TtftState) {
             std::thread::sleep(Duration::from_secs(5));
         }
     });
+}
+
+/// Which collector IDEs are open right now — the quota strip's host-gate
+/// signal, read through a short cache because snapshot() fires on every
+/// sample batch and a process-table walk per batch would be waste.
+fn running_hosts() -> TtftHosts {
+    static CACHE: Mutex<Option<(std::time::Instant, TtftHosts)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(2);
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, hosts)) = *guard {
+            if at.elapsed() < TTL {
+                return hosts;
+            }
+        }
+    }
+    let alive = usage_quota::host::running_process_names();
+    let hosts = TtftHosts {
+        codex: usage_quota::host::any_host_running("codex", &alive),
+        claude_code: usage_quota::host::any_host_running("claude", &alive),
+    };
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), hosts));
+    }
+    hosts
 }
 
 fn now_ms() -> i64 {

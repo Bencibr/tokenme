@@ -17,6 +17,11 @@ pub struct CodexTtftCursor {
     offset: u64,
     models: HashMap<String, String>,
     completed_turns: HashSet<String>,
+    /// Output tokens seen per open turn: the `token_count` records carry no
+    /// turn id of their own, so they attribute to the turn whose
+    /// `turn_context` was read most recently.
+    turn_output: HashMap<String, u64>,
+    current_turn: Option<String>,
 }
 
 impl CodexTtftCursor {
@@ -33,17 +38,21 @@ impl CodexTtftCursor {
 }
 
 /// One Codex turn-level TTFT observation, in milliseconds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodexTtftSample {
     pub turn_id: String,
     pub model: Option<String>,
     pub ttft_ms: u64,
     /// Timestamp on the terminal rollout record, when present and parseable.
     pub completed_at_ms: Option<i64>,
+    /// Output tokens per generation second — turn output over the window the
+    /// turn's own records measure (`duration_ms − time_to_first_token_ms`).
+    /// Absent when the rollout omits the token counts or the duration.
+    pub tps: Option<f64>,
 }
 
 /// Samples parsed after the supplied cursor, plus the cursor to persist.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CodexTtftRead {
     pub samples: Vec<CodexTtftSample>,
     pub cursor: CodexTtftCursor,
@@ -79,15 +88,27 @@ pub fn read_ttft(path: &Path, mut cursor: CodexTtftCursor) -> std::io::Result<Co
         }
         pos = pos.saturating_add(n as u64);
         let Ok(line) = std::str::from_utf8(&buf) else { continue };
-        if !line.contains("turn_context") && !line.contains("task_complete") && !line.contains("turn_complete") {
+        if !line.contains("turn_context")
+            && !line.contains("task_complete")
+            && !line.contains("turn_complete")
+            && !line.contains("token_count")
+        {
             continue;
         }
         if let Some((turn_id, model)) = turn_model(line) {
-            cursor.models.insert(turn_id, model);
+            cursor.models.insert(turn_id.clone(), model);
+            cursor.current_turn = Some(turn_id);
+            continue;
+        }
+        if let Some(tokens) = turn_output(line) {
+            if let Some(turn) = cursor.current_turn.as_ref() {
+                *cursor.turn_output.entry(turn.clone()).or_insert(0) += tokens;
+            }
             continue;
         }
         if let Some(sample) = complete_sample(line, &cursor) {
             if cursor.completed_turns.insert(sample.turn_id.clone()) {
+                cursor.current_turn = None;
                 samples.push(sample);
             }
         }
@@ -135,12 +156,35 @@ fn complete_sample(line: &str, cursor: &CodexTtftCursor) -> Option<CodexTtftSamp
         .get("timestamp")
         .and_then(Value::as_str)
         .and_then(usage_core::parse_ts_ms);
+    // The turn's own records measure the window: `duration_ms` spans the whole
+    // turn, so the generation part is what remains after the first token.
+    let tps = match (payload.get("duration_ms").and_then(Value::as_f64), cursor.turn_output.get(&turn_id).copied()) {
+        (Some(duration_ms), Some(output)) if duration_ms > ttft_ms as f64 && output > 0 => {
+            let seconds = (duration_ms - ttft_ms as f64) / 1000.0;
+            let tps = output as f64 / seconds;
+            (0.1..=2000.0).contains(&tps).then_some(tps)
+        }
+        _ => None,
+    };
     Some(CodexTtftSample {
         model: cursor.models.get(&turn_id).cloned(),
         turn_id,
         ttft_ms,
         completed_at_ms,
+        tps,
     })
+}
+
+/// One `token_count` record's own output tokens — the per-record usage, never
+/// the running session accumulator.
+fn turn_output(line: &str) -> Option<u64> {
+    let (_, payload) = record_parts(line)?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+    let last = payload.get("info")?.get("last_token_usage")?;
+    let tokens = last.get("output_tokens")?.as_u64()?;
+    Some(tokens)
 }
 
 #[cfg(test)]
@@ -167,6 +211,36 @@ mod tests {
         assert_eq!(out.samples[0].ttft_ms, 1234);
         assert_eq!(out.samples[0].completed_at_ms, Some(1_790_163_151_944));
         assert_eq!(out.cursor.offset(), std::fs::metadata(&path).unwrap().len());
+    }
+
+    #[test]
+    fn tps_is_turn_output_over_the_generation_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(record("turn_context", serde_json::json!({"turn_id":"t1","model":"gpt-5.6-luna"})).as_bytes()).unwrap();
+        // Two token_count records of the same turn: their per-record output
+        // sums, the running session accumulator next door is ignored.
+        file.write_all(record("event_msg", serde_json::json!({"type":"token_count","info":{"last_token_usage":{"output_tokens":40}}})).as_bytes()).unwrap();
+        file.write_all(record("event_msg", serde_json::json!({"type":"token_count","info":{"total_token_usage":{"output_tokens":900000},"last_token_usage":{"output_tokens":60}}})).as_bytes()).unwrap();
+        // 500 ms of generation after the first token: 100 tokens / 0.5 s.
+        file.write_all(record("event_msg", serde_json::json!({"type":"task_complete","turn_id":"t1","time_to_first_token_ms":1234,"duration_ms":1734})).as_bytes()).unwrap();
+
+        let out = read_ttft(&path, CodexTtftCursor::default()).unwrap();
+        assert_eq!(out.samples.len(), 1);
+        assert_eq!(out.samples[0].tps, Some(200.0));
+    }
+
+    #[test]
+    fn a_turn_without_token_counts_has_no_tps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(record("turn_context", serde_json::json!({"turn_id":"t1","model":"gpt-5.6-luna"})).as_bytes()).unwrap();
+        file.write_all(record("event_msg", serde_json::json!({"type":"task_complete","turn_id":"t1","time_to_first_token_ms":900,"duration_ms":400})).as_bytes()).unwrap();
+        // duration shorter than the TTFT cannot name a generation window.
+        let out = read_ttft(&path, CodexTtftCursor::default()).unwrap();
+        assert_eq!(out.samples[0].tps, None);
     }
 
     #[test]

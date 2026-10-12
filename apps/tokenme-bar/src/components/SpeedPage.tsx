@@ -5,12 +5,22 @@ import { t } from "../lib/i18n";
 import { Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
 
-/** The window the average covers: the old table's median window, kept — a
+/** The window the averages cover: the old table's median window, kept — a
  *  provider's older entries say more about yesterday's network than about the
  *  access speed the user is reading. */
 const AVG_WINDOW = 20;
 
-const PROVIDERS: { id: TtftSample["provider"]; tool: string; nameKey: "ttft.codex" | "ttft.claude"; granularityKey: "ttft.turn" | "ttft.request" }[] = [
+/** 快中慢 bands, the quota gauge's colour language: TTFT lower is faster
+ *  (≤1 s green, ≤2.5 s amber, past that red); TPS is the inverse (≥50 green,
+ *  ≥20 amber, below red). */
+function stageOfMs(ms: number): "ok" | "mid" | "bad" {
+  return ms <= 1000 ? "ok" : ms <= 2500 ? "mid" : "bad";
+}
+function stageOfTps(tps: number): "ok" | "mid" | "bad" {
+  return tps >= 50 ? "ok" : tps >= 20 ? "mid" : "bad";
+}
+
+const PROVIDERS: { id: "codex" | "claude_code"; tool: string; nameKey: "ttft.codex" | "ttft.claude"; granularityKey: "ttft.turn" | "ttft.request" }[] = [
   { id: "codex", tool: "codex", nameKey: "ttft.codex", granularityKey: "ttft.turn" },
   { id: "claude_code", tool: "claude", nameKey: "ttft.claude", granularityKey: "ttft.request" },
 ];
@@ -24,6 +34,15 @@ function metricLabel(metric: TtftSample["metric"]): string {
   return metric === "first_content" ? t("ttft.first_content") : t("ttft.ttft");
 }
 
+function SpeedCell({ value, cap, stage }: { value: string; cap: string; stage: "ok" | "mid" | "bad" | null }) {
+  return (
+    <span className="speed-cell">
+      <span className="speed-num num" data-stage={stage ?? undefined}>{value}</span>
+      <span className="speed-cap">{cap}</span>
+    </span>
+  );
+}
+
 function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   nameKey: "ttft.codex" | "ttft.claude";
   granularityKey: "ttft.turn" | "ttft.request";
@@ -35,8 +54,11 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
   // Only like compares with like: the two metrics answer different questions
   // (first token vs first content), and one provider may emit both.
   const comparable = latest ? samples.filter((sample) => sample.metric === latest.metric) : [];
-  const avg = average(comparable.slice(0, AVG_WINDOW).map((sample) => sample.ttft_ms));
-  const sub = [t(granularityKey), latest?.model ?? null].filter(Boolean).join(" · ");
+  const recent = comparable.slice(0, AVG_WINDOW);
+  const avgMs = average(recent.map((sample) => sample.ttft_ms));
+  const avgTps = average(recent.map((sample) => sample.tps).filter((tps): tps is number => typeof tps === "number" && Number.isFinite(tps)));
+  const sub = [t(granularityKey), latest?.model ?? null,
+    comparable.length > 0 ? t("ttft.samples", { n: comparable.length }) : null].filter(Boolean).join(" · ");
   return (
     <li className="speed">
       <ToolIcon tool={tool} size={20} />
@@ -44,15 +66,22 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now }: {
         <span className="speed-provider">{t(nameKey)}</span>
         <span className="ttft-granularity">{sub}</span>
       </span>
-      <span className="speed-fig">
-        <span className="speed-last num">{latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}</span>
-        <span className="ttft-granularity">{latest ? metricLabel(latest.metric) : t("ttft.no_data")}</span>
-      </span>
-      <span className="speed-meta">
-        <span className="num">{t("ttft.avg", { ms: Math.round(avg ?? latest?.ttft_ms ?? 0) })}</span>
-        <span>{t("ttft.samples", { n: comparable.length })}</span>
-        <span>{latest ? relativeTime(latest.sampled_at_ms, now) : "—"}</span>
-      </span>
+      <SpeedCell
+        value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
+        cap={latest ? metricLabel(latest.metric) : t("ttft.no_data")}
+        stage={latest ? stageOfMs(latest.ttft_ms) : null}
+      />
+      <SpeedCell
+        value={avgMs != null ? `${Math.round(avgMs)} ms` : "—"}
+        cap={t("ttft.head.avg")}
+        stage={avgMs != null ? stageOfMs(avgMs) : null}
+      />
+      <SpeedCell
+        value={avgTps != null ? avgTps.toFixed(1) : "—"}
+        cap={t("ttft.head.tps")}
+        stage={avgTps != null ? stageOfTps(avgTps) : null}
+      />
+      <span className="speed-time">{latest ? relativeTime(latest.sampled_at_ms, now) : "—"}</span>
     </li>
   );
 }
@@ -63,6 +92,10 @@ export function SpeedPage({ snapshot, now }: { snapshot: TtftSnapshot; now: numb
     codex: snapshot.samples.filter((sample) => sample.provider === "codex").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
     claude_code: snapshot.samples.filter((sample) => sample.provider === "claude_code").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
   }), [snapshot.samples]);
+  // Only an open IDE earns a row: the snapshot's host flags are the same
+  // running-process signal the quota strip's gate reads; engines older than
+  // the field omit it and the page then shows every row.
+  const visible = PROVIDERS.filter((p) => snapshot.hosts?.[p.id] !== false);
   return (
     <Section
       label={t("ttft.title")}
@@ -82,11 +115,13 @@ export function SpeedPage({ snapshot, now }: { snapshot: TtftSnapshot; now: numb
       }
     >
       {aboutOpen ? <p className="ttft-about-note" id="ttft-about-note" role="note">{t("ttft.about")}</p> : null}
-      <ol className="speed-list">
-        {PROVIDERS.map((p) => (
-          <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} tool={p.tool} samples={byProvider[p.id]} now={now} />
-        ))}
-      </ol>
+      {visible.length === 0 ? <p className="ttft-note">{t("ttft.no_host")}</p> : (
+        <ol className="speed-list">
+          {visible.map((p) => (
+            <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} tool={p.tool} samples={byProvider[p.id]} now={now} />
+          ))}
+        </ol>
+      )}
       {snapshot.claude_config_status === "error" ? <p className="ttft-note" role="status">{t("ttft.claude_config_error")}</p> : null}
       {snapshot.enabled && snapshot.claude_receiver === "unavailable" ? <p className="ttft-note" role="status">{t("ttft.receiver_unavailable")}</p> : null}
       {snapshot.enabled ? <p className="ttft-note">{t("ttft.passive_hint")}</p> : null}
