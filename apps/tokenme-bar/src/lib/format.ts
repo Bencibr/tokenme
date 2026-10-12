@@ -157,6 +157,15 @@ export function deltaDirection(n: number): "up" | "down" | "flat" {
   return n > 0 ? "up" : "down";
 }
 
+/** A duration speaks in the unit that fits: past a second a millisecond
+ *  figure is a number to parse, so it moves to seconds (whole seconds past
+ *  a minute). */
+export function duration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const seconds = ms / 1000;
+  return `${seconds >= 60 ? Math.round(seconds) : seconds.toFixed(1)} s`;
+}
+
 export function relativeTime(ms: number, nowMs: number): string {
   const diff = Math.max(0, nowMs - ms);
   const min = Math.floor(diff / 60_000);

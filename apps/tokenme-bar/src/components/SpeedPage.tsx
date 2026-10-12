@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ActiveSpeedTest, MachineScope, TtftSample, TtftSnapshot } from "../types";
-import { relativeTime } from "../lib/format";
+import { duration, relativeTime } from "../lib/format";
 import { t } from "../lib/i18n";
 import { bridge } from "../lib/bridge";
 import { IconInfo } from "./Icons";
@@ -85,12 +85,12 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now, canTest, testin
         </button> : null}
       </span>
       <SpeedCell
-        value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
+        value={latest ? duration(latest.ttft_ms) : "—"}
         cap={latest ? `${metricLabel(latest.metric)} · ${relativeTime(latest.sampled_at_ms, now)}` : t("ttft.no_data")}
         stage={latest ? stageOfMs(latest.ttft_ms) : null}
       />
       <SpeedCell
-        value={avgMs != null ? `${Math.round(avgMs)} ms` : "—"}
+        value={avgMs != null ? duration(avgMs) : "—"}
         cap={t("ttft.head.avg")}
         stage={avgMs != null ? stageOfMs(avgMs) : null}
       />
@@ -163,7 +163,7 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
       ) : null}
       {!scopedAway && activeTest ? <p className="ttft-active-result" role="status">
         <span>{t("ttft.active.result", { provider: t(activeProvider), age: relativeTime(activeTest.sampledAtMs, now) })}</span>
-        <strong>{Math.round(activeTest.ttftMs)} ms</strong>
+        <strong>{duration(activeTest.ttftMs)}</strong>
         {activeTest.tps != null ? <strong>{activeTest.tps.toFixed(1)} TPS</strong> : null}
       </p> : null}
       {!scopedAway && activeError ? <p className="ttft-note" role="alert">{activeError}</p> : null}
