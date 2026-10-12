@@ -151,8 +151,11 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
             }
             "item/started" | "item/updated" => {
                 let item_type = params.get("item").and_then(|v| v.get("type")).and_then(Value::as_str).unwrap_or_default();
-                if !item_type.is_empty() && !matches!(item_type, "agentMessage" | "reasoning") {
-                    return Err("Codex attempted a tool during the read-only speed check; the run was stopped.".into());
+                // "userMessage" opens every turn — it is the input's own echo,
+                // not a tool call, and aborting on it stopped every healthy
+                // run before the first token could arrive.
+                if !item_type.is_empty() && !matches!(item_type, "agentMessage" | "reasoning" | "userMessage") {
+                    return Err(format!("Codex started a {item_type} item during the read-only speed check; the run was stopped."));
                 }
             }
             "turn/completed" => {
