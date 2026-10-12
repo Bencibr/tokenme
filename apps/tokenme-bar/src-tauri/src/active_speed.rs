@@ -211,8 +211,11 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
         .map_err(|_| "Could not start the temporary Claude telemetry receiver.".to_string())?;
     let endpoint = format!("http://{}/v1/traces", server.local_addr());
     let mut command = Command::new(executable);
+    // `--tools` is variadic: written as two args it swallows the empty value
+    // AND the prompt after it, and the CLI exits "Input must be provided".
+    // The joined form closes the list; `--` pins the prompt as positional.
     command
-        .args(["-p", "--output-format", "json", "--max-turns", "1", "--no-session-persistence", "--restricted", "--tools", "", PROMPT])
+        .args(["-p", "--output-format", "json", "--max-turns", "1", "--no-session-persistence", "--restricted", "--tools=", "--", PROMPT])
         .current_dir(std::env::temp_dir())
         .env("CLAUDE_CODE_ENABLE_TELEMETRY", "1")
         .env("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1")
