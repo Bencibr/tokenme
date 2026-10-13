@@ -121,6 +121,8 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             logging::init();
+            #[cfg(target_os = "macos")]
+            updater::cleanup_stale_copies();
             notify::init(app.handle());
             // The check-in ledger rides the panel's own log dir; the probes
             // themselves call through this hook, so usage-quota stays

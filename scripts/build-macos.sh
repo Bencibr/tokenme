@@ -123,7 +123,11 @@ echo "==> tauri build: $((SECONDS - t))s"
 # `tokenme-<hash>` instead of `dev.tokenme.bar`. Re-signing ad-hoc binds the
 # plist and gives the app a stable identity — which is also what a keychain ACL
 # (e.g. Qoder's `Safe Storage` item) is matched against.
-codesign --force --sign - "$APP_DIR/TokenMe.app"
+# Keep the CodeDirectory identifier aligned with CFBundleIdentifier. Ad-hoc
+# signing still changes the cdhash per build, but a stable identifier prevents
+# LaunchServices/UserNotifications from treating the code-signing name as a
+# second app identity.
+codesign --force --sign - --identifier dev.tokenme.bar "$APP_DIR/TokenMe.app"
 codesign -v "$APP_DIR/TokenMe.app"
 
 if (( ! FAST )); then
