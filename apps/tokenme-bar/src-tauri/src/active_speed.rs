@@ -46,11 +46,21 @@ pub async fn run_active_speed_test(provider: String) -> Result<ActiveSpeedTest, 
     tauri::async_runtime::spawn_blocking(move || {
         let gate = ACTIVE_TEST.get_or_init(|| Mutex::new(()));
         let _guard = gate.try_lock().map_err(|_| "A speed check is already running.".to_string())?;
-        match provider.as_str() {
+        crate::logging::info(&format!("active speed: starting {provider}"));
+        let result = match provider.as_str() {
             "codex" => run_codex(),
             "claude_code" => run_claude(),
             _ => unreachable!(),
+        };
+        match &result {
+            Ok(sample) => crate::logging::info(&format!(
+                "active speed: {provider} completed ttft={:.0}ms model={}",
+                sample.ttft_ms,
+                sample.model.as_deref().unwrap_or("unknown")
+            )),
+            Err(error) => crate::logging::error(&format!("active speed: {provider} failed: {error}")),
         }
+        result
     }).await.map_err(|_| "The speed check worker stopped unexpectedly.".to_string())?
 }
 
@@ -213,7 +223,7 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
     let server = claude_otel_ttft::start_server(0, move |samples| { let _ = tx.send(samples); })
         .map_err(|_| "Could not start the temporary Claude telemetry receiver.".to_string())?;
     let endpoint = format!("http://{}/v1/traces", server.local_addr());
-    // The process environment cannot carry the telemetry redirect: without
+    // The process environment cannot carry this redirect: without
     // --restricted the CLI applies ~/.claude/settings.json's env block OVER
     // the inherited environment, and custom-API setups keep an OTEL endpoint
     // of their own in there — the samples never reach this ephemeral
@@ -234,10 +244,11 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
     // `--tools` is variadic: written as two args it swallows the empty value
     // AND the prompt after it, and the CLI exits "Input must be provided".
     // The joined form closes the list; `--` pins the prompt as positional.
-    // No `--restricted`: it skips settings.json's env block — exactly where
-    // custom-API setups keep ANTHROPIC_BASE_URL/AUTH_TOKEN — so restricted
-    // runs fell back to OAuth and died on an identity this machine may not
-    // even use. Tools are already off, and the turn is capped at one.
+    // No `--restricted`: it skips ~/.claude/settings.json's env block, which
+    // is exactly where custom-API setups live (ANTHROPIC_BASE_URL /
+    // ANTHROPIC_AUTH_TOKEN) — restricted runs fell back to OAuth and died on
+    // an identity this machine may not even use. Tools are already off via
+    // --tools=, and the turn is capped at one.
     command
         .args(["-p", "--output-format", "json", "--max-turns", "1", "--no-session-persistence", "--tools="])
         .arg("--settings").arg(&settings_path)

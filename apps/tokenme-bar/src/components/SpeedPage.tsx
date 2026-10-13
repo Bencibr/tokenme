@@ -128,7 +128,10 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
     setTesting(provider);
     setActiveError(null);
     try { setActiveTest(await bridge.runActiveSpeedTest(provider)); }
-    catch { setActiveError(t("ttft.active.error")); }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+      setActiveError(detail ? `${t("ttft.active.error")} (${detail})` : t("ttft.active.error"));
+    }
     finally { setTesting(null); }
   };
   const activeProvider = activeTest?.provider === "claude_code" ? "ttft.claude" : "ttft.codex";
