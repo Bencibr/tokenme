@@ -348,6 +348,9 @@ fn localize_segment(seg: &str) -> String {
     if let Some(r) = seg.strip_prefix("积分 ") {
         return format!("{r} credits");
     }
+    if let Some(r) = seg.strip_prefix("余额 ") {
+        return format!("Balance {r}");
+    }
     seg.to_string()
 }
 

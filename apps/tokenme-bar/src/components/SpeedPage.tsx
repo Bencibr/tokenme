@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ActiveSpeedTest, MachineScope, TtftSample, TtftSnapshot } from "../types";
-import { relativeTime } from "../lib/format";
+import { duration, relativeTime } from "../lib/format";
 import { t } from "../lib/i18n";
 import { bridge } from "../lib/bridge";
 import { IconInfo } from "./Icons";
@@ -45,15 +45,17 @@ function SpeedCell({ value, cap, stage }: { value: string; cap: string; stage: "
   );
 }
 
-function SpeedRow({ nameKey, granularityKey, tool, samples, now, canTest, testing, onTest }: {
+function SpeedRow({ nameKey, granularityKey, provider, tool, samples, now, canTest, testing, onTest, activeTest }: {
   nameKey: "ttft.codex" | "ttft.claude" | "ttft.dsh";
   granularityKey: "ttft.turn" | "ttft.request";
+  provider: "codex" | "claude_code" | "dsh";
   tool: string;
   samples: TtftSample[];
   now: number;
   canTest: boolean;
   testing: boolean;
   onTest: () => void;
+  activeTest: ActiveSpeedTest | null;
 }) {
   const latest = samples[0];
   // Only like compares with like: the two metrics answer different questions
@@ -85,12 +87,12 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now, canTest, testin
         </button> : null}
       </span>
       <SpeedCell
-        value={latest ? `${Math.round(latest.ttft_ms)} ms` : "—"}
+        value={latest ? duration(latest.ttft_ms) : "—"}
         cap={latest ? `${metricLabel(latest.metric)} · ${relativeTime(latest.sampled_at_ms, now)}` : t("ttft.no_data")}
         stage={latest ? stageOfMs(latest.ttft_ms) : null}
       />
       <SpeedCell
-        value={avgMs != null ? `${Math.round(avgMs)} ms` : "—"}
+        value={avgMs != null ? duration(avgMs) : "—"}
         cap={t("ttft.head.avg")}
         stage={avgMs != null ? stageOfMs(avgMs) : null}
       />
@@ -99,6 +101,16 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now, canTest, testin
         cap={t("ttft.head.tps")}
         stage={avgTps != null ? stageOfTps(avgTps) : null}
       />
+      {activeTest?.provider === provider ? <div className="ttft-row-active" role="status">
+        <span className="ttft-row-active-label">{t("ttft.active.result", { provider: t(nameKey), age: relativeTime(activeTest.sampledAtMs, now) })}</span>
+        <SpeedCell
+          value={duration(activeTest.ttftMs)}
+          cap={activeTest.measurement === "claude_otel" ? t("ttft.first_content") : t("ttft.ttft")}
+          stage={stageOfMs(activeTest.ttftMs)}
+        />
+        <span aria-hidden="true" />
+        {activeTest.tps != null ? <SpeedCell value={activeTest.tps.toFixed(1)} cap="TPS" stage={stageOfTps(activeTest.tps)} /> : <span aria-hidden="true" />}
+      </div> : null}
     </li>
   );
 }
@@ -128,10 +140,12 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
     setTesting(provider);
     setActiveError(null);
     try { setActiveTest(await bridge.runActiveSpeedTest(provider)); }
-    catch { setActiveError(t("ttft.active.error")); }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+      setActiveError(detail ? `${t("ttft.active.error")} (${detail})` : t("ttft.active.error"));
+    }
     finally { setTesting(null); }
   };
-  const activeProvider = activeTest?.provider === "claude_code" ? "ttft.claude" : "ttft.codex";
   return (
     <Section
       label={t("ttft.title")}
@@ -156,16 +170,12 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
       {!scopedAway && visible.length > 0 ? (
         <ol className="speed-list">
           {visible.map((p) => (
-            <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} tool={p.tool} samples={byProvider[p.id]} now={now}
-              canTest={p.id !== "dsh"} testing={testing === p.id} onTest={() => p.id !== "dsh" && void runTest(p.id)} />
+            <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} provider={p.id} tool={p.tool} samples={byProvider[p.id]} now={now}
+              canTest={p.id !== "dsh"} testing={testing === p.id} onTest={() => p.id !== "dsh" && void runTest(p.id)}
+              activeTest={p.id === "dsh" ? null : activeTest} />
           ))}
         </ol>
       ) : null}
-      {!scopedAway && activeTest ? <p className="ttft-active-result" role="status">
-        <span>{t("ttft.active.result", { provider: t(activeProvider), age: relativeTime(activeTest.sampledAtMs, now) })}</span>
-        <strong>{Math.round(activeTest.ttftMs)} ms</strong>
-        {activeTest.tps != null ? <strong>{activeTest.tps.toFixed(1)} TPS</strong> : null}
-      </p> : null}
       {!scopedAway && activeError ? <p className="ttft-note" role="alert">{activeError}</p> : null}
       {!scopedAway ? <p className="ttft-note">{t("ttft.active.hint")}</p> : null}
       {snapshot.claude_config_status === "error" ? <p className="ttft-note" role="status">{t("ttft.claude_config_error")}</p> : null}
