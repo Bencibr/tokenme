@@ -15,6 +15,7 @@ const OWNED_ENV: &[(&str, &str)] = &[
     ("OTEL_TRACES_EXPORTER", "otlp"),
     ("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/json"),
     ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4319/v1/traces"),
+    ("OTEL_TRACES_EXPORT_INTERVAL", "1000"),
 ];
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -197,6 +198,7 @@ mod tests {
         assert_eq!(enabled["theme"], "dark");
         assert_eq!(enabled["env"]["MY_EXISTING"], "keep");
         assert_eq!(enabled["env"]["OTEL_TRACES_EXPORTER"], "otlp");
+        assert_eq!(enabled["env"]["OTEL_TRACES_EXPORT_INTERVAL"], "1000");
         disable_owned(&owner).unwrap();
         let disabled: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
         assert_eq!(disabled["theme"], "dark");
