@@ -1,6 +1,6 @@
 # TokenMe CLI 参考
 
-> 版本：0.1.7 · 更新：2026-10-12 · 读者：CLI 用户 · 事实来源：`crates/usage-cli/src/args.rs`（已对照 `tokenme --help` 核实）· [English](COMMANDS_EN.md)
+> 版本：0.1.8 · 更新：2026-10-13 · 读者：CLI 用户 · 事实来源：`crates/usage-cli/src/args.rs`（已对照 `tokenme --help` 核实）· [English](COMMANDS_EN.md)
 
 所有命令共享以下全局选项（在命令行上任意位置皆可）：
 
