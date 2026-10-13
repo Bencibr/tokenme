@@ -82,6 +82,14 @@ The tap is bumped automatically on every release, so `brew upgrade` keeps you cu
 sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 ```
 
+**macOS notification troubleshooting**: macOS records notification permission by app identity. Keep only one `TokenMe.app` under `/Applications`; if you copied the app manually in the past, quit TokenMe, remove old `TokenMe.app.previous*` or `tokenme.app.previous*` copies, and open the current bundle again. On startup the app also removes these known backup names and unregisters dead LaunchServices paths. For the first notification, open **System Settings → Notifications → TokenMe** and allow notifications. You can verify delivery with the command below; the result is written to `~/Library/Logs/tokenme/panel.log`:
+
+```bash
+TOKENME_TEST_NOTIFY=1 /Applications/TokenMe.app/Contents/MacOS/TokenMe
+```
+
+`notify test: posted` means delivery succeeded; `blocked` means macOS is still denying it. A bare `cargo run` has no app identity and cannot represent the installed bundle's notification state.
+
 ### Windows
 
 Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/latest). The installer supports an all-users install: on shared machines choose **All users**, and use the same mode for upgrades — the machine-wide installation is then replaced in place for every Windows account. The setup also installs the `tokenme` CLI and adds its `bin` directory to the user PATH (Only me) or system PATH (All users). Open a new terminal after installation to use `tokenme --help`, `tokenme daily`, and `tokenme quota`. Upgrades do not duplicate the PATH entry; uninstall removes only this installation's entry.

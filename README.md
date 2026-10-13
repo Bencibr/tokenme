@@ -82,6 +82,14 @@ tap 随每次发布自动更新，`brew upgrade` 即可升级；cask 安装不�
 sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 ```
 
+**macOS 通知排障**：系统通知按应用身份记录。请确保 `/Applications` 下只保留一个 `TokenMe.app`；如果以前手动复制过应用，先退出 TokenMe，再删除 `TokenMe.app.previous*`、`tokenme.app.previous*` 等旧副本，然后重新打开当前包。应用启动时也会自动清理这些已知的旧备份并注销死的 LaunchServices 路径。首次使用通知时，到「系统设置 → 通知 → TokenMe」允许通知；可以用下面的命令验证投递链路，结果写入 `~/Library/Logs/tokenme/panel.log`：
+
+```bash
+TOKENME_TEST_NOTIFY=1 /Applications/TokenMe.app/Contents/MacOS/TokenMe
+```
+
+日志出现 `notify test: posted` 表示投递成功，`blocked` 表示仍被系统设置拒绝。裸 `cargo run` 没有应用身份，不能代表正式安装包的通知状态。
+
 ### Windows
 
 到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载安装程序。安装器支持"所有用户"模式：共享电脑上请选择**所有用户**，升级时也保持同一模式——这样会原地替换机器级安装，并对所有 Windows 账户生效。安装包同时包含 `tokenme` 命令行工具，并自动将其 `bin` 目录加入用户 PATH（只为我）或系统 PATH（所有用户）。安装后重新打开终端，即可运行 `tokenme --help`、`tokenme daily` 和 `tokenme quota`。升级不会重复添加 PATH 项，卸载时会移除该安装目录的 PATH 项。
