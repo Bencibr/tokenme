@@ -101,11 +101,16 @@ function SpeedRow({ nameKey, granularityKey, provider, tool, samples, now, canTe
         cap={t("ttft.head.tps")}
         stage={avgTps != null ? stageOfTps(avgTps) : null}
       />
-      {activeTest?.provider === provider ? <p className="ttft-row-active" role="status">
-        <span>{t("ttft.active.result", { provider: t(nameKey), age: relativeTime(activeTest.sampledAtMs, now) })}</span>
-        <strong>{duration(activeTest.ttftMs)}</strong>
-        {activeTest.tps != null ? <strong>{activeTest.tps.toFixed(1)} TPS</strong> : null}
-      </p> : null}
+      {activeTest?.provider === provider ? <div className="ttft-row-active" role="status">
+        <span className="ttft-row-active-label">{t("ttft.active.result", { provider: t(nameKey), age: relativeTime(activeTest.sampledAtMs, now) })}</span>
+        <SpeedCell
+          value={duration(activeTest.ttftMs)}
+          cap={activeTest.measurement === "claude_otel" ? t("ttft.first_content") : t("ttft.ttft")}
+          stage={stageOfMs(activeTest.ttftMs)}
+        />
+        <span aria-hidden="true" />
+        {activeTest.tps != null ? <SpeedCell value={activeTest.tps.toFixed(1)} cap="TPS" stage={stageOfTps(activeTest.tps)} /> : <span aria-hidden="true" />}
+      </div> : null}
     </li>
   );
 }
