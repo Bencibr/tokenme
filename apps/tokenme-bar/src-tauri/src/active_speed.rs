@@ -146,6 +146,7 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
         }
     }))?;
     let mut first_delta: Option<Duration> = None;
+    let mut seen_items: Vec<String> = Vec::new();
     let mut turn_id: Option<String> = None;
     let mut output_tokens = None;
     let mut turn_duration_ms = None;
@@ -183,6 +184,18 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
                 if !item_type.is_empty() && !matches!(item_type, "agentMessage" | "reasoning" | "userMessage") {
                     return Err(format!("Codex started a {item_type} item during the read-only speed check; the run was stopped."));
                 }
+                // The agent message opening IS the first-text moment: in
+                // streaming turns it sits milliseconds ahead of the first
+                // delta, and on buffered deliveries the server completes the
+                // turn without ever emitting a delta at all — three app-side
+                // failures in one evening were exactly those. Same clock,
+                // same slot.
+                if item_type == "agentMessage" && first_delta.is_none() {
+                    first_delta = Some(started.elapsed());
+                }
+                if !item_type.is_empty() && seen_items.last().map(String::as_str) != Some(item_type) {
+                    seen_items.push(item_type.to_string());
+                }
             }
             "thread/tokenUsage/updated" => {
                 if let Some(tokens) = token_usage_output(params, thread_id.as_str(), turn_id.as_deref()) {
@@ -212,7 +225,10 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
         }
     };
     if !turn_completed { return Err("Codex completed without a finished speed-check turn.".into()); }
-    let ttft = first_delta.ok_or_else(|| "Codex completed without a streamed text delta; no TTFT sample was recorded.".to_string())?;
+    let ttft = first_delta.ok_or_else(|| {
+        let seen = if seen_items.is_empty() { "none".to_string() } else { seen_items.join(", ") };
+        format!("Codex completed without any agent message text (items seen: {seen}); no TTFT sample was recorded.")
+    })?;
     let ttft_ms = ttft.as_secs_f64() * 1000.0;
     let duration_ms = turn_duration_ms.unwrap_or_else(|| started.elapsed().as_secs_f64() * 1000.0);
     let decode_ms = (duration_ms - ttft_ms).max(0.0);
