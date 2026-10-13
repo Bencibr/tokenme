@@ -297,7 +297,7 @@ fn valid_sample(sample: &TtftSample) -> bool {
         && sample.decode_ms.is_none_or(|millis| millis.is_finite() && (0.0..=600_000.0).contains(&millis))
         && matches!(sample.provider.as_str(), "codex" | "claude_code" | "dsh")
         && matches!(sample.metric.as_str(), "ttft" | "first_content")
-        && sample.model.as_ref().is_none_or(|model| model.len() <= 128 && !model.chars().any(char::is_control))
+        && sample.model.as_ref().is_none_or(|model| !model.trim().is_empty() && model.len() <= 128 && !model.chars().any(char::is_control))
         && sample.session_id.as_ref().is_none_or(|id| id.len() <= 512 && !id.chars().any(char::is_control))
         && sample.sampled_at_ms <= now_ms().saturating_add(300_000)
 }

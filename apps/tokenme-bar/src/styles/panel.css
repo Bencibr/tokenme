@@ -24,7 +24,7 @@
    the page rounds itself for the web preview, the layer does it for real. */
 [data-env="tauri"] .panel {
   border-radius: 12px;
-  border: 1px solid var(--hair-2);
+  border: 0;
   /* full height: the old -2px left a seam whose layer backing read as a
      white line under the page's translucent surface; the native corner clip
      needs no page-side inset */
@@ -32,6 +32,25 @@
   /* Keep overlays, scroll content, and the WebView's own composited layers
      inside the same rounded shape as the native window region. */
   clip-path: inset(0 round 12px);
+}
+
+/* Windows already clips the whole HWND to the 12px shape in panel.rs. Avoid a
+   second, independently rasterized CSS clip there; its overlap made the lower
+   corner pixels of the frame uneven. Mac still needs the WebView-side clip. */
+[data-env="tauri"][data-platform="windows"] .panel {
+  border-radius: 0;
+  clip-path: none;
+}
+
+/* Keep the frame clear of the native rounded-window edge. */
+[data-env="tauri"] .panel::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  z-index: 10;
+  border: 1px solid var(--hair-2);
+  border-radius: 10px;
+  pointer-events: none;
 }
 
 @keyframes panel-in {

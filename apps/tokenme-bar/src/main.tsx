@@ -8,6 +8,7 @@ import "./styles/bubble.css";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 document.body.dataset.env = inTauri ? "tauri" : "web";
+document.body.dataset.platform = isWindows ? "windows" : "other";
 
 // TokenMe is a utility surface, not a browser. WebView2's native context menu
 // exposes Save As/Print/Refresh on the panel and the Windows bubble; neither

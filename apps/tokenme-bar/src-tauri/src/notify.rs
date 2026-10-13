@@ -766,7 +766,7 @@ impl Worker {
 
 /// The platform post. notify-rust on macOS rides its `preview-macos-un` feature
 /// (UNUserNotificationCenter); on Windows its WinRT toast backend.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn post(title: &str, body: &str) -> Result<(), String> {
     notify_rust::Notification::new()
         .summary(title)
@@ -792,7 +792,7 @@ fn post(title: &str, body: &str) -> Result<(), String> {
     n.show().map(|_| ()).map_err(|e| e.to_string())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn post(_title: &str, _body: &str) -> Result<(), String> {
     Err("desktop notifications are not wired on this platform".into())
 }

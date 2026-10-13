@@ -6,6 +6,7 @@
 //! prompt, response text, credentials, or active result is persisted.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
@@ -66,8 +67,8 @@ pub async fn run_active_speed_test(provider: String) -> Result<ActiveSpeedTest, 
 }
 
 fn run_codex() -> Result<ActiveSpeedTest, String> {
-    let executable = resolve_executable("codex.exe", "codex")
-        .ok_or_else(|| "Codex CLI was not found on PATH.".to_string())?;
+    let executable = resolve_codex_executable()
+        .ok_or_else(|| "Codex CLI could not be found. Add its install directory to PATH or install the Codex CLI.".to_string())?;
     let mut command = Command::new(executable);
     command
         .args(["app-server", "--listen", "stdio://"])
@@ -80,8 +81,9 @@ fn run_codex() -> Result<ActiveSpeedTest, String> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
     }
-    let mut child = command.spawn()
-        .map_err(|_| "Could not start Codex app-server.".to_string())?;
+    let mut child = command.spawn().map_err(|error| {
+        format!("Could not start the Codex app-server process ({:?}).", error.kind())
+    })?;
 
     let result = run_codex_protocol(&mut child);
     let _ = child.kill();
@@ -131,7 +133,7 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
     let thread_result = thread_response.get("result").ok_or_else(|| "Codex returned no thread result.".to_string())?;
     let thread_id = thread_result.get("thread").and_then(|v| v.get("id")).and_then(Value::as_str)
         .ok_or_else(|| "Codex returned no thread id.".to_string())?.to_string();
-    let model = thread_result.get("model").and_then(Value::as_str).map(str::to_string);
+    let model = codex_thread_model(thread_result);
 
     let started = Instant::now();
     send_rpc(&mut input, json!({
@@ -271,7 +273,8 @@ fn send_rpc(input: &mut impl Write, message: Value) -> Result<(), String> {
 }
 
 fn run_claude() -> Result<ActiveSpeedTest, String> {
-    let executable = resolve_claude_executable().ok_or_else(|| "Claude Code CLI was not found on PATH.".to_string())?;
+    let executable = resolve_claude_executable()
+        .ok_or_else(|| "Claude Code CLI could not be found. Add its install directory to PATH or install Claude Code.".to_string())?;
     let (tx, rx) = mpsc::channel::<Vec<claude_otel_ttft::TtftSample>>();
     let server = claude_otel_ttft::start_server(0, move |samples| { let _ = tx.send(samples); })
         .map_err(|_| "Could not start the temporary Claude telemetry receiver.".to_string())?;
@@ -323,7 +326,7 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
     let child = command.spawn();
     let result = match child {
         Ok(mut child) => run_claude_child(&mut child, &rx),
-        Err(_) => Err("Could not start Claude Code CLI.".into()),
+        Err(error) => Err(format!("Could not start the Claude Code CLI process ({:?}).", error.kind())),
     };
     server.shutdown();
     let _ = std::fs::remove_file(&settings_path);
@@ -339,12 +342,21 @@ fn cli_speed_sample(output: &[u8]) -> Option<ActiveSpeedTest> {
         (Some(tokens), Some(duration)) if duration > ttft_ms => Some(tokens as f64 * 1000.0 / (duration - ttft_ms)),
         _ => None,
     };
-    let model = value.get("model").and_then(Value::as_str).map(str::to_string)
-        .or_else(|| value.get("modelUsage").and_then(Value::as_object).and_then(|models| models.keys().next().cloned()));
+    let model = value.get("model").and_then(nonempty_model)
+        .or_else(|| value.get("modelUsage").and_then(Value::as_object).and_then(|models| models.keys().find(|name| !name.trim().is_empty()).cloned()));
     Some(ActiveSpeedTest {
         provider: "claude_code".into(), model, ttft_ms, tps, output_tokens, duration_ms,
         sampled_at_ms: now_ms(), measurement: "claude_cli".into(),
     })
+}
+
+fn nonempty_model(value: &Value) -> Option<String> {
+    value.as_str().map(str::trim).filter(|model| !model.is_empty()).map(str::to_string)
+}
+
+fn codex_thread_model(thread: &Value) -> Option<String> {
+    thread.get("model").and_then(nonempty_model)
+        .or_else(|| thread.pointer("/thread/model").and_then(nonempty_model))
 }
 
 fn run_claude_child(child: &mut Child, rx: &mpsc::Receiver<Vec<claude_otel_ttft::TtftSample>>) -> Result<ActiveSpeedTest, String> {
@@ -409,31 +421,122 @@ fn token_usage_output(params: &Value, thread_id: &str, turn_id: Option<&str>) ->
         .or_else(|| params.pointer("/tokenUsage/total/outputTokens")))
 }
 
-fn resolve_executable(executable: &str, fallback: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        let candidate = directory.join(executable);
-        if candidate.is_file() { return Some(candidate); }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let candidate = directory.join(fallback);
-            if candidate.is_file() { return Some(candidate); }
-        }
-    }
-    Some(std::path::PathBuf::from(fallback))
+fn resolve_codex_executable() -> Option<PathBuf> {
+    let names = if cfg!(windows) { &["codex.exe"][..] } else { &["codex"][..] };
+    #[cfg(target_os = "windows")]
+    { newest_windows_codex_install().or_else(|| find_cli(names)) }
+    #[cfg(not(target_os = "windows"))]
+    { find_cli(names).or_else(|| find_in_known_user_bins(names)) }
 }
 
-fn resolve_claude_executable() -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        for name in ["claude", "claude.exe"] {
-            let candidate = directory.join(name);
-            if candidate.is_file() { return Some(candidate); }
-            let candidate = directory.join("node_modules").join("@anthropic-ai").join("claude-code").join("bin").join(name);
-            if candidate.is_file() { return Some(candidate); }
+fn resolve_claude_executable() -> Option<PathBuf> {
+    let names = if cfg!(windows) { &["claude.exe"][..] } else { &["claude"][..] };
+    find_cli(names).or_else(|| find_in_known_user_bins(names))
+}
+
+/// Search the app's inherited PATH and, on Windows, the current user's latest
+/// PATH value. GUI apps can outlive PATH changes, and Codex's desktop-managed
+/// executable directory changes when its hash-named runtime is updated.
+fn find_cli(names: &[&str]) -> Option<PathBuf> {
+    let mut dirs = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    #[cfg(target_os = "windows")]
+    dirs.extend(windows_user_path_dirs());
+    find_executable_in_dirs(&dirs, names)
+}
+
+fn find_executable_in_dirs(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
+    for directory in dirs {
+        for name in names {
+            let direct = directory.join(name);
+            if direct.is_file() { return Some(direct); }
+            // npm's Claude Code package exposes a small platform-specific
+            // launcher inside its global node_modules tree.
+            let packaged = directory.join("node_modules").join("@anthropic-ai")
+                .join("claude-code").join("bin").join(name);
+            if packaged.is_file() { return Some(packaged); }
         }
     }
-    Some(std::path::PathBuf::from(if cfg!(windows) { "claude.exe" } else { "claude" }))
+    None
+}
+
+fn find_in_known_user_bins(names: &[&str]) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
+    #[cfg(not(target_os = "windows"))]
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let mut dirs = vec![
+        home.join(".local").join("bin"),
+        home.join("bin"),
+        home.join(".npm-global").join("bin"),
+        home.join(".volta").join("bin"),
+        home.join(".bun").join("bin"),
+        home.join(".asdf").join("shims"),
+    ];
+    if let Some(prefix) = std::env::var_os("NPM_CONFIG_PREFIX") {
+        let prefix = PathBuf::from(prefix);
+        dirs.push(prefix.join("bin"));
+        dirs.push(prefix);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for root in [home.join(".nvm").join("versions").join("node"), home.join(".fnm").join("node-versions")] {
+            if let Ok(entries) = std::fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    dirs.push(path.join("bin"));
+                    dirs.push(path.join("installation").join("bin"));
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    dirs.extend([PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
+    #[cfg(target_os = "linux")]
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    find_executable_in_dirs(&dirs, names)
+}
+
+#[cfg(target_os = "windows")]
+fn newest_windows_codex_install() -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+        .join("OpenAI").join("Codex").join("bin");
+    let mut installs = std::fs::read_dir(root).ok()?.filter_map(Result::ok)
+        .filter_map(|entry| {
+            let executable = entry.path().join("codex.exe");
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            executable.is_file().then_some((modified, executable))
+        }).collect::<Vec<_>>();
+    installs.sort_by(|left, right| right.0.cmp(&left.0));
+    installs.into_iter().next().map(|(_, executable)| executable)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_user_path_dirs() -> Vec<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
+    let key: Vec<u16> = "Environment\0".encode_utf16().collect();
+    let name: Vec<u16> = "Path\0".encode_utf16().collect();
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+    let mut bytes = 0u32;
+    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), flags,
+        std::ptr::null_mut(), std::ptr::null_mut(), &mut bytes) };
+    if status != 0 || bytes < 2 || bytes > 1_048_576 { return Vec::new() }
+    let mut buffer = vec![0u16; (bytes as usize + 1) / 2];
+    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), flags,
+        std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut bytes) };
+    if status != 0 { return Vec::new() }
+    let end = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    let path = std::ffi::OsString::from_wide(&buffer[..end]);
+    std::env::split_paths(&path).collect()
 }
 
 fn now_ms() -> i64 {
@@ -495,15 +598,20 @@ mod tests {
     }
 
     #[test]
-    fn claude_fallback_matches_the_host_executable_name() {
-        let path = resolve_claude_executable().unwrap();
-        if std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| {
-            ["claude", "claude.exe"].iter().any(|name| dir.join(name).is_file())
-        })) {
-            assert!(path.file_name().is_some_and(|name| name == "claude" || name == "claude.exe"));
-        } else {
-            assert_eq!(path, std::path::PathBuf::from(if cfg!(windows) { "claude.exe" } else { "claude" }));
-        }
+    fn executable_discovery_never_returns_a_missing_command() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_executable_in_dirs(&[dir.path().to_path_buf()], &["codex.exe"]), None);
+        let executable = dir.path().join("codex.exe");
+        std::fs::write(&executable, b"test executable marker").unwrap();
+        assert_eq!(find_executable_in_dirs(&[dir.path().to_path_buf()], &["codex.exe"]), Some(executable));
+    }
+
+    #[test]
+    fn codex_model_accepts_both_thread_response_shapes_and_rejects_blank_values() {
+        assert_eq!(codex_thread_model(&json!({"model":"gpt-6.1-sol"})).as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(codex_thread_model(&json!({"thread":{"model":"gpt-6.1-sol"}})).as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(codex_thread_model(&json!({"model":"  ","thread":{"model":"gpt-6.1-sol"}})).as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(codex_thread_model(&json!({"model":"  "})), None);
     }
 
     #[test]
