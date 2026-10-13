@@ -8,5 +8,9 @@ fn main() {
         .unwrap_or(0);
     println!("cargo:rustc-env=TOKENME_BUILD_ID={id}");
     println!("cargo:rerun-if-changed=BUILD_ID");
+    let diagnostics = std::fs::read_to_string("resources/diagnostics/build-info.json").unwrap_or_else(|_| "{}".into());
+    // One-line JSON is produced before a Windows build; no host paths or keys.
+    println!("cargo:rustc-env=TOKENME_BUILD_DIAGNOSTICS={}", diagnostics.trim());
+    println!("cargo:rerun-if-changed=resources/diagnostics/build-info.json");
     tauri_build::build()
 }

@@ -95,9 +95,17 @@ const PLAN_ENDPOINT: &str = "https://api.cline.bot/api/v1/users/me/plan";
 const WINDOWS: [(&str, i64, &str); 3] =
     [("five_hour", 300, "5 小时"), ("weekly", 10_080, "周"), ("monthly", 43_200, "月")];
 
+/// Set when the plan tier answered but the usage meter could not — an outage
+/// the caller rides on the last known answer.
+static OUTAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl QuotaProbe for ClineQuota {
     fn tool(&self) -> &'static str {
         "cline"
+    }
+
+    fn outage(&self) -> bool {
+        OUTAGE.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
@@ -112,10 +120,20 @@ impl QuotaProbe for ClineQuota {
         // the vendor answers "no plan history" for is on the free tier, which
         // still gets a named bar instead of silently vanishing from the panel.
         let Some(tier) = plan_tier(&borrowed) else { return Vec::new() };
-        let mut out = get_json(ENDPOINT, &borrowed).map(|body| samples_from(&body, &tier)).unwrap_or_default();
+        let usage = get_json(ENDPOINT, &borrowed);
+        let mut out = usage.as_ref().map(|body| samples_from(body, &tier)).unwrap_or_default();
         if out.is_empty() {
+            // A tier that answered while the usage meter could not is an
+            // outage: hold the last known windows instead of banking the 0%
+            // placeholder over them. A usage meter that ANSWERED empty is the
+            // vendor's own "no rows" and keeps its placeholder bar.
+            if usage.is_none() {
+                OUTAGE.store(true, std::sync::atomic::Ordering::Relaxed);
+                return Vec::new();
+            }
             out.push(tier_sample(&tier));
         }
+        OUTAGE.store(false, std::sync::atomic::Ordering::Relaxed);
         out
     }
 }

@@ -116,7 +116,13 @@ const WINDOWS: &[(&str, &str, i64, &str)] = &[
 /// The `status` value the vendor's own client reads as "this window has no limit".
 const UNLIMITED: f64 = 3.0;
 
+use std::sync::atomic::Ordering;
+
 pub struct MiniMaxCodeQuota;
+
+/// Set when the credential opened but both live meters came back empty — an
+/// outage the caller rides on the last known answer.
+static OUTAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl QuotaProbe for MiniMaxCodeQuota {
     fn tool(&self) -> &'static str {
@@ -125,6 +131,10 @@ impl QuotaProbe for MiniMaxCodeQuota {
 
     fn fetch(&self) -> Vec<QuotaSample> {
         live().unwrap_or_default()
+    }
+
+    fn outage(&self) -> bool {
+        OUTAGE.load(Ordering::Relaxed)
     }
 }
 
@@ -142,24 +152,39 @@ fn live() -> Option<Vec<QuotaSample>> {
     // answer alone — a plan-less account with credits (this machine) and a
     // subscribed account without both both render truthfully.
     let mut out = Vec::new();
+    let mut live_answered = false;
     if let Some(rows) =
         fetched(&cred.access, &plan_bases(cred.region.as_deref()), PATH, samples_from)
     {
+        live_answered = true;
         out.extend(rows);
     }
     if let Some(rows) =
         fetched(&cred.access, &agent_bases(cred.region.as_deref()), CREDITS_PATH, credits_from)
     {
+        live_answered = true;
         out.extend(rows);
     }
     // The day's claim rides the same credential and the same pass: a claimable
     // panel row is collected right here (that is what makes this probe the
     // auto-check-in), and a closed day ships its marker row so the strip's
-    // badge can read it.
+    // badge can read it. The claim runs even on a meters-silent pass — the
+    // vendor-side state change is the point — but its marker row rides only a
+    // pass where a live meter answered: banking a lone marker over the held
+    // windows is the partial-result defeat zcode grew an outage flag for.
+    let mut checkin_row = None;
     if let Some(outcome) = minimax_daily_checkin(&cred, false) {
         if outcome.done_today {
-            out.push(checkin_marker_row(&outcome));
+            checkin_row = Some(checkin_marker_row(&outcome));
         }
+    }
+    if !live_answered {
+        OUTAGE.store(true, Ordering::Relaxed);
+        return None;
+    }
+    OUTAGE.store(false, Ordering::Relaxed);
+    if let Some(row) = checkin_row {
+        out.push(row);
     }
     (!out.is_empty()).then_some(out)
 }

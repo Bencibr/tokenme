@@ -6277,6 +6277,7 @@ dependencies = [
  "sha2 0.10.9",
  "ureq 2.12.1",
  "usage-core",
+ "webpki-roots 0.26.11",
  "windows-sys 0.61.2",
 ]
 

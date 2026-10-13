@@ -1,0 +1,51 @@
+#!/usr/bin/make -f
+export CARGO_HOME = $(CURDIR)/.debian-cargo
+export CARGO_NET_OFFLINE = true
+export CARGO_BUILD_JOBS = 2
+# Ubuntu Resolute provides the archive toolchain as unversioned cargo/rustc
+# packages (currently 1.93). The source's newer rust-version is checked by
+# CI and the release toolchain; Launchpad's cargo flag lets this builder
+# compile the same code without inventing a non-archive Build-Depends name.
+CARGO = cargo
+export RUSTC = rustc
+export RUSTDOC = rustdoc
+export CARGO_PROFILE_RELEASE_LTO = false
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	python3 packaging/ppa/verify-inputs.py
+	python3 scripts/check-theme-parity.py
+	python3 scripts/check-i18n-parity.py
+
+override_dh_auto_build:
+	$(CARGO) build --release --frozen --ignore-rust-version --target-dir .debian-target/cli -p usage-cli
+	$(CARGO) build --release --frozen --ignore-rust-version --target-dir .debian-target/panel --manifest-path apps/tokenme-bar/src-tauri/Cargo.toml --features custom-protocol
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	$(CARGO) test --release --frozen --ignore-rust-version --target-dir .debian-target/cli --workspace
+	$(CARGO) test --release --frozen --ignore-rust-version --target-dir .debian-target/panel --manifest-path apps/tokenme-bar/src-tauri/Cargo.toml --features custom-protocol
+endif
+
+override_dh_auto_install:
+	install -D -m0755 .debian-target/cli/release/tokenme debian/tokenme-cli/usr/bin/tokenme
+	install -D -m0755 .debian-target/panel/release/tokenme debian/token-me/usr/bin/TokenMe
+	install -D -m0644 packaging/ppa/tokenme.desktop debian/token-me/usr/share/applications/tokenme.desktop
+	install -D -m0644 apps/tokenme-bar/src-tauri/icons/128x128.png debian/token-me/usr/share/icons/hicolor/128x128/apps/tokenme.png
+	install -D -m0755 apps/tokenme-bar/src-tauri/resources/collector/tokenme-x86_64 debian/token-me/usr/lib/TokenMe/collector/tokenme-x86_64
+	install -D -m0755 apps/tokenme-bar/src-tauri/resources/collector/tokenme-aarch64 debian/token-me/usr/lib/TokenMe/collector/tokenme-aarch64
+	install -D -m0644 apps/tokenme-bar/src-tauri/icons/icon.ico debian/token-me/usr/lib/TokenMe/icon.ico
+
+override_dh_shlibdeps:
+	dh_shlibdeps -X/usr/lib/TokenMe/collector/
+
+override_dh_strip:
+	dh_strip -X/usr/lib/TokenMe/collector/
+
+override_dh_dwz:
+	dh_dwz -X/usr/lib/TokenMe/collector/
+
+override_dh_auto_clean:
+	rm -rf .debian-target .debian-cargo

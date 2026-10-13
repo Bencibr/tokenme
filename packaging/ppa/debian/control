@@ -1,0 +1,25 @@
+Source: token-me
+Section: utils
+Priority: optional
+Maintainer: TokenMe contributors <packaging@example.com>
+Build-Depends: debhelper-compat (= 13),
+ cargo, rustc,
+ pkg-config, libgtk-3-dev, libwebkit2gtk-4.1-dev,
+ libayatana-appindicator3-dev, libssl-dev, python3
+Standards-Version: 4.7.0
+Homepage: https://github.com/Bencibr/tokenme
+Rules-Requires-Root: no
+
+Package: token-me
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, libayatana-appindicator3-1
+Suggests: gnome-shell-extension-appindicator
+Description: desktop token usage and cost monitor
+ TokenMe displays local AI tool usage, quota and cost in a desktop panel.
+ Includes static collectors for remote x86-64 and ARM64 Linux machines.
+
+Package: tokenme-cli
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: command line token usage collector
+ Collect and export local AI tool usage without a desktop session.

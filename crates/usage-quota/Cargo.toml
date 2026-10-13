@@ -24,6 +24,10 @@ base64.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+webpki-roots = "0.26"
+
+[target.'cfg(windows)'.dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 
 [dev-dependencies]
 tempfile = "3"

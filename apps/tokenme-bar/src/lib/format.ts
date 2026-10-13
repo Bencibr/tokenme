@@ -157,6 +157,15 @@ export function deltaDirection(n: number): "up" | "down" | "flat" {
   return n > 0 ? "up" : "down";
 }
 
+/** A duration speaks in the unit that fits: past a second a millisecond
+ *  figure is a number to parse, so it moves to seconds (whole seconds past
+ *  a minute). */
+export function duration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const seconds = ms / 1000;
+  return `${seconds >= 60 ? Math.round(seconds) : seconds.toFixed(1)} s`;
+}
+
 export function relativeTime(ms: number, nowMs: number): string {
   const diff = Math.max(0, nowMs - ms);
   const min = Math.floor(diff / 60_000);
@@ -168,6 +177,13 @@ export function relativeTime(ms: number, nowMs: number): string {
   if (days === 1) return t("rel.yesterday");
   if (days < 7) return t("rel.day", { n: days });
   return t("rel.week", { n: Math.floor(days / 7) });
+}
+
+/** Carry rounded milliseconds into seconds at 1000 ms. */
+export function formatLatency(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const rounded = Math.round(ms);
+  return rounded < 1000 ? `${rounded} ms` : `${(ms / 1000).toFixed(2)} s`;
 }
 
 /**

@@ -11,6 +11,7 @@
 pub mod cache;
 pub mod host;
 mod http;
+pub mod diagnostics;
 mod providers;
 
 use std::sync::Arc;
@@ -70,7 +71,12 @@ pub fn manual_checkin(tool: &str) -> Result<(bool, String), String> {
     CHECKIN_TOOLS
         .iter()
         .find(|(id, _)| *id == tool)
-        .map(|(_, claim)| claim())
+        .map(|(id, claim)| {
+            let mut trace = diagnostics::ProbeTrace::start(id);
+            let result = claim();
+            trace.finish(match &result { Ok((true, _)) => "confirmed", Ok(_) => "not_confirmed", Err(_) => "error" }, None);
+            result
+        })
         .unwrap_or_else(|| Err(format!("{tool} 没有签到活动")))
 }
 
@@ -97,6 +103,31 @@ pub fn log_checkin(msg: &str) {
     }
 }
 
+/// The sink a host hands the meters' diagnostics. The CLI installs nothing.
+pub type MeterLog = Arc<dyn Fn(&str) + Send + Sync>;
+
+static METER_LOG: std::sync::OnceLock<MeterLog> = std::sync::OnceLock::new();
+
+pub fn set_meter_log(f: MeterLog) {
+    let _ = METER_LOG.set(f);
+}
+
+/// Emit a throttled provider diagnostic without including credentials, URLs or
+/// response bodies.
+pub fn log_meter(key: &str, msg: &str) {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let last = LAST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let due = last.lock().map(|mut map| {
+        let due = map.get(key).is_none_or(|t| now.saturating_sub(*t) > 10 * 60 * 1000);
+        if due { map.insert(key.to_string(), now); }
+        due
+    }).unwrap_or(false);
+    if due {
+        if let Some(f) = METER_LOG.get() { f(&format!("{key}: {msg}")); }
+    }
+}
+
 pub trait QuotaProbe: Send + Sync {
     /// Must match an adapter `TOOL_ID` so the panel can group quota with spend.
     fn tool(&self) -> &'static str;
@@ -119,7 +150,16 @@ pub trait QuotaProbe: Send + Sync {
     /// Probes shell out and hit the network; neither may take the menu-bar
     /// process down with them.
     fn guarded_fetch(&self) -> Vec<QuotaSample> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.fetch())).unwrap_or_default()
+        let mut trace = diagnostics::ProbeTrace::start(self.tool());
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.fetch())) {
+            Ok(samples) => { trace.finish(if samples.is_empty() { "empty" } else { "ok" }, Some(samples.len())); samples }
+            Err(_) => { trace.finish("panic", None); Vec::new() }
+        }
+    }
+
+    /// Whether an empty fetch means an outage whose last answer should be held.
+    fn outage(&self) -> bool {
+        false
     }
 }
 

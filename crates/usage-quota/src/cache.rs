@@ -168,6 +168,7 @@ fn views(tool: &str, captured_at_ms: i64, entries: &[Entry]) -> Vec<QuotaView> {
 pub fn probe(cache: Option<&Cache>, source: &dyn QuotaProbe) -> Vec<QuotaView> {
     if let Some(cache) = cache {
         if let Some(fresh) = cache.fresh(source.tool()) {
+            crate::diagnostics::note(source.tool(), "probe_skipped", "cache_hit");
             return fresh;
         }
     }
@@ -177,10 +178,30 @@ pub fn probe(cache: Option<&Cache>, source: &dyn QuotaProbe) -> Vec<QuotaView> {
     // cycle would start another one — dozens of stuck `agy` / `security`
     // processes. While one is in flight the caller gets whatever is cached.
     let Some(_flight) = Flight::claim(source.tool()) else {
+        crate::diagnostics::note(source.tool(), "probe_skipped", "already_running");
         return cache.and_then(|c| c.within(source.tool(), GRACE)).unwrap_or_default();
     };
     let samples = source.guarded_fetch();
     if samples.is_empty() {
+        // An outage flag says this empty means "the meters could not answer",
+        // not "nothing here": the last known windows ride however old they are
+        // (the UI speaks the samples' age), and no empty verdict is stored —
+        // the first successful poll replaces the held windows outright.
+        // Measured 2026-10-13: a zcode account's weekly pool hit 100% and the
+        // vendor went silent within one poll cycle; a plain empty answer would
+        // have banked a local 0% sample in the real answer's place.
+        if source.outage() {
+            if let Some(recent) = cache.and_then(|c| c.stale(source.tool())) {
+                if !recent.is_empty() {
+                    crate::log_meter(
+                        &format!("{}:outage", source.tool()),
+                        &format!("meters silent — holding the last known {} window(s)", recent.len()),
+                    );
+                    return recent;
+                }
+            }
+            return Vec::new();
+        }
         // Keep a good answer for a grace period rather than blanking the bar
         // because one request timed out; after that, remember the "nothing here"
         // verdict so the next cycle costs nothing.

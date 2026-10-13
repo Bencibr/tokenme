@@ -382,7 +382,7 @@ fn quota_summary(server: &LanguageServer, port: u16, scheme: &str) -> Option<Val
 #[cfg(unix)]
 fn http_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    AGENT.get_or_init(|| ureq::AgentBuilder::new().timeout_connect(LOCAL_CONNECT).timeout_read(LOCAL_READ).build())
+    AGENT.get_or_init(|| crate::http::agent_builder().timeout_connect(LOCAL_CONNECT).timeout_read(LOCAL_READ).build())
 }
 
 /// The language server's TLS certificate is self-signed; the loopback address
@@ -457,7 +457,9 @@ fn https_agent() -> &'static ureq::Agent {
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        ureq::AgentBuilder::new()
+        #[cfg(windows)]
+        { config.resumption = ureq::rustls::client::Resumption::disabled(); }
+        crate::http::agent_builder()
             .tls_config(Arc::new(config))
             .timeout_connect(LOCAL_CONNECT)
             .timeout_read(LOCAL_READ)
