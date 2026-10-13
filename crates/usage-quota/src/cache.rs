@@ -167,6 +167,7 @@ fn views(tool: &str, captured_at_ms: i64, entries: &[Entry]) -> Vec<QuotaView> {
 pub fn probe(cache: Option<&Cache>, source: &dyn QuotaProbe) -> Vec<QuotaView> {
     if let Some(cache) = cache {
         if let Some(fresh) = cache.fresh(source.tool()) {
+            crate::diagnostics::note(source.tool(), "probe_skipped", "cache_hit");
             return fresh;
         }
     }
@@ -176,6 +177,7 @@ pub fn probe(cache: Option<&Cache>, source: &dyn QuotaProbe) -> Vec<QuotaView> {
     // cycle would start another one — dozens of stuck `agy` / `security`
     // processes. While one is in flight the caller gets whatever is cached.
     let Some(_flight) = Flight::claim(source.tool()) else {
+        crate::diagnostics::note(source.tool(), "probe_skipped", "already_running");
         return cache.and_then(|c| c.within(source.tool(), GRACE)).unwrap_or_default();
     };
     let samples = source.guarded_fetch();

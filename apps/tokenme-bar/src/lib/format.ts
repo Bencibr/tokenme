@@ -179,6 +179,13 @@ export function relativeTime(ms: number, nowMs: number): string {
   return t("rel.week", { n: Math.floor(days / 7) });
 }
 
+/** Carry rounded milliseconds into seconds at 1000 ms. */
+export function formatLatency(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const rounded = Math.round(ms);
+  return rounded < 1000 ? `${rounded} ms` : `${(ms / 1000).toFixed(2)} s`;
+}
+
 /**
  * Seconds-level age for the footer's freshness readout: exact within the first
  * minute — where the seconds are the point, because they are how a manual

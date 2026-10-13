@@ -13,6 +13,8 @@ mod claude_otel_config;
 mod claude_otel_ttft;
 mod ttft;
 mod active_speed;
+#[cfg(windows)]
+mod windows_diagnostics;
 mod snapshot;
 mod tray;
 mod updater;
@@ -123,6 +125,11 @@ pub fn run() {
             logging::init();
             #[cfg(target_os = "macos")]
             updater::cleanup_stale_copies();
+            usage_quota::diagnostics::set_sink(Some(std::sync::Arc::new(logging::quota_event)));
+            #[cfg(windows)]
+            windows_diagnostics::init();
+            #[cfg(windows)]
+            logging::info("quota TLS: session resumption disabled on Windows");
             notify::init(app.handle());
             // The check-in ledger rides the panel's own log dir; the probes
             // themselves call through this hook, so usage-quota stays

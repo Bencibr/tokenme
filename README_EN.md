@@ -19,7 +19,7 @@
 
 ## What is TokenMe?
 
-TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, a fully static Linux collector and CLI. It answers three questions that usually have no good home:
+TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, a fully static Linux collector and CLI, and a Linux desktop preview built from source. It answers three questions that usually have no good home:
 
 - How many tokens did I burn today, and what did they cost?
 - How much is left on each subscription, and when does it reset?
@@ -88,7 +88,69 @@ Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/lates
 
 ### Linux
 
-No menu-bar panel here — but Linux is a first-class collector: a fully static binary (musl, `x86_64` / `aarch64`, no glibc to align, no Rust or Python on the box). Grab the tarball from [Releases](https://github.com/Bencibr/tokenme/releases/latest) (`install-linux.sh` rides inside):
+#### Ubuntu desktop
+
+The Linux desktop build is still a preview; Ubuntu 24.04 LTS or newer is recommended. It opens from the top-bar AppIndicator, and the desktop pet is not implemented on Linux yet. The current stable install path is a local `.deb` built from source; the apt instructions will be added after the PPA is published.
+
+Install the system libraries, Rust, Node.js/pnpm, and Zig for the static collectors bundled into the panel:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential curl git pkg-config python3 \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libssl-dev \
+  nodejs npm zig
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup update stable
+rustup default stable
+sudo npm install --global pnpm@11
+cargo install cargo-zigbuild --locked
+```
+
+Make sure `rustc --version` is at least 1.97, then build the panel:
+
+```bash
+git clone https://github.com/Bencibr/tokenme.git
+cd tokenme
+bash scripts/build-linux-desktop.sh
+```
+
+The script runs the checks and tests, then writes a `.deb` under `apps/tokenme-bar/src-tauri/target/release/bundle/deb/`. Install and launch it with:
+
+```bash
+sudo apt install ./apps/tokenme-bar/src-tauri/target/release/bundle/deb/*.deb
+TokenMe &
+```
+
+You can also launch **TokenMe** from Ubuntu's application menu. If the icon does not appear in the GNOME top bar, install and enable the AppIndicator extension, then sign in again:
+
+```bash
+sudo apt install -y gnome-shell-extension-appindicator
+```
+
+To upgrade, pull the source and install the newly built package:
+
+```bash
+git pull --ff-only
+bash scripts/build-linux-desktop.sh
+sudo apt install ./apps/tokenme-bar/src-tauri/target/release/bundle/deb/*.deb
+```
+
+To remove the desktop panel:
+
+```bash
+sudo apt remove tokenme
+```
+
+If you only need the headless Linux collector, skip the GTK/WebKit dependencies and use the static CLI instructions below. To install the CLI from a checkout instead:
+
+```bash
+cargo install --path crates/usage-cli --bin tokenme
+tokenme detect
+```
+
+Linux also provides a fully static collector binary (musl, `x86_64` / `aarch64`, no glibc to align, no Rust or Python on the box). Grab the collector tarball from [Releases](https://github.com/Bencibr/tokenme/releases/latest) (`install-linux.sh` rides inside):
 
 ```bash
 tar xzf tokenme-cli-*-linux-musl.tar.gz

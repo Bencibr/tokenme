@@ -21,6 +21,7 @@ apps/tokenme-bar/src-tauri/resources/collector/
 
 # Windows CLI staged by the NSIS build hook
 apps/tokenme-bar/src-tauri/resources/cli/
+apps/tokenme-bar/src-tauri/resources/diagnostics/
 
 # a compiled CLI binary landed at apps/tokenme-bar/tokenme once and was swept
 # into a commit; refuse the exact path — the global apps/ exclusion cannot

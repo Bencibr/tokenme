@@ -1,0 +1,22 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: TokenMe
+Source: https://github.com/Bencibr/tokenme
+
+Files: *
+Copyright: 2026 TokenMe contributors
+License: MIT
+ See LICENSE in the upstream source archive.
+
+Files: vendor/rust/*
+Copyright: The respective dependency authors
+License: multiple
+ Each dependency's original license files are preserved in its vendor directory.
+ PREPARED-INPUTS.json lists the license expression supplied by each dependency.
+ These dependencies are not covered by the upstream application's MIT license.
+
+Files: apps/tokenme-bar/dist/* vendor/frontend-licenses/*
+Copyright: TokenMe contributors and the respective frontend dependency authors
+License: multiple
+ The frontend is generated from the application's TypeScript and locked npm
+ dependencies. Original dependency license notices are preserved under
+ vendor/frontend-licenses; pnpm-lock.yaml identifies the dependency versions.

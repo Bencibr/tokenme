@@ -1169,6 +1169,12 @@ pub fn open_at(app: &AppHandle, period: &str) {
 }
 
 fn anchor(window: &WebviewWindow, rect: Option<Rect>) {
+    // AppIndicator exposes no tray rectangle. Wayland owns placement; the
+    // decorated Linux window remains movable if centering is unsupported.
+    if cfg!(target_os = "linux") && rect.is_none() {
+        let _ = window.center();
+        return;
+    }
     // A tray rectangle is only an anchor if it describes a place on screen.
     // Until the status item has been laid out — which, measured on this machine,
     // is every launch until the first click — muda reports `(0, 2160, 68, 0)`:
@@ -1542,6 +1548,15 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         return;
     }
 
+    #[cfg(target_os = "linux")]
+    if let WindowEvent::CloseRequested { api, .. } = event {
+        api.prevent_close();
+        if let Some(panel) = window.app_handle().get_webview_window(LABEL) {
+            request_visibility(&panel, false);
+        }
+        return;
+    }
+
     #[cfg(target_os = "windows")]
     if matches!(event, WindowEvent::Resized(_)) {
         // The panel is fixed-size today, but Windows can change its physical
@@ -1566,7 +1581,7 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
     // the tray popup disappear immediately after a successful show. The
     // Windows click-away monitor above uses the actual HWND and pointer state,
     // so it remains the authoritative outside-click path there.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
         if !matches!(event, WindowEvent::Focused(false)) {
             return;

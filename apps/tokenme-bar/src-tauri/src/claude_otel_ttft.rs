@@ -238,6 +238,7 @@ where
                     if duplicate {
                         continue;
                     }
+                    let model = clean_model(model);
                     let sampled_at_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -362,6 +363,10 @@ fn tps_of(output_tokens: Option<f64>, duration_ms: Option<f64>, ttft_ms: f64) ->
     tps.is_finite().then_some(tps).filter(|tps| (0.1..=2000.0).contains(tps))
 }
 
+fn clean_model(model: Option<String>) -> Option<String> {
+    model.map(|model| model.trim().to_owned()).filter(|model| !model.is_empty())
+}
+
 impl<'de> Deserialize<'de> for Attribute {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: Deserializer<'de> {
@@ -399,7 +404,7 @@ impl<'de> Deserialize<'de> for Attribute {
                     "ttft_ms" | "first_content_ms" | "gen_ai.usage.output_tokens" | "output_tokens" => {
                         number = serde_json::from_value::<AttributeValue>(value).ok().and_then(|value| value.number());
                     }
-                    "gen_ai.request.model" => {
+                    "gen_ai.request.model" | "model" => {
                         text = serde_json::from_value::<AttributeValue>(value).ok().and_then(|value| value.string_value)
                             .filter(|s| s.len() <= 128 && !s.chars().any(char::is_control));
                     }
@@ -462,6 +467,14 @@ mod tests {
         let attributes = &parsed.resource_spans[0].scope_spans[0].spans[0].attributes;
         assert_eq!(attributes[0].number, Some(42.0));
         assert_eq!(attributes[1].text.as_deref(), Some("claude-opus"));
+    }
+
+    #[test]
+    fn accepts_claude_model_alias_and_drops_blank_model_labels() {
+        let named: Attribute = serde_json::from_str(r#"{"key":"model","value":{"stringValue":"claude-sonnet-4-5"}}"#).unwrap();
+        let blank: Attribute = serde_json::from_str(r#"{"key":"model","value":{"stringValue":"  "}}"#).unwrap();
+        assert_eq!(clean_model(named.text).as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(clean_model(blank.text), None);
     }
 
     #[test]

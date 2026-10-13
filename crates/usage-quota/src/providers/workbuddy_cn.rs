@@ -59,7 +59,7 @@ impl Transport {
         let enterprise = info.pointer("/account/enterpriseId").and_then(Value::as_str).unwrap_or_default();
         // Fixed vendor origins: metadata in an auth record cannot redirect a token.
         let base = if path == METER { "https://www.workbuddy.cn" } else { "https://copilot.tencent.com" };
-        let req = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(3)).timeout_read(Duration::from_secs(6))
+        let req = crate::http::agent_builder().timeout_connect(Duration::from_secs(3)).timeout_read(Duration::from_secs(6))
             .redirects(0).build().post(&format!("{base}{path}"))
             .set("authorization", &format!("Bearer {token}"))
             .set("content-type", "application/json").set("accept", "application/json")

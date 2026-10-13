@@ -750,7 +750,7 @@ fn today_benefits_all_claimed_for(edition: Edition, body: &Value, day_open: bool
 /// identity-bearing read may be believed about an omission.
 fn checkin_campaigns(base: &str, token: &str, ident: Option<&QoderClaimIdentity>) -> Option<Value> {
     let url = format!("{base}{CAMPAIGNS_PATH}");
-    let mut req = ureq::AgentBuilder::new()
+    let mut req = crate::http::agent_builder()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()
@@ -1155,7 +1155,7 @@ fn with_machine_headers(req: ureq::Request, ident: &QoderClaimIdentity) -> ureq:
 
 fn checkin_claim(base: &str, token: &str, campaign: &str, ident: Option<&QoderClaimIdentity>) -> Option<(bool, f64, bool)> {
     let url = format!("{base}{CAMPAIGNS_PATH}/{campaign}/claim");
-    let mut req = ureq::AgentBuilder::new()
+    let mut req = crate::http::agent_builder()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()

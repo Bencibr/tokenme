@@ -76,12 +76,13 @@ function SpeedRow({ nameKey, granularityKey, provider, tool, samples, now, canTe
   // carries only the model and the three figures.
   const title = [t(nameKey), t(granularityKey),
     recent.length > 0 ? t("ttft.samples", { n: recent.length }) : null].filter(Boolean).join(" · ");
-  const sub = latest?.model ?? "—";
+  const activeModel = activeTest?.provider === provider ? activeTest.model?.trim() : undefined;
+  const sub = latest?.model?.trim() || activeModel || "—";
   return (
     <li className="speed" title={title}>
       <span className="speed-ic"><ToolIcon tool={tool} size={20} /></span>
       <span className="speed-meta">
-        <span className="speed-sub ttft-granularity">{sub}</span>
+        <span className="speed-sub ttft-granularity" title={sub === "—" ? undefined : sub}>{sub}</span>
         {canTest ? <button type="button" className="ttft-test-button" onClick={onTest} disabled={testing}>
           {testing ? t("ttft.active.running") : t("ttft.active.button")}
         </button> : null}
@@ -150,7 +151,7 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
     try { setActiveTest(await bridge.runActiveSpeedTest(provider)); }
     catch (error) {
       const detail = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-      setActiveError(detail ? `${t("ttft.active.error")} (${detail})` : t("ttft.active.error"));
+      setActiveError(detail ? `${t("ttft.active.error")} ${detail}` : t("ttft.active.error"));
     }
     finally { setTesting(null); }
   };

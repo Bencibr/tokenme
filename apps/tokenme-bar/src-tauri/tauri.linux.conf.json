@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "TokenMe",
+        "width": 400,
+        "height": 660,
+        "decorations": true,
+        "transparent": false,
+        "shadow": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "focus": true,
+        "center": true
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["deb"]
+  }
+}

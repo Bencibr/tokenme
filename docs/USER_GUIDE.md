@@ -196,6 +196,16 @@ tokenme budget set zcode --daily 5 --monthly 50
 | 同步徽标过期或缺失 | 采集端：`systemctl --user list-timers tokenme-export.timer` 看定时器活着没，手动 `tokenme export`；展示机：bundle 必须落在 `~/tokenme-sync`——`tokenme import <file> --dry-run` 可预演合并 |
 | bundle 被拒 | 导入消息里写明原因（sha256 不符 = 传输损坏或截断；格式/schema 不符 = 两端版本差）。文件保留、什么都没合——修好通道或升级旧的一端，它会自己重试 |
 
+## Windows 异常退出诊断
+
+Windows 安装程序为 `TokenMe.exe` 和可选的 `TokenMe-diagnostic.exe` 配置本地完整内存转储，每个程序保留三份，目录为 `%LOCALAPPDATA%\tokenme\crashes`。配置需要管理员权限；普通用户安装仍可使用，`panel.log` 会记录完整转储是否可用。已有的自定义 WER 设置会保留。转储不会自动上传；完整内存可能包含凭证，请保留在本机。
+
+与 `panel.log` 同目录的 `quota.log` 以 JSONL 记录探测和请求 ID、进程及 Windows 线程 ID、提供方、主机名、HTTP 状态或错误类别、耗时以及并发数量。日志不包含 URL 路径和查询参数、请求头、请求内容或响应正文。`http_response` 表示响应头已到达，`probe_end` 在正文处理结束后记录；没有结束事件的开始记录，可帮助定位原生崩溃时仍在执行的工作。日志上限为 2 MiB，另保留一份备份。Rust panic 还会记录调用栈；原生堆损坏由 WER 捕获，程序不会捕获后继续运行。
+
+常规 `pnpm tauri build --bundles nsis` 构建在打包后，将匹配的 EXE/PDB、源码版本和指纹、本地补丁及 SHA256 归档到 `dist/windows-symbols/`。无需安装程序时，从仓库根目录运行 `node scripts/build-windows-panel.mjs --no-bundle --ci`。源码指纹过期，或 PDB 的 GUID/age 与程序不匹配，都会导致归档失败。
+
+定向追踪堆损坏时，将归档的程序复制为 `TokenMe-diagnostic.exe`，退出正常实例，在管理员 PowerShell 中运行 `windows-pageheap.ps1 -Mode Enable`，然后重新启动诊断副本。完成后用 `-Mode Disable` 关闭并重启。正常安装和启动不会启用 PageHeap；它会明显增加内存占用。脚本位于安装目录的 `bin` 中；同目录的 `windows-crash-dumps.ps1 -Mode Enable` 可在管理员权限下修复转储配置。
+
 ## 桌面宠物问候（Windows）
 
 通用设置里有宠物问候、休息提醒与动作的独立开关，外加提醒间隔和 打招呼 预览。问候跟随本地时间：早晨 06:00–11:00、中午 11:00–14:00、晚间 18:00–22:00、22:00–06:00 是轻声的夜间问候。每个时段每个本地日只问候一次；午夜前后算同一个夜晚。

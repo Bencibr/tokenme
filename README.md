@@ -19,7 +19,7 @@
 
 ## TokenMe是什么？
 
-TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的菜单栏应用：macOS 与 Windows 有原生安装包，Linux 是一等的静态采集端，外加命令行工具。它回答三个平时没地方看的问题：
+TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的菜单栏应用：macOS 与 Windows 有原生安装包，Linux 提供静态采集端、命令行工具与源码构建的桌面预览版。它回答三个平时没地方看的问题：
 
 - 今天用了多少 token、折合多少钱？
 - 各家订阅的额度还剩多少、什么时候重置？
@@ -88,7 +88,69 @@ sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 
 ### Linux
 
-没有菜单栏面板，但 Linux 是一等采集端：完全静态的二进制（musl，`x86_64` / `aarch64`，不需要 glibc 对齐，机器上也不用装 Rust 或 Python）。到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载压缩包（内附 `install-linux.sh`）：
+#### Ubuntu 桌面版
+
+Linux 桌面版目前是预览版，建议使用 Ubuntu 24.04 LTS 或更新版本。它通过顶栏 AppIndicator 打开面板，桌面宠物暂未支持 Linux。当前稳定的安装方式是从源码构建本地 `.deb`；PPA 发布后再使用 apt 源安装。
+
+先安装系统依赖、Rust、Node.js/pnpm，以及构建面板内置静态采集器所需的 Zig：
+
+```bash
+sudo apt update
+sudo apt install -y build-essential curl git pkg-config python3 \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libssl-dev \
+  nodejs npm zig
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup update stable
+rustup default stable
+sudo npm install --global pnpm@11
+cargo install cargo-zigbuild --locked
+```
+
+确认 `rustc --version` 不低于 1.97，然后构建面板：
+
+```bash
+git clone https://github.com/Bencibr/tokenme.git
+cd tokenme
+bash scripts/build-linux-desktop.sh
+```
+
+脚本会运行检查和测试，并在 `apps/tokenme-bar/src-tauri/target/release/bundle/deb/` 生成 `.deb`。安装并启动：
+
+```bash
+sudo apt install ./apps/tokenme-bar/src-tauri/target/release/bundle/deb/*.deb
+TokenMe &
+```
+
+也可以从 Ubuntu 应用程序菜单启动 **TokenMe**。如果 GNOME 顶栏没有图标，安装并启用 AppIndicator 扩展后重新登录：
+
+```bash
+sudo apt install -y gnome-shell-extension-appindicator
+```
+
+升级时在源码目录执行：
+
+```bash
+git pull --ff-only
+bash scripts/build-linux-desktop.sh
+sudo apt install ./apps/tokenme-bar/src-tauri/target/release/bundle/deb/*.deb
+```
+
+卸载面板：
+
+```bash
+sudo apt remove tokenme
+```
+
+如果只需要无界面的 Linux 采集端，不必安装 GTK/WebKit 依赖，直接使用下面的静态 CLI 教程即可。需要 CLI 时还可以在源码目录单独安装：
+
+```bash
+cargo install --path crates/usage-cli --bin tokenme
+tokenme detect
+```
+
+Linux 同时提供完全静态的采集端二进制（musl，`x86_64` / `aarch64`，不需要 glibc 对齐，机器上也不用装 Rust 或 Python）。到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载采集端压缩包（内附 `install-linux.sh`）：
 
 ```bash
 tar xzf tokenme-cli-*-linux-musl.tar.gz

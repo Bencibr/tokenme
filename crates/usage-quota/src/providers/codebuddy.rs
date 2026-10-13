@@ -91,7 +91,7 @@ fn access_token() -> Option<String> {
 /// One POST, shaped the way the console page and the open-source reader both
 /// send it: only currently-valid packs, both live (0) and exhausted (3) ones.
 fn post_meter(token: &str) -> Option<Value> {
-    let resp: Value = ureq::AgentBuilder::new()
+    let resp: Value = crate::http::agent_builder()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .build()

@@ -62,9 +62,9 @@ fn live_quota(report: &Report, now_ms: i64) -> Option<&QuotaView> {
         .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent))
 }
 
-/// `(title, tooltip)`. Windows ignores the title, so the tooltip repeats it.
+/// `(title, tooltip)`. Icon-only trays repeat the numbers in the tooltip.
 pub fn label_for(report: &Report, mode: TrayMode) -> (Option<String>, String) {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     let mode = { let _ = mode; TrayMode::TrayOnly };
     let now_ms = report.generated_at_ms;
     let day = &report.day;
@@ -150,9 +150,8 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) 
 }
 
 fn paint<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
-    // Windows has an icon-only notification area. Old text-only preferences
-    // must never remove the application's only tray entry after an upgrade.
-    #[cfg(target_os = "windows")]
+    // Windows and Linux retain an icon even with an old text-only preference.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     let mode = { let _ = mode; TrayMode::TrayOnly };
     #[cfg(target_os = "windows")]
     crate::windows_tray::refresh(app);
@@ -246,12 +245,17 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(tauri::menu::Menu<tauri::Wry>, 
     let week = MenuItem::with_id(app, "week", l.str("本周", "This Week"), true, None::<&str>)?;
     let today = MenuItem::with_id(app, "today", l.str("今日花费", "Today's Cost"), true, None::<&str>)?;
     let refresh_item = MenuItem::with_id(app, "refresh", l.str("刷新", "Refresh"), true, None::<&str>)?;
+    #[cfg(target_os = "linux")]
+    let open_panel = MenuItem::with_id(app, "open_panel", l.str("打开面板", "Open Panel"), true, None::<&str>)?;
 
     autostart
         .set_checked(app.state::<Shared>().settings().autostart)
         .ok();
 
-    let menu = MenuBuilder::new(app)
+    let menu = MenuBuilder::new(app);
+    #[cfg(target_os = "linux")]
+    let menu = menu.item(&open_panel).separator();
+    let menu = menu
         .item(&refresh_item)
         .separator()
         .item(&today)
@@ -287,9 +291,15 @@ fn tray_image() -> tauri::image::Image<'static> {
 }
 
 /// macOS keeps the 44px menu-bar glyph — that is its native 22pt@2x size.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn tray_image() -> tauri::image::Image<'static> {
     tauri::include_image!("icons/tray-icon.png")
+}
+
+// AppIndicator preserves colors; the application icon reads on both themes.
+#[cfg(target_os = "linux")]
+fn tray_image() -> tauri::image::Image<'static> {
+    tauri::include_image!("icons/32x32.png")
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
@@ -559,6 +569,8 @@ fn on_tray_event(tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent) {
 
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id().as_ref() {
+        #[cfg(target_os = "linux")]
+        "open_panel" => panel::show(app, None),
         "refresh" => {
             // The full refresh the panel's 刷新 runs: a fresh models.dev price
             // table first (the engine re-summarizes when it lands), then the

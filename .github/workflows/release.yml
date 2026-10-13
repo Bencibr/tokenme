@@ -209,7 +209,7 @@ jobs:
     # Fully static musl builds for Linux collectors, cross-compiled with zig so
     # no distro toolchain enters the picture. Same recipe as
     # scripts/build-linux.sh; the tarball carries install-linux.sh next to the
-    # binary — that pair is the whole Linux install story.
+    # binary for the headless collector install.
     strategy:
       matrix:
         include:
@@ -250,6 +250,85 @@ jobs:
           name: cli-linux-${{ matrix.arch }}
           path: dist/*
 
+  linux-panel:
+    needs: [notes, cli-linux]
+    # Native builds on the oldest supported Ubuntu baseline keep glibc
+    # requirements below those of newer desktop releases.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, arch: amd64 }
+          - { os: ubuntu-22.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-linux-*
+          path: collector
+          merge-multiple: true
+      - name: Stage collectors
+        shell: bash
+        run: |
+          mkdir -p apps/tokenme-bar/src-tauri/resources/collector
+          for a in x86_64 aarch64; do
+            install -m 0755 "collector/tokenme-$a" "apps/tokenme-bar/src-tauri/resources/collector/tokenme-$a"
+          done
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file pkg-config \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
+      - name: Build and test Linux desktop
+        run: |
+          set -o pipefail
+          bash scripts/build-linux-desktop.sh 2>&1 | tee "build-linux-panel-${{ matrix.arch }}.log"
+      - name: Surface build failure
+        if: failure()
+        run: |
+          LOG="build-linux-panel-${{ matrix.arch }}.log"
+          if [ -f "$LOG" ]; then
+            grep -nE 'error(\[[0-9]*\])?:|FAILED|failures:|panicked at|warning: build failed|ELIFECYCLE' "$LOG" | tail -50 | while IFS= read -r line; do echo "::error::$line"; done || true
+            tail -40 "$LOG" | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+      - name: Upload Linux build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-linux-${{ matrix.arch }}
+          path: build-linux-panel-${{ matrix.arch }}.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Stage Debian package
+        run: |
+          packages=(apps/tokenme-bar/src-tauri/target/release/bundle/deb/*.deb)
+          if [ "${#packages[@]}" -ne 1 ] || [ ! -f "${packages[0]}" ]; then
+            echo "::error::Expected exactly one Debian package"
+            exit 1
+          fi
+          test "$(dpkg-deb -f "${packages[0]}" Architecture)" = "${{ matrix.arch }}"
+          dpkg-deb --info "${packages[0]}"
+          mkdir -p dist
+          cp "${packages[0]}" "dist/tokenme-linux-${{ matrix.arch }}.deb"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-linux-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error
+
   windows-panel:
     needs: [notes, cli-linux]
     # The NSIS setup exe for the Windows menu-bar panel. No cross-compile:
@@ -281,6 +360,8 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: apps/tokenme-bar/pnpm-lock.yaml
+      - name: Install frontend deps
+        run: pnpm --dir apps/tokenme-bar install --frozen-lockfile
       - name: Build
         id: build
         shell: pwsh
@@ -300,7 +381,7 @@ jobs:
           path: dist/*
 
   release:
-    needs: [notes, macos, macos-universal, windows-panel, cli, cli-linux]
+    needs: [notes, macos, macos-universal, windows-panel, linux-panel, cli, cli-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -311,7 +392,7 @@ jobs:
       - name: Hash
         run: |
           cd dist
-          sha256sum tokenme_*.dmg tokenme-macos-*.app.zip tokenme-windows-*.exe tokenme-cli-* > ../sha256.txt
+          sha256sum tokenme_*.dmg tokenme-macos-*.app.zip tokenme-windows-*.exe tokenme-linux-*.deb tokenme-cli-* > ../sha256.txt
       - uses: softprops/action-gh-release@v2
         with:
           # The body is the notes job's artifact, merged into dist/ by
@@ -323,6 +404,7 @@ jobs:
             dist/tokenme_*.dmg
             dist/tokenme-macos-*.app.zip
             dist/tokenme-windows-*.exe
+            dist/tokenme-linux-*.deb
             dist/tokenme-cli-*
             sha256.txt
             latest.json

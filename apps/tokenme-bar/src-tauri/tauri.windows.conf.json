@@ -1,11 +1,13 @@
 {
   "build": {
-    "beforeBuildCommand": "node ../../scripts/bundle-windows-cli.mjs && pnpm build"
+    "beforeBuildCommand": "node ../../scripts/bundle-windows-cli.mjs && node ../../scripts/prepare-windows-diagnostics.mjs && pnpm build"
   },
   "bundle": {
     "resources": {
       "resources/cli/tokenme.exe": "bin/tokenme.exe",
-      "../../../scripts/windows-cli-path.ps1": "bin/windows-cli-path.ps1"
+      "../../../scripts/windows-cli-path.ps1": "bin/windows-cli-path.ps1",
+      "../../../scripts/windows-crash-dumps.ps1": "bin/windows-crash-dumps.ps1",
+      "../../../scripts/windows-pageheap.ps1": "bin/windows-pageheap.ps1"
     }
   }
 }
