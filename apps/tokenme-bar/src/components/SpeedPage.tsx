@@ -108,11 +108,22 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
   const [activeTest, setActiveTest] = useState<ActiveSpeedTest | null>(null);
   const [activeError, setActiveError] = useState<string | null>(null);
   const [testing, setTesting] = useState<ActiveSpeedTest["provider"] | null>(null);
+  const activeSample = useMemo<TtftSample | null>(() => activeTest ? {
+    provider: activeTest.provider,
+    granularity: activeTest.provider === "codex" ? "turn" : "request",
+    metric: activeTest.provider === "codex" ? "ttft" : "first_content",
+    ttft_ms: activeTest.ttftMs,
+    sampled_at_ms: activeTest.sampledAtMs,
+    model: activeTest.model,
+    tps: activeTest.tps,
+    output_tokens: activeTest.outputTokens,
+    decode_ms: activeTest.durationMs != null ? Math.max(0, activeTest.durationMs - activeTest.ttftMs) : null,
+  } : null, [activeTest]);
   const byProvider = useMemo(() => ({
-    codex: snapshot.samples.filter((sample) => sample.provider === "codex").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
-    claude_code: snapshot.samples.filter((sample) => sample.provider === "claude_code").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
+    codex: [...snapshot.samples.filter((sample) => sample.provider === "codex"), ...(activeSample?.provider === "codex" ? [activeSample] : [])].sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
+    claude_code: [...snapshot.samples.filter((sample) => sample.provider === "claude_code"), ...(activeSample?.provider === "claude_code" ? [activeSample] : [])].sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
     dsh: snapshot.samples.filter((sample) => sample.provider === "dsh").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
-  }), [snapshot.samples]);
+  }), [activeSample, snapshot.samples]);
   // TTFT is collected on this machine only — the OTLP receiver and the
   // Codex rollouts are local files, and no sync bundle carries samples.
   // Scoped to a remote machine, the local rows would silently contradict
