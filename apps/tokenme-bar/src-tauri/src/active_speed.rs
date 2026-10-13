@@ -5,7 +5,7 @@
 //! per-process OTLP settings and exports to a temporary loopback receiver. No
 //! prompt, response text, credentials, or active result is persisted.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
@@ -19,6 +19,7 @@ use crate::claude_otel_ttft::{self, MetricField};
 const PROMPT: &str = "For a short speed check, reply with exactly this word and nothing else: READY";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const EXPORT_GRACE: Duration = Duration::from_secs(10);
+const USAGE_GRACE: Duration = Duration::from_millis(750);
 
 static ACTIVE_TEST: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -145,10 +146,26 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
         }
     }))?;
     let mut first_delta: Option<Duration> = None;
-    let output_tokens = loop {
-        let message = receive_message(&rx, child, started)?;
+    let mut seen_items: Vec<String> = Vec::new();
+    let mut turn_id: Option<String> = None;
+    let mut output_tokens = None;
+    let mut turn_duration_ms = None;
+    let mut turn_completed = false;
+    let mut usage_deadline: Option<Instant> = None;
+    loop {
+        let message = if let Some(deadline) = usage_deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { break; }
+            match rx.recv_timeout(remaining) {
+                Ok(line) => serde_json::from_str(&line).map_err(|_| "Codex app-server sent an invalid protocol message.".to_string())?,
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            receive_message(&rx, child, started)?
+        };
         if message.get("id").and_then(Value::as_i64) == Some(3) {
             if message.get("error").is_some() { return Err("Codex rejected the speed-check request.".into()); }
+            turn_id = message.pointer("/result/turn/id").and_then(Value::as_str).map(str::to_string);
             continue;
         }
         let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
@@ -167,23 +184,59 @@ fn run_codex_protocol(child: &mut Child) -> Result<ActiveSpeedTest, String> {
                 if !item_type.is_empty() && !matches!(item_type, "agentMessage" | "reasoning" | "userMessage") {
                     return Err(format!("Codex started a {item_type} item during the read-only speed check; the run was stopped."));
                 }
+                // The agent message opening IS the first-text moment: in
+                // streaming turns it sits milliseconds ahead of the first
+                // delta, and on buffered deliveries the server completes the
+                // turn without ever emitting a delta at all — three app-side
+                // failures in one evening were exactly those. Same clock,
+                // same slot.
+                if item_type == "agentMessage" && first_delta.is_none() {
+                    first_delta = Some(started.elapsed());
+                }
+                if !item_type.is_empty() && seen_items.last().map(String::as_str) != Some(item_type) {
+                    seen_items.push(item_type.to_string());
+                }
+            }
+            "thread/tokenUsage/updated" => {
+                if let Some(tokens) = token_usage_output(params, thread_id.as_str(), turn_id.as_deref()) {
+                    output_tokens = Some(tokens);
+                    if turn_completed && output_tokens.is_some() { break; }
+                }
             }
             "turn/completed" => {
                 let turn = params.get("turn").unwrap_or(&Value::Null);
-                break numeric(turn.pointer("/usage/outputTokens").or_else(|| turn.pointer("/usage/output_tokens")));
+                turn_completed = true;
+                turn_duration_ms = turn.get("durationMs").and_then(|value| value.as_f64().or_else(|| value.as_i64().map(|n| n as f64)))
+                    .filter(|value| value.is_finite() && *value >= 0.0);
+                // Older app-server versions exposed usage on the completed turn;
+                // keep that fallback while preferring the current notification.
+                if output_tokens.is_none() {
+                    output_tokens = numeric(turn.pointer("/usage/outputTokens").or_else(|| turn.pointer("/usage/output_tokens")));
+                }
+                if output_tokens.is_some() { break; }
+                // The usage notification is independent from turn/completed and
+                // may arrive just after it. Give it a short bounded grace period
+                // so a missing notification never turns a finished test into a
+                // 90-second wait.
+                usage_deadline = Some(Instant::now() + USAGE_GRACE);
             }
             "turn/failed" => return Err("The Codex speed-check turn failed.".into()),
             _ => {}
         }
     };
-    let ttft = first_delta.ok_or_else(|| "Codex completed without a streamed text delta; no TTFT sample was recorded.".to_string())?;
-    let duration = started.elapsed();
-    let decode = duration.saturating_sub(ttft).as_secs_f64();
-    let tps = output_tokens.filter(|tokens| *tokens > 0 && decode > 0.0)
-        .map(|tokens| tokens as f64 / decode);
+    if !turn_completed { return Err("Codex completed without a finished speed-check turn.".into()); }
+    let ttft = first_delta.ok_or_else(|| {
+        let seen = if seen_items.is_empty() { "none".to_string() } else { seen_items.join(", ") };
+        format!("Codex completed without any agent message text (items seen: {seen}); no TTFT sample was recorded.")
+    })?;
+    let ttft_ms = ttft.as_secs_f64() * 1000.0;
+    let duration_ms = turn_duration_ms.unwrap_or_else(|| started.elapsed().as_secs_f64() * 1000.0);
+    let decode_ms = (duration_ms - ttft_ms).max(0.0);
+    let tps = output_tokens.filter(|tokens| *tokens > 0 && decode_ms > 0.0)
+        .map(|tokens| tokens as f64 / (decode_ms / 1000.0));
     Ok(ActiveSpeedTest {
-        provider: "codex".into(), model, ttft_ms: ttft.as_secs_f64() * 1000.0,
-        tps, output_tokens, duration_ms: Some(duration.as_secs_f64() * 1000.0),
+        provider: "codex".into(), model, ttft_ms,
+        tps, output_tokens, duration_ms: Some(duration_ms),
         sampled_at_ms: now_ms(), measurement: "codex_stream".into(),
     })
 }
@@ -265,7 +318,7 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
         .env("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/json")
         .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint)
         .env("OTEL_TRACES_EXPORT_INTERVAL", "1000")
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let child = command.spawn();
     let result = match child {
@@ -277,21 +330,46 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
     result
 }
 
+fn cli_speed_sample(output: &[u8]) -> Option<ActiveSpeedTest> {
+    let value = serde_json::from_slice::<Value>(output).ok()?;
+    let ttft_ms = value.get("ttft_stream_ms").and_then(Value::as_f64).filter(|value| value.is_finite() && *value > 0.0)?;
+    let duration_ms = value.get("duration_ms").and_then(Value::as_f64).filter(|value| value.is_finite() && *value >= ttft_ms);
+    let output_tokens = value.pointer("/usage/output_tokens").and_then(|value| numeric(Some(value)));
+    let tps = match (output_tokens, duration_ms) {
+        (Some(tokens), Some(duration)) if duration > ttft_ms => Some(tokens as f64 * 1000.0 / (duration - ttft_ms)),
+        _ => None,
+    };
+    let model = value.get("model").and_then(Value::as_str).map(str::to_string)
+        .or_else(|| value.get("modelUsage").and_then(Value::as_object).and_then(|models| models.keys().next().cloned()));
+    Some(ActiveSpeedTest {
+        provider: "claude_code".into(), model, ttft_ms, tps, output_tokens, duration_ms,
+        sampled_at_ms: now_ms(), measurement: "claude_cli".into(),
+    })
+}
+
 fn run_claude_child(child: &mut Child, rx: &mpsc::Receiver<Vec<claude_otel_ttft::TtftSample>>) -> Result<ActiveSpeedTest, String> {
+    let stdout = child.stdout.take();
+    let output_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        if let Some(mut stdout) = stdout { let _ = stdout.read_to_end(&mut output); }
+        output
+    });
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
-            Err(_) => { let _ = child.kill(); let _ = child.wait(); return Err("Could not read Claude Code process status.".into()); }
+            Err(_) => { let _ = child.kill(); let _ = child.wait(); let _ = output_reader.join(); return Err("Could not read Claude Code process status.".into()); }
         }
         if started.elapsed() >= REQUEST_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = output_reader.join();
             return Err("The Claude Code speed check timed out.".into());
         }
         thread::sleep(Duration::from_millis(40));
     };
+    let output = output_reader.join().unwrap_or_default();
     if !status.success() { return Err("Claude Code exited before exporting a speed sample.".into()); }
 
     let export_deadline = Instant::now() + EXPORT_GRACE;
@@ -307,17 +385,28 @@ fn run_claude_child(child: &mut Child, rx: &mpsc::Receiver<Vec<claude_otel_ttft:
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    let sample = sample.ok_or_else(|| "Claude Code did not export request TTFT. Check that this CLI version supports enhanced telemetry.".to_string())?;
-    Ok(ActiveSpeedTest {
-        provider: "claude_code".into(), model: sample.model, ttft_ms: sample.millis,
-        tps: sample.tps, output_tokens: sample.output_tokens, duration_ms: sample.duration_ms,
-        sampled_at_ms: sample.sampled_at_ms.min(i64::MAX as u64) as i64,
-        measurement: "claude_otel".into(),
-    })
+    if let Some(sample) = sample {
+        return Ok(ActiveSpeedTest {
+            provider: "claude_code".into(), model: sample.model, ttft_ms: sample.millis,
+            tps: sample.tps, output_tokens: sample.output_tokens, duration_ms: sample.duration_ms,
+            sampled_at_ms: sample.sampled_at_ms.min(i64::MAX as u64) as i64,
+            measurement: "claude_otel".into(),
+        });
+    }
+    cli_speed_sample(&output).ok_or_else(|| "Claude Code did not export request TTFT. Check that this CLI version supports enhanced telemetry.".to_string())
 }
 
 fn numeric(value: Option<&Value>) -> Option<u64> {
     value.and_then(|v| v.as_u64().or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok())))
+}
+
+fn token_usage_output(params: &Value, thread_id: &str, turn_id: Option<&str>) -> Option<u64> {
+    if params.get("threadId").and_then(Value::as_str) != Some(thread_id) { return None; }
+    if let Some(expected) = turn_id {
+        if params.get("turnId").and_then(Value::as_str) != Some(expected) { return None; }
+    }
+    numeric(params.pointer("/tokenUsage/last/outputTokens")
+        .or_else(|| params.pointer("/tokenUsage/total/outputTokens")))
 }
 
 fn resolve_executable(executable: &str, fallback: &str) -> Option<std::path::PathBuf> {
@@ -365,6 +454,21 @@ mod tests {
     }
 
     #[test]
+    fn token_usage_notification_provides_output_tokens_for_the_active_turn() {
+        let params = json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "tokenUsage": {
+                "last": { "outputTokens": 7 },
+                "total": { "outputTokens": 7 }
+            }
+        });
+        assert_eq!(token_usage_output(&params, "thread-1", Some("turn-1")), Some(7));
+        assert_eq!(token_usage_output(&params, "thread-1", Some("other-turn")), None);
+        assert_eq!(token_usage_output(&params, "other-thread", None), None);
+    }
+
+    #[test]
     fn only_supported_providers_are_admitted() {
         assert!(matches!("codex", "codex" | "claude_code"));
         assert!(matches!("claude_code", "codex" | "claude_code"));
@@ -400,5 +504,17 @@ mod tests {
         } else {
             assert_eq!(path, std::path::PathBuf::from(if cfg!(windows) { "claude.exe" } else { "claude" }));
         }
+    }
+
+    #[test]
+    fn cli_result_fallback_uses_stream_ttft() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        std::fs::write(&path, br#"{"ttft_ms":23024,"ttft_stream_ms":1835,"duration_ms":23112,"usage":{"output_tokens":851},"modelUsage":{"claude-opus-5":{}}}"#).unwrap();
+        let sample = cli_speed_sample(&std::fs::read(&path).unwrap()).expect("CLI speed result");
+        assert_eq!(sample.measurement, "claude_cli");
+        assert_eq!(sample.ttft_ms, 1835.0);
+        assert_eq!(sample.model.as_deref(), Some("claude-opus-5"));
+        assert!(sample.tps.is_some_and(|tps| tps > 39.0 && tps < 40.0));
     }
 }
