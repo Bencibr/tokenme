@@ -1,6 +1,6 @@
 # TokenMe User Guide
 
-> Version: 0.1.7 · Updated: 2026-10-12 · Audience: daily users · Covers both the CLI and the menu-bar panel · [中文版](USER_GUIDE.md)
+> Version: 0.1.8 · Updated: 2026-10-13 · Audience: daily users · Covers both the CLI and the menu-bar panel · [中文版](USER_GUIDE.md)
 
 ## Feature checklist
 

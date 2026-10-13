@@ -98,7 +98,37 @@ Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/lates
 
 #### Ubuntu desktop
 
-The Linux desktop build is still a preview; Ubuntu 24.04 LTS or newer is recommended. It opens from the top-bar AppIndicator, and the desktop pet is not implemented on Linux yet. The current stable install path is a local `.deb` built from source; the apt instructions will be added after the PPA is published.
+The Linux desktop build is still a preview; Ubuntu 26.04 LTS (Resolute) is recommended. It opens from the top-bar AppIndicator, and the desktop pet is not implemented on Linux yet. The recommended install path is the [TokenMe PPA](https://launchpad.net/~brinbro/+archive/ubuntu/tokenme):
+
+```bash
+sudo add-apt-repository ppa:brinbro/tokenme
+sudo apt update
+sudo apt install token-me tokenme-cli
+```
+
+Launch **TokenMe** from Ubuntu's application menu, or run `TokenMe`. If the icon does not appear in the GNOME top bar, install and enable the AppIndicator extension, then sign in again:
+
+```bash
+sudo apt install -y gnome-shell-extension-appindicator
+```
+
+To upgrade a PPA installation:
+
+```bash
+sudo apt update
+sudo apt upgrade
+```
+
+To remove a PPA installation:
+
+```bash
+sudo apt remove token-me tokenme-cli
+sudo add-apt-repository --remove ppa:brinbro/tokenme  # optional
+```
+
+Ubuntu 24.04 or another release without a PPA build can use the source-build steps below:
+
+#### Build the Ubuntu desktop from source
 
 Install the system libraries, Rust, Node.js/pnpm, and Zig for the static collectors bundled into the panel:
 
@@ -137,7 +167,7 @@ You can also launch **TokenMe** from Ubuntu's application menu. If the icon does
 sudo apt install -y gnome-shell-extension-appindicator
 ```
 
-To upgrade, pull the source and install the newly built package:
+To upgrade a source-built installation, pull the source and install the newly built package:
 
 ```bash
 git pull --ff-only
@@ -145,7 +175,7 @@ bash scripts/build-linux-desktop.sh
 sudo apt install ./apps/tokenme-bar/src-tauri/target/release/bundle/deb/*.deb
 ```
 
-To remove the desktop panel:
+To remove a source-built desktop panel:
 
 ```bash
 sudo apt remove tokenme
@@ -269,16 +299,11 @@ TokenMe can passively measure **TTFT** (time to first token) and **TPS** (genera
 DSH follows its session stats: TTFT averaged per request, TPS as output tokens over decode time; older logs without first-token timestamps yield neither. An active test sends one short prompt only after you click (uses plan quota), is kept separate from passive averages, and retains no prompt or response text.
 
 
-## What's new in 0.1.7
+## What's new in 0.1.8
 
-- **New**: passive TTFT/TPS measurements for Codex, Claude Code and DSH; DSH results now aggregate by session using its output-weighted TPS formula. Optional one-shot speed tests are available for Codex and Claude Code.
-- **New**: Qoder CN as a separate usage and quota adapter, with credit-pack windows and daily check-in.
+- **Maintenance**: release metadata is aligned, and Ubuntu PPA packaging and installation documentation are included.
 
-## What's new in 0.1.6
-
-- **New**: desktop pet skins (water drop / animated kitten / cute hanfu girl / cute hanfu boy / modern cute girl / summer long-legged beauty — blinking, pointer-following pupils, edge poses, token badge on hover); the summer skin preserves tall adult proportions, with display size and eye anchors defined in its JSON skin package; the pet registry now also supports lazy-loaded GLB/VRM model skins with JSON camera/head-tracking settings and a 2D fallback; the kitten's top pose was redesigned as a compact downward-looking peek; daily check-in for Trae, Trae CN and Qoder, done only after the vendor confirms; a separate Trae CN adapter with per-credit-pack windows; settings split into General / Alerts / Advanced / About with per-tool quota switches and auto check-in.
-- **Verified**: WorkBuddy and Cline on real Windows machines.
-- **Fixed**: Windows tray clicks, panel show/hide, borderless surface and bubble lifecycle — the invisible-panel and residual-surface regressions.
+See the [changelog](CHANGELOG.md) for complete details of earlier releases.
 
 ## Data & privacy
 

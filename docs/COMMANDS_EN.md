@@ -1,6 +1,6 @@
 # TokenMe CLI Reference
 
-> Version: 0.1.7 · Updated: 2026-10-12 · Audience: CLI users · Source of truth: `crates/usage-cli/src/args.rs` (verified against `tokenme --help`) · [中文](COMMANDS.md)
+> Version: 0.1.8 · Updated: 2026-10-13 · Audience: CLI users · Source of truth: `crates/usage-cli/src/args.rs` (verified against `tokenme --help`) · [中文](COMMANDS.md)
 
 All commands share these global options (place them anywhere on the line):
 

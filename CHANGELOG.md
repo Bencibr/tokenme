@@ -2,6 +2,12 @@
 
 All notable changes to TokenMe are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.8] — 2026-10-13
+
+### Changed
+
+- 统一发布版本元数据，并补充 Ubuntu PPA 的打包与安装文档。
+
 ## [0.1.7]
 
 ### Changed

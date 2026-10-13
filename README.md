@@ -98,7 +98,37 @@ TOKENME_TEST_NOTIFY=1 /Applications/TokenMe.app/Contents/MacOS/TokenMe
 
 #### Ubuntu 桌面版
 
-Linux 桌面版目前是预览版，建议使用 Ubuntu 24.04 LTS 或更新版本。它通过顶栏 AppIndicator 打开面板，桌面宠物暂未支持 Linux。当前稳定的安装方式是从源码构建本地 `.deb`；PPA 发布后再使用 apt 源安装。
+Linux 桌面版目前是预览版，建议使用 Ubuntu 26.04 LTS（Resolute）。它通过顶栏 AppIndicator 打开面板，桌面宠物暂未支持 Linux。推荐使用 [TokenMe PPA](https://launchpad.net/~brinbro/+archive/ubuntu/tokenme) 安装：
+
+```bash
+sudo add-apt-repository ppa:brinbro/tokenme
+sudo apt update
+sudo apt install token-me tokenme-cli
+```
+
+启动方式：从 Ubuntu 应用程序菜单打开 **TokenMe**，或运行 `TokenMe`。如果 GNOME 顶栏没有图标，安装并启用 AppIndicator 扩展后重新登录：
+
+```bash
+sudo apt install -y gnome-shell-extension-appindicator
+```
+
+通过 PPA 升级：
+
+```bash
+sudo apt update
+sudo apt upgrade
+```
+
+卸载 PPA 安装：
+
+```bash
+sudo apt remove token-me tokenme-cli
+sudo add-apt-repository --remove ppa:brinbro/tokenme  # 可选
+```
+
+Ubuntu 24.04 或其他暂未提供 PPA 构建的版本，可以按下面的源码构建步骤安装：
+
+#### 从源码构建 Ubuntu 桌面版
 
 先安装系统依赖、Rust、Node.js/pnpm，以及构建面板内置静态采集器所需的 Zig：
 
@@ -137,7 +167,7 @@ TokenMe &
 sudo apt install -y gnome-shell-extension-appindicator
 ```
 
-升级时在源码目录执行：
+源码安装的升级方式是在源码目录执行：
 
 ```bash
 git pull --ff-only
@@ -145,7 +175,7 @@ bash scripts/build-linux-desktop.sh
 sudo apt install ./apps/tokenme-bar/src-tauri/target/release/bundle/deb/*.deb
 ```
 
-卸载面板：
+卸载源码构建的面板：
 
 ```bash
 sudo apt remove tokenme
@@ -269,16 +299,11 @@ TokenMe 可以从本地客户端活动中被动测量 **TTFT**（首 token 延�
 DSH 按会话汇总：TTFT 取请求均值，TPS 按输出 token 除以解码耗时；旧日志缺首 token 时间则无此指标。主动测试点击后才发一条短提示（消耗套餐额度），结果与被动均值分开显示，提示词与回复一概不留。
 
 
-## 0.1.7 更新内容
+## 0.1.8 更新内容
 
-- **新增**：支持被动采集 Codex、Claude Code 与 DSH 的 TTFT/TPS；DSH 按会话汇总，并采用输出 token 加权的 TPS 公式。Codex 与 Claude Code 支持用户主动发起单次测速。
-- **新增**：Qoder CN 独立用量与配额适配器，支持积分包窗口和每日签到。
+- **维护**：统一发布版本元数据，并补充 Ubuntu PPA 的打包与安装文档。
 
-## 0.1.6 更新内容
-
-- **新增**：桌面宠物皮肤（水滴 / 动态小猫 / 古风萌女孩 / 古风萌男孩 / 现代风美少女 / 夏日长腿美女——眨眼、瞳孔跟随、贴边姿态，悬停显示 token 徽标）；夏日皮肤保留成年人物的修长比例，显示尺寸与眼睛锚点由 JSON 皮肤包配置；宠物注册表新增按需加载的 GLB/VRM 3D 模型皮肤，支持 JSON 相机、头部跟踪配置，并保留 2D 回退；小猫顶部姿态重做为紧凑的向下探看；Trae、Trae CN、Qoder 每日签到，厂商确认成功才算完成；Trae CN 独立适配器与积分包窗口；设置拆分为通用 / 提醒 / 高级 / 关于四页，支持逐工具配额开关与自动签到。
-- **验证**：WorkBuddy、Cline 通过 Windows 实机验证。
-- **修复**：Windows 托盘点击、面板显示/隐藏、无边框窗口与悬浮气泡的生命周期，修复面板不可见与残留表面。
+历史版本的完整更新内容请查看[更新日志](CHANGELOG.md)。
 
 ## 数据与隐私
 

@@ -1,6 +1,6 @@
 # TokenMe 架构
 
-> 版本：0.1.7 · 更新：2026-10-12 · 读者：贡献者 · [English](ARCHITECTURE_EN.md)
+> 版本：0.1.8 · 更新：2026-10-13 · 读者：贡献者 · [English](ARCHITECTURE_EN.md)
 
 ## 一段话总览
 

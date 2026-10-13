@@ -1,6 +1,6 @@
 # TokenMe Architecture
 
-> Version: 0.1.7 · Updated: 2026-10-12 · Audience: contributors · [中文](ARCHITECTURE.md)
+> Version: 0.1.8 · Updated: 2026-10-13 · Audience: contributors · [中文](ARCHITECTURE.md)
 
 ## One-paragraph summary
 
