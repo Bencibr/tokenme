@@ -154,6 +154,7 @@ fn views(tool: &str, captured_at_ms: i64, entries: &[Entry]) -> Vec<QuotaView> {
             label: e.label.clone(),
             id: e.id.clone(),
             origin: usage_core::QuotaOrigin::Probe,
+            cycle: None,
         })
         .collect()
 }

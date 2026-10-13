@@ -1200,6 +1200,21 @@
   max-width: 100%;
 }
 
+.quota-cycle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 1px 0 2px 26px;
+  color: var(--ink-3);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.quota-cycle em {
+  color: var(--accent-ink);
+  font-style: normal;
+}
+
 .quota-name {
   position: relative;
   font-size: 11.5px;

@@ -102,6 +102,14 @@ export interface QuotaView {
   /** `probe` = read live from the tool, `log` = embedded in its own records,
    *  `budget` = a cap set in tokenme and measured against our own cost. */
   origin?: "log" | "probe" | "budget";
+  cycle?: {
+    observed_tokens: number;
+    estimated_tokens?: number | null;
+    previous_tokens?: number | null;
+    status: "collecting" | "partial" | "complete" | "unavailable";
+    period_start_ms: number;
+    period_end_ms: number;
+  } | null;
 }
 
 /** The saved drag order of the quota section: tool ids for the groups,
@@ -387,6 +395,7 @@ export interface Bridge {
   setTheme: (theme: ThemeKey) => Promise<void>;
   setShowMoney: (on: boolean) => Promise<void>;
   setQuotaDisplayMode: (mode: QuotaDisplayMode) => Promise<void>;
+  setShowCycleTokens: (on: boolean) => Promise<void>;
   ttftSnapshot: () => Promise<TtftSnapshot>;
   runActiveSpeedTest: (provider: ActiveSpeedTest["provider"]) => Promise<ActiveSpeedTest>;
   setTtftEnabled: (on: boolean) => Promise<void>;
@@ -509,6 +518,7 @@ export interface PanelSettings {
   theme: ThemeKey;
   show_money: boolean;
   quota_display_mode: QuotaDisplayMode;
+  show_cycle_tokens: boolean;
   ttft_enabled: boolean;
   show_empty_tools: boolean;
   bubble_enabled: boolean;

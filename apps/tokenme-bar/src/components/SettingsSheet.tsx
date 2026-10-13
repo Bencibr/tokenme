@@ -67,6 +67,7 @@ export function SettingsSheet({
   onMoney,
   onPolling,
   onQuotaDisplayMode,
+  onShowCycleTokens,
   displays,
 }: {
   onClose: () => void;
@@ -78,6 +79,7 @@ export function SettingsSheet({
   /** The master switch, so the quota section can say it stopped immediately. */
   onPolling: (on: boolean) => void;
   onQuotaDisplayMode: (mode: QuotaDisplayMode) => void;
+  onShowCycleTokens: (on: boolean) => void;
   displays: Record<string, string>;
 }) {
   const [settings, setSettings] = useState<PanelSettings | null>(null);
@@ -161,6 +163,17 @@ export function SettingsSheet({
       setQuotaModeError(true);
     } finally {
       setQuotaModeBusy(false);
+    }
+  };
+
+  const setCycleTokens = async (on: boolean) => {
+    if (!settings) return;
+    try {
+      await bridge.setShowCycleTokens(on);
+      setSettings((s) => s ? { ...s, show_cycle_tokens: on } : s);
+      onShowCycleTokens(on);
+    } catch {
+      setSettings((s) => s ? { ...s, show_cycle_tokens: !on } : s);
     }
   };
 
@@ -603,6 +616,7 @@ export function SettingsSheet({
         {tab === "advanced" ? (
           <>
             {switchRow(t("set.polling"), t("set.polling.hint"), settings.quota_polling, setQuotaPolling)}
+            {switchRow(t("set.cycle.tokens"), t("set.cycle.tokens.hint"), settings.show_cycle_tokens, setCycleTokens)}
             {switchRow(t("set.ttft"), t("set.ttft.hint"), settings.ttft_enabled, (on) => void setTtft(on), ttftBusy)}
             {ttftError ? <p className="sheet-hint" role="alert">{t("set.ttft.failed")}</p> : null}
             {/* Master off ⇒ no claim can fire at all, so the guarantee would be

@@ -90,6 +90,7 @@ const [page, setPage] = useState<PageKey>(() => {
   // asked them to — a frozen figure with no explanation reads as a broken panel.
   const [quotaPolling, setQuotaPolling] = useState(true);
   const [quotaDisplayMode, setQuotaDisplayMode] = useState<QuotaDisplayMode>("used");
+  const [showCycleTokens, setShowCycleTokens] = useState(false);
   const [ttftSnapshot, setTtftSnapshot] = useState<TtftSnapshot>({ revision: 0, enabled: false, claude_receiver: "disabled", claude_config_status: "disabled", samples: [] });
   // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
   // switch without touching persistence.
@@ -153,6 +154,7 @@ const [page, setPage] = useState<PageKey>(() => {
       setShowMoney(s.show_money);
       setQuotaPolling(s.quota_polling);
       setQuotaDisplayMode(s.quota_display_mode);
+      setShowCycleTokens(s.show_cycle_tokens);
       // The idle cadence is what the "updates stopped" line measures against.
       setRefreshSecs(s.refresh_secs);
       if (new URLSearchParams(location.search).get("showempty") === null) {
@@ -485,7 +487,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "overview" ? (
                 <>
                   <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} hoursPrev={report.hourly_prev} period={period} />
-                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} showCycleTokens={showCycleTokens} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
@@ -531,6 +533,7 @@ const [page, setPage] = useState<PageKey>(() => {
             onMoney={setShowMoney}
             onPolling={setQuotaPolling}
             onQuotaDisplayMode={setQuotaDisplayMode}
+            onShowCycleTokens={setShowCycleTokens}
             displays={Object.fromEntries(report.sources.map((s) => [s.id, s.display]))}
           />
         ) : null}

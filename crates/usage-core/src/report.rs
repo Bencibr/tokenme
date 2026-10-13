@@ -140,6 +140,31 @@ pub struct QuotaView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub origin: QuotaOrigin,
+    /// Local token accounting for a 5-hour or weekly quota window. This is
+    /// optional so older reports and quota-only rows remain wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<CycleUsage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleStatus {
+    Collecting,
+    Partial,
+    Complete,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleUsage {
+    pub observed_tokens: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_tokens: Option<f64>,
+    pub status: CycleStatus,
+    pub period_start_ms: i64,
+    pub period_end_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -342,6 +367,7 @@ pub fn poll_quota(adapters: &[Box<dyn crate::SourceAdapter>]) -> Vec<QuotaView> 
                 label: q.label,
                 id: q.id,
                 origin: QuotaOrigin::Probe,
+                cycle: None,
             });
         }
     }
@@ -727,6 +753,7 @@ fn merge_quotas<'a>(
                     label: q.label.clone(),
                     id: q.id.clone(),
                     origin: QuotaOrigin::Log,
+                    cycle: None,
                 },
             );
         }
@@ -1762,6 +1789,7 @@ mod tests {
             label: None,
             id: None,
             origin,
+            cycle: None,
         }
     }
 
@@ -1960,6 +1988,7 @@ mod tests {
             label: Some(label.into()),
             id: None,
             origin: QuotaOrigin::Probe,
+            cycle: None,
         };
         let opts = ReportOptions::new(&p)
             .with_now(now)
@@ -2000,6 +2029,7 @@ mod tests {
             label: Some("5 小时".into()),
             id: None,
             origin: QuotaOrigin::Probe,
+            cycle: None,
         };
         let r = summarize(&[logged], &ReportOptions::new(&p).with_now(now).with_quota(vec![polled]));
         assert_eq!(r.quotas.len(), 1, "one window, not a named twin: {:?}", r.quotas);
@@ -2024,6 +2054,7 @@ mod tests {
             label: Some(label.into()),
             id: None,
             origin: QuotaOrigin::Probe,
+            cycle: None,
         };
         let opts = ReportOptions::new(&p).with_now(now).with_quota(vec![
             view("Gemini · 5 小时", 300, 41.0),
@@ -2055,6 +2086,7 @@ mod tests {
             label: Some(label.into()),
             id: None,
             origin: QuotaOrigin::Probe,
+            cycle: None,
         };
         let opts = ReportOptions::new(&p)
             .with_now(now)
@@ -2080,6 +2112,7 @@ mod tests {
             label: Some(label.into()),
             id: None,
             origin: QuotaOrigin::Probe,
+            cycle: None,
         };
         let opts = ReportOptions::new(&p).with_now(now).with_quota(vec![
             view("工具调用 · GLM Coding Lite", 43_200, 0.0),
@@ -2164,6 +2197,7 @@ mod tests {
             label: None,
             id: None,
             origin: QuotaOrigin::Probe,
+            cycle: None,
         }]);
         let r = summarize(&[], &opts);
         let row = r.quotas.iter().find(|q| q.tool == "codex").expect("a stale probe answer is still the answer");
@@ -2264,6 +2298,7 @@ mod tests {
             label: Some("5 小时".into()),
             id: None,
             origin: QuotaOrigin::Probe,
+            cycle: None,
         };
         let opts = ReportOptions::new(&p).with_now(now).with_quota(vec![polled.clone()]);
         let r = summarize(&[ev5h, week], &opts);
@@ -2295,6 +2330,7 @@ mod tests {
             label: Some("周".into()),
             id: None,
             origin: QuotaOrigin::Probe,
+            cycle: None,
         };
         let opts = ReportOptions::new(&p)
             .with_now(instant_after_polling(false, now, std::slice::from_ref(&late)))

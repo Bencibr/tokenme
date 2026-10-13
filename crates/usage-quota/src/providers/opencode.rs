@@ -1,4 +1,9 @@
-//! OpenCode Go quota: the subscription's three dollar-value windows.
+//! OpenCode Go quota: the official subscription's three usage windows.
+//!
+//! The endpoint is a real provider statistics API (`rolling`, `weekly`, and
+//! `monthly`), but its percentages are usage against monthly dollar limits.
+//! They must not be treated as a uniform Token percentage when several models
+//! are used in one cycle.
 //!
 //! The key is the one the user already configured for the OpenCode Go provider,
 //! read from `OPENCODE_API_KEY`, the official provider block in `opencode.json`,
@@ -65,7 +70,11 @@ fn live() -> Option<Vec<QuotaSample>> {
             ("user-agent", USER_AGENT),
         ],
     )?;
-    Some(samples_from(&body))
+    let mut samples = samples_from(&body);
+    for sample in &mut samples {
+        sample.id = Some(super::account_window_id(&key, sample.window_minutes));
+    }
+    Some(samples)
 }
 
 /// `{"usage":{"rolling":{"status","percent","resetsAt"}, …}}`. `percent` is

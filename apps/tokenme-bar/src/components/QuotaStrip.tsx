@@ -70,6 +70,13 @@ function displayWindowName(q: QuotaView): string {
   return translateQuotaVocab(windowName(q));
 }
 
+function formatCycleTokens(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}K`;
+  return Math.round(value).toLocaleString();
+}
+
 /** Tools whose quota probe owns a daily check-in: the group header grows the
  *  badge/button for exactly these. */
 const CHECKIN_TOOLS = ["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn"];
@@ -202,6 +209,7 @@ export function QuotaStrip({
   scoped,
   polling = true,
   displayMode = "used",
+  showCycleTokens = false,
 }: {
   quotas: QuotaView[];
   now: number;
@@ -215,6 +223,7 @@ export function QuotaStrip({
    *  answer and the section says when it was taken. */
   polling?: boolean;
   displayMode?: QuotaDisplayMode;
+  showCycleTokens?: boolean;
 }) {
   // The check-in marker rows are state, not data (CHECKIN_STATE_IDS): every
   // count and row on screen reads this filtered list; the badge and button
@@ -693,14 +702,22 @@ export function QuotaStrip({
                 // the user already asked to remove; `title={label}` keeps them.
                 const rowTail =
                     tail === ` · ${plan}` || tail.startsWith(` · ${t("quota.label.used", { value: "" }).trimEnd()}`) ? "" : tail;
+                const cycle = q.cycle;
+                const cycleStatus = cycle?.status === "complete"
+                  ? t("quota.cycle.complete")
+                  : cycle?.status === "partial"
+                    ? t("quota.cycle.partial")
+                    : cycle?.status === "collecting"
+                      ? t("quota.cycle.collecting")
+                      : t("quota.cycle.unavailable");
                 return (
-                  <div
-                    className="quota-row"
-                    key={rowKey(q)}
-                    data-qrow={rowKey(q)}
-                    data-dragging={drag?.kind === "row" && drag.key === rowKey(q) ? "" : undefined}
-                    onPointerDown={(e) => beginPress(e, { kind: "row", key: rowKey(q) })}
-                  >
+                  <div key={rowKey(q)}>
+                    <div
+                      className="quota-row"
+                      data-qrow={rowKey(q)}
+                      data-dragging={drag?.kind === "row" && drag.key === rowKey(q) ? "" : undefined}
+                      onPointerDown={(e) => beginPress(e, { kind: "row", key: rowKey(q) })}
+                    >
                     <span
                       className="quota-name"
                       title={label}
@@ -759,6 +776,19 @@ export function QuotaStrip({
                       </span>
                     )}
                     <span className="quota-reset num">{resetNode}</span>
+                    </div>
+                    {showCycleTokens && cycle ? (
+                      <div className="quota-cycle" role="status">
+                        <span>{t("quota.cycle.observed", { tokens: formatCycleTokens(cycle.observed_tokens) })}</span>
+                        {cycle.estimated_tokens != null ? (
+                          <span>{t("quota.cycle.estimated", { tokens: formatCycleTokens(cycle.estimated_tokens) })}</span>
+                        ) : null}
+                        {cycle.previous_tokens != null && cycle.previous_tokens > 0 ? (
+                          <span>{t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })}</span>
+                        ) : null}
+                        <em>{cycleStatus}</em>
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}

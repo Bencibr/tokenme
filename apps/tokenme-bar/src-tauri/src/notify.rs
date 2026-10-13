@@ -896,6 +896,7 @@ mod tests {
             label: label.map(Into::into),
             id: id.map(Into::into),
             origin: QuotaOrigin::Probe,
+            cycle: None,
         }
     }
 

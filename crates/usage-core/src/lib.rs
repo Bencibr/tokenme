@@ -19,7 +19,7 @@ pub use pricing::{Price, PricingMap, PricingMeta, PricingSource};
 pub use report::{
     local_day_of, poll_quota, summarize, summarize_facts, AggregatePlan, Breakdown, CallFact,
     FactGroup, HeatCell, Item, MachineScope, MachineView, QuotaFact, QuotaOrigin, QuotaView,
-    Report, ReportFacts, ReportOptions, RollupRow, SessionFact, SessionGroup, SessionRow,
+    CycleStatus, CycleUsage, Report, ReportFacts, ReportOptions, RollupRow, SessionFact, SessionGroup, SessionRow,
     SourceStatus, Summary, SyncRecord, UnpricedModel, Window, LIVE_HOUR0, LIVE_PREV,
     LIVE_PREV_HOUR0, LIVE_TODAY, LIVE_QUARTER0,
 };

@@ -152,6 +152,7 @@ pub struct PanelSettings {
     pub theme: Theme,
     pub show_money: bool,
     pub quota_display_mode: QuotaDisplayMode,
+    pub show_cycle_tokens: bool,
     pub ttft_enabled: bool,
     pub show_empty_tools: bool,
     pub bubble_enabled: bool,
@@ -250,6 +251,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         theme: settings.theme,
         show_money: settings.show_money,
         quota_display_mode: settings.quota_display_mode,
+        show_cycle_tokens: settings.show_cycle_tokens,
         ttft_enabled: settings.ttft_enabled,
         show_empty_tools: settings.show_empty_tools,
         bubble_enabled: settings.bubble_enabled,
@@ -448,6 +450,18 @@ pub async fn set_quota_display_mode(app: AppHandle, mode: QuotaDisplayMode) -> R
     let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
     let mut next = settings.clone();
     next.quota_display_mode = mode;
+    next.save().map_err(|e| e.to_string())?;
+    *settings = next;
+    Ok(())
+}
+
+/// Persist the optional local quota-cycle token summary without changing probes.
+#[tauri::command]
+pub async fn set_show_cycle_tokens(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
+    let mut next = settings.clone();
+    next.show_cycle_tokens = on;
     next.save().map_err(|e| e.to_string())?;
     *settings = next;
     Ok(())

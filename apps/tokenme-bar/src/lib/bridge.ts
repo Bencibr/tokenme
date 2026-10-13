@@ -269,6 +269,14 @@ export const bridge: Bridge = {
     await invoke<void>("set_quota_display_mode", { mode });
   },
 
+  async setShowCycleTokens(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.show_cycle_tokens = on;
+      return;
+    }
+    await invoke<void>("set_show_cycle_tokens", { on });
+  },
+
   async ttftSnapshot(): Promise<TtftSnapshot> {
     if (!inTauri) {
       // QA samples so the 访问速度 page reviews with rows on it.
@@ -558,6 +566,7 @@ const browserSettings: PanelSettings = {
   theme: "dark",
   show_money: false,
   quota_display_mode: "used",
+  show_cycle_tokens: false,
   ttft_enabled: false,
   show_empty_tools: false,
   bubble_enabled: true,

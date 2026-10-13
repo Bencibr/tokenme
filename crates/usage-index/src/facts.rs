@@ -7,10 +7,11 @@
 //! events, once, inside one transaction.
 
 use rusqlite::{params, params_from_iter, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
 use usage_core::{
-    local_day_of, AggregatePlan, CallFact, FactGroup, MachineScope, QuotaFact, QuotaSample,
-    ReportFacts, Result, RollupRow, SessionFact, SessionGroup, TokenCounts, LIVE_HOUR0, LIVE_PREV,
+    local_day_of, AggregatePlan, CallFact, CycleStatus, CycleUsage, FactGroup, MachineScope, QuotaFact, QuotaSample,
+    QuotaView, ReportFacts, Result, RollupRow, SessionFact, SessionGroup, TokenCounts, LIVE_HOUR0, LIVE_PREV,
     LIVE_PREV_HOUR0, LIVE_QUARTER0,
     LIVE_TODAY,
 };
@@ -25,6 +26,45 @@ use crate::{
 /// trips this; a corrupt timestamp pair must not turn one publish into a
 /// thousand day-recomputes.
 const ROLLUP_BUILD_CAP_DAYS: i64 = 402;
+const CYCLE_META_PREFIX: &str = "cycle:v1:";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CycleState {
+    identity: String,
+    period_start_ms: i64,
+    period_end_ms: i64,
+    observed_tokens: f64,
+    previous_tokens: Option<f64>,
+    complete: bool,
+    last_used_percent: f64,
+    /// The newest quota sample that contributed to this state. Older cached
+    /// samples must never move a cycle backwards or trigger a reset.
+    #[serde(default)]
+    last_sampled_at_ms: i64,
+}
+
+const RESET_JITTER_TOLERANCE_MS: i64 = 60_000;
+
+fn cycle_state_key(q: &QuotaView) -> String {
+    format!("{CYCLE_META_PREFIX}{}:{}:{}", q.tool, q.window_minutes, cycle_bucket_key(q))
+}
+
+fn legacy_cycle_state_key(q: &QuotaView) -> String {
+    format!("{CYCLE_META_PREFIX}{}:{}:{}", q.tool, q.window_minutes, q.label.as_deref().unwrap_or_default())
+}
+
+fn cycle_bucket_key(q: &QuotaView) -> String {
+    if let Some(family) = model_family_hint(q.label.as_deref()) {
+        return format!("family:{family}");
+    }
+    q.label
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
 
 /// The bare-column rule: in a `SELECT …, name, MIN(rowid) … GROUP BY …` query
 /// SQLite takes `name` from the row that produced the MIN — exactly the
@@ -54,6 +94,156 @@ fn opt_of(s: String) -> Option<String> {
 }
 
 impl Index {
+    /// Attach local token accounting to the live quota rows. The event table is
+    /// indexed by `(tool, ts_ms)`, so bounded sums stay cheap and do not require
+    /// a second raw-log scan. Vendor percentages are only used for the estimate
+    /// for providers whose window meter is known to be token-like.
+    pub fn attach_cycle_usage(&self, quotas: &mut [QuotaView], now_ms: i64) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for q in quotas {
+            if q.origin == usage_core::QuotaOrigin::Budget || !matches!(q.window_minutes, 300 | 10_080) {
+                continue;
+            }
+            if !seen.insert((q.tool.clone(), q.window_minutes, q.resets_at_ms, cycle_bucket_key(q))) {
+                continue;
+            }
+            let window_ms = q.window_minutes.saturating_mul(60_000);
+            let observed_until = (q.sampled_at_ms > 0 && q.sampled_at_ms <= now_ms).then_some(q.sampled_at_ms).unwrap_or(now_ms);
+            // A missing or stale reset is not a license to report zero. Keep a
+            // trailing window for the local tally, while withholding the
+            // stronger "partial cycle" claim until a future reset is known.
+            let start = if q.resets_at_ms > observed_until {
+                q.resets_at_ms.saturating_sub(window_ms)
+            } else {
+                observed_until.saturating_sub(window_ms)
+            };
+            let key = cycle_state_key(q);
+            let identity = q.id.as_deref().unwrap_or("unknown");
+            let raw = self.meta_value(&key)?.or_else(|| {
+                let legacy = legacy_cycle_state_key(q);
+                (legacy != key).then(|| self.meta_value(&legacy).ok()).flatten().flatten()
+            });
+            let old = raw.and_then(|raw| serde_json::from_str::<CycleState>(&raw).ok());
+            let observed_identity = (identity != "unknown").then_some(identity);
+            let old_identity = old.as_ref().map(|s| s.identity.as_str()).filter(|id| *id != "unknown");
+            // A log-derived/cached row has no account id. Preserve the last
+            // verified identity instead of replacing it with `unknown` and
+            // losing account-switch isolation while polling is disabled.
+            let effective_identity = observed_identity.or(old_identity).unwrap_or("unknown");
+            let account_changed = old.as_ref().is_some_and(|s| observed_identity.is_some_and(|new| s.identity != new));
+            // An explicit account change wins over timestamp ordering: a
+            // delayed cache entry from the previous account must not repaint
+            // the new account's cycle.
+            let stale_sample = !account_changed && old.as_ref().is_some_and(|s| s.last_sampled_at_ms > observed_until);
+            let reset_seen = old.as_ref().is_some_and(|s| {
+                !stale_sample && q.resets_at_ms > observed_until && start > s.period_start_ms + RESET_JITTER_TOLERANCE_MS
+            });
+            let usage_reset = old.as_ref().is_some_and(|s| {
+                !stale_sample && !account_changed && s.last_used_percent >= 20.0 && q.used_percent + 20.0 < s.last_used_percent
+            });
+            if stale_sample {
+                let state = old.as_ref().expect("stale_sample implies prior state");
+                let estimated_tokens = if state.observed_tokens > 0.0
+                    && state.last_used_percent >= 5.0
+                    && token_percent_is_trustworthy(&q.tool)
+                    && state.identity != "unknown"
+                    && state.period_end_ms > state.last_sampled_at_ms
+                {
+                    Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0))
+                } else {
+                    None
+                };
+                let status = if !token_percent_is_trustworthy(&q.tool) {
+                    CycleStatus::Unavailable
+                } else if state.complete {
+                    CycleStatus::Complete
+                } else if state.period_end_ms > state.last_sampled_at_ms {
+                    CycleStatus::Partial
+                } else {
+                    CycleStatus::Collecting
+                };
+                q.cycle = Some(CycleUsage {
+                    observed_tokens: state.observed_tokens,
+                    estimated_tokens,
+                    previous_tokens: state.previous_tokens,
+                    status,
+                    period_start_ms: state.period_start_ms,
+                    period_end_ms: state.period_end_ms,
+                });
+                continue;
+            }
+            let (start, previous_tokens, mut complete) = if account_changed {
+                (observed_until, None, false)
+            } else if reset_seen || usage_reset {
+                (start, old.as_ref().and_then(|s| s.complete.then_some(s.observed_tokens)), false)
+            } else if let Some(state) = &old {
+                (state.period_start_ms, state.previous_tokens, state.complete)
+            } else {
+                (start, None, false)
+            };
+            let end = if q.resets_at_ms > observed_until {
+                q.resets_at_ms
+            } else {
+                start.saturating_add(window_ms)
+            };
+            let observed_tokens = self.sum_tokens(&q.tool, start, observed_until, model_family_hint(q.label.as_deref()))?;
+            let known_boundary = q.resets_at_ms > observed_until;
+            if q.used_percent >= 99.5 {
+                complete = true;
+            }
+            let estimated_tokens = if known_boundary && !account_changed && identity != "unknown" && observed_tokens > 0.0 && q.used_percent >= 5.0 && token_percent_is_trustworthy(&q.tool) {
+                Some(observed_tokens * 100.0 / q.used_percent.clamp(0.1, 100.0))
+            } else {
+                None
+            };
+            let status = if !token_percent_is_trustworthy(&q.tool) {
+                CycleStatus::Unavailable
+            } else if complete {
+                CycleStatus::Complete
+            } else if q.resets_at_ms > observed_until {
+                CycleStatus::Partial
+            } else {
+                CycleStatus::Collecting
+            };
+            let state = CycleState {
+                identity: effective_identity.to_string(),
+                period_start_ms: start,
+                period_end_ms: end,
+                observed_tokens,
+                previous_tokens,
+                complete,
+                last_used_percent: q.used_percent,
+                last_sampled_at_ms: observed_until,
+            };
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+                    params![key, serde_json::to_string(&state).map_err(|e| usage_core::Error::Sqlite(e.to_string()))?],
+                )
+                .map_err(sql_err)?;
+            q.cycle = Some(CycleUsage {
+                observed_tokens,
+                estimated_tokens,
+                previous_tokens,
+                status,
+                period_start_ms: start,
+                period_end_ms: end,
+            });
+        }
+        Ok(())
+    }
+
+    fn sum_tokens(&self, tool: &str, start_ms: i64, end_ms: i64, model_family: Option<&str>) -> Result<f64> {
+        // shortcut: events have no quota-account fingerprint, so aggregation is per tool; upgrade when adapters persist one.
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) FROM event WHERE tool = ?1 AND source NOT LIKE 'linux:%' AND meter = 'tokens' AND ts_ms >= ?2 AND ts_ms < ?3 AND (?4 IS NULL OR lower(COALESCE(model, '')) LIKE '%' || lower(?4) || '%')",
+                rusqlite::params![tool, start_ms, end_ms, model_family],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)
+    }
+
     /// Everything [`usage_core::summarize_facts`] needs, in ~2.2k rows instead
     /// of ~390k events. `plan` carries every period boundary, resolved in
     /// chrono by the caller — SQL never derives a local time here.
@@ -472,6 +662,23 @@ impl Index {
     }
 }
 
+fn token_percent_is_trustworthy(tool: &str) -> bool {
+    matches!(tool, "codex" | "claude" | "antigravity")
+}
+
+/// Claude's weekly Sonnet/Opus rows are separate vendor buckets. Only apply a
+/// filter for families the provider names explicitly; generic labels continue
+/// to aggregate every local model so we do not invent a model mapping.
+fn model_family_hint(label: Option<&str>) -> Option<&'static str> {
+    let suffix = label?.split_once(" · ")?.1;
+    match suffix.to_ascii_lowercase().as_str() {
+        "sonnet" => Some("sonnet"),
+        "opus" => Some("opus"),
+        "haiku" => Some("haiku"),
+        _ => None,
+    }
+}
+
 /// Recomputes one local day of the rollup inside `tx`, used by the lazy build's
 /// day loops (the maintenance paths after deletes have their own in `ingest`).
 fn rollup_one_day(tx: &rusqlite::Transaction<'_>, day: chrono::NaiveDate) -> Result<()> {
@@ -717,6 +924,7 @@ mod golden {
                 label: Some("周".into()),
                 id: None,
                 origin: QuotaOrigin::Probe,
+                cycle: None,
             }])
             .with_budgets(budgets);
         // Same limit both paths see: the plan was built with 3, so the event
@@ -1039,7 +1247,6 @@ mod golden {
         );
         let mut idx = Index::open_in_memory().unwrap();
         idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
-
         // Shrink = rewrite: purge both rows, then read the replacement bytes.
         mock.set_size(99);
         mock.push_batch(vec![
@@ -1277,6 +1484,284 @@ mod golden {
         assert_report_eq(&oracle, &mine);
         assert!(mine.day.breakdown.mcps.iter().all(|i| i.key != "other"), "the second mcp never names an event");
         assert_eq!(mine.day.breakdown.skills.len(), 1, "review is the only skill");
+    }
+
+    #[test]
+    fn cycle_usage_counts_local_tokens_and_only_projects_trusted_token_meters() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle.jsonl"),
+            vec![
+                ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0)),
+                ev("opencode", now - 10 * 60_000, "cycle", Some("model"), None, counts(2_000.0)),
+            ],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = CASE id WHEN 1 THEN 'codex' ELSE 'opencode' END", []).unwrap();
+        let mut quotas = vec![
+            QuotaView {
+                tool: "codex".into(), used_percent: 25.0, window_minutes: 300,
+                resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+                id: Some("acct:codex:300".into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+            },
+            QuotaView {
+                tool: "opencode".into(), used_percent: 25.0, window_minutes: 300,
+                resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+                id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+            },
+        ];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        assert_eq!(quotas[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
+        assert_eq!(quotas[0].cycle.as_ref().unwrap().estimated_tokens, Some(4_000.0));
+        assert_eq!(quotas[1].cycle.as_ref().unwrap().observed_tokens, 2_000.0);
+        assert_eq!(quotas[1].cycle.as_ref().unwrap().estimated_tokens, None, "OpenCode's official percentage is a dollar meter, not a Token meter");
+        assert_eq!(quotas[1].cycle.as_ref().unwrap().status, CycleStatus::Unavailable);
+    }
+
+    #[test]
+    fn cycle_usage_keeps_tokens_when_reset_is_unknown() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-no-reset.jsonl"),
+            vec![
+                ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0)),
+                ev("codex", now - 60_000, "cycle", Some("gpt-5"), None, counts(2_000.0)),
+            ],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'codex'", []).unwrap();
+        let mut quotas = vec![QuotaView {
+            tool: "codex".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: 0, sampled_at_ms: now - 5 * 60_000, label: Some("5 小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        }];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        let cycle = quotas[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.observed_tokens, 1_000.0);
+        assert_eq!(cycle.estimated_tokens, None);
+        assert_eq!(cycle.status, CycleStatus::Collecting);
+        assert_eq!(cycle.period_end_ms, now - 5 * 60_000);
+    }
+
+    #[test]
+    fn cycle_usage_starts_fresh_when_quota_account_changes() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-account.jsonl"),
+            vec![ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'codex'", []).unwrap();
+        let quota = |id: &str| QuotaView {
+            tool: "codex".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+            id: Some(id.into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        let mut first = vec![quota("acct:a:300")];
+        idx.attach_cycle_usage(&mut first, now).unwrap();
+        assert_eq!(first[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
+        let mut switched = vec![quota("acct:b:300")];
+        idx.attach_cycle_usage(&mut switched, now).unwrap();
+        let cycle = switched[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.observed_tokens, 0.0);
+        assert_eq!(cycle.previous_tokens, None);
+        assert_eq!(cycle.period_start_ms, now);
+    }
+
+    #[test]
+    fn cycle_usage_keeps_verified_identity_when_cached_quota_has_none() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-cached-identity.jsonl"),
+            vec![ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'codex'", []).unwrap();
+        let quota = |id: Option<&str>, sampled_at_ms| QuotaView {
+            tool: "codex".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms, label: Some("5 小时".into()),
+            id: id.map(str::to_string), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        let mut first = vec![quota(Some("acct:a:300"), now)];
+        idx.attach_cycle_usage(&mut first, now).unwrap();
+        let mut cached = vec![quota(None, now + 60_000)];
+        idx.attach_cycle_usage(&mut cached, now + 60_000).unwrap();
+        let mut switched = vec![quota(Some("acct:b:300"), now + 120_000)];
+        idx.attach_cycle_usage(&mut switched, now + 120_000).unwrap();
+        assert_eq!(switched[0].cycle.as_ref().unwrap().observed_tokens, 0.0);
+        assert_eq!(switched[0].cycle.as_ref().unwrap().period_start_ms, now + 120_000);
+    }
+
+    #[test]
+    fn cycle_usage_does_not_merge_same_window_buckets() {
+        let now = now_fixture();
+        let mut idx = Index::open_in_memory().unwrap();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-buckets.jsonl"),
+            vec![
+                ev("claude", now - 10 * 60_000, "cycle-sonnet", Some("claude-sonnet-4"), None, counts(1_000.0)),
+                ev("claude", now - 9 * 60_000, "cycle-opus", Some("claude-opus-4"), None, counts(2_000.0)),
+            ],
+        );
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'claude'", []).unwrap();
+        let quota = |label: &str| QuotaView {
+            tool: "claude".into(), used_percent: 25.0, window_minutes: 10_080,
+            resets_at_ms: now + 6 * 86_400_000, sampled_at_ms: now, label: Some(label.into()),
+            id: Some("acct:a:10080".into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        let mut quotas = vec![quota("7 天 · Sonnet"), quota("7 天 · Opus")];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        assert!(quotas.iter().all(|q| q.cycle.is_some()));
+        assert_eq!(quotas[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
+        assert_eq!(quotas[1].cycle.as_ref().unwrap().observed_tokens, 2_000.0);
+    }
+
+    #[test]
+    fn cycle_usage_does_not_extrapolate_without_account_identity() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-unknown-account.jsonl"),
+            vec![ev("antigravity", now - 10 * 60_000, "cycle", Some("gemini"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'antigravity'", []).unwrap();
+        let mut quotas = vec![QuotaView {
+            tool: "antigravity".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        }];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        assert_eq!(quotas[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
+        assert_eq!(quotas[0].cycle.as_ref().unwrap().estimated_tokens, None);
+    }
+
+    #[test]
+    fn cycle_usage_ignores_stale_lower_percentage() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-stale-quota.jsonl"),
+            vec![ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'codex'", []).unwrap();
+        let quota = |used_percent, sampled_at_ms| QuotaView {
+            tool: "codex".into(), used_percent, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms, label: Some("5 小时".into()),
+            id: Some("acct:a:300".into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        let mut fresh = vec![quota(25.0, now)];
+        idx.attach_cycle_usage(&mut fresh, now).unwrap();
+        let mut stale = vec![quota(0.0, now - 60_000)];
+        idx.attach_cycle_usage(&mut stale, now).unwrap();
+        assert_eq!(stale[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
+        assert_eq!(stale[0].cycle.as_ref().unwrap().status, CycleStatus::Partial);
+    }
+
+    #[test]
+    fn cycle_usage_tolerates_small_reset_timestamp_jitter() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-reset-jitter.jsonl"),
+            vec![ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'codex'", []).unwrap();
+        let quota = |reset, sampled_at_ms| QuotaView {
+            tool: "codex".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: reset, sampled_at_ms, label: Some("5 小时".into()),
+            id: Some("acct:a:300".into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        let first_reset = now + 290 * 60_000;
+        let mut first = vec![quota(first_reset, now)];
+        idx.attach_cycle_usage(&mut first, now).unwrap();
+        let mut jittered = vec![quota(first_reset + 30_000, now + 30_000)];
+        idx.attach_cycle_usage(&mut jittered, now + 30_000).unwrap();
+        assert_eq!(jittered[0].cycle.as_ref().unwrap().period_start_ms, now - 10 * 60_000);
+        assert_eq!(jittered[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
+    }
+
+    #[test]
+    fn cycle_usage_ignores_label_whitespace_changes() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-label-spelling.jsonl"),
+            vec![ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'codex'", []).unwrap();
+        let quota = |label: &str, sampled_at_ms| QuotaView {
+            tool: "codex".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms, label: Some(label.into()),
+            id: Some("acct:a:300".into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        let mut first = vec![quota("5 小时", now)];
+        idx.attach_cycle_usage(&mut first, now).unwrap();
+        let mut spelling = vec![quota("5小时", now + 60_000)];
+        idx.attach_cycle_usage(&mut spelling, now + 60_000).unwrap();
+        assert_eq!(spelling[0].cycle.as_ref().unwrap().period_start_ms, now - 10 * 60_000);
+    }
+
+    #[test]
+    fn cycle_usage_account_change_wins_over_a_delayed_cached_sample() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-delayed-account.jsonl"),
+            vec![ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'codex'", []).unwrap();
+        let quota = |id: &str, sampled_at_ms| QuotaView {
+            tool: "codex".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms, label: Some("5 小时".into()),
+            id: Some(id.into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        let mut first = vec![quota("acct:a:300", now)];
+        idx.attach_cycle_usage(&mut first, now).unwrap();
+        let mut switched = vec![quota("acct:b:300", now - 60_000)];
+        idx.attach_cycle_usage(&mut switched, now).unwrap();
+        assert_eq!(switched[0].cycle.as_ref().unwrap().observed_tokens, 0.0);
+        assert_eq!(switched[0].cycle.as_ref().unwrap().previous_tokens, None);
+    }
+
+    #[test]
+    fn cycle_usage_restores_last_complete_cycle_after_reopen() {
+        let now = now_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-reopen.jsonl"),
+            vec![ev("codex", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open(&path).unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'codex'", []).unwrap();
+        let mut first = vec![QuotaView {
+            tool: "codex".into(), used_percent: 100.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+            id: Some("acct:a:300".into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        }];
+        idx.attach_cycle_usage(&mut first, now).unwrap();
+        drop(idx);
+
+        let next = now + 301 * 60_000;
+        let mut second = vec![QuotaView {
+            tool: "codex".into(), used_percent: 10.0, window_minutes: 300,
+            resets_at_ms: next + 290 * 60_000, sampled_at_ms: next, label: Some("5 小时".into()),
+            id: Some("acct:a:300".into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        }];
+        let idx = Index::open(&path).unwrap();
+        idx.attach_cycle_usage(&mut second, next).unwrap();
+        assert_eq!(second[0].cycle.as_ref().unwrap().previous_tokens, Some(1_000.0));
     }
 }
 

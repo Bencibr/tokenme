@@ -46,12 +46,17 @@ fn live() -> Option<Vec<QuotaSample>> {
         ("accept", "application/json".into()),
         ("user-agent", USER_AGENT.into()),
     ];
-    if let Some(id) = account_id {
-        headers.push(("chatgpt-account-id", id));
+    if let Some(id) = account_id.as_ref() {
+        headers.push(("chatgpt-account-id", id.clone()));
     }
     let borrowed: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let body = get_json(ENDPOINT, &borrowed)?;
-    Some(samples_from(&body))
+    let identity = account_id.as_deref().unwrap_or(token.as_str());
+    let mut samples = samples_from(&body);
+    for sample in &mut samples {
+        sample.id = Some(super::account_window_id(identity, sample.window_minutes));
+    }
+    Some(samples)
 }
 
 /// `reset_at` is unix **seconds**, `used_percent` is already 0-100, and the window

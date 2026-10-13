@@ -40,7 +40,11 @@ fn live() -> Option<Vec<QuotaSample>> {
                 ("user-agent", USER_AGENT),
             ],
         )?;
-        Some(samples_from(&body))
+        let mut samples = samples_from(&body);
+        for sample in &mut samples {
+            sample.id = Some(super::account_window_id(&token, sample.window_minutes));
+        }
+        Some(samples)
     }
 }
 

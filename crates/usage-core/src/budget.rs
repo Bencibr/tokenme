@@ -143,6 +143,7 @@ pub fn views(
                 label: Some(format!("{what} · ${used:.2}/${limit:.0}")),
                 id: Some(if window == 1_440 { "day".into() } else { "month".into() }),
                 origin: QuotaOrigin::Budget,
+                cycle: None,
             });
         }
     }

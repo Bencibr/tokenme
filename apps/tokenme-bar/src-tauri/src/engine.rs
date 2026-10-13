@@ -804,6 +804,9 @@ fn publish_with_quota<R: Runtime>(
         );
     }
     let mut report = usage_core::report::summarize_facts(&facts, &opts);
+    if let Err(e) = index.attach_cycle_usage(&mut report.quotas, report.generated_at_ms) {
+        crate::logging::error(&format!("publish: cycle token usage failed — quota rows stay visible without the summary: {e}"));
+    }
     // The boot publish deliberately skips the probes: until the post-scan
     // publish lands, the quota strip shows "探测中" instead of vanishing.
     report.quotas_pending = !poll_quota;

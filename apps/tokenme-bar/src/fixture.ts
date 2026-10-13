@@ -400,8 +400,8 @@ const SOURCES: SourceStatus[] = [
 
 function quotasOf(now: number): QuotaView[] {
   return [
-    { tool: "codex", used_percent: 12, window_minutes: 300, resets_at_ms: now + 3 * 3_600_000 + 12 * 60_000, sampled_at_ms: now - 90_000 },
-    { tool: "claude", used_percent: 8.5, window_minutes: 10_080, resets_at_ms: now + 2 * DAY + 6 * 3_600_000, sampled_at_ms: now - 4 * 60_000 },
+    { tool: "codex", used_percent: 12, window_minutes: 300, resets_at_ms: now + 3 * 3_600_000 + 12 * 60_000, sampled_at_ms: now - 90_000, cycle: { observed_tokens: 124000, estimated_tokens: 1033333, previous_tokens: 980000, status: "partial", period_start_ms: now - 2 * 3_600_000, period_end_ms: now + 3 * 3_600_000 } },
+    { tool: "claude", used_percent: 8.5, window_minutes: 10_080, resets_at_ms: now + 2 * DAY + 6 * 3_600_000, sampled_at_ms: now - 4 * 60_000, cycle: { observed_tokens: 860000, estimated_tokens: 10117647, previous_tokens: 7200000, status: "partial", period_start_ms: now - 5 * DAY, period_end_ms: now + 2 * DAY + 6 * 3_600_000 } },
     { tool: "workbuddy", used_percent: 58.1, window_minutes: 0, resets_at_ms: now + 18 * DAY + 2 * 3_600_000, sampled_at_ms: now - 60_000, label: "Bonus Pack · 已用 250/430" },
   ];
 }

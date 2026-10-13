@@ -65,6 +65,7 @@ pub fn run() {
             commands::set_theme,
             commands::set_show_money,
             commands::set_quota_display_mode,
+            commands::set_show_cycle_tokens,
             commands::get_ttft_snapshot,
             commands::set_ttft_enabled,
             active_speed::run_active_speed_test,

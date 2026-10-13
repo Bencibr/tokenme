@@ -89,7 +89,7 @@ macOS 由 `scripts/build-macos.sh` 构建，Windows 由 `apps/tokenme-bar` 下�
 
 ### 3.5 OpenCode 官方配额
 
-TokenMe 只读取官方 OpenCode Go provider 的配额：优先 `OPENCODE_API_KEY`，其次 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`；该 provider 的 `options.baseURL` 必须是 `https://opencode.ai/zen/go/v1`），最后回退 `~/.local/share/opencode/auth.json`。自定义代理地址不会被当作官方配额凭据。OpenCode 行显示 5 小时、7 天与月度三个窗口。行没出现时，依次检查 高级 → 自动探测配额、逐工具探测的 OpenCode 开关，以及 `panel.log` 的 quota poll 记录。
+TokenMe 只读取官方 OpenCode Go provider 的配额统计接口：优先 `OPENCODE_API_KEY`，其次 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`；该 provider 的 `options.baseURL` 必须是 `https://opencode.ai/zen/go/v1`），最后回退 `~/.local/share/opencode/auth.json`。自定义代理地址不会被当作官方配额凭据。OpenCode 官方 `/zen/go/v1/usage` 返回 5 小时、7 天与月度三个窗口的使用百分比和重置时间；这些百分比按月度美元额度计算，不能直接当作跨模型 Token 百分比。行没出现时，依次检查 高级 → 自动探测配额、逐工具探测的 OpenCode 开关，以及 `panel.log` 的 quota poll 记录。
 
 ### 3.6 令牌自动续期
 

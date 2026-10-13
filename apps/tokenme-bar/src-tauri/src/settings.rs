@@ -176,6 +176,9 @@ pub struct Settings {
     pub show_money: bool,
     #[serde(default)]
     pub quota_display_mode: QuotaDisplayMode,
+    /// Show local token totals for 5-hour and weekly quota windows.
+    #[serde(default)]
+    pub show_cycle_tokens: bool,
     /// Opt-in passive client-side TTFT collection.
     #[serde(default)]
     pub ttft_enabled: bool,
@@ -244,6 +247,7 @@ impl Default for Settings {
             refresh_secs: default_refresh_secs(),
             show_money: default_show_money(),
             quota_display_mode: QuotaDisplayMode::default(),
+            show_cycle_tokens: false,
             ttft_enabled: false,
             show_empty_tools: false,
             bubble_enabled: default_bubble_enabled(),

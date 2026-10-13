@@ -254,6 +254,14 @@ fn show_window_on_ui(window: &WebviewWindow, rect: Option<Rect>) {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        #[cfg(target_os = "macos")]
+        let trayless_open = rect
+            .as_ref()
+            .map(|rect| {
+                let (w, h) = rect_size(rect);
+                !usable_tray_size(w, h)
+            })
+            .unwrap_or(true);
         anchor(window, rect);
         let anchored_at = window.outer_position().ok();
         #[cfg(not(target_os = "windows"))]
@@ -266,6 +274,13 @@ fn show_window_on_ui(window: &WebviewWindow, rect: Option<Rect>) {
             // the translucent page until relaunch.
             apply_window_background(window.app_handle(), None);
             let _ = window.show();
+            // The status item can still report its pre-layout zero-height
+            // window during setup. Retry after this main-thread turn so the
+            // first reveal follows the icon instead of the screen fallback.
+            if trayless_open {
+                let surface = window.clone();
+                let _ = window.run_on_main_thread(move || anchor(&surface, None));
+            }
         }
         let _ = anchored_at;
     }

@@ -27,6 +27,13 @@ mod workbuddy_cn;
 mod workbuddy_wbipc;
 mod zcode;
 
+/// Stable, non-secret quota-account/window identity for cycle state. The raw
+/// credential or account id never leaves the provider or reaches the report.
+pub(crate) fn account_window_id(identity: &str, window_minutes: i64) -> String {
+    use sha2::{Digest, Sha256};
+    format!("acct:{:x}:{window_minutes}", Sha256::digest(identity.as_bytes()))
+}
+
 pub use agnes::AgnesQuota;
 pub use antigravity::AntigravityQuota;
 pub use atomcode::AtomCodeQuota;
