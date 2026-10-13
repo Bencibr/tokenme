@@ -241,6 +241,11 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
     }}).to_string())
         .map_err(|_| "Could not stage the Claude telemetry settings.".to_string())?;
     let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
     // `--tools` is variadic: written as two args it swallows the empty value
     // AND the prompt after it, and the CLI exits "Input must be provided".
     // The joined form closes the list; `--` pins the prompt as positional.
@@ -262,11 +267,6 @@ fn run_claude() -> Result<ActiveSpeedTest, String> {
         .env("OTEL_TRACES_EXPORT_INTERVAL", "1000")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
     let child = command.spawn();
     let result = match child {
         Ok(mut child) => run_claude_child(&mut child, &rx),
