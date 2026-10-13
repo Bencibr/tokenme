@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TokenMe
+Comment=AI token usage and cost monitor
+Exec=TokenMe
+Icon=tokenme
+Terminal=false
+Categories=Utility;
+StartupWMClass=TokenMe

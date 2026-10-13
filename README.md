@@ -19,7 +19,7 @@
 
 ## TokenMe是什么？
 
-TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的菜单栏应用：macOS 与 Windows 有原生安装包，Linux 是一等的静态采集端，外加命令行工具。它回答三个平时没地方看的问题：
+TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的菜单栏应用：macOS 与 Windows 有原生安装包，Linux 提供静态采集端、命令行工具与源码构建的桌面预览版。它回答三个平时没地方看的问题：
 
 - 今天用了多少 token、折合多少钱？
 - 各家订阅的额度还剩多少、什么时候重置？
@@ -88,7 +88,9 @@ sudo xattr -rd com.apple.quarantine /Applications/TokenMe.app
 
 ### Linux
 
-没有菜单栏面板，但 Linux 是一等采集端：完全静态的二进制（musl，`x86_64` / `aarch64`，不需要 glibc 对齐，机器上也不用装 Rust 或 Python）。到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载压缩包（内附 `install-linux.sh`）：
+Ubuntu 桌面预览版可通过 `bash scripts/build-linux-desktop.sh` 从源码构建 `.deb`，通过顶栏菜单打开面板。桌面宠物暂未支持 Linux。
+
+Linux 同时提供完全静态的采集端二进制（musl，`x86_64` / `aarch64`，不需要 glibc 对齐，机器上也不用装 Rust 或 Python）。到 [Releases](https://github.com/Bencibr/tokenme/releases/latest) 下载采集端压缩包（内附 `install-linux.sh`）：
 
 ```bash
 tar xzf tokenme-cli-*-linux-musl.tar.gz

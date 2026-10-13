@@ -19,7 +19,7 @@
 
 ## What is TokenMe?
 
-TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, a fully static Linux collector and CLI. It answers three questions that usually have no good home:
+TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, a fully static Linux collector and CLI, and a Linux desktop preview built from source. It answers three questions that usually have no good home:
 
 - How many tokens did I burn today, and what did they cost?
 - How much is left on each subscription, and when does it reset?
@@ -88,7 +88,9 @@ Grab the setup from [Releases](https://github.com/Bencibr/tokenme/releases/lates
 
 ### Linux
 
-No menu-bar panel here — but Linux is a first-class collector: a fully static binary (musl, `x86_64` / `aarch64`, no glibc to align, no Rust or Python on the box). Grab the tarball from [Releases](https://github.com/Bencibr/tokenme/releases/latest) (`install-linux.sh` rides inside):
+The Ubuntu desktop preview builds a `.deb` from source with `bash scripts/build-linux-desktop.sh` and opens its panel through the indicator menu. The desktop pet is not implemented on Linux yet.
+
+Linux also provides a fully static collector binary (musl, `x86_64` / `aarch64`, no glibc to align, no Rust or Python on the box). Grab the collector tarball from [Releases](https://github.com/Bencibr/tokenme/releases/latest) (`install-linux.sh` rides inside):
 
 ```bash
 tar xzf tokenme-cli-*-linux-musl.tar.gz
