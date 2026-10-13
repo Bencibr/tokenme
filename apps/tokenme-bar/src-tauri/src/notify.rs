@@ -380,13 +380,14 @@ fn channel() -> &'static Sender<Msg> {
 }
 
 /// Called once at setup.
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
 pub fn init(app: &tauri::AppHandle) {
     #[cfg(target_os = "windows")]
     {
         let _ = IDENTIFIER.set(app.config().identifier.clone());
     }
-    #[cfg(not(target_os = "windows"))]
-    let _ = app;
+    let _ = APP.set(app.clone());
 }
 
 /// Offer a fresh report's quota views to the tier machine. Budget views (caps
@@ -768,6 +769,32 @@ impl Worker {
 /// (UNUserNotificationCenter); on Windows its WinRT toast backend.
 #[cfg(target_os = "macos")]
 fn post(title: &str, body: &str) -> Result<(), String> {
+    // notify-rust's UN path probes the main run loop from the calling thread
+    // and answers "Mainthread not running" when that one-instant snapshot
+    // finds the loop mid-dispatch — four passes in a row on 2026-10-13 while
+    // the app was alive and polling. Called ON the main thread the probe is
+    // bypassed (block_on_main owns the loop and waits for the delegate), so
+    // the post rides the app's own dispatch instead of racing it.
+    if let Some(app) = APP.get() {
+        let (title, body) = (title.to_string(), body.to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shown = app.run_on_main_thread(move || {
+            let _ = tx.send(
+                notify_rust::Notification::new()
+                    .summary(&title)
+                    .body(&body)
+                    .show()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            );
+        });
+        if let Err(e) = shown {
+            return Err(format!("main-thread dispatch failed: {e}"));
+        }
+        return rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| Err("main-thread delivery timed out".into()));
+    }
     notify_rust::Notification::new()
         .summary(title)
         .body(body)
