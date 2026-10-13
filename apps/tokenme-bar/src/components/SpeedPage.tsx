@@ -45,15 +45,17 @@ function SpeedCell({ value, cap, stage }: { value: string; cap: string; stage: "
   );
 }
 
-function SpeedRow({ nameKey, granularityKey, tool, samples, now, canTest, testing, onTest }: {
+function SpeedRow({ nameKey, granularityKey, provider, tool, samples, now, canTest, testing, onTest, activeTest }: {
   nameKey: "ttft.codex" | "ttft.claude" | "ttft.dsh";
   granularityKey: "ttft.turn" | "ttft.request";
+  provider: "codex" | "claude_code" | "dsh";
   tool: string;
   samples: TtftSample[];
   now: number;
   canTest: boolean;
   testing: boolean;
   onTest: () => void;
+  activeTest: ActiveSpeedTest | null;
 }) {
   const latest = samples[0];
   // Only like compares with like: the two metrics answer different questions
@@ -99,6 +101,11 @@ function SpeedRow({ nameKey, granularityKey, tool, samples, now, canTest, testin
         cap={t("ttft.head.tps")}
         stage={avgTps != null ? stageOfTps(avgTps) : null}
       />
+      {activeTest?.provider === provider ? <p className="ttft-row-active" role="status">
+        <span>{t("ttft.active.result", { provider: t(nameKey), age: relativeTime(activeTest.sampledAtMs, now) })}</span>
+        <strong>{duration(activeTest.ttftMs)}</strong>
+        {activeTest.tps != null ? <strong>{activeTest.tps.toFixed(1)} TPS</strong> : null}
+      </p> : null}
     </li>
   );
 }
@@ -108,22 +115,11 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
   const [activeTest, setActiveTest] = useState<ActiveSpeedTest | null>(null);
   const [activeError, setActiveError] = useState<string | null>(null);
   const [testing, setTesting] = useState<ActiveSpeedTest["provider"] | null>(null);
-  const activeSample = useMemo<TtftSample | null>(() => activeTest ? {
-    provider: activeTest.provider,
-    granularity: activeTest.provider === "codex" ? "turn" : "request",
-    metric: activeTest.provider === "codex" ? "ttft" : "first_content",
-    ttft_ms: activeTest.ttftMs,
-    sampled_at_ms: activeTest.sampledAtMs,
-    model: activeTest.model,
-    tps: activeTest.tps,
-    output_tokens: activeTest.outputTokens,
-    decode_ms: activeTest.durationMs != null ? Math.max(0, activeTest.durationMs - activeTest.ttftMs) : null,
-  } : null, [activeTest]);
   const byProvider = useMemo(() => ({
-    codex: [...snapshot.samples.filter((sample) => sample.provider === "codex"), ...(activeSample?.provider === "codex" ? [activeSample] : [])].sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
-    claude_code: [...snapshot.samples.filter((sample) => sample.provider === "claude_code"), ...(activeSample?.provider === "claude_code" ? [activeSample] : [])].sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
+    codex: snapshot.samples.filter((sample) => sample.provider === "codex").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
+    claude_code: snapshot.samples.filter((sample) => sample.provider === "claude_code").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
     dsh: snapshot.samples.filter((sample) => sample.provider === "dsh").sort((a, b) => b.sampled_at_ms - a.sampled_at_ms),
-  }), [activeSample, snapshot.samples]);
+  }), [snapshot.samples]);
   // TTFT is collected on this machine only — the OTLP receiver and the
   // Codex rollouts are local files, and no sync bundle carries samples.
   // Scoped to a remote machine, the local rows would silently contradict
@@ -145,7 +141,6 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
     }
     finally { setTesting(null); }
   };
-  const activeProvider = activeTest?.provider === "claude_code" ? "ttft.claude" : "ttft.codex";
   return (
     <Section
       label={t("ttft.title")}
@@ -170,16 +165,12 @@ export function SpeedPage({ snapshot, now, scope }: { snapshot: TtftSnapshot; no
       {!scopedAway && visible.length > 0 ? (
         <ol className="speed-list">
           {visible.map((p) => (
-            <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} tool={p.tool} samples={byProvider[p.id]} now={now}
-              canTest={p.id !== "dsh"} testing={testing === p.id} onTest={() => p.id !== "dsh" && void runTest(p.id)} />
+            <SpeedRow key={p.id} nameKey={p.nameKey} granularityKey={p.granularityKey} provider={p.id} tool={p.tool} samples={byProvider[p.id]} now={now}
+              canTest={p.id !== "dsh"} testing={testing === p.id} onTest={() => p.id !== "dsh" && void runTest(p.id)}
+              activeTest={p.id === "dsh" ? null : activeTest} />
           ))}
         </ol>
       ) : null}
-      {!scopedAway && activeTest ? <p className="ttft-active-result" role="status">
-        <span>{t("ttft.active.result", { provider: t(activeProvider), age: relativeTime(activeTest.sampledAtMs, now) })}</span>
-        <strong>{duration(activeTest.ttftMs)}</strong>
-        {activeTest.tps != null ? <strong>{activeTest.tps.toFixed(1)} TPS</strong> : null}
-      </p> : null}
       {!scopedAway && activeError ? <p className="ttft-note" role="alert">{activeError}</p> : null}
       {!scopedAway ? <p className="ttft-note">{t("ttft.active.hint")}</p> : null}
       {snapshot.claude_config_status === "error" ? <p className="ttft-note" role="status">{t("ttft.claude_config_error")}</p> : null}
