@@ -120,9 +120,28 @@ fn discover_login_info(edition: Edition, dir: &std::path::Path) -> Option<Value>
     }
 }
 
+/// One slot per edition: a probe whose live meter could not answer while the
+/// install clearly holds an account is an outage, and the caller holds the
+/// last known windows instead of banking a local snapshot (see fetch_for).
+static OUTAGE: [std::sync::atomic::AtomicBool; 2] = [
+    std::sync::atomic::AtomicBool::new(false),
+    std::sync::atomic::AtomicBool::new(false),
+];
+
+fn outage_slot(edition: Edition) -> &'static std::sync::atomic::AtomicBool {
+    match edition {
+        Edition::Global => &OUTAGE[0],
+        Edition::China => &OUTAGE[1],
+    }
+}
+
 impl QuotaProbe for QoderQuota {
     fn tool(&self) -> &'static str {
         "qoder"
+    }
+
+    fn outage(&self) -> bool {
+        outage_slot(Edition::Global).load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The daily check-in rides this probe and must run even while the host
@@ -139,13 +158,18 @@ impl QuotaProbe for QoderQuota {
 impl QuotaProbe for QoderCnQuota {
     fn tool(&self) -> &'static str { "qoder_cn" }
     fn daily_task(&self) -> bool { true }
+    fn outage(&self) -> bool {
+        outage_slot(Edition::China).load(std::sync::atomic::Ordering::Relaxed)
+    }
     fn fetch(&self) -> Vec<QuotaSample> { fetch_for(Edition::China) }
 }
 
 fn fetch_for(edition: Edition) -> Vec<QuotaSample> {
     let mut pending = None;
+    let mut account_seen = false;
     for dir in app_dirs_for(edition) {
         if let Some(info) = discover_login_info(edition, &dir) {
+            account_seen = true;
             let checkin = daily_checkin_for(edition, &info, false);
             if let Some(samples) = live_usage_for(edition, &info).filter(|s| !s.is_empty()) {
                 return with_checkin_mark(edition, samples, &checkin);
@@ -156,17 +180,29 @@ fn fetch_for(edition: Edition) -> Vec<QuotaSample> {
     for db in state_dbs_for(edition) {
         let Some(conn) = open(&db) else { continue };
         if let Some(info) = ide_secret(edition, &db, &conn, USER_KEY) {
+            account_seen = true;
             let checkin = daily_checkin_for(edition, &info, false);
             if let Some(samples) = live_usage_for(edition, &info).filter(|s| !s.is_empty()) {
                 return with_checkin_mark(edition, samples, &checkin);
             }
             pending = checkin.or(pending);
         }
-        if let Some(value) = ide_secret(edition, &db, &conn, QUOTA_KEY) {
-            let samples = samples_from_snapshot(&value);
-            if !samples.is_empty() { return with_checkin_mark(edition, samples, &pending); }
+        if ide_secret(edition, &db, &conn, QUOTA_KEY).is_some() {
+            // The local creditUsage snapshot is a stale record, not a live
+            // answer: banking it (or a lone marker row) over the cached
+            // windows is the partial-result defeat zcode grew an outage flag
+            // for. It only marks the account as present.
+            account_seen = true;
         }
     }
+    // An install that holds an account while the usage API would not answer is
+    // an outage — the caller holds the last known windows (last check-in mark
+    // included). The success paths above already returned.
+    if account_seen {
+        outage_slot(edition).store(true, std::sync::atomic::Ordering::Relaxed);
+        return Vec::new();
+    }
+    outage_slot(edition).store(false, std::sync::atomic::Ordering::Relaxed);
     // A successful claim must remain visible even if the usage API is unavailable.
     with_checkin_mark(edition, Vec::new(), &pending)
 }
