@@ -3,7 +3,7 @@ Section: utils
 Priority: optional
 Maintainer: TokenMe contributors <packaging@example.com>
 Build-Depends: debhelper-compat (= 13),
- cargo-1.97 (>= 1.97.1), rustc-1.97 (>= 1.97.1),
+ cargo, rustc,
  pkg-config, libgtk-3-dev, libwebkit2gtk-4.1-dev,
  libayatana-appindicator3-dev, libssl-dev, python3
 Standards-Version: 4.7.0

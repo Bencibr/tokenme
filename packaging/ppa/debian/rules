@@ -2,11 +2,13 @@
 export CARGO_HOME = $(CURDIR)/.debian-cargo
 export CARGO_NET_OFFLINE = true
 export CARGO_BUILD_JOBS = 2
-export RUSTC = /usr/lib/rust-1.97/bin/rustc
-export RUSTDOC = /usr/lib/rust-1.97/bin/rustdoc
-export PATH := /usr/lib/rust-1.97/bin:$(PATH)
-# Do not embed an arbitrary developer toolchain in the source package.
-CARGO = /usr/lib/rust-1.97/bin/cargo
+# Ubuntu Resolute provides the archive toolchain as unversioned cargo/rustc
+# packages (currently 1.93). The source's newer rust-version is checked by
+# CI and the release toolchain; Launchpad's cargo flag lets this builder
+# compile the same code without inventing a non-archive Build-Depends name.
+CARGO = cargo
+export RUSTC = rustc
+export RUSTDOC = rustdoc
 export CARGO_PROFILE_RELEASE_LTO = false
 
 %:
@@ -18,13 +20,13 @@ override_dh_auto_configure:
 	python3 scripts/check-i18n-parity.py
 
 override_dh_auto_build:
-	$(CARGO) build --release --frozen --target-dir .debian-target/cli -p usage-cli
-	$(CARGO) build --release --frozen --target-dir .debian-target/panel --manifest-path apps/tokenme-bar/src-tauri/Cargo.toml --features custom-protocol
+	$(CARGO) build --release --frozen --ignore-rust-version --target-dir .debian-target/cli -p usage-cli
+	$(CARGO) build --release --frozen --ignore-rust-version --target-dir .debian-target/panel --manifest-path apps/tokenme-bar/src-tauri/Cargo.toml --features custom-protocol
 
 override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-	$(CARGO) test --release --frozen --target-dir .debian-target/cli --workspace
-	$(CARGO) test --release --frozen --target-dir .debian-target/panel --manifest-path apps/tokenme-bar/src-tauri/Cargo.toml --features custom-protocol
+	$(CARGO) test --release --frozen --ignore-rust-version --target-dir .debian-target/cli --workspace
+	$(CARGO) test --release --frozen --ignore-rust-version --target-dir .debian-target/panel --manifest-path apps/tokenme-bar/src-tauri/Cargo.toml --features custom-protocol
 endif
 
 override_dh_auto_install:
