@@ -97,6 +97,47 @@ pub fn log_checkin(msg: &str) {
     }
 }
 
+/// The sink a host hands the meters' diagnostics: one line per live meter that
+/// could not answer, with its reason. The CLI installs nothing and the calls
+/// stay silent there.
+pub type MeterLog = Arc<dyn Fn(&str) + Send + Sync>;
+
+static METER_LOG: std::sync::OnceLock<MeterLog> = std::sync::OnceLock::new();
+
+/// Install the host's meter-diagnostics sink. Called once at setup; later
+/// calls win.
+pub fn set_meter_log(f: MeterLog) {
+    let _ = METER_LOG.set(f);
+}
+
+/// One line into the host's log, throttled per key: a pass repeats every
+/// ~75 s and an outage lasts hours — the reason is worth one line, not a
+/// chorus.
+pub fn log_meter(key: &str, msg: &str) {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let last = LAST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let due = last
+        .lock()
+        .map(|mut map| {
+            let due = map.get(key).is_none_or(|t| now.saturating_sub(*t) > 10 * 60 * 1000);
+            if due {
+                map.insert(key.to_string(), now);
+            }
+            due
+        })
+        .unwrap_or(false);
+    if due {
+        if let Some(f) = METER_LOG.get() {
+            f(&format!("{key}: {msg}"));
+        }
+    }
+}
+
 pub trait QuotaProbe: Send + Sync {
     /// Must match an adapter `TOOL_ID` so the panel can group quota with spend.
     fn tool(&self) -> &'static str;
@@ -120,6 +161,14 @@ pub trait QuotaProbe: Send + Sync {
     /// process down with them.
     fn guarded_fetch(&self) -> Vec<QuotaSample> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.fetch())).unwrap_or_default()
+    }
+
+    /// Whether an empty fetch this cycle means "the meters could not answer" —
+    /// an outage to ride out on the last known answer, however old — rather
+    /// than "there is genuinely nothing here", where the rows should retire
+    /// after the grace. Default: no.
+    fn outage(&self) -> bool {
+        false
     }
 }
 
@@ -475,6 +524,62 @@ mod tests {
             "a refused probe never reaches its vendor, cache or no cache"
         );
         assert!(out.is_empty(), "no cache to serve means the row stays absent, not live-probed");
+    }
+
+    /// The outage contract (2026-10-13, the zcode case): an account's weekly
+    /// pool hit 100% and the vendor stopped quoting it within one poll cycle.
+    /// A probe whose meters could not answer rides the last known windows
+    /// however old they are, and no "nothing here" verdict is banked — the
+    /// first successful poll replaces the held answer outright. A plain empty
+    /// probe keeps the grace semantics instead.
+    #[test]
+    fn an_outage_probe_rides_the_last_known_answer() {
+        struct Outage;
+        impl QuotaProbe for Outage {
+            fn tool(&self) -> &'static str {
+                "zcode"
+            }
+            fn fetch(&self) -> Vec<QuotaSample> {
+                Vec::new()
+            }
+            fn outage(&self) -> bool {
+                true
+            }
+        }
+        struct Silent;
+        impl QuotaProbe for Silent {
+            fn tool(&self) -> &'static str {
+                "qoder"
+            }
+            fn fetch(&self) -> Vec<QuotaSample> {
+                Vec::new()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache::Cache::in_dir(dir.path().to_path_buf(), TTL);
+        cache.store(
+            "zcode",
+            &[QuotaSample {
+                used_percent: 100.0,
+                window_minutes: 10_080,
+                resets_at_ms: 0,
+                label: Some("weekly".into()),
+                id: None,
+            }],
+        );
+        let out = collect_probes_gated(
+            BUDGET,
+            vec![Box::new(Outage), Box::new(Silent)],
+            Some(cache),
+            &|_| true,
+        );
+        let zcode: Vec<_> = out.iter().filter(|v| v.tool == "zcode").collect();
+        assert_eq!(zcode.len(), 1, "the outage rides the last known windows");
+        assert_eq!(zcode[0].used_percent, 100.0, "the held answer, verbatim");
+        assert!(
+            !out.iter().any(|v| v.tool == "qoder"),
+            "a silent non-outage probe with no cache entry stays absent"
+        );
     }
 
     #[test]

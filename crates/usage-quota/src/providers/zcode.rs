@@ -56,12 +56,19 @@ use sha2::Digest as _;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use usage_core::QuotaSample;
 
-use crate::http::get_json;
+use crate::http::{get_json, get_json_any_status};
 use crate::QuotaProbe;
 
 pub struct ZcodeQuota;
+
+/// Set while the credential store holds accounts yet not one live meter
+/// returned a number — an outage the caller rides on the last known answer
+/// (see [`QuotaProbe::outage`]).
+static OUTAGE: AtomicBool = AtomicBool::new(false);
 
 /// The provider quota meter the IDE's usage panel is built on. Live, so nothing
 /// here can lag behind what ZCode itself shows.
@@ -106,6 +113,17 @@ impl QuotaProbe for ZcodeQuota {
             out.extend(samples);
         }
         out.extend(mcp_meter(plan.as_deref()).unwrap_or_default());
+        // A credential store that holds accounts while not one live meter
+        // returned a number is an outage, not an empty account — measured
+        // 2026-10-13: the weekly pool hit 100% and all three meters went
+        // empty within one poll cycle. Returning the local budget sample
+        // alone would bank a 0% over the real answer; returning nothing lets
+        // the caller hold the last known windows until the vendor answers.
+        let outage = out.is_empty() && store_has_accounts();
+        OUTAGE.store(outage, Ordering::Relaxed);
+        if outage {
+            return Vec::new();
+        }
         if let Some(db) = db_path() {
             if let Ok(conn) = Connection::open_with_flags(
                 format!("file:{}?mode=ro", db.display()),
@@ -116,6 +134,27 @@ impl QuotaProbe for ZcodeQuota {
         }
         out
     }
+
+    fn outage(&self) -> bool {
+        OUTAGE.load(Ordering::Relaxed)
+    }
+}
+
+/// Whether the credential store holds any account identity at all — the
+/// difference between "the meters could not answer" (an outage) and "there is
+/// no account here" (the tool is simply not signed in).
+fn store_has_accounts() -> bool {
+    credential_store()
+        .and_then(|store| {
+            store.as_object().map(|o| {
+                o.keys().any(|k| {
+                    k.starts_with("account-provider:coding-plan:account:")
+                        || k.starts_with("oauth:")
+                        || k == "zcodejwttoken"
+                })
+            })
+        })
+        .unwrap_or(false)
 }
 
 // ------------------------------------------------------- the Start Plan bucket
@@ -178,8 +217,11 @@ fn usage_auth_from(store: &Value, key: &[u8; 32]) -> Option<UsageAuth> {
 }
 
 fn usage_auth() -> Option<UsageAuth> {
-    let store = credential_store()?;
-    usage_auth_from(&store, &envelope_key())
+    let result = credential_store().and_then(|store| usage_auth_from(&store, &envelope_key()));
+    if result.is_none() {
+        crate::log_meter("zcode:limits", "no coding-plan api-key and no oauth access token in the credential store");
+    }
+    result
 }
 
 /// Read the current Start Plan balance used by ZCode's 3.14.x usage panel.
@@ -187,15 +229,38 @@ fn usage_auth() -> Option<UsageAuth> {
 /// accepts the OAuth-issued ZCode JWT, while the legacy limits endpoint uses a
 /// coding-plan API key.
 fn zcode_plan_windows() -> Option<Vec<QuotaSample>> {
-    let store = credential_store()?;
+    let store = match credential_store() {
+        Some(store) => store,
+        None => {
+            crate::log_meter("zcode:balance", "no credentials store (~/.zcode/v2/credentials.json missing or unreadable)");
+            return None;
+        }
+    };
     let key = envelope_key();
-    let token = opened(&store, "zcodejwttoken", &key)?;
+    let Some(token) = opened(&store, "zcodejwttoken", &key) else {
+        crate::log_meter("zcode:balance", "no zcodejwttoken in the credential store");
+        return None;
+    };
     let device_mid = device_mid();
     let authorization = format!("Bearer {token}");
     let headers = zcode_headers(&authorization, device_mid.as_deref());
     let url = zcode_plan_balance_url();
-    let body = get_json(&url, &headers)?;
-    Some(samples_from_balance(&body))
+    let Some((status, body)) = get_json_any_status(&url, &headers) else {
+        crate::log_meter("zcode:balance", "balance endpoint unreachable (network or TLS)");
+        return None;
+    };
+    if status != 200 {
+        crate::log_meter("zcode:balance", &format!("balance endpoint answered HTTP {status}"));
+        return None;
+    }
+    let samples = samples_from_balance(&body);
+    if samples.is_empty() {
+        crate::log_meter(
+            "zcode:balance",
+            "balance answered 200 with no plans or balances (quota exhausted, or the token names another account)",
+        );
+    }
+    Some(samples)
 }
 
 fn zcode_plan_balance_url() -> String {
@@ -288,7 +353,10 @@ fn quota_windows(auth: &UsageAuth, plan: Option<&str>) -> Option<Vec<QuotaSample
     )?;
     // A rejected credential answers HTTP 200 with `{"code":401,…}` and no
     // `data`; the app treats that as "no answer", and so does this.
-    let data = body.get("data")?;
+    let data = body.get("data").or_else(|| {
+        crate::log_meter("zcode:limits", "limits endpoint answered without data (rejected credential?)");
+        None
+    })?;
     let level = data.get("level").and_then(Value::as_str).map(str::to_string);
     Some(samples_from_limits(
         data.get("limits").unwrap_or(&Value::Null),
@@ -514,7 +582,10 @@ struct Session {
 /// guessed: this account's `lite` tier refreshes ~40 h out, which is neither a
 /// day nor a month, and a bar labelled with the wrong length is a wrong number.
 fn mcp_meter(plan: Option<&str>) -> Option<Vec<QuotaSample>> {
-    let session = session()?;
+    let Some(session) = session() else {
+        crate::log_meter("zcode:mcp", "no zcodejwttoken / bigmodel token in the credential store");
+        return None;
+    };
     let body = get_json(
         MCP_USAGE_URL,
         &[

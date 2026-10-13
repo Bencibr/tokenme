@@ -126,6 +126,7 @@ pub fn run() {
             // themselves call through this hook, so usage-quota stays
             // host-agnostic.
             usage_quota::set_checkin_log(std::sync::Arc::new(|msg| crate::logging::checkin(msg)));
+            usage_quota::set_meter_log(std::sync::Arc::new(|msg| crate::logging::info(msg)));
 
             let handle = app.handle().clone();
             let ttft_dir = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
