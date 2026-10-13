@@ -209,7 +209,7 @@ where
                     let mut model = None;
                     let mut output_tokens = None;
                     let mut duplicate = false;
-                    let (mut saw_ttft, mut saw_first_content, mut saw_model, mut saw_output) = (false, false, false, false);
+                    let (mut saw_ttft, mut saw_first_content, mut saw_output) = (false, false, false);
                     for attribute in &span.attributes {
                         let (seen, slot) = match attribute.key.as_str() {
                             "ttft_ms" => (&mut saw_ttft, &mut ttft),
@@ -223,7 +223,6 @@ where
                                     duplicate = true;
                                     break;
                                 }
-                                saw_model = true;
                                 if model.is_none() { model = attribute.text.clone(); }
                                 continue;
                             }
