@@ -89,7 +89,7 @@ macOS 由 `scripts/build-macos.sh` 构建，Windows 由 `apps/tokenme-bar` 下�
 
 ### 3.5 OpenCode 官方配额
 
-TokenMe 只读取官方 OpenCode Go provider 的配额：优先 `OPENCODE_API_KEY`，其次 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`；该 provider 的 `options.baseURL` 必须是 `https://opencode.ai/zen/go/v1`），最后回退 `~/.local/share/opencode/auth.json`。自定义代理地址不会被当作官方配额凭据。OpenCode 行显示 5 小时、7 天与月度三个窗口。行没出现时，依次检查 高级 → 自动探测配额、逐工具探测的 OpenCode 开关，以及 `panel.log` 的 quota poll 记录。
+TokenMe 只读取官方 OpenCode Go provider 的配额，凭据按顺序取：`OPENCODE_API_KEY`；其次是 OpenCode V2 自己的凭据库——`opencode.db` 的 `credential` 表（桌面端与 CLI 的账号登录都写在这里，`integration_id` 为 `opencode-go` 或 `opencode`，`type:"oauth"` 时用 `access`、`type:"api"` 时用 `key`；已过期的令牌不在这里续期，等 OpenCode 自己刷新）；其次是 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`；该 provider 的 `options.baseURL` 必须是 `https://opencode.ai/zen/go/v1`）；最后回退遗留的 `~/.local/share/opencode/auth.json`（只认 OpenCode 写 Go 密钥的那两个 id）。自定义代理地址不会被当作官方配额凭据。OpenCode 行显示 5 小时、7 天与月度三个窗口。行没出现时，依次检查 高级 → 自动探测配额、逐工具探测的 OpenCode 开关，以及 `panel.log` 的 quota poll 记录——探测跑了却空手而归时，同一行会带 `probes-empty: [opencode:原因]`，原因就是厂商自己的 401/403、令牌过期或没有官方凭据。
 
 ### 3.6 令牌自动续期
 

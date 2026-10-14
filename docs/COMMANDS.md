@@ -68,7 +68,7 @@ tokenme quota
 
 应答由一个共享的 5 分钟 TTL 缓存（`crates/usage-quota/src/lib.rs::TTL`；OS 配置目录下每个工具一个 JSON 文件）。这条命令最多等 30 秒拿实时探测结果——面板只等 5 秒——超时的探测仍会在 6 小时宽限窗内贡献上一次的答案。宿主应用退出后暂停其探测，是面板的 `host_exit_pause` 设置，CLI 不做这件事。
 
-OpenCode 配额只认官方 Go 端点。密钥查找顺序：`OPENCODE_API_KEY`；其次 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`，且该 provider 的 `baseURL` 必须是 `https://opencode.ai/zen/go/v1` 才算数）；最后是 `~/.local/share/opencode/auth.json` 里的 API 条目。自定义 provider 地址不作为此配额的凭据。结果包含滚动 5 小时、周与月三个窗口。
+OpenCode 配额只认官方 Go 端点。密钥查找顺序：`OPENCODE_API_KEY`；其次是 OpenCode V2 自己的凭据库 `opencode.db` 的 `credential` 表（`integration_id` 为 `opencode-go`/`opencode` 且优先 `active=1` 的行，OAuth 取 `access`、粘贴的密钥取 `key`，已过期的不续期也不发送）；其次是 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`，且该 provider 的 `baseURL` 必须是 `https://opencode.ai/zen/go/v1` 才算数）；最后是遗留的 `~/.local/share/opencode/auth.json`（只认 OpenCode 写 Go 密钥的那两个 id）。自定义 provider 地址不作为此配额的凭据。结果包含滚动 5 小时、周与月三个窗口。
 
 大多数探测只读凭据。恰好三家会把轮换后的令牌原子性写回各自的存储：**MiniMax Code**（存住的 access token 距过期不足 2 分钟时，用 `auth.json` 里的 refresh token 换新，遵守厂商自己的锁）、**Kimi Code**（只在 `/usages` 拒绝存量令牌后才换新）、**Cline**（在 gateway 令牌到期前轮换）。其余探测一律不写——磁盘上的 WorkBuddy 凭据来自你亲自跑过的 `tokenme workbuddy-login`，不是探测写的。
 
