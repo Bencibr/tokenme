@@ -179,6 +179,18 @@ export function IconServer(p: IconProps) {
   );
 }
 
+/** Status bar's local / remote device management entry. */
+export function IconDevices(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <rect x="3.5" y="5" width="10.5" height="14" rx="1.8" />
+      <rect x="14" y="8" width="6.5" height="10" rx="1.5" />
+      <path d="M7 16.5h3.5" />
+      <path d="M16 15h2.5" />
+    </Svg>
+  );
+}
+
 /** List rows' "open detail" affordance: a forward chevron. */
 export function IconNext(p: IconProps) {
   return (

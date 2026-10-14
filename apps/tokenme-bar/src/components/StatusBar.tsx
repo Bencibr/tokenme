@@ -5,7 +5,7 @@ import { clockStamp, freshness, relativeTime, TRAY_MODE_LABEL } from "../lib/for
 import { useTicker } from "../lib/hooks";
 import { t } from "../lib/i18n";
 import type { UpdateInfo } from "../lib/update";
-import { IconRefresh, IconServer, IconSettings, IconWarn } from "./Icons";
+import { IconDevices, IconRefresh, IconServer, IconSettings, IconWarn } from "./Icons";
 
 /** One dot for the whole fleet: the most actionable state wins. */
 function aggServerStatus(servers: ServerView[]): ServerStatus {
@@ -183,8 +183,9 @@ export function StatusBar({
           <IconServer size={15} />
           <span className="srv-dot" aria-hidden="true" />
         </button>
-        <button type="button" className="icon-btn" onClick={onOpenSync} title={t("sync.title")} aria-label={t("sync.title")}>
-          <IconRefresh size={15} />
+        <button type="button" className="sync-btn" onClick={onOpenSync} title={t("sync.title")} aria-label={t("sync.title")}>
+          <IconDevices size={14} />
+          <span>{t("sync.short")}</span>
         </button>
         <button type="button" className="settings-btn" onClick={onOpenSettings} title={t("status.settings")} aria-label={t("status.settings")}>
           <IconSettings size={15} />

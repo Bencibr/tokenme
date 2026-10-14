@@ -77,6 +77,7 @@ const zh = {
   "hdr.sync.more": "+{n} 台",
 
   "sync.title": "设备同步",
+  "sync.short": "设备",
   "sync.close": "关闭设备同步",
   "sync.role": "角色",
   "sync.role.primary": "主设备",
@@ -708,6 +709,7 @@ const en: Record<StrKey, string> = {
   "hdr.sync.more": "+{n} more",
 
   "sync.title": "Device sync",
+  "sync.short": "Devices",
   "sync.close": "Close device sync",
   "sync.role": "Role",
   "sync.role.primary": "Primary",
