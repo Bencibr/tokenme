@@ -170,7 +170,7 @@ tokenme sync stop      # request a stop through the private user Unix socket; ke
 
 `sync stop` uses `device-sync/secondary-runtime.sock` under the user data directory, with a `0700` directory and `0600` socket; it is not a loopback-TCP control plane. An abnormal runtime exit cleans up the socket and keeps pending packages; the next explicit `sync run` or Panel recovery can continue. The macOS/Unix path is tested here; Windows named-pipe ACL behavior remains unverified on this machine.
 
-The Panel device-sync sheet exposes the matching primary start/stop, private certificate and invite generation, secondary invite/pair, approve/reject, pause/resume/revoke, and secondary runtime start/stop actions. Primary startup saves identity and certificate in the user-private directory; after a Panel restart the secondary runtime follows the persisted `enabled` state, while an explicit stop persists disabled. `sync run/stop/status` is the same runtime entry for Ubuntu and other headless machines.
+The Panel device-sync sheet exposes the matching primary start/stop, private certificate and invite generation, QR-file save, secondary QR-file read or invite/pair, approve/reject, pause/resume/revoke/unpair, and secondary runtime start/stop actions. A cross-device listener also requires an advertised address; the panel refuses loopback or unspecified addresses in an invite. Primary startup saves identity and certificate in the user-private directory; after a Panel restart the secondary runtime follows the persisted `enabled` state, while an explicit stop persists disabled. `sync run/stop/status` is the same runtime entry for Ubuntu and other headless machines.
 
 ## sync upload
 

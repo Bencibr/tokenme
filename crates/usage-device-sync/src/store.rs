@@ -631,6 +631,27 @@ impl SyncStore {
         })
     }
 
+    /// Remove the active secondary binding while leaving local usage history and
+    /// immutable outbox rows intact for audit/reconciliation.
+    pub fn clear_secondary_config(&mut self, now_ms: i64) -> SyncResult<Option<PathBuf>> {
+        self.index.with_network_transaction(|tx| {
+            let identity_path: Option<String> = tx.query_row(
+                "SELECT identity_path FROM device_sync_secondary_config WHERE config_key = 'secondary' AND primary_id = ?1",
+                params![self.primary_id], |row| row.get(0),
+            ).optional().map_err(sql_err)?;
+            tx.execute(
+                "DELETE FROM device_sync_secondary_config WHERE config_key = 'secondary' AND primary_id = ?1",
+                params![self.primary_id],
+            ).map_err(sql_err)?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_last_unpaired_at_ms', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![now_ms.to_string()],
+            ).map_err(sql_err)?;
+            Ok(identity_path.map(PathBuf::from))
+        })
+    }
+
     /// Network scheduling and local dirty capture are separate switches. A
     /// stopped or primary-paused secondary keeps recording revisions so resume
     /// can upload the changes made while it was offline.
@@ -3186,6 +3207,27 @@ mod tests {
         let resumed = store.secondary_config().unwrap().unwrap();
         assert!(resumed.enabled);
         assert!(!resumed.capture_enabled);
+    }
+
+    #[test]
+    fn clearing_secondary_config_keeps_local_index_history() {
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let config = SecondarySyncConfig {
+            primary_id: "primary-1".into(), device_id: "device-1".into(), origin: "laptop".into(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1, 2, 3],
+            certificate_pin: hash_bytes(&[1, 2, 3]), identity_path: PathBuf::from("identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        };
+        store.save_secondary_config(&config, 1).unwrap();
+        let identity_path = store.clear_secondary_config(2).unwrap();
+        assert_eq!(identity_path, Some(PathBuf::from("identity.json")));
+        assert!(store.secondary_config().unwrap().is_none());
+        assert_eq!(store.index().event_count().unwrap(), 0);
+        assert_eq!(store.index().conn().query_row::<String, _, _>(
+            "SELECT value FROM meta WHERE key = 'device_sync_last_unpaired_at_ms'", [], |row| row.get(0),
+        ).unwrap(), "2");
     }
 
     #[test]

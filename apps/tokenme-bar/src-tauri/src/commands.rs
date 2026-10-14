@@ -37,6 +37,7 @@ pub enum SyncManagementRequest {
     StartPrimary { bind: Option<String>, advertise_host: Option<String>, allow_lan: bool },
     StartSecondary,
     Stop,
+    Unpair,
     CreateInvite { expires_at_ms: Option<i64> },
     Pair { invite: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
     Approve { request_id: String },
@@ -268,7 +269,10 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let key_path = directory.join("server-key.pem");
     let (certificate_der, private_key_der) = usage_device_sync::ensure_server_certificate(&cert_path, &key_path, "localhost").map_err(|e| format!("cannot create private sync certificate: {e}"))?;
     let bind_text = bind.unwrap_or_else(|| "127.0.0.1:47821".into());
-    let bind_addr = bind_text.parse().map_err(|e| format!("sync bind address is invalid: {e}"))?;
+    let bind_addr: std::net::SocketAddr = bind_text.parse().map_err(|e| format!("sync bind address is invalid: {e}"))?;
+    if allow_lan && bind_addr.ip().is_loopback() {
+        return Err("LAN/VPN access requires a non-loopback listen address".into());
+    }
     let store = SyncStore::open(sync_index_path()?, identity.device_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
     let server = usage_device_sync::HttpsSyncServer::bind(HttpsServerConfig {
         bind_addr,
@@ -284,11 +288,14 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         staging_quota_bytes: 512 * 1024 * 1024,
     }, store).map_err(|e| format!("cannot start sync listener: {e}"))?;
     let address = server.local_addr().map_err(|e| e.to_string())?;
-    let host = advertise_host.unwrap_or_else(|| if address.ip().is_loopback() { "127.0.0.1".into() } else { address.ip().to_string() });
-    if host.is_empty() || host.contains('/') || host.contains(':') && !host.starts_with('[') && host.parse::<std::net::IpAddr>().is_err() {
-        return Err("sync advertise host is invalid".into());
-    }
-    let endpoint = format!("https://{host}:{}", address.port());
+    let host = match advertise_host {
+        Some(host) => host,
+        None if address.ip().is_loopback() => "127.0.0.1".into(),
+        None if address.ip().is_unspecified() => return Err("a LAN/VPN listener needs an advertise host such as 192.168.1.20".into()),
+        None => address.ip().to_string(),
+    };
+    let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
+    let endpoint = format!("https://{endpoint_host}:{}", address.port());
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let join = thread::spawn(move || server.run_until(&thread_stop));
@@ -302,6 +309,24 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
 }
 
 fn hex_bytes(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
+
+fn advertised_endpoint_host(value: &str, allow_lan: bool) -> Result<String, String> {
+    let host = value.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+    if host.is_empty() || host.contains('/') || host.contains('?') || host.contains('#') {
+        return Err("sync advertise host is invalid".into());
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if allow_lan && (ip.is_loopback() || ip.is_unspecified()) {
+            return Err("LAN/VPN invites cannot advertise a loopback or unspecified address".into());
+        }
+        return Ok(match ip {
+            std::net::IpAddr::V6(_) => format!("[{host}]"),
+            std::net::IpAddr::V4(_) => host,
+        });
+    }
+    if host.contains(':') { return Err("sync advertise host is invalid".into()); }
+    Ok(host)
+}
 
 fn parse_pin(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -387,6 +412,28 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
             stop_service(state);
             Ok(())
         },
+        SyncManagementRequest::Unpair => {
+            if state.role == "primary" || state.service.is_some() {
+                return Err("stop the primary sync service before unpairing this device".into());
+            }
+            let Some(config) = SyncStore::read_secondary_config(&index_path).map_err(|e| e.to_string())? else {
+                return Err("this device is not paired".into());
+            };
+            stop_service(state);
+            let identity_path = config.identity_path.clone();
+            let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|e| e.to_string())?;
+            let removed_path = store.clear_secondary_config(current_ms()).map_err(|e| e.to_string())?;
+            let directory = sync_dir()?;
+            if removed_path.as_ref().is_some_and(|path| path == &identity_path) && identity_path.parent() == Some(directory.as_path()) {
+                let _ = std::fs::remove_file(identity_path);
+            }
+            state.role.clear();
+            state.primary_id = None;
+            state.endpoint = None;
+            state.certificate_pin = None;
+            state.last_error = None;
+            Ok(())
+        },
         SyncManagementRequest::CreateInvite { expires_at_ms } => {
             let primary_id = state_primary_id(state, &snapshot)?;
             let endpoint = state.endpoint.clone().ok_or_else(|| "start the primary service before creating an invite".to_string())?;
@@ -400,6 +447,12 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
             Ok(())
         }
         SyncManagementRequest::Pair { invite, origin, display_name, os } => {
+            if state.service.is_some() || state.role == "primary" {
+                return Err("stop the primary sync service before pairing this device as a secondary".into());
+            }
+            if state.runtime.is_some() || state.role == "secondary" || SyncStore::read_secondary_config(&index_path).map_err(|e| e.to_string())?.is_some() {
+                return Err("this device is already paired; unpair it before using a new invite".into());
+            }
             let details = PairingInvite::parse_url(&invite).map_err(|e| format!("invalid pairing invite: {e}"))?;
             let certificate_der = details.certificate_der.ok_or_else(|| "invite does not contain the public server certificate; ask the primary for a fresh invite".to_string())?;
             let primary_id = details.primary_id.clone().ok_or_else(|| "invite does not contain the primary id; ask the primary for a fresh invite".to_string())?;
@@ -1080,4 +1133,18 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
         let _ = channel.0.send(Msg::Scope(scope));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::advertised_endpoint_host;
+
+    #[test]
+    fn advertised_hosts_are_safe_for_invites() {
+        assert_eq!(advertised_endpoint_host("192.168.1.20", true).unwrap(), "192.168.1.20");
+        assert_eq!(advertised_endpoint_host("2001:db8::20", true).unwrap(), "[2001:db8::20]");
+        assert!(advertised_endpoint_host("0.0.0.0", true).is_err());
+        assert!(advertised_endpoint_host("127.0.0.1", true).is_err());
+        assert!(advertised_endpoint_host("2001:db8::20/path", true).is_err());
+    }
 }

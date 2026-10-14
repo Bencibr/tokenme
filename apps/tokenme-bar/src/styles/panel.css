@@ -2924,6 +2924,30 @@
   padding: 10px 16px 6px;
 }
 
+.sheet-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  color: var(--ink-2);
+  background: transparent;
+  border: 1px solid var(--hair-2);
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: var(--t-meta);
+  cursor: pointer;
+}
+
+.sheet-refresh:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--fill-hover);
+}
+
+.sheet-refresh:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .srv-hd {
   margin: 0;
   font-size: var(--t-body);
@@ -2977,6 +3001,32 @@
 .sync-invite:focus {
   outline: 1px solid var(--accent);
   border-color: var(--accent);
+}
+
+.sync-file {
+  display: none;
+}
+
+.sync-qr-block {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 8px 0 4px;
+}
+
+.sync-qr {
+  width: 176px;
+  height: 176px;
+  padding: 6px;
+  background: #fff;
+  border-radius: var(--r-sm);
+  image-rendering: pixelated;
+}
+
+.sync-qr-block .sheet-actions {
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
 .sheet-srv .sheet-foot {
@@ -3131,6 +3181,11 @@
   border: 1px solid var(--hair-2);
   border-radius: var(--r-md);
   transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+a.btn-quiet {
+  cursor: pointer;
+  text-decoration: none;
 }
 
 .btn-quiet:hover:not(:disabled) {

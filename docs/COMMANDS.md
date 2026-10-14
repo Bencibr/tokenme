@@ -170,7 +170,7 @@ tokenme sync stop      # 通过用户私有 Unix socket 请求停止，不删除
 
 `sync stop` 使用用户数据目录下 `device-sync/secondary-runtime.sock`，目录为 `0700`、socket 为 `0600`；它不是 loopback TCP 控制面。运行时异常退出会回收 socket，待传包仍保留，下一次显式 `sync run` 或面板恢复可以继续。当前 macOS/Unix 路径已测试；Windows named pipe ACL 仍未在本机验证。
 
-Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请生成、从端粘贴邀请/配对、批准/拒绝、暂停/恢复/撤销，以及从端后台 runtime 启停。主端启动使用用户私有目录自动保存 identity 与证书；从端配对配置会在 Panel 重启后按 `enabled` 状态恢复，显式停止会持久化为 disabled。`sync run/stop/status` 是 Ubuntu 等无面板机器的同一 runtime 入口。
+Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请生成、二维码文件保存、从端二维码识别或粘贴邀请/配对、批准/拒绝、暂停/恢复/撤销/解除配对，以及从端后台 runtime 启停。跨设备监听还需要填写对外地址；面板会拒绝把回环或未指定地址写进邀请。主端启动使用用户私有目录自动保存 identity 与证书；从端配对配置会在 Panel 重启后按 `enabled` 状态恢复，显式停止会持久化为 disabled。`sync run/stop/status` 是 Ubuntu 等无面板机器的同一 runtime 入口。
 
 ## sync upload
 
