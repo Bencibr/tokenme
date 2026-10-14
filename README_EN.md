@@ -181,7 +181,7 @@ Every tool below ships as a built-in adapter — 28 of them, indexed straight fr
 >
 > **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
 
-OpenCode quota supports the official provider only. TokenMe reads `OPENCODE_API_KEY`, `provider.<id>.options.apiKey` from `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json` when `baseURL` is `https://opencode.ai/zen/go/v1`, and finally API entries in `~/.local/share/opencode/auth.json`. Custom proxy providers are ignored.
+OpenCode quota supports the official provider only. The credential comes, in order, from `OPENCODE_API_KEY`, OpenCode V2's own store (the `credential` table of `opencode.db` — where the desktop app and the CLI both keep their login), `provider.<id>.options.apiKey` in `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json` when `baseURL` is `https://opencode.ai/zen/go/v1`, and finally the legacy `~/.local/share/opencode/auth.json`. Custom proxy providers are ignored.
 >
 > Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 

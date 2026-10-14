@@ -181,7 +181,7 @@ $ tokenme daily --days 3
 >
 > **平台验证**：随实机验证进度更新。⏳ 表示该平台的路径已实现、但尚未在实机上跑通；验证通过后更新标记即可。
 
-OpenCode 配额只适配官方 provider。TokenMe 从 `OPENCODE_API_KEY`、`$XDG_CONFIG_HOME/opencode/opencode.json` / `~/.config/opencode/opencode.json` 中 `provider.<id>.options.apiKey`（且 `baseURL` 为 `https://opencode.ai/zen/go/v1`），或 `~/.local/share/opencode/auth.json` 读取凭据；自定义代理 provider 不会计入官方配额。
+OpenCode 配额只适配官方 provider。凭据按顺序取自 `OPENCODE_API_KEY`、OpenCode V2 自己的凭据库（`opencode.db` 的 `credential` 表，桌面端与 CLI 的登录都写在这里）、`$XDG_CONFIG_HOME/opencode/opencode.json` / `~/.config/opencode/opencode.json` 中 `provider.<id>.options.apiKey`（且 `baseURL` 为 `https://opencode.ai/zen/go/v1`），最后是遗留的 `~/.local/share/opencode/auth.json`；自定义代理 provider 不会计入官方配额。
 >
 > 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——实测其落盘 OAuth 令牌已过期，要续期就得用 Gemini CLI 自带包里的 client id/secret 去提交表单，而磁盘上也找不到该接口要的 project id（`crates/usage-quota/src/providers/gemini.rs`）。
 
