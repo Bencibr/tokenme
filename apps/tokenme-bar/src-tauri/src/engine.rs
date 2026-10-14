@@ -911,9 +911,8 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
         .map(|sample| format!("{}:{}%", sample.tool, format_args!("{:.1}", sample.used_percent)))
         .collect();
     // Why a probe could not answer: its own switch (`off`) or its host process
-    // gone (`host`) — the gate's two refusals, named per tool. The empty
-    // brackets with an empty off-list is the different case: probes ran and
-    // nobody answered, which is the one worth chasing in a user's log.
+    // gone (`host`) — the gate's two refusals, named per tool. The third case,
+    // a probe that was allowed and ran but came back empty, is named below.
     let mut off: Vec<String> = Vec::new();
     if !polling_off {
         for probe in usage_quota::inventory() {
@@ -926,12 +925,24 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
     }
     let off_note =
         if off.is_empty() { String::new() } else { format!(" probes-off: [{}]", off.join(", ")) };
+    // The probe's own word for an empty answer: the vendor's 401/403, an expired
+    // token, no credential at all. The log used to show only that a row was not
+    // there — which is how an OpenCode Go subscription went unnoticed while the
+    // credential sat in that tool's own (V2) store.
+    let empty: Vec<String> = usage_quota::take_probe_notes()
+        .into_iter()
+        .filter(|(tool, _)| settings.probe_allowed(tool) && host_gate_open(tool, auto_checkin, &alive))
+        .map(|(tool, why)| format!("{tool}:{why}"))
+        .collect();
+    let empty_note =
+        if empty.is_empty() { String::new() } else { format!(" probes-empty: [{}]", empty.join(", ")) };
     crate::logging::info(&format!(
-        "quota poll: {} windows in {} ms [{}]{}",
+        "quota poll: {} windows in {} ms [{}]{}{}",
         q.len(),
         poll_started.elapsed().as_millis(),
         per_tool.join(", "),
-        off_note
+        off_note,
+        empty_note
     ));
     if let Ok(mut slot) = QUOTA_PASS.lock() {
         *slot = Some((Instant::now(), q.clone()));

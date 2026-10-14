@@ -11,6 +11,7 @@
 pub mod cache;
 pub mod host;
 mod http;
+mod notes;
 mod providers;
 
 use std::sync::Arc;
@@ -20,6 +21,12 @@ use usage_core::{QuotaSample, QuotaView};
 
 pub use providers::ClaudeQuota;
 pub use providers::workbuddy_login;
+
+/// Why this pass's probes came back empty, one line per tool — the registry the
+/// provider modules write to when a fetch finds no credential or the vendor
+/// refuses it. The host drains it after a pass and prints the lines there; a
+/// probe served from cache wrote nothing, so silence keeps meaning "not asked".
+pub use notes::take as take_probe_notes;
 
 /// The tools whose probe owns a daily check-in claim, and the forced-claim
 /// entry for each. One table, because three call sites must agree about the
