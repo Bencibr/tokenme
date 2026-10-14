@@ -30,6 +30,59 @@
   ${EndIf}
 !macroend
 
+; An interrupted or older uninstall can leave the Add/Remove Programs entry
+; behind after its uninstaller.exe has gone away. Tauri's default maintenance
+; page tries that path before any installer hook runs, so the custom NSIS
+; template calls this repair macro while that page is being prepared.
+!macro TokenMeRepairStaleUninstall
+  ReadRegStr $R0 SHCTX "${MANUPRODUCTKEY}" ""
+  ${If} "$R0" == ""
+    ReadRegStr $R0 SHCTX "${UNINSTKEY}" "InstallLocation"
+    ${If} "$R0" != ""
+      StrCpy $R1 $R0 1
+      ${If} "$R1" == "$\""
+        StrLen $R1 $R0
+        IntOp $R1 $R1 - 2
+        StrCpy $R0 $R0 $R1 1
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  ${If} "$R0" == ""
+    Return
+  ${EndIf}
+  ${If} ${FileExists} "$R0\uninstall.exe"
+    Return
+  ${EndIf}
+  DetailPrint "Removing stale TokenMe uninstall registration"
+  DeleteRegKey SHCTX "${UNINSTKEY}"
+  DeleteRegKey SHCTX "${MANUPRODUCTKEY}"
+!macroend
+
+; Remove a duplicate registration for the same physical install after a
+; successful uninstall. This covers the opposite HKCU/HKLM view left by old
+; installers without deleting a registration for another install directory.
+!macro TokenMeDeleteMatchingUninstall ROOT
+  ReadRegStr $R0 ${ROOT} "${MANUPRODUCTKEY}" ""
+  ${If} "$R0" == "$INSTDIR"
+    DeleteRegKey ${ROOT} "${UNINSTKEY}"
+    DeleteRegKey ${ROOT} "${MANUPRODUCTKEY}"
+  ${Else}
+    ReadRegStr $R0 ${ROOT} "${UNINSTKEY}" "InstallLocation"
+    ${If} "$R0" != ""
+      StrCpy $R1 $R0 1
+      ${If} "$R1" == "$\""
+        StrLen $R1 $R0
+        IntOp $R1 $R1 - 2
+        StrCpy $R0 $R0 $R1 1
+      ${EndIf}
+      ${If} "$R0" == "$INSTDIR"
+        DeleteRegKey ${ROOT} "${UNINSTKEY}"
+        DeleteRegKey ${ROOT} "${MANUPRODUCTKEY}"
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   ; Keep the helper until POSTUNINSTALL: the app-running check may cancel an
   ; uninstall after this hook, in which case PATH must stay intact.
@@ -72,4 +125,6 @@
 
 !macro NSIS_HOOK_POSTUNINSTALL
   !insertmacro TokenMeCliPath Remove "$PLUGINSDIR\windows-cli-path.ps1"
+  !insertmacro TokenMeDeleteMatchingUninstall HKLM
+  !insertmacro TokenMeDeleteMatchingUninstall HKCU
 !macroend
