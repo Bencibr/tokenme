@@ -13,10 +13,10 @@
 | 测 TTFT（首 token 延迟）与 TPS | 面板 → 速度（被动测量；Codex / Claude Code 可主动发起一次短请求实测） |
 | 看各家订阅剩余额度与重置倒计时 | 面板 → 概览下方的配额条（窗口跨 80% 或耗尽时弹系统通知） |
 | 每日签到一键代领 | 面板 → 工具页行头（Trae CN、Qoder、Qoder CN、MiniMax Code、WorkBuddy 国内版） |
-| 把服务器、容器上的用量汇总进来 | 面板底栏「服务器」一键部署，或 Linux 采集端手动安装（见 §4） |
+| 把服务器、容器上的用量汇总进来 | 面板底栏「服务器」一键部署，或 Linux 采集端手动安装（见 §4）；严格 HTTPS 多设备通道可在设备同步面板或 `tokenme sync run` 中使用（见 §4.1） |
 | 给无限额的工具设成本上限 | `tokenme budget set`（见 §5） |
 | 在菜单栏常驻数字或图标 | 托盘显示模式，六种任选（见 §3） |
-| 数据不出本机 | 全程只读索引，无遥测、无第三方代理（见 §7） |
+| 数据不发往第三方 | 默认只读索引；启用多设备同步时只发到你批准的主设备，无遥测、无第三方代理（见 §7） |
 
 ## 1. 安装
 
@@ -115,6 +115,8 @@ MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline�
 
 一台以上机器报数时，头部下拉把整个面板——每个周期、模型与项目排行、调用序列、会话列表——折叠到 **全部机器**、**本机** 或按名字选任意一台远程机器。这是对同一份索引的重新汇总，瞬间完成：全部 = 各机之和。触发行显示当前范围：全部机器 带最多三枚机器色点与远程占比（远程 42%），单机带自己的色点、占比与最近合并时间。有机器超期时 全部机器 行出现警示标记。没有任何导入时这个控件整个不渲染——单机面板与从前一模一样。
 
+严格设备同步的已登记设备也会进入这个下拉：没有数据的设备显示 0，暂停、撤销或需对账会显示对应状态。打开设备同步面板可以执行主从角色管理、主端服务启停、创建邀请、粘贴邀请并配对、批准/拒绝、暂停/恢复和撤销；从设备还会显示 endpoint、stream/epoch、待传量、最后连接和可操作错误。设备状态和这些管理操作共用一个私有 Tauri IPC 命令，不开 loopback TCP 控制面。
+
 ### 3.12 启动首屏
 
 面板能在可绘制后约一秒出数字：第一帧是上一次运行自己发布的报告（索引旁的 `report.json`，3–22 ms 读回，不扫描、不探测、不查询）。它如实标注身份——左角 **上次扫描的数据** 芯片带数据实际年龄，配额区显示 探测中 而非上一次的窗口。缓存报告只在能如实描述时才被使用（同机器范围、同一本地日、一小时以内、非恢复写入）；全新安装或隔夜间隙没有可恢复的，等待分两层：窗口原生底上的一枚转圈加一行 正在索引本机用量…（颜色随 外观），页面接管后是 `index.html` 自己的加载卡。`panel.log` 把里程碑分得清清楚楚：`the page booted N ms after launch` 是 bundle 跑起来，`the page reported content N ms after launch` 是数字上屏，`boot: restored …` 说明这次启动有没有可恢复的报告。
@@ -141,6 +143,47 @@ MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline�
 - 每次导入先验证后落库：bundle 的 sha256 对清单、批次 token 和对清单、格式与 schema 版本门。合并在单一事务里——任何失败整体回滚，文件保留在磁盘，什么都不进。
 - 行数有上限（清单计数加余量），坏文件撑不爆内存。bundle 只能让行向前走（增长谓词拒绝更低计数）；导入从不删除——采集端后来清理的行会被报告为 stale，不会消失。
 - unix 上 bundle 与清单一律 `0600`。bundle 携带的与索引一致——token 计数、模型/会话/项目名、本地日志路径——绝无代码、Prompt 或凭据。把 `~/tokenme-sync` 当索引本身对待：能写进这个目录的人（你的账号，或你共享给的任何账号）就能注入用量行——合并去重，但不签名。
+
+### 4.1 严格 HTTPS 多设备通道（CLI/服务集成）
+
+这是与上面历史文件 bundle 并行的严格通道：从设备主动通过 **HTTPS over TCP + TLS 1.3** 上传到主设备，主设备不会反向拉取。配对使用一次性高熵邀请、证书 SHA-256 pin 和 Ed25519 设备身份；pin 未通过前不会发送邀请秘密。上传包带有设备、stream、epoch、generation、原始 manifest 和 gzip 哈希的签名，主设备按 receipt 幂等处理，断线时由调用方保留待传数据。
+
+当前已交付协议库、TLS transport、共享 SQLite outbox/journal/FIFO scheduler、认证 status/recovery、CLI 的 `sync run/stop/status` 和低层 `invite/approve/open-stream/serve/upload` 路径，以及 Panel 的主从配对和设备管理面板。完整 invite 配对后，从设备会持久化 endpoint、证书 pin、主设备绑定和 identity，并由 runtime 自动获取 stream/epoch、生成本机快照、写 journal/outbox、通过 TLS 上传并 ACK；普通用户不需要填写 stream 或 generation。旧 `export/import` 文件入口和 SSH importer 不会切换到这个协议。Windows 已提供当前 SID 私有 DACL 的 `cfg(windows)` 实现，但本机无法编译/运行 Windows 分支，仍标为未验证。
+
+Panel 主设备可以一键启动/停止监听并生成用户私有证书和邀请；从设备粘贴完整邀请后配对，主设备在面板批准/拒绝、暂停/恢复或撤销。Ubuntu/headless 从设备使用同一配置运行 `tokenme sync run`，`sync stop` 通过用户私有 Unix socket 停止，`sync status` 显示待传、最后连接和错误：
+
+```bash
+tokenme sync upload \
+  --endpoint https://192.168.1.20:47821 \
+  --server-name tokenme-primary \
+  --trust-cert ~/.config/tokenme/primary-cert.pem \
+  --pin-sha256 <64-hex-cert-sha256> \
+  --identity ~/.config/tokenme/device-identity.json \
+  --origin laptop \
+  --primary-id <primary-id> --stream-id <stream-id> \
+  --data-epoch 1 --generation 1
+```
+
+兼容的低层主设备服务示例（Panel 主设备可自动生成证书和启动服务）：
+
+```bash
+tokenme sync serve --primary-id <primary-id> \
+  --bind 0.0.0.0:47821 --cert primary-cert.pem --key primary-key.pem --allow-lan
+```
+
+低层 CLI 提交邀请（推荐普通用户直接使用完整 invite；秘密从标准输入读，避免出现在进程列表）：
+
+```bash
+printf '%s\n' '<invite-secret-hex>' | tokenme sync pair \
+  --endpoint https://192.168.1.20:47821 --server-name tokenme-primary \
+  --trust-cert primary-cert.pem --pin-sha256 <64-hex-cert-sha256> \
+  --invite-id <invite-id> --invite-secret-hex - \
+  --identity ~/.config/tokenme/device-identity.json --origin laptop --os linux
+```
+
+端口默认建议 `47821`，服务端只有显式 LAN/VPN 配置才监听非回环地址。旧的 `export/import` 文件入口继续保持原有语义，不会因为启用网络通道而自动切换；UDP、QUIC、SSH 不是这个通道的协议。上传成功前本地索引不删除，遇到 `409 RECONCILE_REQUIRED` 时必须人工对账，不能自动清空待传数据。
+
+验证边界：`cargo test -p usage-device-sync` 已覆盖 loopback TLS1.3、独立 primary/secondary SQLite 经真实 TLS 上传并 ACK、允许 LAN bind 的本机 round-trip、错误 pin/坏连接/前置拒绝、outbox FIFO/lease、重复快照和晚到历史更新；这不是跨主机 LAN/VPN 或 macOS/Windows/Ubuntu 三端互通证明。服务端并发、客户端/服务端 body、响应、超时和 staging 配额均有上限。Panel 的 Rust/TypeScript 可在本机检查；Windows named-pipe ACL、Windows 原生构建和三端真机仍为 UNVERIFIED。
 
 ## 5. 预算
 
@@ -176,8 +219,8 @@ tokenme budget set zcode --daily 5 --monthly 50
 
 - 入库的只有每次请求的 token 计数、模型名与项目路径——绝不碰你的代码和 Prompt。
 - 扫描全程只读：探测读凭据，会把续期后的凭据写回的只有 §3 点名的那三家，且各自只写自己的存储。无遥测、无第三方代理。
-- 网络调用只有三处：对你自己厂商账号的实时配额探测、models.dev 价格表、以及你亲自点击的面板内邮件/发布链接。
-- 多机同步（§4）在你的机器之间搬运的也只有这些元数据——bundle 里没有代码、Prompt 或凭据——通道由你选择（ssh/scp、Syncthing、挂载盘）。tokenme 不开端口、不存同步凭据，每个 bundle 合并前都过验证（sha256 + 计数 + schema）。
+- 网络调用包括对你自己厂商账号的实时配额探测、models.dev 价格表、你亲自点击的面板内邮件/发布链接，以及你明确配置的设备间同步端点。
+- 多机同步（§4）在你的机器之间搬运的也只有这些元数据——bundle 里没有代码、Prompt 或凭据。传统文件 bundle 的通道由你选择（ssh/scp、Syncthing、挂载盘）；严格设备同步则只向你明确配置并批准的主设备开放 pinned HTTPS/TCP/TLS 1.3。tokenme 不使用云端中继、不存第三方同步凭据，每个 bundle 或严格包在合并前都过校验。
 
 ## 8. 故障排查
 

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 usage-core.workspace = true
 usage-index.workspace = true
+usage-device-sync.workspace = true
 usage-quota.workspace = true
 usage-adapter-all.workspace = true
 usage-adapter-dsh = { path = "../adapters/dsh" }
@@ -21,3 +22,6 @@ serde_json.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dirs.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true

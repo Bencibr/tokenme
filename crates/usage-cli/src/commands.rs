@@ -2,10 +2,19 @@
 //! `usage_core::report::summarize`; this file only slices events and formats.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::thread;
 
 use chrono::{Datelike, Local, TimeZone};
-use usage_core::{summarize, DateFilter, Item, Summary, UsageEvent, Window};
+use usage_core::{summarize, CallKind, DateFilter, Item, Meter, Summary, UsageEvent, Window};
+use usage_device_sync::{
+    hash_bytes, identity_bytes, DeviceIdentity, HttpsServerConfig, HttpsTransportConfig, NetworkCall, NetworkCounts,
+    NetworkPackage, NetworkRow, PairingInvite, PairingRequest, SignedUpload,
+    SyncRuntime, SyncRuntimeConfig, SyncStore, Tls13HttpsTransport,
+};
 use usage_index::{retention_cutoff, IngestReport};
 
 use crate::args::{Group, Win};
@@ -630,11 +639,12 @@ pub fn sessions(ctx: &Ctx, limit: usize) -> Result<(), String> {
         print_json(&report.recent_sessions);
         return Ok(());
     }
-    let mut t = Table::new(&["last active", "tool", "session", "project", "model", "reqs", "tokens", "cost"])
-        .right(&[5, 6, 7]);
+    let mut t = Table::new(&["last active", "device", "tool", "session", "project", "model", "reqs", "tokens", "cost"])
+        .right(&[6, 7, 8]);
     for s in &report.recent_sessions {
         t.push(vec![
             render::ago(ctx.now_ms - s.last_ms),
+            if s.origin.is_empty() { "local".into() } else { s.origin.clone() },
             s.tool.clone(),
             s.session.chars().take(12).collect(),
             render::truncate(&s.project.as_deref().map(render::shorten_path).unwrap_or_default(), 28),
@@ -1401,6 +1411,568 @@ pub fn import_sync(ctx: &mut Ctx, file: &std::path::Path, dry_run: bool) -> Resu
         println!("{}", render::dim("dry run — everything parsed, merged and reconciled; nothing was committed", ctx.color));
     }
     Ok(())
+}
+
+/// Strict network sync command. This intentionally does not use the legacy
+/// JSONL/SSH importer and does not remove a local package after an ACK: the
+/// outbox/journal lifecycle is a later slice, so the command sends one bounded
+/// snapshot and leaves the source index untouched.
+pub fn sync_upload(
+    ctx: &mut Ctx,
+    endpoint: String,
+    server_name: String,
+    trust_cert: PathBuf,
+    pin_sha256: String,
+    identity_path: PathBuf,
+    origin: String,
+    primary_id: String,
+    stream_id: String,
+    data_epoch: u64,
+    generation: u64,
+    days: i64,
+) -> Result<(), String> {
+    if days <= 0 {
+        return Err("--days must be positive".into());
+    }
+    if data_epoch == 0 || generation == 0 {
+        return Err("--data-epoch and --generation start at 1".into());
+    }
+    let identity = DeviceIdentity::load_or_create(&identity_path, origin, "tokenme-cli")
+        .map_err(|e| format!("cannot load sync identity {}: {e}", identity_path.display()))?;
+    let hi_ms = ctx.now_ms.saturating_add(1);
+    let lo_ms = ctx.now_ms.saturating_sub(days.saturating_mul(MS_DAY));
+    let all_events = ctx.index.all_events().map_err(|e| e.to_string())?;
+    let keyless_ids = stable_keyless_occurrences(&all_events);
+    let mut keyless_seen: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+    let mut rows = Vec::new();
+    for event in all_events.into_iter().filter(|event| event.ts_ms >= lo_ms) {
+        if event.ts_ms < lo_ms || event.ts_ms >= hi_ms || event.source.starts_with("linux:") {
+            continue;
+        }
+        let (key, occurrence_id) = match event.dedupe_key.clone() {
+            Some(key) => (Some(key), None),
+            None => {
+                let fingerprint = keyless_fingerprint(&event);
+                let ordinal = keyless_seen.entry(fingerprint.clone()).or_insert(0);
+                let occurrence = keyless_ids
+                    .get(&fingerprint)
+                    .and_then(|ids| ids.get(*ordinal))
+                    .cloned()
+                    .ok_or_else(|| "strict sync could not assign a stable keyless occurrence".to_string())?;
+                *ordinal += 1;
+                (None, Some(occurrence))
+            }
+        };
+        let calls = event.calls.iter().map(|call| NetworkCall {
+            kind: match call.kind { CallKind::Mcp => "mcp", CallKind::Skill => "skill" }.into(),
+            name: call.name.clone(),
+        }).collect::<Vec<_>>();
+        rows.push(NetworkRow {
+            key,
+            occurrence_id,
+            tool: event.tool,
+            ts_ms: event.ts_ms,
+            session: event.session,
+            project: event.project,
+            model: event.model,
+            meter: match event.meter { Meter::Tokens => "tokens", Meter::Credits => "credits" }.into(),
+            source: if event.source.is_empty() { "local".into() } else { event.source },
+            counts: NetworkCounts {
+                in_tok: Some(event.counts.input),
+                cc_tok: Some(event.counts.cache_creation),
+                cr_tok: Some(event.counts.cache_read),
+                out_tok: Some(event.counts.output),
+                reason_tok: Some(event.counts.reasoning),
+                credits: Some(event.counts.credits),
+            },
+            calls,
+        });
+    }
+    let package = NetworkPackage::from_rows(
+        identity.origin.clone(),
+        usage_index::INDEX_SCHEMA_VERSION,
+        lo_ms,
+        hi_ms,
+        &rows,
+        ctx.now_ms,
+    ).map_err(|e| format!("cannot build strict sync package: {e}"))?;
+    let envelope = usage_device_sync::UploadEnvelope {
+        protocol_id: usage_device_sync::PROTOCOL_ID.into(),
+        primary_id,
+        device_id: identity.device_id.clone(),
+        origin: identity.origin.clone(),
+        stream_id,
+        data_epoch,
+        generation,
+        manifest_bytes: package.manifest_bytes.clone(),
+        gzip_sha256: usage_device_sync::hash_bytes(&package.gzip_bytes),
+    };
+    let upload = SignedUpload::sign(envelope, &identity.signing_key, package.gzip_bytes)
+        .map_err(|e| format!("cannot sign strict sync package: {e}"))?;
+    let cert_der = usage_device_sync::load_pem_certificate(&trust_cert)
+        .map_err(|e| format!("cannot load pinned trust certificate {}: {e}", trust_cert.display()))?;
+    let pin = parse_sha256(&pin_sha256)?;
+    let mut transport_config = HttpsTransportConfig::pinned(endpoint, server_name, cert_der);
+    transport_config.pinned_certificate_sha256 = pin;
+    let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|e| e.to_string())?;
+    let receipt = transport.upload(&upload).map_err(|e| format!("strict sync upload failed: {e}"))?;
+    if ctx.g.json {
+        print_json(&receipt);
+    } else {
+        println!("uploaded {} row(s): inserted {}, updated {}, deduped {}", receipt.rows, receipt.inserted, receipt.updated, receipt.deduped);
+        println!("receipt {} / generation {}", hex_bytes(&receipt.receipt_hash), receipt.generation);
+        println!("local index and pending source data were retained; this command has no outbox cleanup");
+    }
+    Ok(())
+}
+
+/// A keyless adapter row cannot use SQLite rowid: rebuild/prune may recreate it.
+/// Derive its identity from stable source content and keep a deterministic
+/// multiplicity for exact duplicates. The complete snapshot makes a window
+/// export a projection of one numbering, not a fresh numbering of a dirty subset.
+fn stable_keyless_occurrences(events: &[UsageEvent]) -> BTreeMap<Vec<u8>, Vec<String>> {
+    let mut fingerprints: Vec<Vec<u8>> = events
+        .iter()
+        .filter(|event| event.dedupe_key.is_none())
+        .map(keyless_fingerprint)
+        .collect();
+    fingerprints.sort();
+    let mut result = BTreeMap::new();
+    let mut counts: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+    for fingerprint in fingerprints {
+        let ordinal = counts.entry(fingerprint.clone()).or_insert(0);
+        result.entry(fingerprint.clone()).or_insert_with(Vec::new).push(format!(
+            "codex-occ-v1:{}:{}",
+            hex_bytes(&hash_bytes(&identity_bytes(b"tokenme/device-sync/keyless-occurrence/v1", &[&fingerprint]))),
+            *ordinal,
+        ));
+        *ordinal += 1;
+    }
+    result
+}
+
+fn keyless_fingerprint(event: &UsageEvent) -> Vec<u8> {
+    let meter = match event.meter { Meter::Tokens => "tokens", Meter::Credits => "credits" };
+    let mut call_names = event.calls.iter().map(|call| {
+        let kind = match call.kind { CallKind::Mcp => "mcp", CallKind::Skill => "skill" };
+        format!("{kind}\u{1f}{name}", name = call.name)
+    }).collect::<Vec<_>>();
+    call_names.sort();
+    let calls = call_names.join("\u{1e}");
+    let count_bits = [
+        event.counts.input.to_bits(), event.counts.cache_creation.to_bits(),
+        event.counts.cache_read.to_bits(), event.counts.output.to_bits(),
+        event.counts.reasoning.to_bits(), event.counts.credits.to_bits(),
+    ];
+    let ts = event.ts_ms.to_be_bytes();
+    let count_bytes = count_bits.iter().flat_map(|bits| bits.to_be_bytes()).collect::<Vec<_>>();
+    let fields = [
+        event.tool.as_bytes(), &ts, event.session.as_bytes(), event.project.as_deref().unwrap_or("").as_bytes(),
+        event.model.as_deref().unwrap_or("").as_bytes(), meter.as_bytes(), event.source.as_bytes(),
+        count_bytes.as_slice(), calls.as_bytes(),
+    ];
+    identity_bytes(b"tokenme/device-sync/keyless-fingerprint/v1", &fields)
+}
+
+pub fn sync_status(ctx: &Ctx) -> Result<(), String> {
+    let status = SyncStore::read_status(&ctx.db_path).map_err(|e| e.to_string())?;
+    let secondary = SyncStore::read_secondary_config(&ctx.db_path).map_err(|e| e.to_string())?;
+    let running = secondary_runtime_status(&ctx.db_path);
+    if ctx.g.json {
+        let outbox = secondary.as_ref().and_then(|config| SyncStore::open(&ctx.db_path, config.primary_id.clone()).ok()?.outbox_summary().ok());
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "registry": status,
+            "secondary": secondary,
+            "runtime_running": running,
+            "outbox": outbox,
+        })).map_err(|e| e.to_string())?);
+    } else {
+        println!("primary: {}", status.primary_id.as_deref().unwrap_or_else(|| secondary.as_ref().map(|config| config.primary_id.as_str()).unwrap_or("not initialized")));
+        if let Some(config) = secondary {
+            let outbox = SyncStore::open(&ctx.db_path, config.primary_id.clone()).ok().and_then(|store| store.outbox_summary().ok());
+            println!("secondary: {}", if running { "running" } else if config.enabled { "stopped" } else { "disabled" });
+            println!("endpoint: {}", config.endpoint);
+            println!("certificate_pin: {}", hex_bytes(&config.certificate_pin));
+            println!("stream: {}", config.stream_id.as_deref().unwrap_or("not opened"));
+            println!("data_epoch: {}", config.data_epoch.map(|value| value.to_string()).unwrap_or_else(|| "-".into()));
+            println!("last_connected_at_ms: {}", config.last_connected_at_ms.map(|value| value.to_string()).unwrap_or_else(|| "-".into()));
+            println!("pending: {}", outbox.as_ref().map(|summary| summary.pending).unwrap_or(0));
+            if let Some(error) = config.last_error { println!("last_error: {error}"); }
+        }
+        for device in status.devices {
+            println!("{}\t{}\t{}\t{}\t{}", device.device_id, device.origin, device.os, format!("{:?}", device.status).to_lowercase(), device.last_generation.map(|n| n.to_string()).unwrap_or_else(|| "-".into()));
+        }
+        for request in status.pairing_requests {
+            println!("pairing {}\t{}\t{}", request.request_id, request.origin, request.status);
+        }
+    }
+    Ok(())
+}
+
+pub fn sync_run(ctx: &mut Ctx) -> Result<(), String> {
+    let config = SyncStore::read_secondary_config(&ctx.db_path)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no secondary sync configuration; pair this device first".to_string())?;
+    let mut config_store = SyncStore::open(&ctx.db_path, config.primary_id.clone()).map_err(|error| error.to_string())?;
+    if !config.enabled { config_store.set_secondary_enabled(true, ctx.now_ms).map_err(|error| error.to_string())?; }
+    drop(config_store);
+    let identity = DeviceIdentity::load_or_create(
+        config.identity_path.clone(), config.origin.clone(), "tokenme-cli secondary",
+    ).map_err(|error| format!("cannot load secondary identity: {error}"))?;
+    if identity.device_id != config.device_id || identity.origin != config.origin {
+        return Err("secondary identity does not match the paired device configuration".into());
+    }
+    let mut transport_config = HttpsTransportConfig::pinned(
+        config.endpoint.clone(), config.server_name.clone(), config.certificate_der.clone(),
+    );
+    transport_config.pinned_certificate_sha256 = config.certificate_pin;
+    let transport = Tls13HttpsTransport::new(transport_config).map_err(|error| error.to_string())?;
+    let store = SyncStore::open(&ctx.db_path, config.primary_id.clone()).map_err(|error| error.to_string())?;
+    let owner = format!("cli-secondary-{}", identity.device_id);
+    let runtime_config = SyncRuntimeConfig::new(owner).map_err(|error| error.to_string())?;
+    let cancellation = transport.cancellation();
+    let runtime = SyncRuntime::new_secondary(store, transport, runtime_config, identity);
+    let adapters = std::mem::take(&mut ctx.adapters);
+    run_secondary_service(runtime, cancellation, config.primary_id, ctx.db_path.clone(), ctx.g.json, adapters)
+}
+
+pub fn sync_stop(ctx: &Ctx) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let path = secondary_control_path(&ctx.db_path)?;
+        let mut socket = std::os::unix::net::UnixStream::connect(&path)
+            .map_err(|error| format!("secondary runtime is not running ({}): {error}", path.display()))?;
+        socket.write_all(b"stop\n").map_err(|error| format!("cannot request secondary stop: {error}"))?;
+        let mut response = [0u8; 64];
+        let count = socket.read(&mut response).map_err(|error| format!("cannot read secondary stop response: {error}"))?;
+        println!("{}", String::from_utf8_lossy(&response[..count]).trim());
+        if let Some(config) = SyncStore::read_secondary_config(&ctx.db_path).map_err(|error| error.to_string())? {
+            let mut store = SyncStore::open(&ctx.db_path, config.primary_id).map_err(|error| error.to_string())?;
+            store.set_secondary_enabled(false, ctx.now_ms).map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        Err("sync stop uses a private Unix socket; Windows named-pipe ACL implementation is UNVERIFIED on this platform".into())
+    }
+}
+
+fn secondary_runtime_status(db_path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(path) = secondary_control_path(db_path) else { return false; };
+        let Ok(mut socket) = std::os::unix::net::UnixStream::connect(path) else { return false; };
+        if socket.write_all(b"status\n").is_err() { return false; }
+        let mut response = [0u8; 64];
+        socket.read(&mut response).is_ok()
+    }
+    #[cfg(not(unix))]
+    { false }
+}
+
+#[cfg(unix)]
+fn secondary_control_path(db_path: &std::path::Path) -> Result<PathBuf, String> {
+    let root = cli_sync_dir_for_db(db_path)?;
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => return Err(format!("private sync directory is not a real directory: {}", root.display())),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir_all(&root).map_err(|error| format!("cannot create private sync directory: {error}"))?,
+        Err(error) => return Err(format!("cannot inspect private sync directory: {error}")),
+    }
+    std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|error| format!("cannot protect private sync directory: {error}"))?;
+    Ok(root.join("secondary-runtime.sock"))
+}
+
+#[cfg(unix)]
+fn bind_secondary_control(db_path: &std::path::Path) -> Result<(std::os::unix::net::UnixListener, PathBuf), String> {
+    use std::os::unix::fs::FileTypeExt;
+    let path = secondary_control_path(db_path)?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+            return Err(format!("secondary control path is not a private Unix socket: {}", path.display()));
+        }
+        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+            return Err("secondary runtime is already running".into());
+        }
+        std::fs::remove_file(&path).map_err(|error| format!("cannot remove stale secondary socket: {error}"))?;
+    }
+    let listener = std::os::unix::net::UnixListener::bind(&path).map_err(|error| format!("cannot bind private secondary socket: {error}"))?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).map_err(|error| format!("cannot protect secondary socket: {error}"))?;
+    listener.set_nonblocking(true).map_err(|error| format!("cannot configure secondary socket: {error}"))?;
+    Ok((listener, path))
+}
+
+#[cfg(unix)]
+fn run_secondary_service(
+    runtime: SyncRuntime, cancellation: usage_device_sync::ClientTransportCancellation,
+    primary_id: String, db_path: PathBuf, json: bool,
+    adapters: Vec<Box<dyn usage_core::SourceAdapter>>,
+) -> Result<(), String> {
+    let (listener, path) = bind_secondary_control(&db_path)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let join = thread::spawn(move || {
+        let mut runtime = runtime;
+        runtime.run_until_with_ingest(&thread_stop, usage_core::report::now_ms, |store| {
+            let filter = DateFilter::new(Some(retention_cutoff(usage_core::report::now_ms())), None);
+            let options = usage_index::IngestOptions {
+                force: false,
+                claim_wait: std::time::Duration::from_millis(500),
+            };
+            if let Err(error) = store.index_mut().ingest_with(&adapters, &filter, &options) {
+                eprintln!("tokenme: resident sync ingest failed ({error}); pending local data was retained");
+            }
+            Ok(())
+        })
+    });
+    eprintln!("tokenme: secondary sync runtime started; stop with `tokenme sync stop`");
+    let mut stop_requested = false;
+    let mut control_error = None;
+    'service: loop {
+        if join.is_finished() { break; }
+        match listener.accept() {
+            Ok((mut socket, _)) => {
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                let _ = socket.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                let mut command = [0u8; 64];
+                let count = match socket.read(&mut command) {
+                    Ok(0) => continue,
+                    Ok(count) => count,
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                    Err(_) => continue,
+                };
+                match std::str::from_utf8(&command[..count]).unwrap_or("").trim() {
+                    "stop" => {
+                        stop_requested = true;
+                        stop.store(true, Ordering::Release);
+                        cancellation.cancel();
+                        let _ = socket.write_all(b"stopping\n");
+                    }
+                    "status" => {
+                        let _ = socket.write_all(b"running\n");
+                    }
+                    _ => {
+                        let _ = socket.write_all(b"unknown command\n");
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(std::time::Duration::from_millis(100)),
+            Err(error) => {
+                control_error = Some(format!("secondary control listener failed: {error}"));
+                stop.store(true, Ordering::Release);
+                break 'service;
+            }
+        }
+        if stop_requested { break; }
+    }
+    stop.store(true, Ordering::Release);
+    cancellation.cancel();
+    let joined = join.join().map_err(|_| "secondary runtime thread panicked".to_string());
+    let cleanup = std::fs::remove_file(&path).map_err(|error| format!("cannot remove secondary control socket: {error}"));
+    if let Some(error) = control_error { return Err(error); }
+    cleanup?;
+    let result = joined?.map_err(|error| error.to_string());
+    if stop_requested {
+        let mut store = SyncStore::open(&db_path, primary_id).map_err(|error| error.to_string())?;
+        store.set_secondary_enabled(false, usage_core::report::now_ms()).map_err(|error| error.to_string())?;
+    }
+    let report = result?;
+    if json { print_json(&report); }
+    else { println!("secondary runtime stopped: {} pending package(s), {} acknowledged", report.pending, report.acknowledged); }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn run_secondary_service(
+    _runtime: SyncRuntime, _cancellation: usage_device_sync::ClientTransportCancellation,
+    _primary_id: String, _db_path: PathBuf, _json: bool,
+    _adapters: Vec<Box<dyn usage_core::SourceAdapter>>,
+) -> Result<(), String> {
+    Err("sync run uses a private Unix socket; Windows named-pipe ACL implementation is UNVERIFIED on this platform".into())
+}
+
+pub fn sync_invite(
+    ctx: &Ctx, endpoint: String, pin_sha256: Option<String>, certificate: Option<PathBuf>,
+    server_name: String, expires_at_ms: i64, primary_id: String,
+) -> Result<(), String> {
+    let certificate_der = if let Some(path) = certificate {
+        usage_device_sync::load_pem_certificate(&path).map_err(|error| format!("cannot load primary certificate {}: {error}", path.display()))?
+    } else {
+        let root = cli_sync_dir_for_db(&ctx.db_path)?;
+        let cert_path = root.join("primary-cert.pem");
+        let key_path = root.join("primary-key.pem");
+        usage_device_sync::ensure_server_certificate(&cert_path, &key_path, &server_name)
+            .map_err(|error| format!("cannot create primary service certificate: {error}"))?.0
+    };
+    let derived_pin = hex_bytes(&hash_bytes(&certificate_der));
+    let certificate_pin = pin_sha256.unwrap_or_else(|| derived_pin.clone());
+    let parsed_pin = parse_sha256(&certificate_pin)?;
+    if parsed_pin != hash_bytes(&certificate_der) {
+        return Err("--pin-sha256 does not match the primary certificate; refusing to create an invite".into());
+    }
+    let mut store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| e.to_string())?;
+    let primary_id = store.primary_id().to_string();
+    let invite = store.create_pairing_invite(endpoint, certificate_pin, expires_at_ms).map_err(|e| e.to_string())?;
+    let secret_hex = hex_bytes(&invite.secret);
+    let url = invite.url_with_certificate(&primary_id, &server_name, &certificate_der).map_err(|e| e.to_string())?;
+    if ctx.g.json {
+        println!("{}", serde_json::json!({"invite_id": invite.invite_id, "endpoint": invite.endpoint, "certificate_pin": invite.certificate_pin, "expires_at_ms": invite.expires_at_ms, "secret_hex": secret_hex, "url": url}));
+    } else {
+        println!("invite_id {}", invite.invite_id);
+        println!("secret_hex {}", secret_hex);
+        println!("{}", url);
+    }
+    Ok(())
+}
+
+pub fn sync_approve(ctx: &Ctx, request_id: String, primary_id: String) -> Result<(), String> {
+    let mut store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| e.to_string())?;
+    let device = store.approve_pairing(&request_id, ctx.now_ms).map_err(|e| e.to_string())?;
+    if ctx.g.json { println!("{}", serde_json::to_string(&device).map_err(|e| e.to_string())?); }
+    else { println!("approved {} ({})", device.device_id, device.origin); }
+    Ok(())
+}
+
+pub fn sync_pair(
+    ctx: &Ctx,
+    invite_url: Option<String>,
+    endpoint: Option<String>,
+    server_name: Option<String>,
+    trust_cert: Option<PathBuf>,
+    pin_sha256: Option<String>,
+    invite_id: Option<String>,
+    invite_secret_hex: Option<String>,
+    identity_path: Option<PathBuf>,
+    origin: Option<String>,
+    os: Option<String>,
+) -> Result<(), String> {
+    if let Some(url) = invite_url {
+        let details = PairingInvite::parse_url(&url).map_err(|error| format!("invalid pairing invite: {error}"))?;
+        let primary_id = details.primary_id.clone().ok_or_else(|| "invite does not contain primary id; create a fresh Panel/CLI invite".to_string())?;
+        let certificate_der = details.certificate_der.clone().ok_or_else(|| "invite does not contain the public certificate; create a fresh invite".to_string())?;
+        let pin = parse_sha256(&details.invite.certificate_pin)?;
+        if usage_device_sync::hash_bytes(&certificate_der) != pin {
+            return Err("pairing invite certificate does not match its advertised pin".into());
+        }
+        let identity_path = identity_path.unwrap_or(cli_sync_dir_for_db(&ctx.db_path)?.join("secondary-identity.json"));
+        let identity = DeviceIdentity::load_or_create(&identity_path, origin.unwrap_or_else(|| "secondary".into()), "tokenme-cli secondary")
+            .map_err(|error| format!("cannot load sync identity: {error}"))?;
+        let server_name = details.server_name.unwrap_or_else(|| "localhost".into());
+        let request = PairingRequest::new(&details.invite, &identity, os.unwrap_or_else(|| std::env::consts::OS.into())).map_err(|error| error.to_string())?;
+        let mut transport_config = HttpsTransportConfig::pinned(details.invite.endpoint.clone(), server_name.clone(), certificate_der.clone());
+        transport_config.pinned_certificate_sha256 = pin;
+        let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|error| error.to_string())?;
+        let state = transport.send_pairing_request(&request).map_err(|error| format!("pairing request failed: {error}"))?;
+        let mut store = SyncStore::open(&ctx.db_path, primary_id.clone()).map_err(|error| error.to_string())?;
+        store.save_secondary_config(&usage_device_sync::SecondarySyncConfig {
+            primary_id, device_id: identity.device_id.clone(), origin: identity.origin.clone(), endpoint: details.invite.endpoint,
+            server_name, certificate_der, certificate_pin: pin, identity_path, stream_id: None, data_epoch: None,
+            expected_generation: None, enabled: true, capture_enabled: true, last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }, ctx.now_ms).map_err(|error| error.to_string())?;
+        if ctx.g.json { print_json(&state); } else { println!("pairing request {} ({}) — secondary runtime can now use `tokenme sync run`", state.request_id, state.status); }
+        return Ok(());
+    }
+
+    let endpoint = endpoint.ok_or_else(|| "--endpoint is required unless --invite is used".to_string())?;
+    let server_name = server_name.ok_or_else(|| "--server-name is required unless --invite is used".to_string())?;
+    let trust_cert = trust_cert.ok_or_else(|| "--trust-cert is required unless --invite is used".to_string())?;
+    let pin_sha256 = pin_sha256.ok_or_else(|| "--pin-sha256 is required unless --invite is used".to_string())?;
+    let invite_id = invite_id.ok_or_else(|| "--invite-id is required unless --invite is used".to_string())?;
+    let invite_secret_hex = invite_secret_hex.ok_or_else(|| "--invite-secret-hex is required unless --invite is used".to_string())?;
+    let identity_path = identity_path.ok_or_else(|| "--identity is required unless --invite is used".to_string())?;
+    let origin = origin.ok_or_else(|| "--origin is required unless --invite is used".to_string())?;
+    let os = os.unwrap_or_else(|| std::env::consts::OS.into());
+    let identity = DeviceIdentity::load_or_create(&identity_path, origin, "tokenme-cli").map_err(|error| error.to_string())?;
+    let invite_secret_hex = if invite_secret_hex == "-" {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).map_err(|error| format!("cannot read invite secret from stdin: {error}"))?;
+        input.trim().to_string()
+    } else { invite_secret_hex };
+    let secret = parse_hex(&invite_secret_hex, "--invite-secret-hex")?;
+    if secret.len() != 32 { return Err("--invite-secret-hex must be 32 bytes".into()); }
+    let invite = PairingInvite { invite_id, endpoint, certificate_pin: pin_sha256.clone(), expires_at_ms: i64::MAX, secret };
+    let request = PairingRequest::new(&invite, &identity, os).map_err(|error| error.to_string())?;
+    let cert_der = usage_device_sync::load_pem_certificate(&trust_cert).map_err(|error| error.to_string())?;
+    let pin = parse_sha256(&pin_sha256)?;
+    if usage_device_sync::hash_bytes(&cert_der) != pin {
+        return Err("--trust-cert does not hash to --pin-sha256; refusing to send the invite secret".into());
+    }
+    let mut config = HttpsTransportConfig::pinned(invite.endpoint.clone(), server_name, cert_der);
+    config.pinned_certificate_sha256 = pin;
+    let mut transport = Tls13HttpsTransport::new(config).map_err(|error| error.to_string())?;
+    let state = transport.send_pairing_request(&request).map_err(|error| error.to_string())?;
+    println!("pairing request {} ({})", state.request_id, state.status);
+    Ok(())
+}
+
+fn cli_sync_dir_for_db(db_path: &std::path::Path) -> Result<PathBuf, String> {
+    let absolute = if db_path.is_absolute() {
+        db_path.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(|error| format!("cannot resolve --db path: {error}"))?.join(db_path)
+    };
+    let parent = absolute.parent().ok_or_else(|| format!("--db path has no parent directory: {}", absolute.display()))?;
+    let root = parent.join("device-sync");
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => return Err(format!("private sync directory is not a real directory: {}", root.display())),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir_all(&root).map_err(|error| format!("cannot create private sync directory: {error}"))?,
+        Err(error) => return Err(format!("cannot inspect private sync directory: {error}")),
+    }
+    #[cfg(unix)]
+    std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|error| format!("cannot protect private sync directory: {error}"))?;
+    Ok(root)
+}
+
+pub fn sync_open_stream(ctx: &Ctx, device_id: String, primary_id: String) -> Result<(), String> {
+    let mut store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| e.to_string())?;
+    let receipt = store.open_stream_for_registered(&device_id, ctx.now_ms).map_err(|e| e.to_string())?;
+    if ctx.g.json { println!("{}", serde_json::json!({"primary_id": receipt.primary_id, "device_id": receipt.device_id, "stream_id": receipt.stream_id, "data_epoch": receipt.data_epoch, "expected_generation": receipt.expected_generation})); }
+    else { println!("stream_id {} data_epoch {} generation {}", receipt.stream_id, receipt.data_epoch, receipt.expected_generation); }
+    Ok(())
+}
+
+pub fn sync_serve(ctx: &Ctx, bind: String, cert: Option<PathBuf>, key: Option<PathBuf>, primary_id: String, allow_lan: bool) -> Result<(), String> {
+    let bind_addr: SocketAddr = bind.parse().map_err(|e| format!("--bind is invalid: {e}"))?;
+    let root = cli_sync_dir_for_db(&ctx.db_path)?;
+    let cert_path = cert.unwrap_or_else(|| root.join("primary-cert.pem"));
+    let key_path = key.unwrap_or_else(|| root.join("primary-key.pem"));
+    let (certificate_der, private_key_der) = usage_device_sync::ensure_server_certificate(&cert_path, &key_path, "localhost")
+        .map_err(|error| format!("cannot prepare private primary certificate: {error}"))?;
+    let store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| e.to_string())?;
+    let server = usage_device_sync::HttpsSyncServer::bind(HttpsServerConfig {
+        bind_addr, certificate_der, private_key_der, allow_lan, allowed_peer_ips: Vec::new(),
+        max_body_bytes: usage_device_sync::MAX_COMPRESSED_BYTES, max_concurrent: 1,
+        staging_dir: ctx.db_path.with_file_name("device-sync-staging"),
+        idle_timeout: std::time::Duration::from_secs(30), total_timeout: std::time::Duration::from_secs(600),
+        staging_quota_bytes: 512 * 1024 * 1024,
+    }, store).map_err(|e| e.to_string())?;
+    eprintln!("tokenme: sync primary listening on {}", server.local_addr().map_err(|e| e.to_string())?);
+    server.run().map_err(|e| e.to_string())
+}
+
+fn parse_sha256(value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("--pin-sha256 must be exactly 64 hexadecimal characters".into());
+    }
+    let mut out = [0u8; 32];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).map_err(|_| "invalid --pin-sha256".to_string())?;
+    }
+    Ok(out)
+}
+
+fn parse_hex(value: &str, label: &str) -> Result<Vec<u8>, String> {
+    if value.len() % 2 != 0 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("{label} must contain an even number of hexadecimal characters"));
+    }
+    (0..value.len() / 2).map(|i| u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).map_err(|_| format!("invalid {label}"))).collect()
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// DSH accuracy audit: the projection ledger the desktop app keeps, printed

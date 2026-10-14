@@ -37,7 +37,7 @@ export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
             const billed =
               s.cost > 0 ? (showMoney ? money(s.cost) : "") : s.total_tokens === 0 ? null : t("sess.unpriced");
             return (
-              <li className="sess" key={`${s.tool}/${s.session}`}>
+              <li className="sess" key={JSON.stringify([s.origin, s.tool, s.session])}>
                 <ToolIcon tool={s.tool} size={20} />
                 <div className="sess-main">
                   <div className="sess-line">
@@ -56,6 +56,10 @@ export function Sessions({ rows, now }: { rows: SessionRow[]; now: number }) {
                   <div className="sess-meta">
                     <span className="sess-model" title={s.model}>
                       {s.model}
+                    </span>
+                    <span className="dot-sep" aria-hidden="true" />
+                    <span className="sess-model" title={s.origin || t("scope.local")}>
+                      {s.origin || t("scope.local")}
                     </span>
                     <span className="dot-sep" aria-hidden="true" />
                     <span className="num">{count(s.requests)}</span>

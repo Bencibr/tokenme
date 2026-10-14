@@ -158,6 +158,36 @@ tokenme import bundle.jsonl.gz --dry-run   # parse + reconcile, then roll back
 
 On the menu-bar side you rarely need this: the panel engine auto-imports `~/tokenme-sync` every pass and shows a **多端同步 / Multi-device sync** badge with the newest merge per machine (warning-hued past 24 h).
 
+## sync run / sync stop / sync status
+
+`sync pair --invite '<complete tokenme://device-pair invite>'` is the preferred secondary entry point. After certificate-pin verification it sends the pairing request and stores the endpoint, server name, certificate, pin, primary binding and local identity path in the user data directory; ordinary users do not enter a stream or generation. After approval, `sync run` keeps the single secondary runtime in the foreground: each pass ingests local events, builds a stable snapshot for the local origin, allocates generation and payload revision and writes the journal and immutable outbox in one SQLite transaction, then uploads and ACKs over pinned TLS 1.3.
+
+```bash
+tokenme sync run       # user-level Ubuntu/Linux resident entry; supervise with systemd --user if desired
+tokenme sync status    # devices, stream/epoch, runtime, pending bytes, last connection and error
+tokenme sync stop      # request a stop through the private user Unix socket; keep config and outbox
+```
+
+`sync stop` uses `device-sync/secondary-runtime.sock` under the user data directory, with a `0700` directory and `0600` socket; it is not a loopback-TCP control plane. An abnormal runtime exit cleans up the socket and keeps pending packages; the next explicit `sync run` or Panel recovery can continue. The macOS/Unix path is tested here; Windows named-pipe ACL behavior remains unverified on this machine.
+
+The Panel device-sync sheet exposes the matching primary start/stop, private certificate and invite generation, secondary invite/pair, approve/reject, pause/resume/revoke, and secondary runtime start/stop actions. Primary startup saves identity and certificate in the user-private directory; after a Panel restart the secondary runtime follows the persisted `enabled` state, while an explicit stop persists disabled. `sync run/stop/status` is the same runtime entry for Ubuntu and other headless machines.
+
+## sync upload
+
+Upload local events to an already-approved primary over strict HTTPS/TLS 1.3. This command does not fake pairing, does not clear local data, and does not change the existing `export/import` file path. The primary must issue `primary_id`, `stream_id` and `data_epoch`; provide its certificate PEM and exact 64-hex SHA-256 pin:
+
+```bash
+tokenme sync upload --endpoint https://192.168.1.20:47821 \
+  --server-name tokenme-primary \
+  --trust-cert ~/.config/tokenme/primary-cert.pem \
+  --pin-sha256 <64-hex-cert-sha256> \
+  --identity ~/.config/tokenme/device-identity.json --origin laptop \
+  --primary-id <primary-id> --stream-id <stream-id> \
+  --data-epoch 1 --generation 1
+```
+
+The primary applies receipts idempotently by device, stream and generation. On disconnect or `409 RECONCILE_REQUIRED`, pending local data stays intact and must be reconciled before retrying. `sync upload` remains a low-level single-package/compatibility entry point and still requires the caller to supply stream, epoch and generation; ordinary users should use a complete invite followed by `sync run` instead. The legacy `export/import` file path, SSH importer and the new HTTPS runtime remain separate entry points.
+
 Limits and trust: payload rows are capped (the manifest's count plus slack) so a corrupt file can't exhaust memory; a bundle can only move a row forward — the growth predicate refuses lower counts — and it never deletes (rows the collector purged later are reported as stale). A bundle is validated, not signed: anyone who can write into the sync folder can add rows, so treat it like the index itself. Task guide: [USER_GUIDE.md](USER_GUIDE.md) §4.
 
 ## Storage locations

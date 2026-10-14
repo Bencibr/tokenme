@@ -13,10 +13,11 @@
 | Measure TTFT (time to first token) and TPS | Panel → Speed (passive measurement; Codex / Claude Code can also fire one short live probe) |
 | Each subscription's remaining quota and reset countdown | The quota strip below Overview (a system notification fires when a window crosses 80% or is exhausted) |
 | One-click daily check-in | Panel → Tools, in the row header (Trae CN, Qoder, Qoder CN, MiniMax Code, WorkBuddy CN) |
-| Fold in usage from servers and containers | One-click deploy from the panel footer's server button, or install the Linux collector by hand (see §4) |
+| Fold in usage from servers and containers | One-click deploy from the panel footer's server button, or install the Linux collector by hand (see §4); the strict HTTPS device path is available in the device-sync sheet or through `tokenme sync run` (see §4.1) |
+| Use the strict device-sync path | Panel primary/secondary management or `tokenme sync run/stop/status` over pinned HTTPS/TCP/TLS 1.3 (see §4.1) |
 | Cost caps for tools without a vendor-published limit | `tokenme budget set` (see §5) |
 | Digits or an icon living in the menu bar | Six tray display modes to choose from (see §3) |
-| Data never leaves the machine | Read-only indexing end to end, no telemetry, no third-party proxies (see §7) |
+| Data never goes to a third party | Read-only indexing by default; multi-device sync sends only to your approved primary, with no telemetry or third-party proxy (see §7) |
 
 ## 1. Install
 
@@ -115,6 +116,8 @@ Once a Linux machine syncs in, a **Multi-device sync** badge appears under the f
 
 With more than one machine reporting, the header's dropdown folds the whole panel — every period, the model and project rankings, the call series, the session list — under **All machines**, **This machine**, or any single remote by its own name. It re-summarises the same index rather than re-scanning anything, so it is instant: all = the sum of the machines. The trigger line shows the current scope: All machines carries up to three machine colour chips and the remote share of the figures (Remote 42%); a single machine carries its own chip, its share and its latest merge time. An overdue machine raises a warning mark on the All machines line. With nothing imported the control is not rendered at all — a single-machine panel looks exactly as it did before.
 
+Registered strict-sync devices also appear in this dropdown: a device with no data is shown at 0, and paused, revoked or reconcile-required states are labelled. The device-sync sheet can manage primary/secondary roles, start and stop the primary service, create an invite, paste an invite and pair, approve/reject, pause/resume and revoke. A secondary also shows its endpoint, stream/epoch, pending bytes, last connection and actionable errors. Status and mutations share one private Tauri IPC command; no loopback-TCP control plane is opened.
+
 ### 3.12 The first screen after launch
 
 The panel can show numbers about a second after it can paint: the first frame is the previous run's own published report (`report.json` beside the index, read back in 3–22 ms — no scan, no probe, no query). It is labelled for what it is — the **From the last scan** chip in the left corner carries the data's actual age, and the quota strip shows **Probing quotas…** instead of the previous run's windows. A cached report is used only when it can be described honestly (same machine scope, same local day, under an hour old, not a write from a restore); a fresh install or an overnight gap has nothing to restore, and the wait has two layers: a spinner plus the line **Indexing local usage…** on the window's native backing (its colour follows Appearance), then `index.html`'s own loading card as the page takes over. `panel.log` keeps the milestones apart: `the page booted N ms after launch` is the bundle running, `the page reported content N ms after launch` is figures on screen, and `boot: restored …` says whether this launch had a report to restore.
@@ -141,6 +144,47 @@ Display side needs no setup: every panel pass merges any `tokenme-*.jsonl.gz` it
 - Every import is validated before a single row lands: the bundle's sha256 against its manifest, the batch's token sums against the manifest, and a format + schema-version gate. The merge runs in one transaction — any failure rolls back whole, the file is kept on disk, and nothing merges.
 - Row counts are capped (the manifest's count plus slack), so a corrupt file can't exhaust memory. A bundle can only move a row forward — the growth predicate refuses lower counts — and imports never delete: rows a collector purged later are reported as stale, not removed.
 - On unix, bundles and manifests are written `0600`. A bundle carries what the index already carries — token counts, model/session/project names, local log paths — never code, prompts or credentials. Treat `~/tokenme-sync` like the index itself: whoever can write into that folder (your account, or anyone you share it with) can inject usage rows — merges are duplicate-safe, not signed.
+
+### 4.1 Strict HTTPS multi-device channel (CLI/service integration)
+
+This is a strict channel alongside the legacy file-bundle path above: the secondary device pushes over **HTTPS over TCP + TLS 1.3** to the primary; the primary never pulls. Pairing uses a one-time high-entropy invite, a SHA-256 certificate pin and an Ed25519 device identity. The invite secret is not sent until the pin has passed. Uploads sign the device, stream, epoch, generation, raw manifest and gzip hash; the primary applies them idempotently by receipt, while the caller keeps pending data through disconnects.
+
+The protocol library, TLS transport, shared SQLite outbox/journal/FIFO scheduler, authenticated status/recovery, CLI `sync run/stop/status` and the lower-level `invite/approve/open-stream/serve/upload` paths are delivered, along with the Panel's primary/secondary pairing and device-management sheet. After a complete invite is paired, the secondary persists the endpoint, certificate pin, primary binding and identity; the runtime obtains the stream/epoch, snapshots the local origin, writes journal/outbox state, uploads over TLS and ACKs it. Ordinary users do not enter a stream or generation. The legacy `export/import` file path and SSH importer remain separate. Windows has a `cfg(windows)` current-SID private-DACL implementation, but this machine cannot compile or run that branch, so it remains unverified.
+
+The Panel primary can start/stop the listener and generate a user-private certificate and invite; the secondary pastes the complete invite; the primary approves/rejects, pauses/resumes or revokes. On Ubuntu/headless machines, use the same saved configuration with `tokenme sync run`; `sync stop` uses a private user Unix socket and `sync status` shows pending data, last connection and errors:
+
+```bash
+tokenme sync upload \
+  --endpoint https://192.168.1.20:47821 \
+  --server-name tokenme-primary \
+  --trust-cert ~/.config/tokenme/primary-cert.pem \
+  --pin-sha256 <64-hex-cert-sha256> \
+  --identity ~/.config/tokenme/device-identity.json \
+  --origin laptop \
+  --primary-id <primary-id> --stream-id <stream-id> \
+  --data-epoch 1 --generation 1
+```
+
+Low-level primary service example (the Panel can generate the certificate and start the service automatically):
+
+```bash
+tokenme sync serve --primary-id <primary-id> \
+  --bind 0.0.0.0:47821 --cert primary-cert.pem --key primary-key.pem --allow-lan
+```
+
+Low-level CLI invite submission (ordinary users should prefer the complete invite; the secret comes from stdin so it is not exposed in the process list):
+
+```bash
+printf '%s\n' '<invite-secret-hex>' | tokenme sync pair \
+  --endpoint https://192.168.1.20:47821 --server-name tokenme-primary \
+  --trust-cert primary-cert.pem --pin-sha256 <64-hex-cert-sha256> \
+  --invite-id <invite-id> --invite-secret-hex - \
+  --identity ~/.config/tokenme/device-identity.json --origin laptop --os linux
+```
+
+The suggested default port is `47821`; a server must explicitly opt in before binding a non-loopback LAN/VPN address. The existing `export/import` file path keeps its old semantics and is not selected automatically by enabling this channel. UDP, QUIC and SSH are not transports for this path. A successful upload never deletes the local index; `409 RECONCILE_REQUIRED` requires reconciliation and must not trigger automatic outbox cleanup.
+
+Verification boundary: `cargo test -p usage-device-sync` covers loopback TLS1.3, an independent primary/secondary SQLite upload and ACK over real TLS, a LAN-opt-in bind round trip on the local host, bad pins/bad connections/early rejection, outbox FIFO/lease, repeated snapshots and late historical updates; it is not proof of cross-host LAN/VPN or macOS/Windows/Ubuntu interoperability. Server concurrency, client/server bodies, responses, timeouts and staging quota are bounded. Panel Rust/TypeScript checks run on this machine; Windows named-pipe ACLs, a native Windows build and three-device testing remain UNVERIFIED.
 
 ## 5. Budgets
 
@@ -176,8 +220,8 @@ Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are no
 
 - Only per-request token counts, model names and project paths are indexed — never your code or prompts.
 - Scanning is read-only end to end: probes read credentials, and the only ones that hand a refreshed one back are the three logins §3.6 names, each into that tool's own store. No telemetry, no third-party proxies.
-- The only network calls: live quota probes against your own vendor accounts, the models.dev price list, and (if you click them) the mail/release links in the panel.
-- Cross-machine sync (§4) moves only that same metadata between your machines — bundles carry no code, prompts or credentials — over a channel you own (ssh/scp, Syncthing, a mounted disk). tokenme opens no ports, stores no sync credentials, and validates every bundle (sha256 + sums + schema) before merging.
+- Network calls include live quota probes against your own vendor accounts, the models.dev price list, mail/release links you click, and any device-sync endpoint you explicitly configure.
+- Cross-machine sync (§4) moves only that same metadata — bundles carry no code, prompts or credentials. The legacy file-bundle path uses a channel you own (ssh/scp, Syncthing, or a mounted disk); strict device sync opens only the explicitly configured, approved primary over pinned HTTPS/TCP/TLS 1.3. tokenme uses no cloud relay, stores no third-party sync credentials, and validates every bundle or strict package before merging.
 
 ## 8. Troubleshooting
 

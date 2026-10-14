@@ -46,6 +46,7 @@ pub fn run() {
         .plugin(tauri_plugin_positioner::init())
         .manage(EngineChannel(tx))
         .manage(engine::Shared::new(Settings::load()))
+        .manage(commands::SyncControl::default())
         .manage(servers::state())
         .manage(pet_notice::NoticeState::default())
         .invoke_handler(tauri::generate_handler![
@@ -71,6 +72,7 @@ pub fn run() {
             active_speed::run_active_speed_test,
             commands::set_show_empty_tools,
             commands::set_report_scope,
+            commands::sync_devices,
             servers::commands::get_servers,
             servers::commands::server_public_key,
             servers::commands::server_probe,

@@ -158,6 +158,36 @@ tokenme import bundle.jsonl.gz --dry-run   # 解析 + 合并 + 对账，然后�
 
 菜单栏这边通常用不着它：面板引擎每轮自动合并 `~/tokenme-sync`，并按机器显示 **多端同步 / Multi-device sync** 徽标与最近一次合并（超过 24 小时转警示色）。
 
+## sync run / sync stop / sync status
+
+`sync pair --invite '<完整 tokenme://device-pair 邀请>'` 是从设备的首选入口。它在证书 pin 校验成功后发送配对请求，并把 endpoint、server name、证书、pin、主设备绑定和本地 identity 路径保存到用户数据目录；普通用户不需要填写 stream 或 generation。批准后，`sync run` 在前台运行唯一的 secondary runtime：每轮先摄取本机事件，再按本机 origin 生成稳定快照，在同一 SQLite 事务中分配 generation/payload revision、写 journal 和不可变 outbox，最后通过 pinned TLS 1.3 上传并 ACK。
+
+```bash
+tokenme sync run       # Ubuntu/Linux 用户级常驻入口；前台运行，可由 systemd --user 监督
+tokenme sync status    # 查看设备、stream/epoch、运行状态、待传量、最后连接和错误
+tokenme sync stop      # 通过用户私有 Unix socket 请求停止，不删除配置或待传 outbox
+```
+
+`sync stop` 使用用户数据目录下 `device-sync/secondary-runtime.sock`，目录为 `0700`、socket 为 `0600`；它不是 loopback TCP 控制面。运行时异常退出会回收 socket，待传包仍保留，下一次显式 `sync run` 或面板恢复可以继续。当前 macOS/Unix 路径已测试；Windows named pipe ACL 仍未在本机验证。
+
+Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请生成、从端粘贴邀请/配对、批准/拒绝、暂停/恢复/撤销，以及从端后台 runtime 启停。主端启动使用用户私有目录自动保存 identity 与证书；从端配对配置会在 Panel 重启后按 `enabled` 状态恢复，显式停止会持久化为 disabled。`sync run/stop/status` 是 Ubuntu 等无面板机器的同一 runtime 入口。
+
+## sync upload
+
+通过严格的 HTTPS/TLS 1.3 通道，把本机事件上传到已批准的主设备。这个命令不会伪造配对、不会自动清理本地数据，也不会改变旧的 `export/import` 文件入口；必须先由主设备签发 `primary_id`、`stream_id` 和 `data_epoch`，并提供证书 PEM 与 64 位 SHA-256 pin：
+
+```bash
+tokenme sync upload --endpoint https://192.168.1.20:47821 \
+  --server-name tokenme-primary \
+  --trust-cert ~/.config/tokenme/primary-cert.pem \
+  --pin-sha256 <64-hex-cert-sha256> \
+  --identity ~/.config/tokenme/device-identity.json --origin laptop \
+  --primary-id <primary-id> --stream-id <stream-id> \
+  --data-epoch 1 --generation 1
+```
+
+主端按设备身份、stream 和 generation 做幂等 receipt；连接断开或返回 `409 RECONCILE_REQUIRED` 时保留本地待传数据，不能删除后重试。`sync upload` 是保留的低层单包/兼容入口，仍要求调用方提供 stream、epoch 和 generation；普通用户应使用完整 invite 配对后运行 `sync run`，不手填这些字段。旧的 `export/import` 文件入口、SSH importer 和新 HTTPS runtime 相互隔离。
+
 限制与信任：payload 行数有上限（清单计数加余量），坏文件撑不爆内存；bundle 只能让行向前走（增长谓词拒绝更低的计数），从不删除（采集端后来清理的行会被报告为 stale）。bundle 只经验证、不签名：能写进同步目录的人就能添加行——把它当索引本身对待。任务指南：[USER_GUIDE.md](USER_GUIDE.md) §4。
 
 ## 存储位置

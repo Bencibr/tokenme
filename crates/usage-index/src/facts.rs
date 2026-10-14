@@ -560,9 +560,9 @@ impl Index {
     ///
     /// Scope is pushed into the `LIMIT` itself: filtering after the fact would
     /// let other machines' sessions fill all 20 slots and starve the scoped
-    /// view. `All` keeps the status-quo merge of equal (tool, session) across
-    /// origins; a named scope restricts the same queries by `origin` (rollup)
-    /// or the source prefix (event).
+    /// view. `origin` is part of the session key even under `All`; two devices
+    /// may legitimately reuse a session id. A named scope restricts the same
+    /// queries by `origin` (rollup) or the source prefix (event).
     fn fetch_sessions(&self, limit: usize, scope: &MachineScope) -> Result<Vec<SessionFact>> {
         let (origin, all): (&str, bool) = match scope {
             MachineScope::All => ("", true),
@@ -572,17 +572,17 @@ impl Index {
         let mut top = self
             .conn
             .prepare(
-                "SELECT tool, session, MIN(min_ts), MAX(max_ts) \
+                "SELECT origin, tool, session, MIN(min_ts), MAX(max_ts) \
                  FROM event_rollup \
                  WHERE (?2 = 1 OR origin = ?3) \
-                 GROUP BY tool, session \
-                 ORDER BY MAX(max_ts) DESC, tool ASC, session ASC \
+                 GROUP BY origin, tool, session \
+                 ORDER BY MAX(max_ts) DESC, origin ASC, tool ASC, session ASC \
                  LIMIT ?1",
             )
             .map_err(sql_err)?;
-        let heads: Vec<(String, String, i64, i64)> = top
+        let heads: Vec<(String, String, String, i64, i64)> = top
             .query_map(params![limit.max(1) as i64, all, origin], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })
             .map_err(sql_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -596,7 +596,7 @@ impl Index {
                         IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
                         IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
                         sum(n) \
-                 FROM event_rollup WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR origin = ?4) \
+                 FROM event_rollup WHERE origin = ?1 AND tool = ?2 AND session = ?3 \
                  GROUP BY model, meter ORDER BY model, meter",
             )
             .map_err(sql_err)?;
@@ -604,7 +604,7 @@ impl Index {
             .conn
             .prepare(&format!(
                 "SELECT project FROM event \
-                 WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR ({ORIGIN_SQL}) = ?4) \
+                 WHERE tool = ?1 AND session = ?2 AND ({ORIGIN_SQL}) = ?3 \
                    AND project IS NOT NULL \
                  ORDER BY id ASC LIMIT 1",
             ))
@@ -613,16 +613,16 @@ impl Index {
             .conn
             .prepare(&format!(
                 "SELECT model FROM event \
-                 WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR ({ORIGIN_SQL}) = ?4) \
+                 WHERE tool = ?1 AND session = ?2 AND ({ORIGIN_SQL}) = ?3 \
                    AND model IS NOT NULL \
                  ORDER BY id DESC LIMIT 1",
             ))
             .map_err(sql_err)?;
 
         let mut out = Vec::with_capacity(heads.len());
-        for (tool, session, first_ms, last_ms) in heads {
+        for (origin, tool, session, first_ms, last_ms) in heads {
             let groups_rows = groups_stmt
-                .query_map(params![tool, session, all, origin], |r| {
+                .query_map(params![origin, tool, session], |r| {
                     Ok(SessionGroup {
                         model: opt_of(r.get(0)?),
                         meter: meter_of(&r.get::<_, String>(1)?),
@@ -641,14 +641,15 @@ impl Index {
             let groups =
                 groups_rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?;
             let project: Option<String> = project_stmt
-                .query_row(params![tool, session, all, origin], |r| r.get(0))
+                .query_row(params![tool, session, origin], |r| r.get(0))
                 .optional()
                 .map_err(sql_err)?;
             let model: Option<String> = model_stmt
-                .query_row(params![tool, session, all, origin], |r| r.get(0))
+                .query_row(params![tool, session, origin], |r| r.get(0))
                 .optional()
                 .map_err(sql_err)?;
             out.push(SessionFact {
+                origin,
                 tool,
                 session,
                 model,
@@ -1055,6 +1056,7 @@ mod golden {
         assert_eq!(a.recent_sessions.len(), b.recent_sessions.len(), "recent_sessions");
         for (i, (x, y)) in a.recent_sessions.iter().zip(&b.recent_sessions).enumerate() {
             let p = format!("recent_sessions[{i}]");
+            assert_eq!(x.origin, y.origin, "{p}.origin");
             assert_eq!(x.tool, y.tool, "{p}.tool");
             assert_eq!(x.session, y.session, "{p}.session");
             assert_eq!(x.project, y.project, "{p}.project");
@@ -1107,6 +1109,38 @@ mod golden {
         assert_eq!(facts_first, facts_second, "a second read must be byte-stable");
         let mine_again = summarize_facts(&facts_second, &opts);
         assert_report_eq(&oracle, &mine_again);
+    }
+
+    #[test]
+    fn all_scope_keeps_same_session_name_per_origin() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let ts = now_fixture();
+        idx.conn
+            .execute(
+                "INSERT INTO event(tool, ts_ms, session, project, model, meter, in_tok, source) VALUES('codex', ?1, 'same-session', '/local', 'gpt-5', 'tokens', 10, '/local/log')",
+                params![ts - 1],
+            )
+            .unwrap();
+        idx.conn
+            .execute(
+                "INSERT INTO event(tool, ts_ms, session, project, model, meter, in_tok, source) VALUES('codex', ?1, 'same-session', '/remote', 'gpt-5', 'tokens', 20, 'linux:remote:row-1')",
+                params![ts],
+            )
+            .unwrap();
+
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
+        assert!(facts.rebuilt);
+        assert_eq!(facts.sessions.len(), 2);
+        assert_eq!(facts.sessions.iter().map(|s| s.origin.as_str()).collect::<Vec<_>>(), vec!["remote", ""]);
+        let mut live_origins = facts.live.iter().filter(|f| f.bucket == LIVE_TODAY).map(|f| (f.origin.as_str(), f.requests)).collect::<Vec<_>>();
+        live_origins.sort_by_key(|(origin, _)| *origin);
+        assert_eq!(live_origins, vec![("", 1), ("remote", 1)]);
+        let report = summarize_facts(&facts, &golden_opts(&pricing()));
+        assert_eq!(report.recent_sessions.len(), 2);
+        assert_eq!(report.recent_sessions.iter().map(|s| s.origin.as_str()).collect::<Vec<_>>(), vec!["remote", ""]);
+        assert_eq!(report.recent_sessions.iter().map(|s| s.total_tokens).collect::<Vec<_>>(), vec![20.0, 10.0]);
+        assert_eq!(report.day.summary.sessions, 2);
+        assert_eq!(report.day.breakdown.tools[0].sessions, 2);
     }
 
     /// Raw-insert helper for path (b): replicates persist's mapping (ids in

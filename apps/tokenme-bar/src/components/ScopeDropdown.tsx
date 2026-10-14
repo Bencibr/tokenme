@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import type { MachineScope, MachineView, SyncRecord } from "../types";
+import type { MachineScope, MachineView, SyncDeviceView, SyncRecord } from "../types";
 import { compactTokens, relativeTime } from "../lib/format";
 import { t } from "../lib/i18n";
 import { IconChevron, IconWarn } from "./Icons";
@@ -19,6 +19,16 @@ function share(part: number, whole: number): string {
   return whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : "0%";
 }
 
+function deviceStatusLabel(status: SyncDeviceView["status"]): string {
+  switch (status) {
+    case "pending": return t("scope.device.pending");
+    case "paired": return t("scope.device.paired");
+    case "paused": return t("scope.device.paused");
+    case "revoked": return t("scope.device.revoked");
+    case "reconcile_required": return t("scope.device.reconcile");
+  }
+}
+
 interface MachineRow {
   /** Raw origin; `""` is this machine and never collides with an origin. */
   origin: string;
@@ -30,6 +40,7 @@ interface MachineRow {
   importedAt: number | null;
   age: string | null;
   stale: boolean;
+  device?: SyncDeviceView;
 }
 
 interface Props {
@@ -39,6 +50,7 @@ interface Props {
   /** `Report.machines` — `""` first (this machine), then origins by name. */
   machines: MachineView[];
   syncs?: SyncRecord[];
+  devices?: SyncDeviceView[];
   now: number;
   /** Open state lives in App so Escape closes menu → sheet → panel in order. */
   open: boolean;
@@ -57,6 +69,7 @@ export function ScopeDropdown({
   onScope,
   machines,
   syncs,
+  devices,
   now,
   open,
   onOpen,
@@ -80,10 +93,19 @@ export function ScopeDropdown({
     if (!cur || r.imported_at_ms > cur.imported_at_ms) newest.set(r.origin, r);
   }
 
+  const registered = new Map((devices ?? []).map((device) => [device.origin, device]));
+  const machineRows = [...machines];
+  for (const device of devices ?? []) {
+    if (!machineRows.some((machine) => machine.origin === device.origin)) {
+      machineRows.push({ origin: device.origin, today_tokens: 0 });
+    }
+  }
+
   let slot = 0;
-  const rows: MachineRow[] = machines.map((m) => {
+  const rows: MachineRow[] = machineRows.map((m) => {
     const local = m.origin === "";
     const rec = local ? undefined : newest.get(m.origin);
+    const device = local ? undefined : registered.get(m.origin);
     const importedAt = rec ? rec.imported_at_ms : null;
     return {
       origin: m.origin,
@@ -93,7 +115,8 @@ export function ScopeDropdown({
       color: local ? "var(--accent)" : SLOTS[slot++ % SLOTS.length],
       importedAt,
       age: importedAt === null ? null : relativeTime(importedAt, now),
-      stale: importedAt !== null && now - importedAt > STALE_MS,
+      stale: (importedAt !== null && now - importedAt > STALE_MS) || (device !== undefined && device.status !== "paired"),
+      device,
     };
   });
   const remotes = rows.filter((r) => !r.local);
@@ -153,7 +176,7 @@ export function ScopeDropdown({
     body = (
       <>
         <span className="o-dot" style={{ background: selected?.color ?? "var(--ink-3)" }} aria-hidden="true" />
-        <span className="scope-name">{scope.name}</span>
+        <span className="scope-name">{selected?.name ?? scope.name}</span>
         <span className="scope-supp" data-warn={selected?.stale || undefined}>
           {selected ? `${share(selected.tokens, total)} · ${selected.age ?? "—"}` : "—"}
         </span>
@@ -197,6 +220,7 @@ export function ScopeDropdown({
           {rows.map((r) => {
             const checked = r.local ? scope.kind === "local" : scope.kind === "origin" && scope.name === r.origin;
             const manual = !r.local && serverOrigins.size > 0 && !serverOrigins.has(r.origin);
+            const deviceStatus = r.device ? deviceStatusLabel(r.device.status) : null;
             return (
               <button
                 key={r.origin}
@@ -211,6 +235,7 @@ export function ScopeDropdown({
                 <span className="si-name">
                   <span className="scope-name">{r.name}</span>
                   {manual ? <span className="si-tag">{t("scope.manual")}</span> : null}
+                  {deviceStatus ? <span className="si-tag">{deviceStatus}</span> : null}
                 </span>
                 <span className="si-vals">
                   <span className="si-tok num">{compactTokens(r.tokens)}</span>

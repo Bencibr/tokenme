@@ -2934,6 +2934,32 @@
   display: none;
 }
 
+.sync-input,
+.sync-invite {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 7px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--hair-2);
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: var(--t-meta);
+}
+
+.sync-invite {
+  min-height: 46px;
+  resize: vertical;
+  margin: 6px 0;
+  word-break: break-all;
+}
+
+.sync-input:focus,
+.sync-invite:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
 .sheet-srv .sheet-foot {
   flex: none;
   margin: 0;

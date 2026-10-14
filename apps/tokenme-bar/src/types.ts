@@ -145,6 +145,7 @@ export interface PricingMeta {
 }
 
 export interface SessionRow {
+  origin: string;
   tool: string;
   session: string;
   project: string | null;
@@ -295,6 +296,64 @@ export interface MachineView {
   today_tokens: number;
 }
 
+/** Strict device-sync registry state returned by the read-only Tauri bridge. */
+export type SyncDeviceRole = "primary" | "secondary";
+export type SyncDeviceStatus = "pending" | "paired" | "paused" | "revoked" | "reconcile_required";
+
+export type SyncManagementRequest =
+  | { action: "status" }
+  | { action: "start_primary"; bind?: string | null; advertise_host?: string | null; allow_lan: boolean }
+  | { action: "start_secondary" }
+  | { action: "stop" }
+  | { action: "create_invite"; expires_at_ms?: number | null }
+  | { action: "pair"; invite: string; origin?: string | null; display_name?: string | null; os?: string | null }
+  | { action: "approve"; request_id: string }
+  | { action: "reject"; request_id: string }
+  | { action: "pause"; device_id: string }
+  | { action: "resume"; device_id: string }
+  | { action: "revoke"; device_id: string };
+
+export interface SyncDeviceView {
+  device_id: string;
+  origin: string;
+  display_name: string;
+  os: string;
+  role: SyncDeviceRole;
+  status: SyncDeviceStatus;
+  data_epoch: number;
+  active_stream_id: string | null;
+  last_generation: number | null;
+}
+
+export interface SyncPairingRequestView {
+  request_id: string;
+  invite_id: string;
+  device_id: string;
+  origin: string;
+  display_name: string;
+  os: string;
+  status: string;
+}
+
+export interface SyncDevicesSnapshot {
+  primary_id: string | null;
+  role: SyncDeviceRole | "unconfigured";
+  service_running: boolean;
+  endpoint: string | null;
+  certificate_pin: string | null;
+  stream_id: string | null;
+  data_epoch: number | null;
+  pending: number;
+  in_flight: number;
+  pending_bytes: number;
+  last_error: string | null;
+  last_connected_at_ms: number | null;
+  invite_url: string | null;
+  invite_expires_at_ms: number | null;
+  devices: SyncDeviceView[];
+  pairing_requests: SyncPairingRequestView[];
+}
+
 export interface Report {
   generated_at_ms: number;
   utc_offset: string;
@@ -370,6 +429,8 @@ export interface Bridge {
   /** Switch the whole panel's machine scope; the engine re-folds and the next
    *  published report echoes it in `Report.scope`. */
   setReportScope: (scope: MachineScope) => Promise<void>;
+  /** Strict device-sync status and its management mutations share one IPC command. */
+  syncDevices: (request?: SyncManagementRequest) => Promise<SyncDevicesSnapshot>;
   /** `tool id → data:image/png;base64,…` for the tools that ship a macOS app. */
   toolIcons: () => Promise<Record<string, string>>;
   /** The saved drag order of the quota section (empty lists ⇒ report order). */

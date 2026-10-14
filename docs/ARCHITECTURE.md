@@ -12,6 +12,7 @@
 | :--- | :--- |
 | `crates/usage-core` | 共享契约：`UsageEvent`/`TokenCounts`、计价（models.dev 优先级）、报表聚合（内存 `summarize` 与 rollup 折叠 `summarize_facts` 逐字共享 `merge_quotas`）、预算、`MachineScope` |
 | `crates/usage-index` | SQLite 增量索引：文件游标、去重、摄取租约、保留期、watcher；维护 `event_rollup` 缓存表并承载报表读路径（`report_facts`）；同步协议 `export_sync`/`import_sync` |
+| `crates/usage-device-sync` | 独立严格入口：Ed25519 identity、配对/stream/epoch、签名包、receipt/highwater、确定性 merge，以及受限 HTTPS over TCP/TLS 1.3 transport；不改变旧 JSONL/SSH importer |
 | `crates/usage-quota` | 实时厂商配额探针（一个 provider 一个文件），共享一个 5 分钟 TTL、每工具一份缓存文件；每日签到与令牌续期也在这里；`copilot` 与 `gemini` 是纯探针，没有用量适配器 |
 | `crates/adapters/<tool>` | 20 个工具族 crate，注册表共 27 个工具；7 个兄弟产品复用既有 crate 的解析器（crow5、mimocode 寄在 `opencode`，cola、omp 寄在 `pi`，qoder_cn 寄在 `qoder`，workbuddy_cn 寄在 `workbuddy`，trae_cn 寄在 `trae`） |
 | `crates/adapters/all` | 注册表：`TOOL_IDS`、`detect_all`、`builtin_adapters`，外加编译期交叉核对——四个源码家的版本号与编译版本一致、`latest.json` 自洽（可以滞后，不许串版）、面板 `TOOL_ORDER` 不漏工具、CHANGELOG 每个已发布版本有分节 |
@@ -29,12 +30,15 @@ flowchart LR
     F["crates/usage-quota（实时探针）"] --> C
     G["crates/usage-core/pricing.rs（models.dev）"] --> C
     H["同步 bundle（~/tokenme-sync）"] --> B
+    J["严格设备同步：HTTPS/TCP/TLS 1.3"] --> B
     I["TTFT 通道（本地记录 / 仅回环 OTLP）"] --> E
 ```
 
 面板的引擎线程独占索引；webview 从不直接碰它——每轮 pass 之后，引擎把序列化的 `Report` 经 Tauri 事件发出去。报表带作用域（全部机器 / 本机 / 单一来源）：作用域在折叠层过滤，而配额行无论作用域如何都只来自本机。
 
 面板的报表读路径走 rollup：`usage-index` 维护 `event_rollup`——按（本地日，工具，会话，项目，模型，计量器）一组一行，约 39 万事件的索引折成约 2.2k 行——`Index::report_facts` 一次调用给齐：完整天读 rollup、今天的半天读活切片，外加最近会话与调用。若读时发现 rollup 空而 `event` 非空（升级后首次发布就是这种形态），先自愈重建再回答。内存路径 `summarize` 保留给 CLI 与测试；两条路折叠配额用的是同一个 `merge_quotas`，而 `facts.rs` 的黄金对账测试逐字段钉死两条路相等——谁也不可能跟谁对不上数。
+
+严格设备同步与历史文件 bundle 是两条独立入口。`usage-device-sync` 的主端把 additive 状态表、journal 和不可变 outbox 放在同一 SQLite 索引中；Panel 通过私有 Tauri `sync_devices` 桥读取状态并执行配对、批准/拒绝、暂停/恢复、撤销和服务启停，scope 仍按索引中的 `origin` 折叠。secondary runtime 由 Panel 或 CLI 单一生命周期拥有：认证 status/recovery 后从本机 origin 生成稳定快照，在同一事务中分配 generation/payload revision 并写 journal/outbox，再经 pinned TLS 上传和 ACK；重复快照不产生新 revision，晚到历史更新保留旧 outbox 并生成后续 revision。网络服务只接受有界 HTTP/1.1 POST，TLS 只允许 1.3；并发、非回环 LAN/VPN opt-in、body/staging/超时和 pin 前不发送秘密均由 transport 配置约束。CLI 提供 `sync run/stop/status` 用户级常驻入口，控制面使用私有 Unix socket；`sync upload` 保留为需要显式 stream/epoch/generation 的低层兼容入口。Windows named-pipe ACL、真实跨主机 LAN/VPN 和三端互通仍未验证。
 
 这个循环是被监督的：panic 或意外返回会连同原因写进 `panel.log`，并以封顶退避重启——菜单栏应用一旦停止发布，画面只会安静地停在旧数字上，没有别的征兆。页面自己也报年龄：报表老过五个 cadence（下限五分钟）就在页头显示「数据已停止更新」。cadence 时钟归自己管：文件唤醒只把截止期往近了收，从不往后推，忙碌的日志目录饿不死周期 pass（修复前实测两轮 pass 的间隔被拖到 25–237 秒）。
 
@@ -53,10 +57,14 @@ flowchart LR
 - **门禁抑制请求、不抑制答案**：`settings.json` 经 `usage_quota::collect_gated(budget, gate)` 决定哪些探针发请求；被门挡下的探针是跳过而非删除，缓存照读——把某家关掉，屏幕上留下的是它最后一次的答案。这也是为什么拨动这些开关刻意不触发刷新（强制 pass 会把用户刚刚选择保留的答案扔掉）。横幅同构：`notify::Gate` 只过滤**投递**，窗口的记录档位照常推进，所以解除静音不会补发静音期间越过的线。设置页渲染的探针清单来自 `usage_quota::inventory()`——注册表描述自己（哪些探针存在、哪些有宿主进程映射、哪些在本机拿到过答案），不是前端手抄的一份。
 - **宿主退出即暂停**：工具的宿主进程不在了（精确进程名匹配，不是子串），探针就停发请求、保留最后答案；没有宿主映射的四个探针（`copilot`、`gemini`、`kimicode`、`minimaxcode`）从不受此暂停。
 - **同步合并幂等**：同一 bundle 重放多少次都只算一次；行按导出时打上的 origin 分组成机器视图；删掉一台服务器只停拉取，已合并的行留在索引里。
+- **严格设备同步不降级**：`device_id/stream_id/generation` receipt、data epoch 与签名域必须匹配；旧 epoch、跨 stream 重放和缺少稳定 occurrence identity 的包拒绝，`RECONCILE_REQUIRED` 不自动清 outbox。旧文件 bundle / SSH importer 不经过这个入口。
+- **严格网络边界**：HTTPS over TCP/TLS 1.3 only；不使用 SSH、UDP、QUIC、中继、NAT 打洞或 loopback TCP IPC。包、HTTP body、响应、超时和服务端并发都有上限。
 - **每轮摄取留审计线索**：`logs/scan.log`（每轮有变更的 pass 一行 JSON，至多每小时一条心跳）记录每个工具走了哪些根（自动标出可疑的重叠对）、各轮计数与按工具拆分——「扫描器是不是重复计数了」靠用户发来的一个文件就能回答。
 - **保留期**约束索引体量；`--prune` 丢弃更早的事件。
 
 ## 测试约定
+
+`usage-device-sync` 的 focused suite 覆盖协议/状态/迁移/receipt/merge、TLS 1.3 loopback，以及允许 LAN bind 的本机 round-trip；真实跨主机 LAN/VPN 和 Windows ACL 运行时仍需目标平台验证。
 
 每个适配器自带 fixture 驱动的测试（fixture 已匿名——没有真实会话数据），外加一条对账测试：适配器的数字必须与一次独立 SQL 重算一致。索引测试覆盖冷摄取、续读、并行摄取对账与损坏路径：`Index::open` 是廉价句柄，`Index::verify_integrity` 是整库守卫——把损坏的库连同它的 `-wal`/`-shm` 一起挪到一边（重建不能继承它们），交回一个空库给下一轮摄取重新填。注册表自检：`adapters/all` 在版本号各处漂移、`latest.json` 写出与编译树不符的安装包名或哈希、面板 `TOOL_ORDER` 漏掉工具、CHANGELOG 缺当前编译版本的分节时，直接让构建失败。面板的 Rust 是独立 workspace——根目录的 `cargo test --workspace` 看不见它，`apps/tokenme-bar/src-tauri` 下要再跑一次。服务器 e2e 挂 `#[ignore]`，需要真实 sshd 目标，只有 `cargo test --ignored` 会跑。
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { MachineScope, PageKey, PanelSettings, PeriodKey, QuotaDisplayMode, Report, ServerView, TrayMode, TrayState, TtftSnapshot } from "./types";
+import type { MachineScope, PageKey, PanelSettings, PeriodKey, QuotaDisplayMode, Report, ServerView, SyncDevicesSnapshot, TrayMode, TrayState, TtftSnapshot } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
@@ -18,6 +18,7 @@ import { RankedList } from "./components/RankedList";
 import { Sessions } from "./components/Sessions";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { ServerSheet } from "./components/ServerSheet";
+import { SyncSheet } from "./components/SyncSheet";
 import { Sources } from "./components/Sources";
 import { IconProvider } from "./components/ToolIcon";
 import { StatusBar } from "./components/StatusBar";
@@ -79,6 +80,8 @@ const [page, setPage] = useState<PageKey>(() => {
   // "manual" tags; the sheet itself only borrows it.
   const [servers, setServers] = useState<ServerView[]>([]);
   const [serversOpen, setServersOpen] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, role: "unconfigured", service_running: false, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, last_connected_at_ms: null, invite_url: null, invite_expires_at_ms: null, devices: [], pairing_requests: [] });
   // The sheet's own close guard (a running install must not be dismissed) —
   // Escape asks through this ref instead of closing the sheet blind.
   const serverCloseRef = useRef<() => void>(() => {});
@@ -183,6 +186,12 @@ const [page, setPage] = useState<PageKey>(() => {
         if (alive) setServers(v);
       })
       .catch(() => {});
+    void bridge
+      .syncDevices()
+      .then((v) => {
+        if (alive) setSyncDevices(v);
+      })
+      .catch(() => {});
     const unServers = bridge.onServersUpdated((v) => setServers(v));
     const un = bridge.onReport((r) => {
       setReport(r);
@@ -266,8 +275,12 @@ const [page, setPage] = useState<PageKey>(() => {
       serverCloseRef.current();
       return;
     }
+    if (syncOpen) {
+      setSyncOpen(false);
+      return;
+    }
     if (inTauri) void bridge.hidePanel();
-  }, [settingsOpen, scopeMenuOpen, serversOpen]));
+  }, [settingsOpen, scopeMenuOpen, serversOpen, syncOpen]));
 
   // A text field can only receive keys while the window owns the keyboard, and
   // the non-activating tray panel never does on Windows. While any input or
@@ -475,6 +488,7 @@ const [page, setPage] = useState<PageKey>(() => {
           scopeMenuOpen={scopeMenuOpen}
           onScopeMenuOpen={setScopeMenuOpen}
           serverOrigins={serverOrigins}
+          syncDevices={syncDevices}
           now={now}
         />
 
@@ -515,6 +529,7 @@ const [page, setPage] = useState<PageKey>(() => {
           onRefresh={() => void refresh()}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenServers={() => setServersOpen(true)}
+          onOpenSync={() => setSyncOpen(true)}
           servers={servers}
           tray={inTauri ? { mode: tray?.mode ?? "tray_tokens", onCycle: () => void cycleTrayMode() } : null}
           update={update}
@@ -544,6 +559,14 @@ const [page, setPage] = useState<PageKey>(() => {
             onServers={setServers}
             onClose={() => setServersOpen(false)}
             closeRef={serverCloseRef}
+          />
+        ) : null}
+
+        {syncOpen ? (
+          <SyncSheet
+            snapshot={syncDevices}
+            onSnapshot={setSyncDevices}
+            onClose={() => setSyncOpen(false)}
           />
         ) : null}
       </div>

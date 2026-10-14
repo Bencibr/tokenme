@@ -24,6 +24,7 @@ members = [
     "crates/adapters/minimaxcode",
     "crates/adapters/all",
     "crates/usage-index",
+    "crates/usage-device-sync",
     "crates/usage-quota",
     "crates/usage-cli",
 ]
@@ -38,6 +39,7 @@ repository = "https://github.com/Bencibr/tokenme.git"
 [workspace.dependencies]
 usage-core = { path = "crates/usage-core" }
 usage-index = { path = "crates/usage-index" }
+usage-device-sync = { path = "crates/usage-device-sync" }
 usage-quota = { path = "crates/usage-quota" }
 usage-adapter-claude = { path = "crates/adapters/claude" }
 usage-adapter-codex = { path = "crates/adapters/codex" }
@@ -77,10 +79,18 @@ aes-gcm = "0.10"
 sha2 = "0.10"
 md-5 = "0.10"
 base64 = "0.22"
+ed25519-dalek = "3"
+getrandom = "0.3"
+httparse = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
 clap = { version = "4", features = ["derive"] }
 windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_Security",
     "Win32_Security_Cryptography",
+    "Win32_Security_Authorization",
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }

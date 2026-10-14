@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import type { MachineScope, PageKey, PeriodKey, Report } from "../types";
+import type { MachineScope, PageKey, PeriodKey, Report, SyncDevicesSnapshot } from "../types";
 import {
   PERIOD_LABEL,
   PERIOD_PREV,
@@ -58,6 +58,8 @@ interface Props {
   /** Origins backed by a configured server. The scope menu tags every other
    *  imported origin as a manual export/import. Empty = no tags at all. */
   serverOrigins?: Set<string>;
+  /** Registered strict-sync devices; read-only in this slice. */
+  syncDevices?: SyncDevicesSnapshot;
   /** The shared 30 s tick, so the menu's sync ages stay honest. */
   now: number;
 }
@@ -88,7 +90,7 @@ function syncTip(sync: NonNullable<Props["sync"]>): string {
   return lines.join("\n");
 }
 
-export function Header({ report, period, onPeriod, page, onPage, onClose, sync, scope, onScope, scopeMenuOpen, onScopeMenuOpen, serverOrigins, now }: Props) {
+export function Header({ report, period, onPeriod, page, onPage, onClose, sync, scope, onScope, scopeMenuOpen, onScopeMenuOpen, serverOrigins, syncDevices, now }: Props) {
   const showMoney = useMoney();
   const win = report[period];
   const { summary } = win;
@@ -254,6 +256,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
           onScope={onScope}
           machines={report.machines ?? []}
           syncs={report.syncs}
+          devices={syncDevices?.devices}
           now={now}
           open={scopeMenuOpen}
           onOpen={onScopeMenuOpen}

@@ -94,6 +94,7 @@ export function StatusBar({
   onRefresh,
   onOpenSettings,
   onOpenServers,
+  onOpenSync,
   servers,
   tray,
   update,
@@ -108,6 +109,7 @@ export function StatusBar({
   onRefresh: () => void;
   onOpenSettings: () => void;
   onOpenServers: () => void;
+  onOpenSync: () => void;
   /** The fleet behind the server icon; the dot aggregates one state for all. */
   servers: ServerView[];
   /** Present only inside Tauri: a browser has no menu-bar title to configure. */
@@ -180,6 +182,9 @@ export function StatusBar({
         >
           <IconServer size={15} />
           <span className="srv-dot" aria-hidden="true" />
+        </button>
+        <button type="button" className="icon-btn" onClick={onOpenSync} title={t("sync.title")} aria-label={t("sync.title")}>
+          <IconRefresh size={15} />
         </button>
         <button type="button" className="settings-btn" onClick={onOpenSettings} title={t("status.settings")} aria-label={t("status.settings")}>
           <IconSettings size={15} />

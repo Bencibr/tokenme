@@ -417,6 +417,7 @@ function sessionsOf(now: number): SessionRow[] {
     ["codex", "5590aa71", "cli", "gpt-5-mini", 30 * 3_600_000, 1_286_000, 0.19, 38],
   ];
   return rows.map(([tool, session, project, model, ago, tokens, cost, requests]) => ({
+    origin: "",
     tool,
     session,
     project: `/Users/dev/work/${project}`,

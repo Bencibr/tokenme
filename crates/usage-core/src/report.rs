@@ -217,6 +217,10 @@ pub struct MachineView {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRow {
+    /// `""` for this machine; remote sessions keep their origin so equal
+    /// `(origin, tool, session)` keeps same-named sessions from different devices apart.
+    #[serde(default)]
+    pub origin: String,
     pub tool: String,
     pub session: String,
     pub project: Option<String>,
@@ -510,7 +514,7 @@ impl Row<'_> {
 
 fn summarize_events(rows: &[Row<'_>]) -> Summary {
     let mut s = Summary::default();
-    let mut sessions: HashSet<(&str, &str)> = HashSet::new();
+    let mut sessions: HashSet<(&str, &str, &str)> = HashSet::new();
     let mut unpriced: HashMap<(&str, &str), UnpricedModel> = HashMap::new();
     for r in rows {
         s.counts.add_assign(&r.ev.counts);
@@ -522,7 +526,7 @@ fn summarize_events(rows: &[Row<'_>]) -> Summary {
             }
         }
         s.requests += 1;
-        sessions.insert((r.ev.tool.as_str(), r.ev.session.as_str()));
+        sessions.insert((crate::origin_of(&r.ev.source), r.ev.tool.as_str(), r.ev.session.as_str()));
         if !r.priced && r.tokens() > 0.0 {
             let key = (r.ev.tool.as_str(), r.ev.model.as_deref().unwrap_or("unknown"));
             let e = unpriced.entry(key).or_insert_with(|| UnpricedModel {
@@ -983,10 +987,11 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
         &opts.budgets,
     );
 
-    let mut sessions: BTreeMap<(&str, &str), SessionRow> = BTreeMap::new();
+    let mut sessions: BTreeMap<(&str, &str, &str), SessionRow> = BTreeMap::new();
     for r in &rows {
-        let key = (r.ev.tool.as_str(), r.ev.session.as_str());
+        let key = (crate::origin_of(&r.ev.source), r.ev.tool.as_str(), r.ev.session.as_str());
         let e = sessions.entry(key).or_insert_with(|| SessionRow {
+            origin: key.0.to_string(),
             tool: r.ev.tool.clone(),
             session: r.ev.session.clone(),
             project: r.ev.project.clone(),
@@ -1060,7 +1065,7 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
 //
 // The panel engine no longer pulls the whole event history into Rust on every
 // publish. `usage-index` maintains an `event_rollup` table — one row per local
-// (day, tool, session, project, model, meter), ~2.2k rows for a ~390k-event
+// (day, origin, tool, session, project, model, meter), ~2.2k rows for a ~390k-event
 // index — and answers [`Index::report_facts`] with those rows plus a few small
 // live slices over today's events. [`summarize_facts`] folds them into the same
 // [`Report`] that [`summarize`] produces from raw events; the golden parity
@@ -1180,7 +1185,7 @@ impl AggregatePlan {
 }
 
 /// One `event_rollup` row: every event of one local day that shares
-/// (tool, session, project, model, meter), already summed by SQLite.
+/// (origin, tool, session, project, model, meter), already summed by SQLite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RollupRow {
     /// `%Y-%m-%d` local date. `""` means the ts had no representable local day
@@ -1270,10 +1275,12 @@ pub struct SessionGroup {
 /// One recent session, already resolved: `model` is its last non-null model by
 /// event id, `project` its first non-null project, `first_ms`/`last_ms` the
 /// session's min/max ts, groups the per-(model, meter) sums. Ordered by
-/// `last_ms` desc, then tool, then session — the event path's stable sort over
-/// a `(tool, session)` BTreeMap.
+/// `last_ms` desc, then origin, tool, then session — the event path's stable
+/// sort over an `(origin, tool, session)` BTreeMap.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionFact {
+    /// `""` for this machine; part of the session identity under `All`.
+    pub origin: String,
     pub tool: String,
     pub session: String,
     pub model: Option<String>,
@@ -1346,6 +1353,7 @@ impl<'a> Money<'a> {
 /// facts (the mcp/skill breakdown key).
 #[derive(Debug, Clone, Copy)]
 struct G<'a> {
+    origin: &'a str,
     tool: &'a str,
     session: &'a str,
     project: Option<&'a str>,
@@ -1362,6 +1370,7 @@ struct G<'a> {
 /// is what lets the same helper serve rollup rows and loop-local window vecs.
 fn rollup_g(r: &RollupRow) -> G<'_> {
     G {
+        origin: &r.origin,
         tool: &r.tool,
         session: &r.session,
         project: r.project.as_deref(),
@@ -1376,6 +1385,7 @@ fn rollup_g(r: &RollupRow) -> G<'_> {
 
 fn live_g(f: &FactGroup) -> G<'_> {
     G {
+        origin: &f.origin,
         tool: &f.tool,
         session: &f.session,
         project: f.project.as_deref(),
@@ -1390,6 +1400,7 @@ fn live_g(f: &FactGroup) -> G<'_> {
 
 fn call_g(c: &CallFact) -> G<'_> {
     G {
+        origin: &c.origin,
         tool: &c.tool,
         session: &c.session,
         project: c.project.as_deref(),
@@ -1411,7 +1422,7 @@ fn call_g(c: &CallFact) -> G<'_> {
 fn fold_groups<'a>(groups: impl IntoIterator<Item = G<'a>>, money: &mut Money<'a>) -> (Summary, bool) {
     let mut s = Summary::default();
     let mut priced_any = false;
-    let mut sessions: HashSet<(&str, &str)> = HashSet::new();
+    let mut sessions: HashSet<(&str, &str, &str)> = HashSet::new();
     let mut unpriced: HashMap<(&str, &str), UnpricedModel> = HashMap::new();
     for g in groups {
         let (cost, priced) = money.cost(g.tool, g.model, g.counts, g.meter);
@@ -1425,7 +1436,7 @@ fn fold_groups<'a>(groups: impl IntoIterator<Item = G<'a>>, money: &mut Money<'a
             }
         }
         s.requests += g.requests;
-        sessions.insert((g.tool, g.session));
+        sessions.insert((g.origin, g.tool, g.session));
         if !priced && g.counts.total() > 0.0 {
             let key = (g.tool, g.model.unwrap_or("unknown"));
             let e = unpriced.entry(key).or_insert_with(|| UnpricedModel {
@@ -1686,6 +1697,7 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
                 requests += g.requests;
             }
             SessionRow {
+                origin: s.origin.clone(),
                 tool: s.tool.clone(),
                 session: s.session.clone(),
                 project: s.project.clone(),
@@ -2237,6 +2249,20 @@ mod tests {
         assert_eq!(r.recent_sessions[0].requests, 2);
         assert_eq!(r.recent_sessions[0].model, "glm-5.3-flash", "latest model wins");
         assert_eq!(r.day.summary.sessions, 1);
+    }
+
+    #[test]
+    fn summaries_keep_same_session_name_per_origin() {
+        let p = pricing();
+        let now = ms_of(2026, 9, 23, 10);
+        let mut local = ev("codex", now - 1, "same", "gpt-5", TokenCounts { input: 10.0, ..Default::default() });
+        local.source = "/tmp/local.jsonl".into();
+        let mut remote = ev("codex", now, "same", "gpt-5", TokenCounts { input: 20.0, ..Default::default() });
+        remote.source = "linux:remote:row-1".into();
+        let r = summarize(&[local, remote], &ReportOptions::new(&p).with_now(now));
+        assert_eq!(r.day.summary.sessions, 2);
+        assert_eq!(r.day.breakdown.tools[0].sessions, 2);
+        assert_eq!(r.recent_sessions.iter().map(|s| s.origin.as_str()).collect::<Vec<_>>(), vec!["remote", ""]);
     }
 
     #[test]

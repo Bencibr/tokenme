@@ -1,18 +1,19 @@
 //! The ingest pass: discover → diff against `file_state` → parallel read →
 //! one transaction per file.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDate, TimeZone};
 use rusqlite::{params, OptionalExtension, Transaction};
-use usage_core::{
-    local_day_of, origin_of, DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent,
-};
+use usage_core::{Call, DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent, local_day_of, origin_of};
 
-use crate::{call_kind_str, meter_str, now_ms, sql_err, Index, INSERT_EVENT, ORIGIN_SQL};
+use crate::{
+    call_kind_str, mark_sync_dirty, meter_str, now_ms, sql_err, sync_dirty_enabled,
+    persist_sync_event_identity, sync_event_identity, sync_occurrence_for_ingest, Index, INSERT_EVENT, ORIGIN_SQL,
+};
 
 /// Nothing older than this stays in the index, which is also how far `rebuild`
 /// re-reads. `report`'s heatmap spans 742 days (two years — the year view's
@@ -154,7 +155,7 @@ pub(crate) fn recompute_span_tx(tx: &Transaction<'_>, lo_ts: i64, hi_ts: i64) ->
 /// the doomed rows' own timestamps (a purge touches scattered days, not a
 /// range). One unrepresentable ts wipes the whole rollup — its `""` bucket is
 /// only ever filled correctly by the full lazy rebuild.
-pub(crate) fn recompute_days_tx(tx: &Transaction<'_>, doomed_ts: &[i64]) -> Result<()> {
+pub fn recompute_days_tx(tx: &Transaction<'_>, doomed_ts: &[i64]) -> Result<()> {
     if doomed_ts.iter().any(|t| local_day_of(*t).is_none()) {
         tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
         return Ok(());
@@ -319,7 +320,7 @@ fn pass<'a>(
     let started = Instant::now();
     let mut acc = Acc::default();
     if clear_first {
-        idx.clear()?;
+        idx.clear_local_for_rebuild()?;
     }
     for adapter in adapters {
         // One broken adapter must degrade to "that tool is missing this pass",
@@ -657,7 +658,9 @@ fn persist(
         .conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(sql_err)?;
+    let sync_enabled = sync_dirty_enabled(&tx)?;
     let mut inserted = 0i64;
+    let mut occurrence_used = BTreeMap::<[u8; 32], BTreeSet<i64>>::new();
     {
         let mut ins_event = tx.prepare(INSERT_EVENT).map_err(sql_err)?;
         let mut sel_existing = tx
@@ -676,8 +679,6 @@ fn persist(
                  WHERE id = ?13",
             )
             .map_err(sql_err)?;
-        let mut ins_call =
-            tx.prepare("INSERT INTO call(event_id, kind, name) VALUES(?1,?2,?3)").map_err(sql_err)?;
         // Labels only. Money never moves backwards, so this is the one write a row
         // with an unchanged total can still get.
         let mut up_label = tx
@@ -695,6 +696,11 @@ fn persist(
         let mut relabeled_days: Vec<i64> = Vec::new();
         for ev in &events {
             let c = &ev.counts;
+            let occurrence_id = if sync_enabled && ev.dedupe_key.as_deref().is_none_or(|key| key.is_empty()) {
+                Some(sync_occurrence_for_ingest(&tx, &key, ev, full_rescan, &mut occurrence_used, now_ms())?)
+            } else {
+                None
+            };
             let existing: Option<(i64, f64, f64, f64, f64, f64, f64, i64, String, String)> =
                 if let Some(dk) = ev.dedupe_key.as_deref() {
                     sel_existing
@@ -721,6 +727,7 @@ fn persist(
             if let Some((old_id, old_in, old_cc, old_cr, old_out, old_reason, old_credits, old_ts, old_project, old_model)) = existing {
                 let old_total = old_in + old_cc + old_cr + old_out + old_credits;
                 let new_total = c.total();
+                let mut changed = false;
                 if new_total > old_total {
                     up_event
                         .execute(params![
@@ -739,14 +746,7 @@ fn persist(
                             old_id,
                         ])
                         .map_err(sql_err)?;
-                    for call in &ev.calls {
-                        ins_call.execute(params![old_id, call_kind_str(call.kind), call.name]).map_err(sql_err)?;
-                    }
-                    if let Some(q) = ev.quota.as_ref() {
-                        ins_quota
-                            .execute(params![old_id, q.used_percent, q.window_minutes, q.resets_at_ms, q.label])
-                            .map_err(sql_err)?;
-                    }
+                    changed = true;
                     let old_day = local_day_of(old_ts).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
                     let new_day = local_day_of(ev.ts_ms).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
                     if old_day == new_day {
@@ -786,12 +786,45 @@ fn persist(
                         up_label
                             .execute(params![ev.project, ev.model, old_id])
                             .map_err(sql_err)?;
+                        changed = true;
                         acc.relabeled += 1;
                         relabeled_days.push(old_ts);
-                    } else {
-                        acc.deduped += 1;
-                        *acc.deduped_by_tool.entry(tool.to_string()).or_default() += 1;
                     }
+                }
+                if merge_call_multiplicity_tx(&tx, old_id, &ev.calls)? {
+                    changed = true;
+                }
+                let old_quota: Option<(f64, i64, i64, Option<String>)> = tx.query_row(
+                    "SELECT used_percent, window_minutes, resets_at_ms, label FROM quota WHERE event_id = ?1",
+                    params![old_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                ).optional().map_err(sql_err)?;
+                let quota_changed = match (&old_quota, ev.quota.as_ref()) {
+                    (None, Some(_)) => true,
+                    (Some(old), Some(new)) => old.0.to_bits() != new.used_percent.to_bits()
+                        || old.1 != new.window_minutes || old.2 != new.resets_at_ms || old.3.as_deref() != new.label.as_deref(),
+                    _ => false,
+                };
+                if quota_changed {
+                    if let Some(q) = ev.quota.as_ref() {
+                        ins_quota.execute(params![old_id, q.used_percent, q.window_minutes, q.resets_at_ms, q.label]).map_err(sql_err)?;
+                    }
+                    changed = true;
+                }
+                if sync_enabled {
+                    // A keyed row may have been indexed before the additive
+                    // identity table existed.  Reasserting the mapping is
+                    // cheap and lets a later paged export repair that row.
+                    persist_sync_event_identity(&tx, old_id, ev, occurrence_id.as_deref())?;
+                }
+                if changed {
+                    if sync_enabled {
+                        let dirty_identity = sync_event_identity(ev, occurrence_id.as_deref())?;
+                        mark_sync_dirty(&tx, &dirty_identity, &key, occurrence_id.as_deref(), old_id, old_ts, now_ms())?;
+                    }
+                } else {
+                    acc.deduped += 1;
+                    *acc.deduped_by_tool.entry(tool.to_string()).or_default() += 1;
                 }
                 continue;
             }
@@ -826,13 +859,24 @@ fn persist(
             *acc.new_by_tool.entry(tool.to_string()).or_default() += 1;
             inserted += 1;
             let id = tx.last_insert_rowid();
-            for call in &ev.calls {
-                ins_call.execute(params![id, call_kind_str(call.kind), call.name]).map_err(sql_err)?;
+            if let Some(occurrence_id) = occurrence_id.as_deref() {
+                tx.execute(
+                    "INSERT INTO sync_event_occurrence(event_id, occurrence_id) VALUES(?1, ?2)",
+                    params![id, occurrence_id],
+                ).map_err(sql_err)?;
             }
+            if sync_enabled {
+                persist_sync_event_identity(&tx, id, ev, occurrence_id.as_deref())?;
+            }
+            insert_call_rows_tx(&tx, id, &ev.calls)?;
             if let Some(q) = ev.quota.as_ref() {
                 ins_quota
                     .execute(params![id, q.used_percent, q.window_minutes, q.resets_at_ms, q.label])
                     .map_err(sql_err)?;
+            }
+            if sync_enabled {
+                let dirty_identity = sync_event_identity(ev, occurrence_id.as_deref())?;
+                mark_sync_dirty(&tx, &dirty_identity, &key, occurrence_id.as_deref(), id, ev.ts_ms, now_ms())?;
             }
             // Same transaction as the event row above: the rollup is a cache of
             // exactly these rows, and a crash may lose both or neither, never
@@ -902,6 +946,54 @@ fn persist(
     Ok(())
 }
 
+/// Calls are a multiset, not a set: two real invocations with the same name
+/// are two local observations.  A keyed adapter may replay a cumulative row,
+/// so only the positive difference from the stored multiplicity is inserted.
+fn insert_call_rows_tx(tx: &Transaction<'_>, event_id: i64, calls: &[Call]) -> Result<()> {
+    for call in calls {
+        tx.execute(
+            "INSERT INTO call(event_id, kind, name) VALUES(?1, ?2, ?3)",
+            params![event_id, call_kind_str(call.kind), call.name],
+        ).map_err(sql_err)?;
+    }
+    Ok(())
+}
+
+fn merge_call_multiplicity_tx(tx: &Transaction<'_>, event_id: i64, calls: &[Call]) -> Result<bool> {
+    let mut incoming = BTreeMap::<(String, String), usize>::new();
+    for call in calls {
+        let key = (call_kind_str(call.kind).to_string(), call.name.clone());
+        let count = incoming.entry(key).or_default();
+        *count = count.checked_add(1).ok_or_else(|| usage_core::Error::Sync("call multiplicity overflow".into()))?;
+    }
+    if incoming.is_empty() {
+        return Ok(false);
+    }
+    let mut existing = BTreeMap::<(String, String), usize>::new();
+    let mut stmt = tx.prepare("SELECT kind, name, count(*) FROM call WHERE event_id = ?1 GROUP BY kind, name").map_err(sql_err)?;
+    let rows = stmt.query_map(params![event_id], |row| {
+        Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, i64>(2)?))
+    }).map_err(sql_err)?;
+    for row in rows {
+        let (key, count) = row.map_err(sql_err)?;
+        let count = usize::try_from(count).map_err(|_| usage_core::Error::Sync("stored call multiplicity is invalid".into()))?;
+        existing.insert(key, count);
+    }
+    drop(stmt);
+    let mut changed = false;
+    for ((kind, name), wanted) in incoming {
+        let have = existing.get(&(kind.clone(), name.clone())).copied().unwrap_or(0);
+        for _ in have..wanted {
+            tx.execute(
+                "INSERT INTO call(event_id, kind, name) VALUES(?1, ?2, ?3)",
+                params![event_id, kind, name],
+            ).map_err(sql_err)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 impl Index {
     /// `ingest_with` with pre-discovered snapshots: for an adapter whose id the
     /// `hints` closure answers `Some(files)`, those files replace `discover` —
@@ -945,6 +1037,12 @@ impl Index {
         tx
             .execute(
                 "DELETE FROM quota WHERE event_id IN (SELECT id FROM event WHERE source = ?1)",
+                params![key],
+            )
+            .map_err(sql_err)?;
+        tx
+            .execute(
+                "DELETE FROM sync_event_occurrence WHERE event_id IN (SELECT id FROM event WHERE source = ?1)",
                 params![key],
             )
             .map_err(sql_err)?;

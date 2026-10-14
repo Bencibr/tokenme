@@ -28,6 +28,7 @@ tauri-plugin-single-instance = "2"
 
 usage-core = { path = "../../../crates/usage-core" }
 usage-index = { path = "../../../crates/usage-index" }
+usage-device-sync = { path = "../../../crates/usage-device-sync" }
 usage-adapter-all = { path = "../../../crates/adapters/all" }
 usage-adapter-dsh = { path = "../../../crates/adapters/dsh" }
 usage-adapter-codex = { path = "../../../crates/adapters/codex" }
