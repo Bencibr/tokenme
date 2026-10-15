@@ -1041,14 +1041,53 @@ impl SyncStore {
         })
     }
 
-    pub fn reject_pairing(&mut self, request_id: &str) -> SyncResult<()> {
+    /// Clear a pairing request from the actionable queue without ever making
+    /// an expired request approvable.  A request whose invite crossed its
+    /// expiry boundary is first materialized as `expired` in the same
+    /// transaction, then both persisted `expired` rows and still-pending rows
+    /// are moved to the retained `rejected` history state.
+    pub fn clear_pairing_request(&mut self, request_id: &str, now_ms: i64) -> SyncResult<()> {
         self.index.with_network_transaction(|tx| {
-            let changed = tx.execute("UPDATE device_pairing_request SET status = 'rejected' WHERE request_id = ?1 AND status = 'pending'", params![request_id]).map_err(sql_err)?;
+            tx.execute(
+                "UPDATE device_pairing_request
+                 SET status = 'expired'
+                 WHERE request_id = ?1 AND status = 'pending' AND EXISTS(
+                     SELECT 1 FROM device_pairing_invite i
+                     WHERE i.invite_id = device_pairing_request.invite_id
+                       AND i.expires_at_ms <= ?2
+                 )",
+                params![request_id, now_ms],
+            ).map_err(sql_err)?;
+            let changed = tx.execute(
+                "UPDATE device_pairing_request SET status = 'rejected'
+                 WHERE request_id = ?1 AND status IN ('pending', 'expired')",
+                params![request_id],
+            ).map_err(sql_err)?;
             if changed == 0 {
-                return Err(SyncError::NotFound("pending pairing request".into()));
+                let status: Option<String> = tx.query_row(
+                    "SELECT status FROM device_pairing_request WHERE request_id = ?1",
+                    params![request_id],
+                    |row| row.get(0),
+                ).optional().map_err(sql_err)?;
+                return Err(match status {
+                    Some(status) => SyncError::Conflict(format!("pairing request is {status}")),
+                    None => SyncError::NotFound("pairing request".into()),
+                });
             }
             Ok(())
         })
+    }
+
+    /// Backward-compatible rejection entry point for callers that do not
+    /// supply a deterministic clock.  The command path uses
+    /// `clear_pairing_request` with its captured operation timestamp.
+    pub fn reject_pairing(&mut self, request_id: &str) -> SyncResult<()> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| SyncError::Invalid(format!("system clock is before unix epoch: {error}")))?
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        self.clear_pairing_request(request_id, now_ms)
     }
 
     pub fn pause_device(&mut self, device_id: &str) -> SyncResult<()> {
@@ -3150,6 +3189,27 @@ mod tests {
         let boundary_request = PairingRequest::new(&boundary_invite, &boundary_device, "linux").unwrap();
         store.receive_pairing_request(&boundary_request, 11).unwrap();
         assert!(matches!(store.approve_pairing(&boundary_request.request_id, 20), Err(SyncError::Conflict(message)) if message.contains("approvable")));
+    }
+
+    #[test]
+    fn persisted_and_dynamic_expired_pairing_requests_can_be_cleared_but_not_approved() {
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let dynamic_invite = store.create_pairing_invite("https://localhost:47821", &"6".repeat(64), 10).unwrap();
+        let dynamic_device = identity("dynamic-expired");
+        let dynamic_request = PairingRequest::new(&dynamic_invite, &dynamic_device, "linux").unwrap();
+        store.receive_pairing_request(&dynamic_request, 1).unwrap();
+        assert_eq!(store.pairing_requests_at(10).unwrap().iter().find(|request| request.request_id == dynamic_request.request_id).unwrap().status, "expired");
+        store.clear_pairing_request(&dynamic_request.request_id, 10).unwrap();
+        assert_eq!(store.pairing_requests_at(10).unwrap().iter().find(|request| request.request_id == dynamic_request.request_id).unwrap().status, "rejected");
+        assert!(matches!(store.approve_pairing(&dynamic_request.request_id, 10), Err(SyncError::Conflict(message)) if message.contains("rejected")));
+
+        let persisted_invite = store.create_pairing_invite("https://localhost:47821", &"7".repeat(64), 100).unwrap();
+        let persisted_device = identity("persisted-expired");
+        let persisted_request = PairingRequest::new(&persisted_invite, &persisted_device, "linux").unwrap();
+        store.receive_pairing_request(&persisted_request, 1).unwrap();
+        store.index().conn().execute("UPDATE device_pairing_request SET status = 'expired' WHERE request_id = ?1", params![persisted_request.request_id]).unwrap();
+        store.clear_pairing_request(&persisted_request.request_id, 2).unwrap();
+        assert_eq!(store.pairing_requests_at(2).unwrap().iter().find(|request| request.request_id == persisted_request.request_id).unwrap().status, "rejected");
     }
 
     #[test]

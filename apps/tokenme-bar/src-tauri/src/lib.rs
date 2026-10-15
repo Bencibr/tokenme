@@ -1,4 +1,5 @@
 mod commands;
+mod diagnostics;
 mod bubble;
 mod lang;
 mod logging;
@@ -47,6 +48,7 @@ pub fn run() {
         .manage(EngineChannel(tx))
         .manage(engine::Shared::new(Settings::load()))
         .manage(commands::SyncControl::default())
+        .manage(diagnostics::DiagnosticsState::default())
         .manage(servers::state())
         .manage(pet_notice::NoticeState::default())
         .invoke_handler(tauri::generate_handler![
@@ -73,6 +75,9 @@ pub fn run() {
             commands::set_show_empty_tools,
             commands::set_report_scope,
             commands::sync_devices,
+            diagnostics::set_diagnostics_enabled,
+            diagnostics::get_diagnostics_status,
+            diagnostics::revoke_diagnostics_sessions,
             servers::commands::get_servers,
             servers::commands::server_public_key,
             servers::commands::server_probe,
@@ -183,7 +188,13 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("tokenme failed to start")
-        .run(|_app, _event| {})
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<diagnostics::DiagnosticsState>() {
+                    state.revoke_all();
+                }
+            }
+        })
 }
 
 fn engine_start(app: tauri::AppHandle, rx: Receiver<engine::Msg>) {

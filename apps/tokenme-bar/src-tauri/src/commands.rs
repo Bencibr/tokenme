@@ -54,6 +54,7 @@ pub enum SyncManagementRequest {
     PairDiscovered { primary_id: String, endpoint: String, certificate_pin: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
     Approve { request_id: String },
     Reject { request_id: String },
+    ClearExpiredRequest { request_id: String },
     Pause { device_id: String },
     Resume { device_id: String },
     Revoke { device_id: String },
@@ -76,6 +77,7 @@ fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
         Some(SyncManagementRequest::PairDiscovered { .. }) => "pair_discovered",
         Some(SyncManagementRequest::Approve { .. }) => "approve",
         Some(SyncManagementRequest::Reject { .. }) => "reject",
+        Some(SyncManagementRequest::ClearExpiredRequest { .. }) => "clear_expired_request",
         Some(SyncManagementRequest::Pause { .. }) => "pause",
         Some(SyncManagementRequest::Resume { .. }) => "resume",
         Some(SyncManagementRequest::Revoke { .. }) => "revoke",
@@ -1099,6 +1101,15 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
         }
         SyncManagementRequest::Reject { request_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
+            SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.clear_pairing_request(&request_id, current_ms()).map_err(|e| e.to_string())
+        }
+        SyncManagementRequest::ClearExpiredRequest { request_id } => {
+            let request = snapshot.pairing_requests.iter().find(|request| request.request_id == request_id)
+                .ok_or_else(|| "pairing request was not found".to_string())?;
+            if request.status != "expired" {
+                return Err("pairing request is not expired".into());
+            }
+            let primary_id = state_primary_id(state, &snapshot)?;
             SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.reject_pairing(&request_id).map_err(|e| e.to_string())
         }
         SyncManagementRequest::Pause { device_id } => {
@@ -1130,14 +1141,24 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
 }
 
 #[tauri::command]
-pub async fn sync_devices(request: Option<SyncManagementRequest>, control: State<'_, SyncControl>) -> Result<SyncDevicesView, String> {
+pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>, control: State<'_, SyncControl>) -> Result<SyncDevicesView, String> {
     let action = sync_action_name(request.as_ref());
     let started = Instant::now();
+    let revoked_device = match request.as_ref() {
+        Some(SyncManagementRequest::Revoke { device_id }) => Some(device_id.clone()),
+        _ => None,
+    };
+    if matches!(request.as_ref(), Some(SyncManagementRequest::Stop)) {
+        if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
+            diagnostics.revoke_all();
+        }
+    }
     if matches!(request.as_ref(), Some(SyncManagementRequest::Discover)) {
         {
             let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
             if state.discovery_in_flight {
                 let error = Err("mDNS discovery is already running".into());
+                crate::logging::sync_event(action, false, Some("operation_busy"));
                 eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
                 return error;
             }
@@ -1155,6 +1176,7 @@ pub async fn sync_devices(request: Option<SyncManagementRequest>, control: State
             apply_discovery_result(&mut state, discovery, discovery_started);
             sync_snapshot(&mut state)
         })();
+        crate::logging::sync_event(action, result.is_ok(), result.as_ref().err().map(|_| "handler_failed"));
         eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
         return result;
     }
@@ -1166,6 +1188,14 @@ pub async fn sync_devices(request: Option<SyncManagementRequest>, control: State
         if let Some(request) = request { run_sync_action(&mut state, request)?; }
         sync_snapshot(&mut state)
     })();
+    crate::logging::sync_event(action, result.is_ok(), result.as_ref().err().map(|_| "handler_failed"));
+    if result.is_ok() {
+        if let Some(device_id) = revoked_device.as_deref() {
+            if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
+                diagnostics.revoke_target(device_id);
+            }
+        }
+    }
     eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
     result
 }
