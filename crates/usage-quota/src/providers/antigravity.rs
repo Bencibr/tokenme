@@ -221,18 +221,41 @@ fn attach() -> Option<Vec<QuotaSample>> {
 #[cfg(unix)]
 fn attach() -> Option<Vec<QuotaSample>> {
     let servers = find_language_servers()?;
+    let mut merged: Vec<QuotaSample> = Vec::new();
     for server in servers.iter().take(MAX_SERVERS) {
         for port in listening_ports(server.pid).into_iter().take(MAX_PORTS) {
             for scheme in ["http", "https"] {
                 let Some(value) = quota_summary(server, port, scheme) else { continue };
                 let samples = samples_from(&value);
                 if !samples.is_empty() {
-                    return Some(samples);
+                    merge_samples(&mut merged, samples);
+                    break;
                 }
             }
         }
     }
-    None
+    (!merged.is_empty()).then_some(merged)
+}
+
+/// A desktop app and an IDE can each host a logged-in language server, and
+/// every server answers for the login it carries — one may sit at 15 % used
+/// while the other has barely moved. The panel renders one row per model
+/// window, so the merged view keeps — per window — whichever server reports
+/// the higher use: that is the quota that can actually stop the user, and
+/// when both servers carry the same login it is simply the fresher of the
+/// two views. A window only one server carries is appended, not dropped.
+#[cfg(any(unix, test))]
+fn merge_samples(into: &mut Vec<QuotaSample>, from: Vec<QuotaSample>) {
+    for sample in from {
+        match into
+            .iter_mut()
+            .find(|kept| kept.window_minutes == sample.window_minutes && kept.label == sample.label)
+        {
+            Some(kept) if kept.used_percent >= sample.used_percent => {}
+            Some(kept) => *kept = sample,
+            None => into.push(sample),
+        }
+    }
 }
 
 /// `ps -axo pid=,command=`, classified the way `CodexBar`
@@ -696,6 +719,45 @@ mod tests {
         let s = samples_from(&body(LIVE));
         let untouched = s.iter().filter(|x| (x.used_percent - 0.0).abs() < 1e-9).count();
         assert_eq!(untouched, 2, "the Claude and GPT group is untouched");
+    }
+
+    /// The desktop app and the IDE each host a server; measured on this
+    /// machine the IDE's login had barely moved while the desktop's weekly
+    /// window sat at 15.6 % — the first answer used to shadow the second.
+    #[test]
+    fn two_servers_merge_per_window_by_the_busier_answer() {
+        let idle = samples_from(&body(
+            r#"{"response":{"groups":[{"displayName":"Gemini Models","buckets":[
+                 {"bucketId":"g5","window":"5h","remainingFraction":1,"resetTime":"2026-10-15T13:00:00Z"},
+                 {"bucketId":"gw","window":"weekly","remainingFraction":0.9985,"resetTime":"2026-10-21T05:49:31Z"}]}]}}"#,
+        ));
+        let active = samples_from(&body(
+            r#"{"response":{"groups":[{"displayName":"Gemini Models","buckets":[
+                 {"bucketId":"g5","window":"5h","remainingFraction":0.8785,"resetTime":"2026-10-15T11:27:40Z"},
+                 {"bucketId":"gw","window":"weekly","remainingFraction":0.8442,"resetTime":"2026-10-21T05:19:45Z"}]}]}}"#,
+        ));
+        let mut merged = idle.clone();
+        merge_samples(&mut merged, active.clone());
+        assert_eq!(merged.len(), 2, "same windows on both sides stay one row each");
+        let five = merged.iter().find(|s| s.window_minutes == 300).unwrap();
+        let week = merged.iter().find(|s| s.window_minutes == 10_080).unwrap();
+        assert!((five.used_percent - 12.15).abs() < 0.01, "{five:?}");
+        assert!((week.used_percent - 15.58).abs() < 0.01, "{week:?}");
+        let active_week = active.iter().find(|s| s.window_minutes == 10_080).unwrap();
+        assert_eq!(week.resets_at_ms, active_week.resets_at_ms, "the reset rides the kept answer");
+        // The merge is symmetric for the zero side: whoever is busier wins.
+        let mut reversed = active;
+        merge_samples(&mut reversed, idle);
+        assert_eq!(reversed, merged);
+    }
+
+    #[test]
+    fn a_window_only_one_server_carries_is_appended_not_dropped() {
+        let one = samples_from(&body(RPC));
+        let mut merged = one[..2].to_vec();
+        merge_samples(&mut merged, one[2..].to_vec());
+        assert_eq!(merged.len(), 4, "the second group's windows join the view");
+        assert_eq!(merged, one, "and disjoint answers compose into the first server's order");
     }
 
     #[test]

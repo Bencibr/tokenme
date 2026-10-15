@@ -21,7 +21,16 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("funide", &["FunIDE"]),
     ("dsh", &["DSH Desktop", "dsh-desktop"]),
     ("zcode", &["ZCode", "zcode"]),
-    ("antigravity", &["Antigravity"]),
+    ("antigravity", &[
+        "Antigravity",
+        // The IDE build's main binary ships as the generic "Electron" (the
+        // Trae rule again); its helpers are the only processes that name the
+        // product, and they live and die with the app.
+        "Antigravity IDE Helper",
+        "Antigravity IDE Helper (GPU)",
+        "Antigravity IDE Helper (Renderer)",
+        "Antigravity IDE Helper (Plugin)",
+    ]),
     // Windows installs the desktop app as one word; the spaced name is macOS.
     ("workbuddy", &["WorkBuddy AI", "WorkBuddyAI"]),
     ("workbuddy_cn", &["WorkBuddy"]),
@@ -202,6 +211,29 @@ mod tests {
         alive.insert("FunIDE".to_string());
         assert!(matches(&alive, "funide"));
         assert!(matches(&alive, "funide.exe"));
+    }
+
+    /// The IDE build's main binary is the generic "Electron", so only its
+    /// helpers can prove the app is alive — a machine running just the IDE
+    /// must not read as "host exited" (that pause froze the quota rows).
+    #[test]
+    fn the_antigravity_ide_counts_through_its_helpers() {
+        let desktop_only = HashSet::from(["Antigravity".into()]);
+        let ide_only: HashSet<String> = [
+            "Electron",
+            "Antigravity IDE Helper",
+            "Antigravity IDE Helper (GPU)",
+            "Antigravity IDE Helper (Renderer)",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(any_host_running("antigravity", &desktop_only));
+        assert!(any_host_running("antigravity", &ide_only));
+        assert!(!any_host_running(
+            "antigravity",
+            &HashSet::from(["language_server_macos_arm".into()])
+        ));
     }
 
     /// Cola gates on either the Electron main process or the bundled
