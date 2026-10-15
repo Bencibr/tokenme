@@ -106,9 +106,10 @@ export interface QuotaView {
     observed_tokens: number;
     estimated_tokens?: number | null;
     previous_tokens?: number | null;
-    status: "collecting" | "partial" | "complete" | "unavailable";
+    status: "collecting" | "partial" | "complete" | "unavailable" | "unverified";
     period_start_ms: number;
     period_end_ms: number;
+    models?: { model: string; tokens: number }[];
   } | null;
 }
 

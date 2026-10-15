@@ -90,6 +90,10 @@ function formatCycleTokens(value: number): string {
  *  badge/button for exactly these. */
 const CHECKIN_TOOLS = ["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn"];
 
+/** Segment/dot hues for the per-model cycle breakdown — panel palette vars,
+ *  repeating with the same order past the fourth model (the query caps at 8). */
+const MODEL_HUES = ["var(--bar-fill)", "var(--warn)", "var(--ok)", "var(--bad)"];
+
 /** The check-in state rides the report as zero-window marker rows. They are
  *  control channel, not data: the badge and the button read them off the raw
  *  report, the row list never shows them. Trae's entitlement window
@@ -269,6 +273,10 @@ export function QuotaStrip({
   // Click a truncated window label to read it whole: the native hover title
   // exists, but nobody waits out its delay in a non-activating panel.
   const [tipKey, setTipKey] = useState<string | null>(null);
+  // The per-model list under a cycle line, and which anchor (model name or
+  // bar) shows the floating tip. Keys are rowKey-scoped, tips row+model.
+  const [modelsOpenKey, setModelsOpenKey] = useState<string | null>(null);
+  const [modelTipKey, setModelTipKey] = useState<string | null>(null);
   const dragRef = useRef<Drag | null>(null);
   // The authoritative order: pointer moves arrive faster than renders, so the
   // drag handlers swap through the ref and never through stale state.
@@ -719,7 +727,9 @@ export function QuotaStrip({
                     ? t("quota.cycle.partial")
                     : cycle?.status === "collecting"
                       ? t("quota.cycle.collecting")
-                      : t("quota.cycle.unavailable");
+                      : cycle?.status === "unverified"
+                        ? t("quota.cycle.unverified")
+                        : t("quota.cycle.unavailable");
                 return (
                   <div key={rowKey(q)}>
                     <div
@@ -797,8 +807,104 @@ export function QuotaStrip({
                           <span>{t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })}</span>
                         ) : null}
                         <em>{cycleStatus}</em>
+                        {cycle.models && cycle.models.length > 0 && cycle.estimated_tokens != null ? (
+                          <button
+                            type="button"
+                            className="quota-cycbtn"
+                            aria-expanded={modelsOpenKey === rowKey(q)}
+                            onClick={() => {
+                              setModelsOpenKey(modelsOpenKey === rowKey(q) ? null : rowKey(q));
+                              setModelTipKey(null);
+                            }}
+                          >
+                            {modelsOpenKey === rowKey(q) ? "▾" : "▸"} {t("quota.cycle.models")}
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
+                    {showCycleTokens && cycle && modelsOpenKey === rowKey(q) && cycle.models && cycle.estimated_tokens != null
+                      ? (() => {
+                          const est = cycle.estimated_tokens;
+                          const mTotal = cycle.models.reduce((a, m) => a + m.tokens, 0);
+                          const left = Math.max(0, (est * (100 - q.used_percent)) / 100);
+                          const rowK = rowKey(q);
+                          return (
+                            <div className="quota-models" role="group" aria-label={t("quota.cycle.models")}>
+                              <div className="quota-models-head">
+                                <span>{t("quota.cycle.limit", { tokens: formatCycleTokens(est) })}</span>
+                                <span className="num">{t("quota.cycle.left", { tokens: formatCycleTokens(left) })}</span>
+                              </div>
+                              <div className="quota-models-mix" aria-hidden="true">
+                                {cycle.models.map((m, i) => (
+                                  <span
+                                    key={m.model}
+                                    style={{ width: `${((m.tokens / mTotal) * 100).toFixed(1)}%`, background: MODEL_HUES[i % MODEL_HUES.length] }}
+                                  />
+                                ))}
+                              </div>
+                              {cycle.models.map((m, i) => {
+                                const share = m.tokens / mTotal;
+                                const dom = share >= 0.9;
+                                const quota = est * share;
+                                const shown = remaining ? Math.max(0, 100 - q.used_percent) : Math.min(100, q.used_percent);
+                                const stage = q.used_percent >= 80 ? "high" : q.used_percent >= 50 ? "mid" : undefined;
+                                const nameK = `n:${rowK}:${i}`;
+                                const barK = `b:${rowK}:${i}`;
+                                const shareText = dom
+                                  ? t("quota.model.share-dom", { p: Math.round(share * 100) })
+                                  : t("quota.model.share", { p: Math.round(share * 100) });
+                                return (
+                                  <div className="quota-mrow" key={m.model}>
+                                    <button
+                                      type="button"
+                                      className="quota-mname"
+                                      aria-expanded={modelTipKey === nameK}
+                                      title={m.model}
+                                      onClick={() => setModelTipKey(modelTipKey === nameK ? null : nameK)}
+                                    >
+                                      <i className="quota-mdot" style={{ background: MODEL_HUES[i % MODEL_HUES.length] }} aria-hidden="true" />
+                                      <span className="quota-mtext">{m.model}</span>
+                                    </button>
+                                    <span
+                                      className="quota-mbar"
+                                      role="button"
+                                      tabIndex={0}
+                                      aria-label={t("quota.model.share", { p: Math.round(share * 100) })}
+                                      onClick={() => setModelTipKey(modelTipKey === barK ? null : barK)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                          e.preventDefault();
+                                          setModelTipKey(modelTipKey === barK ? null : barK);
+                                        }
+                                      }}
+                                    >
+                                      <i data-stage={stage} style={{ width: `${shown}%` }} />
+                                      {modelTipKey === barK ? (
+                                        <span className={`rank-tip${flipTips.has(rowK) ? " up" : ""}`}>
+                                          {t("quota.model.tip", {
+                                            used: formatCycleTokens(m.tokens),
+                                            left: formatCycleTokens(Math.max(0, quota - m.tokens)),
+                                            quota: formatCycleTokens(quota),
+                                            share: shareText,
+                                          })}
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                    <span className="quota-mpct num" data-stage={stage}>
+                                      {shown}
+                                      <em>%</em>
+                                    </span>
+                                    <span className="quota-mused num">{formatCycleTokens(m.tokens)}</span>
+                                  </div>
+                                );
+                              })}
+                              {cycle.status === "unverified" ? (
+                                <p className="quota-models-caveat">{t("quota.cycle.unverified.caveat")}</p>
+                              ) : null}
+                            </div>
+                          );
+                        })()
+                      : null}
                   </div>
                 );
               })}

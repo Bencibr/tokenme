@@ -153,6 +153,17 @@ pub enum CycleStatus {
     Partial,
     Complete,
     Unavailable,
+    /// The vendor's percent is treated as a token meter but its counting rules
+    /// are not verified yet (a third-party-documented endpoint): the estimate
+    /// is shown with a caveat, never silently.
+    Unverified,
+}
+
+/// One model's share of the observed cycle tokens, most-used first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleModelUsage {
+    pub model: String,
+    pub tokens: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,6 +176,12 @@ pub struct CycleUsage {
     pub status: CycleStatus,
     pub period_start_ms: i64,
     pub period_end_ms: i64,
+    /// Per-model breakdown of `observed_tokens` (same window, same machine
+    /// scope). Empty when the events carry no model ids or the meter is not
+    /// token-like — the field disappears from the payload rather than
+    /// shipping an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<CycleModelUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

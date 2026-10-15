@@ -1215,6 +1215,161 @@
   font-style: normal;
 }
 
+/* The per-model breakdown under a cycle line: one single-line row per model,
+   same geometry as the quota rows above (bar / percent / used). */
+.quota-cycbtn {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--ink-3);
+  font: inherit;
+  cursor: pointer;
+}
+
+.quota-cycbtn:hover,
+.quota-cycbtn[aria-expanded="true"] {
+  color: var(--accent-ink);
+}
+
+.quota-models {
+  grid-column: 1 / -1;
+  border: 1px solid var(--hair-2);
+  border-radius: 8px;
+  margin: 0 0 4px;
+  background: var(--surface-solid);
+}
+
+.quota-models-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--hair-2);
+  border-radius: 8px 8px 0 0;
+  color: var(--ink-3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-models-mix {
+  display: flex;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 7px 8px 3px;
+}
+
+.quota-models-mix span {
+  height: 100%;
+}
+
+.quota-mrow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 34px 44px;
+  gap: 7px;
+  align-items: center;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--hair-2);
+  font-size: 11px;
+}
+
+.quota-mrow:last-of-type {
+  border-bottom: 0;
+}
+
+.quota-mname {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--ink-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.quota-mdot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.quota-mtext {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10.5px;
+}
+
+.quota-mbar {
+  position: relative;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--track);
+  cursor: pointer;
+}
+
+.quota-mbar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  min-width: 2px;
+  background: var(--bar-fill);
+}
+
+.quota-mbar i[data-stage="mid"] {
+  background: var(--warn);
+}
+
+.quota-mbar i[data-stage="high"] {
+  background: var(--bad);
+}
+
+.quota-mpct {
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-mpct em {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 10px;
+  margin-left: 1px;
+  opacity: 0.6;
+}
+
+.quota-mpct[data-stage="mid"] {
+  color: var(--warn);
+}
+
+.quota-mpct[data-stage="high"] {
+  color: var(--bad);
+}
+
+.quota-mused {
+  text-align: right;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.quota-models-caveat {
+  margin: 0;
+  padding: 6px 8px 7px;
+  border-top: 1px solid var(--hair-2);
+  color: var(--warn);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .quota-name {
   position: relative;
   font-size: 11.5px;

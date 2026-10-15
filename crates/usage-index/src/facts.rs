@@ -10,7 +10,7 @@ use rusqlite::{params, params_from_iter, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use usage_core::{
-    local_day_of, AggregatePlan, CallFact, CycleStatus, CycleUsage, FactGroup, MachineScope, QuotaFact, QuotaSample,
+    local_day_of, AggregatePlan, CallFact, CycleModelUsage, CycleStatus, CycleUsage, FactGroup, MachineScope, QuotaFact, QuotaSample,
     QuotaView, ReportFacts, Result, RollupRow, SessionFact, SessionGroup, TokenCounts, LIVE_HOUR0, LIVE_PREV,
     LIVE_PREV_HOUR0, LIVE_QUARTER0,
     LIVE_TODAY,
@@ -143,17 +143,21 @@ impl Index {
             });
             if stale_sample {
                 let state = old.as_ref().expect("stale_sample implies prior state");
+                let trusted = token_percent_is_trustworthy(&q.tool);
+                let unverified = !trusted && percent_is_unverified_token_like(&q.tool);
                 let estimated_tokens = if state.observed_tokens > 0.0
-                    && state.last_used_percent >= 5.0
-                    && token_percent_is_trustworthy(&q.tool)
-                    && state.identity != "unknown"
+                    && state.last_used_percent >= if trusted { 5.0 } else { 0.1 }
+                    && (trusted || unverified)
+                    && !(trusted && state.identity == "unknown")
                     && state.period_end_ms > state.last_sampled_at_ms
                 {
                     Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0))
                 } else {
                     None
                 };
-                let status = if !token_percent_is_trustworthy(&q.tool) {
+                let status = if unverified {
+                    CycleStatus::Unverified
+                } else if !trusted {
                     CycleStatus::Unavailable
                 } else if state.complete {
                     CycleStatus::Complete
@@ -162,6 +166,14 @@ impl Index {
                 } else {
                     CycleStatus::Collecting
                 };
+                let models = if trusted || unverified {
+                    self.sum_tokens_by_model(&q.tool, state.period_start_ms, observed_until, model_family_hint(q.label.as_deref()))?
+                    .into_iter()
+                    .map(|(model, tokens)| CycleModelUsage { model, tokens })
+                    .collect()
+                } else {
+                    Vec::new()
+                };
                 q.cycle = Some(CycleUsage {
                     observed_tokens: state.observed_tokens,
                     estimated_tokens,
@@ -169,6 +181,7 @@ impl Index {
                     status,
                     period_start_ms: state.period_start_ms,
                     period_end_ms: state.period_end_ms,
+                    models,
                 });
                 continue;
             }
@@ -191,12 +204,25 @@ impl Index {
             if q.used_percent >= 99.5 {
                 complete = true;
             }
-            let estimated_tokens = if known_boundary && !account_changed && identity != "unknown" && observed_tokens > 0.0 && q.used_percent >= 5.0 && token_percent_is_trustworthy(&q.tool) {
+            let trusted = token_percent_is_trustworthy(&q.tool);
+            let unverified = !trusted && percent_is_unverified_token_like(&q.tool);
+            // The unverified tier (Cline) relaxes two guards on purpose: the
+            // single-account store keeps the "unknown" identity stable, and the
+            // whole point is the early-window magnitude the >=5% gate refuses.
+            let estimated_tokens = if known_boundary
+                && !account_changed
+                && (trusted || unverified)
+                && !(trusted && identity == "unknown")
+                && observed_tokens > 0.0
+                && q.used_percent >= if trusted { 5.0 } else { 0.1 }
+            {
                 Some(observed_tokens * 100.0 / q.used_percent.clamp(0.1, 100.0))
             } else {
                 None
             };
-            let status = if !token_percent_is_trustworthy(&q.tool) {
+            let status = if unverified {
+                CycleStatus::Unverified
+            } else if !trusted {
                 CycleStatus::Unavailable
             } else if complete {
                 CycleStatus::Complete
@@ -221,6 +247,14 @@ impl Index {
                     params![key, serde_json::to_string(&state).map_err(|e| usage_core::Error::Sqlite(e.to_string()))?],
                 )
                 .map_err(sql_err)?;
+            let models = if trusted || unverified {
+                self.sum_tokens_by_model(&q.tool, start, observed_until, model_family_hint(q.label.as_deref()))?
+                .into_iter()
+                .map(|(model, tokens)| CycleModelUsage { model, tokens })
+                .collect()
+            } else {
+                Vec::new()
+            };
             q.cycle = Some(CycleUsage {
                 observed_tokens,
                 estimated_tokens,
@@ -228,9 +262,44 @@ impl Index {
                 status,
                 period_start_ms: start,
                 period_end_ms: end,
+                models,
             });
         }
         Ok(())
+    }
+
+    /// The same meter and machine scope as [`Self::sum_tokens`], grouped by the
+    /// event's model id, heaviest first. Family-hinted rows (Claude's
+    /// Sonnet/Opus buckets) filter like `sum_tokens` so the breakdown sums to
+    /// the row's observed total; unbounded names are capped at 8 rows.
+    fn sum_tokens_by_model(
+        &self,
+        tool: &str,
+        start_ms: i64,
+        end_ms: i64,
+        model_family: Option<&str>,
+    ) -> Result<Vec<(String, f64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT COALESCE(NULLIF(model, ''), 'unknown') AS m, \
+             COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) \
+             FROM event WHERE tool = ?1 AND source NOT LIKE 'linux:%' AND meter = 'tokens' \
+             AND ts_ms >= ?2 AND ts_ms < ?3 \
+             AND (?4 IS NULL OR lower(COALESCE(model, '')) LIKE '%' || lower(?4) || '%') \
+             GROUP BY m ORDER BY 2 DESC LIMIT 8",
+        ).map_err(sql_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![tool, start_ms, end_ms, model_family], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (model, tokens) = row.map_err(sql_err)?;
+            if tokens > 0.0 {
+                out.push((model, tokens));
+            }
+        }
+        Ok(out)
     }
 
     fn sum_tokens(&self, tool: &str, start_ms: i64, end_ms: i64, model_family: Option<&str>) -> Result<f64> {
@@ -665,6 +734,15 @@ impl Index {
 
 fn token_percent_is_trustworthy(tool: &str) -> bool {
     matches!(tool, "codex" | "claude" | "antigravity" | "antigravity_ide")
+}
+
+/// Percent meters whose token-like reading is plausible but NOT vendor-verified
+/// (Cline's usage-limits endpoint is third-party-documented; its own clients
+/// never call it). They extrapolate under [`CycleStatus::Unverified`] — shown
+/// with a caveat — and only the identity guard is relaxed, because these
+/// stores are single-account so the "unknown" identity is stable.
+fn percent_is_unverified_token_like(tool: &str) -> bool {
+    tool == "cline"
 }
 
 /// Claude's weekly Sonnet/Opus rows are separate vendor buckets. Only apply a
@@ -1673,6 +1751,65 @@ mod golden {
         idx.attach_cycle_usage(&mut quotas, now).unwrap();
         assert_eq!(quotas[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
         assert_eq!(quotas[0].cycle.as_ref().unwrap().estimated_tokens, None);
+    }
+
+    /// Cline rides the unverified tier: the estimate fires at 1% with an
+    /// unknown account identity (the store is single-account), the status says
+    /// so, and the per-model breakdown rides along — the model list's data.
+    #[test]
+    fn cycle_usage_estimates_cline_as_unverified_with_models() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-cline-unverified.jsonl"),
+            vec![
+                ev("cline", now - 10 * 60_000, "cycle-a", Some("claude-sonnet-4-5"), None, counts(8_700_000.0)),
+                ev("cline", now - 9 * 60_000, "cycle-b", Some("qwen3-coder-480b"), None, counts(3_900_000.0)),
+                ev("cline", now - 8 * 60_000, "cycle-c", Some("deepseek-v3.2"), None, counts(1_400_000.0)),
+            ],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'cline'", []).unwrap();
+        let mut quotas = vec![QuotaView {
+            tool: "cline".into(), used_percent: 1.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        }];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        let cycle = quotas[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.observed_tokens, 14_000_000.0);
+        assert_eq!(cycle.status, CycleStatus::Unverified);
+        // 1% refuses the estimate for a trusted tool; the unverified tier
+        // exists precisely to show this magnitude, caveated.
+        assert_eq!(cycle.estimated_tokens, Some(1_400_000_000.0));
+        assert_eq!(cycle.models.len(), 3);
+        assert_eq!(cycle.models[0].model, "claude-sonnet-4-5");
+        assert_eq!(cycle.models[0].tokens, 8_700_000.0);
+        assert!(cycle.models[1].tokens > cycle.models[2].tokens, "heaviest first");
+    }
+
+    /// A tool in neither tier keeps the old behavior: the row stays with its
+    /// observed tokens, but no estimate and no model list ship at all.
+    #[test]
+    fn cycle_usage_still_refuses_unknown_meters() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-opencode-unavailable.jsonl"),
+            vec![ev("opencode", now - 10 * 60_000, "cycle", Some("gpt-5"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'opencode'", []).unwrap();
+        let mut quotas = vec![QuotaView {
+            tool: "opencode".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        }];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        let cycle = quotas[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.status, CycleStatus::Unavailable);
+        assert_eq!(cycle.estimated_tokens, None);
+        assert!(cycle.models.is_empty());
     }
 
     #[test]
