@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use crate::diagnostics::{
     DiagnosticsError, DiagnosticsGrant, DiagnosticsMcpRequest, DiagnosticsMcpResponse,
-    DiagnosticsRequestAuth, DiagnosticsScope, DiagnosticsService, DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_REQUEST_TIMEOUT,
+    DiagnosticsScope, DiagnosticsService, DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_REQUEST_TIMEOUT,
     MAX_DIAGNOSTICS_BODY_BYTES,
 };
 use crate::protocol::{
@@ -1550,7 +1550,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::protocol::{DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, UploadEnvelope};
-    use crate::{PairingRequest, SyncStore};
+    use crate::{DiagnosticsRequestAuth, PairingRequest, SyncStore};
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::thread;
 
