@@ -144,7 +144,7 @@ $ tokenme daily --days 3
 
 ## Supported tools & live quota
 
-Every tool below ships as a built-in adapter — 27 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
+Every tool below ships as a built-in adapter — 28 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
 
 | Tool | Live quota | Check-in | Fixtures | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -158,6 +158,7 @@ Every tool below ships as a built-in adapter — 27 of them, indexed straight fr
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | subscription windows | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | credits + plan / resource packs | ✅ | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | self-computed (CLI `/usage`) | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/antigravity_ide.png" width="20" alt=""> **Antigravity IDE** | self-computed (local session store) | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | membership points (one-time token) | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan quota | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI** (international) | member points | — | ✅ | ✅ | ✅ |

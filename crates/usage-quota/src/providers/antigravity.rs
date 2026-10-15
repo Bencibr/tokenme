@@ -45,7 +45,15 @@ use usage_core::{parse_ts_ms, QuotaSample};
 
 use crate::QuotaProbe;
 
-pub struct AntigravityQuota;
+/// One quota probe per install: `ide: false` reads the desktop app's servers
+/// (and may fall back to the vendor CLI), `ide: true` reads only the
+/// Antigravity IDE's extension server — the `trae` / `trae_cn` shape. The two
+/// installs hold independent logins, so the desktop app can sit at 16 % used
+/// while the IDE has barely moved; one probe answering for both would show
+/// one login's number under a row the other login owns.
+pub struct AntigravityQuota {
+    pub ide: bool,
+}
 
 /// The CLI's own window names, and the one hard requirement for the JSON shape:
 /// `/usage --output-format json` only exists from 1.1.11 (`CodexBar`
@@ -94,18 +102,63 @@ const MAX_SERVERS: usize = 2;
 #[cfg(unix)]
 const MAX_PORTS: usize = 4;
 
+/// Which install a discovered server belongs to. The probes are per tool, so
+/// discovery filters on this: the desktop probe answers for `Desktop` and
+/// `Cli` servers (the CLI shares the desktop login), the IDE probe for `Ide`.
+#[cfg(any(unix, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerKind {
+    Desktop,
+    Ide,
+    Cli,
+}
+
+/// The classification `find_language_servers` applies, in the order that
+/// matters: the IDE first, because its markers contain the desktop markers'
+/// substrings (`--app_data_dir antigravity` matches `antigravity-ide`, and the
+/// IDE's path under `extensions/antigravity/` carries `/antigravity/`).
+#[cfg(any(unix, test))]
+fn server_kind(lower: &str) -> Option<ServerKind> {
+    if lower.contains("--app_data_dir antigravity-ide")
+        || lower.contains("--app_data_dir=antigravity-ide")
+        || lower.contains("antigravity ide.app/")
+    {
+        return Some(ServerKind::Ide);
+    }
+    if is_desktop_language_server(lower) {
+        return Some(ServerKind::Desktop);
+    }
+    if is_cli_language_server(lower) {
+        return Some(ServerKind::Cli);
+    }
+    None
+}
+
 impl QuotaProbe for AntigravityQuota {
     fn tool(&self) -> &'static str {
-        "antigravity"
+        if self.ide {
+            "antigravity_ide"
+        } else {
+            "antigravity"
+        }
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
+        let kind = if self.ide { ServerKind::Ide } else { ServerKind::Desktop };
         // Attach first: the running server is logged in already, and a local
         // HTTP call cannot trigger any auth flow.
-        if let Some(samples) = attach() {
+        if let Some(samples) = attach(kind) {
             if !samples.is_empty() {
                 return samples;
             }
+        }
+        // The IDE has no spawn fallback: the vendor CLI answers from the
+        // desktop/CLI login, so its numbers would land under the IDE's row —
+        // exactly the shadowing this split exists to prevent. Its meter is
+        // its own extension server, and the host gate keeps the probe off
+        // while the IDE is closed.
+        if self.ide {
+            return Vec::new();
         }
         // Fallback: the vendor CLI. The one step here that can pop a browser,
         // so both the IDE-presence check and the breaker decide whether it
@@ -219,29 +272,51 @@ fn attach() -> Option<Vec<QuotaSample>> {
 }
 
 #[cfg(unix)]
-fn attach() -> Option<Vec<QuotaSample>> {
-    let servers = find_language_servers()?;
+fn attach(kind: ServerKind) -> Option<Vec<QuotaSample>> {
+    let servers = find_language_servers(kind)?;
+    let mut merged: Vec<QuotaSample> = Vec::new();
     for server in servers.iter().take(MAX_SERVERS) {
         for port in listening_ports(server.pid).into_iter().take(MAX_PORTS) {
             for scheme in ["http", "https"] {
                 let Some(value) = quota_summary(server, port, scheme) else { continue };
                 let samples = samples_from(&value);
                 if !samples.is_empty() {
-                    return Some(samples);
+                    merge_samples(&mut merged, samples);
+                    break;
                 }
             }
         }
     }
-    None
+    (!merged.is_empty()).then_some(merged)
+}
+
+/// Servers of one kind can still be several: the desktop app and the CLI's
+/// own server share a login, and each answers for it. The panel renders one
+/// row per model window, so the merged view keeps — per window — whichever
+/// server reports the higher use: that is the quota that can actually stop
+/// the user, and when both carry the same login it is simply the fresher of
+/// the two views. A window only one server carries is appended, not dropped.
+#[cfg(any(unix, test))]
+fn merge_samples(into: &mut Vec<QuotaSample>, from: Vec<QuotaSample>) {
+    for sample in from {
+        match into
+            .iter_mut()
+            .find(|kept| kept.window_minutes == sample.window_minutes && kept.label == sample.label)
+        {
+            Some(kept) if kept.used_percent >= sample.used_percent => {}
+            Some(kept) => *kept = sample,
+            None => into.push(sample),
+        }
+    }
 }
 
 /// `ps -axo pid=,command=`, classified the way `CodexBar`
 /// `antigravityProcessKind` classifies: a `language_server` binary inside an
 /// Antigravity/Gemini path (desktop app, IDE extension), or the CLI's own
-/// server. Desktop matches without a `--csrf_token` are skipped so a server
-/// that would 401 is never hammered; the CLI's server needs no token.
+/// server. Desktop and IDE matches without a `--csrf_token` are skipped so a
+/// server that would 401 is never hammered; the CLI's server needs no token.
 #[cfg(unix)]
-fn find_language_servers() -> Option<Vec<LanguageServer>> {
+fn find_language_servers(kind: ServerKind) -> Option<Vec<LanguageServer>> {
     let output = Command::new("ps").args(["-axo", "pid=,command="]).output().ok()?;
     let mut servers = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -252,13 +327,16 @@ fn find_language_servers() -> Option<Vec<LanguageServer>> {
         let Ok(pid) = pid_text.parse::<u32>() else { continue };
         let Some(command) = parts.next() else { continue };
         let lower = command.to_lowercase();
-        let desktop = is_desktop_language_server(&lower);
-        let cli = !desktop && is_cli_language_server(&lower);
-        if !desktop && !cli {
+        let Some(server_kind) = server_kind(&lower) else { continue };
+        // The desktop probe also answers for the CLI's server: the CLI draws
+        // on the desktop login, so its quota is the desktop row's answer. The
+        // IDE probe takes IDE servers only — the CLI would answer with the
+        // wrong login's numbers.
+        if server_kind != kind && !(server_kind == ServerKind::Cli && kind == ServerKind::Desktop) {
             continue;
         }
         let csrf = flag_value(command, "--csrf_token");
-        if desktop && csrf.is_none() {
+        if server_kind != ServerKind::Cli && csrf.is_none() {
             continue;
         }
         servers.push(LanguageServer { pid, csrf });
@@ -269,6 +347,8 @@ fn find_language_servers() -> Option<Vec<LanguageServer>> {
 /// A `language_server` executable inside an Antigravity/Gemini desktop path or
 /// carrying the desktop's `--app_data_dir antigravity` flag. The path markers
 /// need their separators so unrelated names ("notantigravity/") cannot match.
+/// [`server_kind`] has already ruled the IDE out before this runs — the IDE's
+/// command line contains `--app_data_dir antigravity` as a substring.
 /// Also compiled for tests on every platform: the classification rules are
 /// pinned where the tests can run, not only where the probe does.
 #[cfg(any(unix, test))]
@@ -282,7 +362,6 @@ fn is_desktop_language_server(lower: &str) -> bool {
     lower.contains("--app_data_dir antigravity")
         || lower.contains("--app_data_dir=antigravity")
         || lower.contains("antigravity.app/")
-        || lower.contains("antigravity ide.app/")
         || lower.contains("/antigravity/")
         || lower.contains("gemini.app/")
 }
@@ -698,6 +777,45 @@ mod tests {
         assert_eq!(untouched, 2, "the Claude and GPT group is untouched");
     }
 
+    /// Several servers of one kind can answer for one row set (the desktop
+    /// app and the CLI's server share a login); before the split this merge
+    /// is also what stopped one install's idle answer shadowing the other's.
+    #[test]
+    fn two_servers_merge_per_window_by_the_busier_answer() {
+        let idle = samples_from(&body(
+            r#"{"response":{"groups":[{"displayName":"Gemini Models","buckets":[
+                 {"bucketId":"g5","window":"5h","remainingFraction":1,"resetTime":"2026-10-15T13:00:00Z"},
+                 {"bucketId":"gw","window":"weekly","remainingFraction":0.9985,"resetTime":"2026-10-21T05:49:31Z"}]}]}}"#,
+        ));
+        let active = samples_from(&body(
+            r#"{"response":{"groups":[{"displayName":"Gemini Models","buckets":[
+                 {"bucketId":"g5","window":"5h","remainingFraction":0.8785,"resetTime":"2026-10-15T11:27:40Z"},
+                 {"bucketId":"gw","window":"weekly","remainingFraction":0.8442,"resetTime":"2026-10-21T05:19:45Z"}]}]}}"#,
+        ));
+        let mut merged = idle.clone();
+        merge_samples(&mut merged, active.clone());
+        assert_eq!(merged.len(), 2, "same windows on both sides stay one row each");
+        let five = merged.iter().find(|s| s.window_minutes == 300).unwrap();
+        let week = merged.iter().find(|s| s.window_minutes == 10_080).unwrap();
+        assert!((five.used_percent - 12.15).abs() < 0.01, "{five:?}");
+        assert!((week.used_percent - 15.58).abs() < 0.01, "{week:?}");
+        let active_week = active.iter().find(|s| s.window_minutes == 10_080).unwrap();
+        assert_eq!(week.resets_at_ms, active_week.resets_at_ms, "the reset rides the kept answer");
+        // The merge is symmetric for the zero side: whoever is busier wins.
+        let mut reversed = active;
+        merge_samples(&mut reversed, idle);
+        assert_eq!(reversed, merged);
+    }
+
+    #[test]
+    fn a_window_only_one_server_carries_is_appended_not_dropped() {
+        let one = samples_from(&body(RPC));
+        let mut merged = one[..2].to_vec();
+        merge_samples(&mut merged, one[2..].to_vec());
+        assert_eq!(merged.len(), 4, "the second group's windows join the view");
+        assert_eq!(merged, one, "and disjoint answers compose into the first server's order");
+    }
+
     #[test]
     fn missing_impossible_and_disabled_buckets_are_dropped_not_invented() {
         let s = samples_from(&body(
@@ -735,30 +853,45 @@ mod tests {
 
     // -- process classification -------------------------------------------
 
-    /// The real command line of the language server on this machine (token
-    /// replaced), as `ps -axo pid=,command=` reports it.
+    /// The real command line of the desktop language server on this machine
+    /// (token replaced), as `ps -axo pid=,command=` reports it.
     const PS_COMMAND: &str = "/Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone --override_ide_name antigravity --subclient_type hub --csrf_token 0123456789abcdef --app_data_dir antigravity";
 
+    /// The real command line of the IDE extension's server (token replaced).
+    /// Its path sits under `extensions/antigravity/` and its data dir is
+    /// `antigravity-ide` — both substrings the desktop markers would eat.
+    const IDE_COMMAND: &str = "/Applications/Antigravity IDE.app/Contents/Resources/app/extensions/antigravity/bin/language_server_macos_arm --csrf_token 0123456789abcdef --extension_server_port 59554 --app_data_dir antigravity-ide --subclient_type ide";
+
     /// The same classify-and-resolve rule `find_language_servers` applies.
-    fn classify(command: &str) -> Option<(bool, Option<String>)> {
+    fn classify(command: &str) -> Option<(ServerKind, Option<String>)> {
         let lower = command.to_lowercase();
-        let desktop = is_desktop_language_server(&lower);
-        let cli = !desktop && is_cli_language_server(&lower);
-        if !desktop && !cli {
-            return None;
-        }
+        let Some(kind) = server_kind(&lower) else { return None };
         let csrf = flag_value(command, "--csrf_token");
-        if desktop && csrf.is_none() {
+        if kind != ServerKind::Cli && csrf.is_none() {
             return None;
         }
-        Some((desktop, csrf))
+        Some((kind, csrf))
     }
 
     #[test]
     fn the_desktop_server_is_found_with_its_token() {
-        let (desktop, csrf) = classify(PS_COMMAND).expect("the real command line classifies");
-        assert!(desktop);
+        let (kind, csrf) = classify(PS_COMMAND).expect("the real command line classifies");
+        assert_eq!(kind, ServerKind::Desktop);
         assert_eq!(csrf.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn the_ide_server_is_its_own_kind_never_the_desktops() {
+        let (kind, csrf) = classify(IDE_COMMAND).expect("the IDE command line classifies");
+        assert_eq!(kind, ServerKind::Ide);
+        assert_eq!(csrf.as_deref(), Some("0123456789abcdef"));
+        // The substring traps, both directions: the IDE's app_data_dir extends
+        // the desktop flag and its path carries `/antigravity/`, so the loose
+        // desktop matcher does fire on it — only `server_kind`'s check order
+        // keeps the IDE out of the desktop bucket.
+        assert!(is_desktop_language_server(&IDE_COMMAND.to_lowercase()));
+        assert_eq!(server_kind(&IDE_COMMAND.to_lowercase()), Some(ServerKind::Ide));
+        assert_eq!(classify(&PS_COMMAND.replace("--app_data_dir antigravity", "--app_data_dir antigravity-ide")).map(|(k, _)| k), Some(ServerKind::Ide));
     }
 
     #[test]
@@ -768,10 +901,16 @@ mod tests {
     }
 
     #[test]
+    fn a_tokenless_ide_server_is_skipped_the_same_way() {
+        let command = "/Applications/Antigravity IDE.app/Contents/Resources/app/extensions/antigravity/bin/language_server_macos_arm --app_data_dir antigravity-ide";
+        assert_eq!(classify(command), None, "it would 401 every call");
+    }
+
+    #[test]
     fn the_cli_server_is_found_without_a_token() {
-        let (desktop, csrf) = classify("/Users/dev/.local/bin/agy language-server --port 8080")
+        let (kind, csrf) = classify("/Users/dev/.local/bin/agy language-server --port 8080")
             .expect("the CLI's server classifies");
-        assert!(!desktop);
+        assert_eq!(kind, ServerKind::Cli);
         assert_eq!(csrf, None, "the CLI needs no CSRF token");
     }
 
@@ -830,28 +969,29 @@ mod tests {
 
     // -- live (opt-in) ------------------------------------------------------
 
-    /// Talks to the real language server running on this machine.
+    /// Talks to the real language servers running on this machine.
     #[test]
     #[cfg(unix)]
-    #[ignore = "needs the Antigravity language server running locally"]
+    #[ignore = "needs an Antigravity language server running locally"]
     fn the_running_server_answers_without_a_subprocess() {
-        let Some(servers) = find_language_servers() else {
-            println!("[antigravity] no language server process found");
-            return;
-        };
-        for server in &servers {
-            println!("[antigravity] pid {} csrf={}", server.pid, server.csrf.is_some());
-            for port in listening_ports(server.pid) {
-                println!("[antigravity] port {port}");
-                for scheme in ["http", "https"] {
-                    let Some(value) = quota_summary(server, port, scheme) else { continue };
-                    let s = samples_from(&value);
-                    println!("[antigravity] {scheme} answered {} windows", s.len());
-                    assert!(!s.is_empty(), "a logged-in server always has windows");
-                    return;
+        for (kind, label) in [(ServerKind::Desktop, "desktop"), (ServerKind::Ide, "ide")] {
+            println!("[antigravity] --- {label} servers ---");
+            let Some(servers) = find_language_servers(kind) else {
+                println!("[antigravity] no {label} language server process found");
+                continue;
+            };
+            for server in &servers {
+                println!("[antigravity] pid {} csrf={}", server.pid, server.csrf.is_some());
+                for port in listening_ports(server.pid) {
+                    println!("[antigravity] port {port}");
+                    for scheme in ["http", "https"] {
+                        let Some(value) = quota_summary(server, port, scheme) else { continue };
+                        let s = samples_from(&value);
+                        println!("[antigravity] {scheme} answered {} windows", s.len());
+                        assert!(!s.is_empty(), "a logged-in server always has windows");
+                    }
                 }
             }
         }
-        panic!("servers found but none answered: {servers:?}");
     }
 }

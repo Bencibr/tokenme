@@ -34,6 +34,12 @@ fn main() {
         }
         return;
     }
+    if matches!(cli.command, Some(Cmd::DiagnosticsStdio)) {
+        if let Err(msg) = commands::diagnostics_stdio(&cli.g) {
+            fail(&msg);
+        }
+        return;
+    }
 
     // Same for a price: the answer is in the price table, and building an index
     // to look one model up would be absurd.
@@ -71,7 +77,7 @@ fn main() {
     // must still be able to ship an (empty) bundle.
     if !matches!(
         command,
-        Cmd::Detect | Cmd::Index { .. } | Cmd::Icons | Cmd::Import { .. } | Cmd::Export { .. }
+        Cmd::Detect | Cmd::Index { .. } | Cmd::Icons | Cmd::DiagnosticsStdio | Cmd::Import { .. } | Cmd::Export { .. }
             | Cmd::Sync { action: SyncCmd::Status | SyncCmd::Run | SyncCmd::Stop | SyncCmd::Invite { .. } | SyncCmd::Pair { .. } | SyncCmd::Approve { .. } | SyncCmd::OpenStream { .. } | SyncCmd::Serve { .. } }
     ) {
         if let Err(msg) = ctx.prepare() {
@@ -91,7 +97,7 @@ fn main() {
         Cmd::CodexDoctor => commands::codex_doctor(&ctx),
         Cmd::WorkbuddyLogin => commands::workbuddy_login(),
         // Handled before the index was built; here only so the match stays total.
-        Cmd::Budget { .. } | Cmd::Icons | Cmd::Pricing { action: PricingCmd::Explain { .. } } => Ok(()),
+        Cmd::Budget { .. } | Cmd::Icons | Cmd::DiagnosticsStdio | Cmd::Pricing { action: PricingCmd::Explain { .. } } => Ok(()),
         Cmd::Pricing { action: PricingCmd::Contested { limit } } => {
             commands::pricing_contested(&ctx, limit)
         }

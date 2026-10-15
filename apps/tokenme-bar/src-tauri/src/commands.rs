@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -10,15 +11,18 @@ use std::time::{Duration, Instant};
 
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use usage_core::pricing::PricingOptions;
 use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
-use usage_device_sync::{hash_bytes, ClientTransportCancellation, DeviceIdentity, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, HttpsServerConfig, PairingInvite, PairingInviteDetails, PairingRequest, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SyncError, SyncRuntime, SyncRuntimeConfig, SyncStore, TransportError, Tls13HttpsTransport, HttpsTransportConfig};
+use usage_device_sync::{hash_bytes, ClientTransportCancellation, DeviceIdentity, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, DiagnosticsError, DiagnosticsHost, HttpsServerConfig, PairingInvite, PairingInviteDetails, PairingRequest, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SyncError, SyncRuntime, SyncRuntimeConfig, SyncStore, TransportError, Tls13HttpsTransport, HttpsTransportConfig};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
 use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Theme, TrayMode};
 use crate::tray;
+
+const DEFAULT_PRIMARY_BIND: &str = "0.0.0.0:47821";
 
 /// Terminates the tray application, rather than merely hiding its panel.
 #[tauri::command]
@@ -51,6 +55,7 @@ pub enum SyncManagementRequest {
     PairDiscovered { primary_id: String, endpoint: String, certificate_pin: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
     Approve { request_id: String },
     Reject { request_id: String },
+    ClearExpiredRequest { request_id: String },
     Pause { device_id: String },
     Resume { device_id: String },
     Revoke { device_id: String },
@@ -73,15 +78,16 @@ fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
         Some(SyncManagementRequest::PairDiscovered { .. }) => "pair_discovered",
         Some(SyncManagementRequest::Approve { .. }) => "approve",
         Some(SyncManagementRequest::Reject { .. }) => "reject",
+        Some(SyncManagementRequest::ClearExpiredRequest { .. }) => "clear_expired_request",
         Some(SyncManagementRequest::Pause { .. }) => "pause",
         Some(SyncManagementRequest::Resume { .. }) => "resume",
         Some(SyncManagementRequest::Revoke { .. }) => "revoke",
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SyncControl {
-    state: Mutex<SyncControlState>,
+    state: Arc<Mutex<SyncControlState>>,
 }
 
 #[derive(Debug, Default)]
@@ -123,12 +129,23 @@ impl SyncPhase {
     }
 }
 
-#[derive(Debug)]
 struct SyncService {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<Result<(), TransportError>>>,
     certificate_der: Vec<u8>,
+    diagnostics: usage_device_sync::HttpsSyncServerHandle,
     mdns: Option<MdnsAdvertisement>,
+}
+
+impl std::fmt::Debug for SyncService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SyncService")
+            .field("join", &self.join.is_some())
+            .field("certificate_der_len", &self.certificate_der.len())
+            .field("mdns", &self.mdns)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A pairing request is persisted before the first network write.  If the
@@ -185,7 +202,7 @@ struct SecondaryRuntimeService {
 }
 
 impl Default for SyncControl {
-    fn default() -> Self { Self { state: Mutex::new(SyncControlState::default()) } }
+    fn default() -> Self { Self { state: Arc::new(Mutex::new(SyncControlState::default())) } }
 }
 
 impl Drop for SyncService {
@@ -282,6 +299,33 @@ fn current_ms() -> i64 {
 
 fn state_primary_id(state: &SyncControlState, snapshot: &DeviceSyncSnapshot) -> Result<String, String> {
     state.primary_id.clone().or_else(|| snapshot.primary_id.clone()).ok_or_else(|| "primary is not configured; start the primary service first".into())
+}
+
+/// The diagnostics authority belongs to the running HTTPS primary.  Keep the
+/// listener handle and certificate behind this small crate-private snapshot so
+/// the panel command cannot manufacture a local or detached grant.
+pub(crate) struct PrimaryDiagnosticsContext {
+    pub handle: usage_device_sync::HttpsSyncServerHandle,
+    pub endpoint: String,
+    pub certificate_pin: String,
+    pub certificate_der: Vec<u8>,
+}
+
+pub(crate) fn primary_diagnostics_context(control: &SyncControl) -> Result<PrimaryDiagnosticsContext, String> {
+    let state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+    let service = state.service.as_ref().ok_or_else(|| "primary sync service is not running".to_string())?;
+    if state.role != "primary" {
+        return Err("diagnostics grants are available only while this device is the primary".into());
+    }
+    if service.join.as_ref().is_some_and(JoinHandle::is_finished) {
+        return Err("primary sync service is no longer running".into());
+    }
+    Ok(PrimaryDiagnosticsContext {
+        handle: service.diagnostics.clone(),
+        endpoint: state.endpoint.clone().ok_or_else(|| "primary endpoint is unavailable".to_string())?,
+        certificate_pin: state.certificate_pin.clone().ok_or_else(|| "primary certificate pin is unavailable".to_string())?,
+        certificate_der: service.certificate_der.clone(),
+    })
 }
 
 fn reap_service(state: &mut SyncControlState) {
@@ -451,7 +495,7 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     Ok(())
 }
 
-fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_host: Option<String>, allow_lan: bool) -> Result<(), String> {
+fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_host: Option<String>, allow_lan: bool, diagnostics_app: Option<AppHandle>) -> Result<(), String> {
     let index_path = sync_index_path()?;
     reap_service(state);
     if state.service.is_some() { return Ok(()); }
@@ -473,11 +517,20 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let cert_path = directory.join("server-cert.pem");
     let key_path = directory.join("server-key.pem");
     let (certificate_der, private_key_der) = usage_device_sync::ensure_server_certificate(&cert_path, &key_path, "localhost").map_err(|e| format!("cannot create private sync certificate: {e}"))?;
-    let bind_text = bind.unwrap_or_else(|| "127.0.0.1:47821".into());
+    let bind_text = bind.unwrap_or_else(|| DEFAULT_PRIMARY_BIND.into());
     let bind_addr: std::net::SocketAddr = bind_text.parse().map_err(|e| format!("sync bind address is invalid: {e}"))?;
     if allow_lan && bind_addr.ip().is_loopback() {
         return Err("LAN/VPN access requires a non-loopback listen address".into());
     }
+    if !allow_lan && !bind_addr.ip().is_loopback() {
+        return Err("a non-loopback primary listener requires LAN/VPN access; enable Allow LAN/VPN or use a loopback bind for local testing".into());
+    }
+    let host = match advertise_host.filter(|host| !host.trim().is_empty()) {
+        Some(host) => host,
+        None if bind_addr.ip().is_loopback() => "127.0.0.1".into(),
+        None => infer_advertise_host().ok_or_else(|| "could not determine a reachable LAN address; enter one such as 192.168.1.20 in Advertised address".to_string())?,
+    };
+    let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
     let existing_primary_id = SyncStore::read_status(&index_path).map_err(|error| format!("cannot read sync role: {error}"))?.primary_id;
     let current_primary_id = existing_primary_id.unwrap_or_else(|| identity.device_id.clone());
     let mut store = SyncStore::open(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
@@ -490,7 +543,12 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         store.clear_secondary_config(current_ms()).map_err(|e| format!("cannot clear stopped secondary binding: {e}"))?;
         if config.identity_path.parent() == Some(directory.as_path()) { let _ = std::fs::remove_file(&config.identity_path); }
     }
-    let server = usage_device_sync::HttpsSyncServer::bind(HttpsServerConfig {
+    let diagnostics_host = usage_device_sync::DiagnosticsHost::default();
+    diagnostics_host.set_log_path("panel", crate::logging::log_dir().join("panel.log")).map_err(|e| format!("cannot configure diagnostics panel log: {e}"))?;
+    diagnostics_host.set_log_path("sync", crate::logging::log_dir().join("diagnostics.log")).map_err(|e| format!("cannot configure diagnostics sync log: {e}"))?;
+    diagnostics_host.set_build_summary(Some(format!("TokenMe {} build {}", env!("CARGO_PKG_VERSION"), env!("TOKENME_BUILD_ID")))).map_err(|e| format!("cannot configure diagnostics build summary: {e}"))?;
+    diagnostics_host.set_panel_state(Some("sync".into())).map_err(|e| format!("cannot configure diagnostics panel state: {e}"))?;
+    let server = usage_device_sync::HttpsSyncServer::bind_with_host(HttpsServerConfig {
         bind_addr,
         certificate_der: certificate_der.clone(),
         private_key_der,
@@ -502,15 +560,15 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         idle_timeout: std::time::Duration::from_secs(30),
         total_timeout: std::time::Duration::from_secs(600),
         staging_quota_bytes: 512 * 1024 * 1024,
-    }, store).map_err(|e| format!("cannot start sync listener: {e}"))?;
+    }, store, diagnostics_host).map_err(|e| format!("cannot start sync listener: {e}"))?;
+    if let Some(app) = diagnostics_app {
+        let diagnostics_host = server.diagnostics_host();
+        server.diagnostics_host().set_control_handler(move |tool, arguments| {
+            dispatch_diagnostics_control(app.clone(), diagnostics_host.clone(), tool, arguments)
+        }).map_err(|e| format!("cannot configure diagnostics control handler: {e}"))?;
+    }
+    let diagnostics = server.diagnostics_handle();
     let address = server.local_addr().map_err(|e| e.to_string())?;
-    let host = match advertise_host {
-        Some(host) => host,
-        None if address.ip().is_loopback() => "127.0.0.1".into(),
-        None if address.ip().is_unspecified() => return Err("a LAN/VPN listener needs an advertise host such as 192.168.1.20".into()),
-        None => address.ip().to_string(),
-    };
-    let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
     let endpoint = format!("https://{endpoint_host}:{}", address.port());
     let mut persisted = SyncStore::open(&index_path, identity.device_id.clone()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
     persisted.save_primary_config(&PrimarySyncConfig {
@@ -542,8 +600,111 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     state.last_error = None;
     state.invite_url = None;
     state.invite_expires_at_ms = None;
-    state.service = Some(SyncService { stop, join: Some(join), certificate_der, mdns });
+    state.service = Some(SyncService { stop, join: Some(join), certificate_der, diagnostics, mdns });
     Ok(())
+}
+
+fn diagnostics_params_object(arguments: &Value) -> Result<&serde_json::Map<String, Value>, DiagnosticsError> {
+    arguments.as_object().ok_or(DiagnosticsError::InvalidParams)
+}
+
+fn diagnostics_optional_string(params: &serde_json::Map<String, Value>, key: &str) -> Result<Option<String>, DiagnosticsError> {
+    params.get(key).map(|value| value.as_str().map(str::to_owned).ok_or(DiagnosticsError::InvalidParams)).transpose()
+}
+
+fn diagnostics_required_identifier(params: &serde_json::Map<String, Value>, key: &str) -> Result<String, DiagnosticsError> {
+    let value = diagnostics_optional_string(params, key)?.ok_or(DiagnosticsError::InvalidParams)?;
+    if value.is_empty() || value.len() > usage_device_sync::MAX_DIAGNOSTICS_STRING_BYTES { return Err(DiagnosticsError::InvalidParams); }
+    Ok(value)
+}
+
+fn diagnostics_only_keys(params: &serde_json::Map<String, Value>, allowed: &[&str]) -> Result<(), DiagnosticsError> {
+    if params.keys().all(|key| allowed.iter().any(|allowed| key == allowed)) { Ok(()) } else { Err(DiagnosticsError::InvalidParams) }
+}
+
+fn dispatch_diagnostics_control(app: AppHandle, host: DiagnosticsHost, tool: &str, arguments: Value) -> Result<Value, DiagnosticsError> {
+    let params = diagnostics_params_object(&arguments)?;
+    if serde_json::to_vec(params).map_err(|_| DiagnosticsError::InvalidParams)?.len() > usage_device_sync::MAX_DIAGNOSTICS_PARAMS_BYTES { return Err(DiagnosticsError::Limit); }
+    match tool {
+        "ui.open_sync_sheet" => {
+            if !params.is_empty() { return Err(DiagnosticsError::InvalidParams); }
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            panel::show(&app, None);
+            if app.emit("sync-open-sheet", ()).is_err() {
+                host.complete_control_operation(&operation_id, false, current_ms());
+                return Err(DiagnosticsError::Internal);
+            }
+            host.complete_control_operation(&operation_id, true, current_ms());
+            Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
+        }
+        "ui.focus_device" => {
+            diagnostics_only_keys(params, &["device_id"])?;
+            let device_id = diagnostics_required_identifier(params, "device_id")?;
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            panel::show(&app, None);
+            if app.emit("sync-focus-device", &device_id).is_err() {
+                host.complete_control_operation(&operation_id, false, current_ms());
+                return Err(DiagnosticsError::Internal);
+            }
+            host.complete_control_operation(&operation_id, true, current_ms());
+            Ok(json!({ "accepted": true, "tool": tool, "device_id": device_id, "operation_id": operation_id }))
+        }
+        "sync.start_primary" => {
+            diagnostics_only_keys(params, &["bind", "advertise_host", "allow_lan"])?;
+            let bind = diagnostics_optional_string(params, "bind")?;
+            let advertise_host = diagnostics_optional_string(params, "advertise_host")?;
+            let allow_lan = params.get("allow_lan").map(|value| value.as_bool().ok_or(DiagnosticsError::InvalidParams)).transpose()?.unwrap_or(false);
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan });
+            Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
+        }
+        "sync.stop_primary" => {
+            if !params.is_empty() { return Err(DiagnosticsError::InvalidParams); }
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), SyncManagementRequest::Stop);
+            Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
+        }
+        "sync.discover" => {
+            if !params.is_empty() { return Err(DiagnosticsError::InvalidParams); }
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), SyncManagementRequest::Discover);
+            Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
+        }
+        "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request" => {
+            diagnostics_only_keys(params, &["request_id"])?;
+            let request_id = diagnostics_required_identifier(params, "request_id")?;
+            let action = if tool == "sync.approve_pairing" { SyncManagementRequest::Approve { request_id } } else if tool == "sync.reject_pairing" { SyncManagementRequest::Reject { request_id } } else { SyncManagementRequest::ClearExpiredRequest { request_id } };
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), action);
+            Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
+        }
+        "sync.pause" | "sync.resume" | "sync.revoke_device" => {
+            diagnostics_only_keys(params, &["device_id"])?;
+            let device_id = diagnostics_required_identifier(params, "device_id")?;
+            let action = if tool == "sync.pause" { SyncManagementRequest::Pause { device_id } } else if tool == "sync.resume" { SyncManagementRequest::Resume { device_id } } else { SyncManagementRequest::Revoke { device_id } };
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), action);
+            Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
+        }
+        "sync.refresh" => {
+            if !params.is_empty() { return Err(DiagnosticsError::InvalidParams); }
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), SyncManagementRequest::Status);
+            Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
+        }
+        _ => Err(DiagnosticsError::ToolUnavailable),
+    }
+}
+
+fn spawn_diagnostics_sync_action(app: AppHandle, host: DiagnosticsHost, tool: &str, operation_id: String, action: SyncManagementRequest) {
+    let tool = tool.to_owned();
+    tauri::async_runtime::spawn(async move {
+        let control = app.state::<SyncControl>();
+        let result = sync_devices(app.clone(), Some(action), control).await;
+        host.complete_control_operation(&operation_id, result.is_ok(), current_ms());
+        let payload = match result { Ok(snapshot) => json!({ "tool": tool, "operation_id": operation_id, "ok": true, "snapshot": snapshot }), Err(error) => json!({ "tool": tool, "operation_id": operation_id, "ok": false, "error": error }) };
+        let _ = app.emit("diagnostics-control-result", payload);
+    });
 }
 
 fn hex_bytes(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
@@ -591,6 +752,18 @@ fn register_mdns_primary(primary_id: &str, certificate_pin: &str, endpoint: &str
 
 fn mdns_permission_hint(detail: &str) -> String {
     detail.to_string()
+}
+
+fn is_loopback_advertise_host(value: &str) -> bool {
+    let host = value.trim().trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("localhost.") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn infer_advertise_host() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect(("8.8.8.8", 80)).ok()?;
+    let address = socket.local_addr().ok()?.ip();
+    (!address.is_loopback() && !address.is_unspecified()).then(|| address.to_string())
 }
 
 fn merge_discovered_primary(results: &mut Vec<DiscoveredPrimaryView>, candidate: DiscoveredPrimaryView) {
@@ -655,14 +828,17 @@ fn discover_mdns_primaries() -> Result<Vec<DiscoveredPrimaryView>, String> {
     Ok(results)
 }
 
-fn advertised_endpoint_host(value: &str, allow_lan: bool) -> Result<String, String> {
+fn advertised_endpoint_host(value: &str, _allow_lan: bool) -> Result<String, String> {
     let host = value.trim().trim_start_matches('[').trim_end_matches(']').to_string();
     if host.is_empty() || host.contains('/') || host.contains('?') || host.contains('#') {
         return Err("sync advertise host is invalid".into());
     }
+    if _allow_lan && is_loopback_advertise_host(&host) {
+        return Err("sync advertise host must be reachable; localhost and loopback addresses are not valid".into());
+    }
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if allow_lan && (ip.is_loopback() || ip.is_unspecified()) {
-            return Err("LAN/VPN invites cannot advertise a loopback or unspecified address".into());
+        if ip.is_unspecified() {
+            return Err("sync advertise host must be reachable; unspecified addresses such as 0.0.0.0 are not valid".into());
         }
         return Ok(match ip {
             std::net::IpAddr::V6(_) => format!("[{host}]"),
@@ -685,7 +861,7 @@ fn parse_pin(value: &str) -> Result<[u8; 32], String> {
     Ok(pin)
 }
 
-fn sync_snapshot(state: &mut SyncControlState) -> Result<SyncDevicesView, String> {
+fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle>) -> Result<SyncDevicesView, String> {
     reap_service(state);
     reap_runtime(state);
     if let Some(error) = state.service.as_ref().and_then(|service| service.mdns.as_ref()).and_then(|mdns| mdns.error.lock().ok().and_then(|slot| slot.clone())) {
@@ -732,7 +908,7 @@ fn sync_snapshot(state: &mut SyncControlState) -> Result<SyncDevicesView, String
             state.primary_id = Some(config.primary_id.clone());
             state.endpoint = primary_endpoint(config);
             if config.enabled && state.service.is_none() {
-                if let Err(error) = start_primary(state, Some(config.bind_addr.clone()), config.advertise_host.clone(), config.allow_lan) {
+                if let Err(error) = start_primary(state, Some(config.bind_addr.clone()), config.advertise_host.clone(), config.allow_lan, diagnostics_app.clone()) {
                     state.last_error = Some(error);
                     state.phase = SyncPhase::Error;
                 } else {
@@ -787,7 +963,7 @@ fn sync_snapshot(state: &mut SyncControlState) -> Result<SyncDevicesView, String
 pub fn restore_sync_on_launch(app: &tauri::AppHandle) {
     let Some(control) = app.try_state::<SyncControl>() else { return; };
     let Ok(mut state) = control.state.lock() else { return; };
-    if let Err(error) = sync_snapshot(&mut state) {
+    if let Err(error) = sync_snapshot(&mut state, Some(app.clone())) {
         state.last_error = Some(error);
         state.phase = SyncPhase::Error;
         return;
@@ -947,7 +1123,7 @@ fn resume_pending_pairing(state: &mut SyncControlState, index_path: &std::path::
     }
 }
 
-fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) -> Result<(), String> {
+fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, diagnostics_app: Option<AppHandle>) -> Result<(), String> {
     let is_status = matches!(&action, SyncManagementRequest::Status);
     if !is_status { state.phase = SyncPhase::Running; }
     let result = (|| {
@@ -965,7 +1141,7 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
         SyncManagementRequest::Discover => {
             Err("mDNS discovery must run asynchronously".into())
         }
-        SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan } => start_primary(state, bind, advertise_host, allow_lan),
+        SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan } => start_primary(state, bind, advertise_host, allow_lan, diagnostics_app),
         SyncManagementRequest::StartSecondary => {
             let config = SyncStore::read_secondary_config(&index_path)
                 .map_err(|error| format!("cannot read secondary sync configuration: {error}"))?
@@ -1079,6 +1255,15 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
         }
         SyncManagementRequest::Reject { request_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
+            SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.clear_pairing_request(&request_id, current_ms()).map_err(|e| e.to_string())
+        }
+        SyncManagementRequest::ClearExpiredRequest { request_id } => {
+            let request = snapshot.pairing_requests.iter().find(|request| request.request_id == request_id)
+                .ok_or_else(|| "pairing request was not found".to_string())?;
+            if request.status != "expired" {
+                return Err("pairing request is not expired".into());
+            }
+            let primary_id = state_primary_id(state, &snapshot)?;
             SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.reject_pairing(&request_id).map_err(|e| e.to_string())
         }
         SyncManagementRequest::Pause { device_id } => {
@@ -1110,14 +1295,24 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
 }
 
 #[tauri::command]
-pub async fn sync_devices(request: Option<SyncManagementRequest>, control: State<'_, SyncControl>) -> Result<SyncDevicesView, String> {
+pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>, control: State<'_, SyncControl>) -> Result<SyncDevicesView, String> {
     let action = sync_action_name(request.as_ref());
     let started = Instant::now();
+    let revoked_device = match request.as_ref() {
+        Some(SyncManagementRequest::Revoke { device_id }) => Some(device_id.clone()),
+        _ => None,
+    };
+    if matches!(request.as_ref(), Some(SyncManagementRequest::Stop)) {
+        if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
+            diagnostics.revoke_all();
+        }
+    }
     if matches!(request.as_ref(), Some(SyncManagementRequest::Discover)) {
         {
             let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
             if state.discovery_in_flight {
                 let error = Err("mDNS discovery is already running".into());
+                crate::logging::sync_event(action, false, Some("operation_busy"));
                 eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
                 return error;
             }
@@ -1133,8 +1328,9 @@ pub async fn sync_devices(request: Option<SyncManagementRequest>, control: State
             let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
             state.discovery_in_flight = false;
             apply_discovery_result(&mut state, discovery, discovery_started);
-            sync_snapshot(&mut state)
+            sync_snapshot(&mut state, Some(app.clone()))
         })();
+        crate::logging::sync_event(action, result.is_ok(), result.as_ref().err().map(|_| "handler_failed"));
         eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
         return result;
     }
@@ -1143,9 +1339,17 @@ pub async fn sync_devices(request: Option<SyncManagementRequest>, control: State
         if state.discovery_in_flight && !matches!(request.as_ref(), Some(SyncManagementRequest::Status)) {
             return Err("mDNS discovery is already running".into());
         }
-        if let Some(request) = request { run_sync_action(&mut state, request)?; }
-        sync_snapshot(&mut state)
+        if let Some(request) = request { run_sync_action(&mut state, request, Some(app.clone()))?; }
+        sync_snapshot(&mut state, Some(app.clone()))
     })();
+    crate::logging::sync_event(action, result.is_ok(), result.as_ref().err().map(|_| "handler_failed"));
+    if result.is_ok() {
+        if let Some(device_id) = revoked_device.as_deref() {
+            if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
+                diagnostics.revoke_target(device_id);
+            }
+        }
+    }
     eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
     result
 }
@@ -1773,7 +1977,7 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
 
 #[cfg(test)]
 mod sync_tests {
-    use super::{advertised_endpoint_host, merge_discovered_primary, rearm_pending_pairing_retry, sync_action_name, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, MDNS_SERVICE_TYPE};
+    use super::{advertised_endpoint_host, merge_discovered_primary, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
 
@@ -1783,7 +1987,31 @@ mod sync_tests {
         assert_eq!(advertised_endpoint_host("2001:db8::20", true).unwrap(), "[2001:db8::20]");
         assert!(advertised_endpoint_host("0.0.0.0", true).is_err());
         assert!(advertised_endpoint_host("127.0.0.1", true).is_err());
+        assert_eq!(advertised_endpoint_host("127.0.0.1", false).unwrap(), "127.0.0.1");
+        assert_eq!(advertised_endpoint_host("localhost", false).unwrap(), "localhost");
+        assert!(advertised_endpoint_host("localhost", true).is_err());
+        assert!(advertised_endpoint_host("::", false).is_err());
         assert!(advertised_endpoint_host("2001:db8::20/path", true).is_err());
+    }
+
+    #[test]
+    fn primary_defaults_to_a_reachable_listener() {
+        assert_eq!(DEFAULT_PRIMARY_BIND, "0.0.0.0:47821");
+    }
+
+    #[test]
+    fn primary_endpoint_uses_reachable_advertised_host() {
+        let config = usage_device_sync::PrimarySyncConfig {
+            primary_id: "primary-1".into(),
+            bind_addr: "0.0.0.0:47821".into(),
+            advertise_host: Some("192.168.1.20".into()),
+            allow_lan: true,
+            enabled: true,
+        };
+        let endpoint = primary_endpoint(&config).expect("configured LAN primary has an endpoint");
+        assert_eq!(endpoint, "https://192.168.1.20:47821");
+        assert!(!endpoint.contains("localhost"));
+        assert!(!endpoint.contains("0.0.0.0"));
     }
 
     #[test]

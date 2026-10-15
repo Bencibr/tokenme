@@ -300,6 +300,63 @@ export interface MachineView {
 export type SyncDeviceRole = "primary" | "secondary";
 export type SyncDeviceStatus = "pending" | "paired" | "paused" | "revoked" | "reconcile_required";
 
+export type DiagnosticsScope = "diagnostics.read" | "sync.control";
+export type DiagnosticsAction = "status" | "configure" | "create_grant" | "revoke_grant" | "revoke_all";
+
+export interface DiagnosticsSessionView {
+  session_id: string;
+  target_device: string;
+  origin: string;
+  scopes: DiagnosticsScope[];
+  issued_at_ms: number;
+  expires_at_ms: number;
+}
+
+export interface DiagnosticsOperationView {
+  operation_id: string;
+  action: Exclude<DiagnosticsAction, "status">;
+  state: "running" | "completed" | "failed";
+  at_ms: number;
+  error_code?: string;
+}
+
+export interface DiagnosticsSnapshot {
+  enabled: boolean;
+  sessions: DiagnosticsSessionView[];
+  retained_operations: number;
+  last_operation: DiagnosticsOperationView | null;
+}
+
+export interface DiagnosticsConfig {
+  schema: "tokenme-diagnostics-grant/v1";
+  endpoint: string;
+  server_name: string;
+  certificate_pin: string;
+  certificate_der_b64: string;
+  grant: {
+    grant_id: string;
+    target_device_id: string;
+    debugger_device_id: string;
+    debugger_origin: string;
+    scopes: DiagnosticsScope[];
+    issued_at_ms: number;
+    expires_at_ms: number;
+    signature: string;
+  };
+}
+
+export interface DiagnosticsResponse extends DiagnosticsSnapshot {
+  config?: DiagnosticsConfig;
+  error?: { code: string; message: string };
+}
+
+export type DiagnosticsManagementRequest =
+  | { action: "status" }
+  | { action: "configure"; enabled: boolean }
+  | { action: "create_grant"; debugger_device_id: string; scopes: DiagnosticsScope[]; ttl_ms: number }
+  | { action: "revoke_grant"; grant_id: string }
+  | { action: "revoke_all" };
+
 export type SyncManagementRequest =
   | { action: "status" }
   | { action: "discover" }
@@ -448,6 +505,7 @@ export interface Bridge {
   setReportScope: (scope: MachineScope) => Promise<void>;
   /** Strict device-sync status and its management mutations share one IPC command. */
   syncDevices: (request?: SyncManagementRequest) => Promise<SyncDevicesSnapshot>;
+  diagnosticsSession: (request: DiagnosticsManagementRequest) => Promise<DiagnosticsResponse>;
   /** `tool id → data:image/png;base64,…` for the tools that ship a macOS app. */
   toolIcons: () => Promise<Record<string, string>>;
   /** The saved drag order of the quota section (empty lists ⇒ report order). */

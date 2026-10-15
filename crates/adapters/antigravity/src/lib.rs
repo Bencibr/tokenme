@@ -1,12 +1,14 @@
-//! Antigravity CLI adapter.
+//! Antigravity adapter, one instance per install (the desktop app and the
+//! IDE are separate tools over the same storage dialect).
 //!
-//! Source: `~/.gemini/antigravity-cli/conversations/<uuid>.db` (SQLite, one
-//! conversation per file), honouring `ANTIGRAVITY_DATA_DIR`. Each
-//! `gen_metadata` row is a `GeneratorMetadata` protobuf — the shipped CLI is a
-//! closed-source Go binary and publishes no `.proto`, so [`wire`] decodes the
-//! handful of fields this mapping needs by hand: the usage message at `#1.#4`,
-//! whose `#2` is uncached input, `#3` total output, `#5` cache read and `#11` the
-//! responseId used as dedupe key, plus the model id at `#1.#19`.
+//! Source: `~/.gemini/<install>/conversations/<uuid>.db` (SQLite, one
+//! conversation per file), honouring the edition's `ANTIGRAVITY_DATA_DIR` /
+//! `ANTIGRAVITY_IDE_DATA_DIR`. Each `gen_metadata` row is a `GeneratorMetadata`
+//! protobuf — the shipped CLI is a closed-source Go binary and publishes no
+//! `.proto`, so [`wire`] decodes the handful of fields this mapping needs by
+//! hand: the usage message at `#1.#4`, whose `#2` is uncached input, `#3`
+//! total output, `#5` cache read and `#11` the responseId used as dedupe key,
+//! plus the model id at `#1.#19`.
 //!
 //! `conversation_summaries.db` beside these files is deliberately not read: its
 //! 21 columns are all title/step-count metadata and carry no token data.
@@ -25,22 +27,59 @@ use usage_core::{
 };
 
 pub const TOOL_ID: &str = "antigravity";
+/// The IDE install is its own tool — separate stores (`~/.gemini/antigravity-ide`),
+/// separate login, separate quota — the `trae` / `trae_cn` shape again.
+pub const TOOL_ID_IDE: &str = "antigravity_ide";
 
 pub use loader::{Audit, SkippedRow};
 
-/// The Antigravity CLI source. Stateless: everything it knows, it re-derives
-/// from the conversation databases on disk.
+/// Which install's stores an adapter reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Edition {
+    #[default]
+    Desktop,
+    Ide,
+}
+
+impl Edition {
+    fn tool_id(self) -> &'static str {
+        match self {
+            Edition::Desktop => TOOL_ID,
+            Edition::Ide => TOOL_ID_IDE,
+        }
+    }
+
+    fn display(self) -> &'static str {
+        match self {
+            Edition::Desktop => "Antigravity",
+            Edition::Ide => "Antigravity IDE",
+        }
+    }
+}
+
+/// One Antigravity install's source. Stateless: everything it knows, it
+/// re-derives from the conversation databases on disk.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct AntigravityAdapter;
+pub struct AntigravityAdapter {
+    edition: Edition,
+}
 
 impl AntigravityAdapter {
+    pub fn desktop() -> Self {
+        Self { edition: Edition::Desktop }
+    }
+
+    pub fn ide() -> Self {
+        Self { edition: Edition::Ide }
+    }
+
     /// Reads every discovered database and reports what the wire actually said,
     /// row by row. The ignored smoke test runs this; `read` fills the same
     /// counters, so the audit cannot drift from the ingest path.
     pub fn audit(&self, files: &[SourceFile]) -> Audit {
         let mut audit = Audit::default();
         for file in files {
-            let _ = loader::read_db(file, &mut audit);
+            let _ = loader::read_db(file, &mut audit, self.edition.tool_id());
         }
         audit
     }
@@ -48,11 +87,11 @@ impl AntigravityAdapter {
 
 impl SourceAdapter for AntigravityAdapter {
     fn id(&self) -> &'static str {
-        TOOL_ID
+        self.edition.tool_id()
     }
 
     fn display_name(&self) -> &'static str {
-        "Antigravity"
+        self.edition.display()
     }
 
     fn semantics(&self) -> Semantics {
@@ -62,7 +101,7 @@ impl SourceAdapter for AntigravityAdapter {
     }
 
     fn probe(&self) -> Option<DetectedSource> {
-        let roots = paths::roots();
+        let roots = paths::roots(self.edition);
         // One open that succeeds and whose `gen_metadata` answers a query is the
         // whole test, so this stops at the first candidate instead of walking the
         // directory: at startup it must cost one file, not a hundred. A root with
@@ -76,7 +115,7 @@ impl SourceAdapter for AntigravityAdapter {
                 .query_row(paths::COUNT_SQL, [], |row| row.get::<_, i64>(0))
                 .unwrap_or(0);
             return Some(DetectedSource {
-                id: TOOL_ID.to_string(),
+                id: self.edition.tool_id().to_string(),
                 display: self.display_name().to_string(),
                 roots,
                 hint: (rows > 0).then(|| format!("{rows} generations")),
@@ -86,7 +125,7 @@ impl SourceAdapter for AntigravityAdapter {
     }
 
     fn discover(&self, filter: &DateFilter) -> Vec<SourceFile> {
-        conversation_dbs(&paths::roots())
+        conversation_dbs(&paths::roots(self.edition))
             .into_iter()
             .filter_map(|path| {
                 let (size, mtime_ms) = paths::stat_file(&path)?;
@@ -107,7 +146,7 @@ impl SourceAdapter for AntigravityAdapter {
         // A `Tree` file ignores the cursor and is re-read whole; `dedupe_key` on
         // every event is what makes that idempotent.
         let mut audit = Audit::default();
-        Ok(loader::read_db(file, &mut audit))
+        Ok(loader::read_db(file, &mut audit, self.edition.tool_id()))
     }
 }
 
@@ -151,13 +190,17 @@ mod tests {
 
     #[test]
     fn semantics_match_what_the_blobs_actually_carry() {
-        let a = AntigravityAdapter;
-        assert_eq!(a.id(), "antigravity");
-        assert_eq!(a.display_name(), "Antigravity");
-        let s = a.semantics();
-        assert_eq!(s, Semantics::TOKENS_PER_CALL_INLINE);
-        assert!(!s.reports_quota, "no quota window exists in these records");
-        assert!(s.dedupes_by_id, "every billable row carries a responseId");
+        for edition in [Edition::Desktop, Edition::Ide] {
+            let a = AntigravityAdapter { edition };
+            assert_eq!(a.id(), edition.tool_id());
+            assert_eq!(a.display_name(), edition.display());
+            let s = a.semantics();
+            assert_eq!(s, Semantics::TOKENS_PER_CALL_INLINE);
+            assert!(!s.reports_quota, "no quota window exists in these records");
+            assert!(s.dedupes_by_id, "every billable row carries a responseId");
+        }
+        assert_eq!(AntigravityAdapter::default().id(), "antigravity", "the default stays the desktop install");
+        assert_eq!(AntigravityAdapter::ide().display_name(), "Antigravity IDE");
     }
 
     #[test]
@@ -177,7 +220,7 @@ mod tests {
 
     #[test]
     fn an_absent_source_reads_as_nothing_rather_than_failing_the_pass() {
-        let a = AntigravityAdapter;
+        let a = AntigravityAdapter::default();
         let file = SourceFile {
             path: PathBuf::from("/nonexistent/antigravity/conversations/x.db"),
             kind: FileKind::Tree,

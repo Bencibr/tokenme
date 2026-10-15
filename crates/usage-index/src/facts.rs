@@ -664,7 +664,7 @@ impl Index {
 }
 
 fn token_percent_is_trustworthy(tool: &str) -> bool {
-    matches!(tool, "codex" | "claude" | "antigravity")
+    matches!(tool, "codex" | "claude" | "antigravity" | "antigravity_ide")
 }
 
 /// Claude's weekly Sonnet/Opus rows are separate vendor buckets. Only apply a

@@ -6,10 +6,25 @@
 //! transport used by the primary and secondary runtimes.
 
 mod protocol;
+mod diagnostics;
 mod runtime;
 mod store;
 mod transport;
 
+pub use diagnostics::{
+    diagnostics_tool_registry, DiagnosticsAuditEvent, DiagnosticsAuthority, DiagnosticsCheckResult,
+    DiagnosticsError,
+    DiagnosticsErrorCode, DiagnosticsGrant, DiagnosticsMcpRequest, DiagnosticsMcpResponse,
+    DiagnosticsControlHandler, DiagnosticsHost, DiagnosticsOperation, DiagnosticsRequestAuth, DiagnosticsScope,
+    DiagnosticsService, DiagnosticsToolDefinition, DiagnosticsTraceEvent,
+    DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_PROTOCOL_VERSION, DIAGNOSTICS_REQUEST_TIMEOUT,
+    MAX_DIAGNOSTICS_ARRAY_ITEMS, MAX_DIAGNOSTICS_AUDIT_EVENTS, MAX_DIAGNOSTICS_BODY_BYTES,
+    MAX_DIAGNOSTICS_CONCURRENT_REQUESTS, MAX_DIAGNOSTICS_GRANTS, MAX_DIAGNOSTICS_JSON_DEPTH,
+    MAX_DIAGNOSTICS_OBJECT_ITEMS, MAX_DIAGNOSTICS_PARAMS_BYTES, MAX_DIAGNOSTICS_REPLAY_ENTRIES,
+    MAX_DIAGNOSTICS_SESSIONS, MAX_DIAGNOSTICS_STRING_BYTES, MAX_DIAGNOSTICS_REQUEST_TTL_MS,
+    MAX_DIAGNOSTICS_GRANT_TTL_MS, MAX_DIAGNOSTICS_SESSION_TTL_MS, MAX_DIAGNOSTICS_TRACE_EVENTS,
+    MAX_DIAGNOSTICS_OPERATIONS, MAX_DIAGNOSTICS_LOG_SCAN_BYTES, MAX_DIAGNOSTICS_OUTPUT_BYTES,
+};
 pub use protocol::{
     hash_bytes, identity_bytes, DeviceIdentity, NetworkCall, NetworkCounts, NetworkManifest,
     NetworkPackage, NetworkRow, PairingInvite, PairingRequest, SignedUpload, StreamOpenReceipt,
@@ -24,5 +39,5 @@ pub use store::{
 pub use runtime::{export_index_snapshot, export_index_snapshots, export_index_snapshots_from_snapshot, LocalSnapshot, RuntimeRunReport, SyncRuntime, SyncRuntimeConfig};
 pub use transport::{
     ensure_server_certificate, load_pem_certificate, load_pem_private_key, ClientTransportCancellation, DeviceSyncTransport, HttpsServerConfig,
-    HttpsSyncServer, HttpsTransportConfig, ParsedEndpoint, Tls13HttpsTransport, TransportError,
+    HttpsSyncServer, HttpsSyncServerHandle, HttpsTransportConfig, ParsedEndpoint, Tls13HttpsTransport, TransportError,
 };

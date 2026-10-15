@@ -12,6 +12,10 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::Connection;
 use usage_adapter_antigravity::{AntigravityAdapter, TOOL_ID};
+
+fn adapter() -> AntigravityAdapter {
+    AntigravityAdapter::default()
+}
 use usage_core::{DateFilter, FileKind, Meter, ReadCursor, SourceAdapter, SourceFile};
 
 /// `ANTIGRAVITY_DATA_DIR` is process-global, so whoever flips it holds one lock.
@@ -237,13 +241,13 @@ impl Fixture {
 }
 
 fn source_files() -> Vec<SourceFile> {
-    AntigravityAdapter.discover(&DateFilter::default())
+    adapter().discover(&DateFilter::default())
 }
 
 fn keys(files: &[SourceFile]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for file in files {
-        let outcome = AntigravityAdapter.read(file, ReadCursor(0)).expect("read is infallible");
+        let outcome = adapter().read(file, ReadCursor(0)).expect("read is infallible");
         for event in &outcome.events {
             out.insert(event.dedupe_key.clone().expect("every event carries a key"));
         }
@@ -259,7 +263,7 @@ fn probe_stops_at_the_first_readable_database() {
     fix.build(SESSION, &refs, &[]);
     let _env = EnvGuard::point_at(fix.path());
 
-    let det = AntigravityAdapter.probe().expect("a fixture install is detected");
+    let det = adapter().probe().expect("a fixture install is detected");
     assert_eq!(det.id, TOOL_ID);
     assert_eq!(det.display, "Antigravity");
     assert_eq!(det.roots, vec![fix.path().to_path_buf()], "the env root is what gets reported");
@@ -271,7 +275,7 @@ fn probe_stops_at_the_first_readable_database() {
     let empty = Fixture::new();
     std::fs::write(empty.db_path("junk"), b"not a database").unwrap();
     let _empty_env = EnvGuard::point_at(empty.path());
-    assert!(AntigravityAdapter.probe().is_none(), "no decodable database, no source");
+    assert!(adapter().probe().is_none(), "no decodable database, no source");
 
 
 }
@@ -305,12 +309,12 @@ fn discover_lists_one_entry_per_conversation_and_skips_sidecars() {
     // A retention window prunes by the file's last write, without opening it.
     let written = files[0].mtime_ms;
     assert_eq!(
-        AntigravityAdapter.discover(&DateFilter::new(Some(written), None)).len(),
+        adapter().discover(&DateFilter::new(Some(written), None)).len(),
         2,
         "a window opening at the last write still keeps both conversations"
     );
     assert_eq!(
-        AntigravityAdapter.discover(&DateFilter::new(Some(written + 86_400_000), None)).len(),
+        adapter().discover(&DateFilter::new(Some(written + 86_400_000), None)).len(),
         0,
         "a conversation that stopped before the window is not opened at all"
     );
@@ -326,8 +330,8 @@ fn real_fixture_rows_map_to_the_independently_measured_numbers() {
     let path = fix.build(SESSION, &refs, &step_refs);
     let _env = EnvGuard::point_at(fix.path());
 
-    let files = AntigravityAdapter.discover(&DateFilter::default());
-    let outcome = AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap();
+    let files = adapter().discover(&DateFilter::default());
+    let outcome = adapter().read(&files[0], ReadCursor(0)).unwrap();
     let by_key: HashMap<String, usage_core::UsageEvent> =
         outcome.events.iter().map(|e| (e.dedupe_key.clone().unwrap(), e.clone())).collect();
 
@@ -338,7 +342,7 @@ fn real_fixture_rows_map_to_the_independently_measured_numbers() {
     assert_eq!(outcome.events.len(), billable.len(), "and no other row invented an event");
 
     for want in &billable {
-        let key = format!("{SESSION}#{}", want.response_id);
+        let key = format!("{TOOL_ID}#{SESSION}#{}", want.response_id);
         let event = by_key.get(&key).unwrap_or_else(|| panic!("missing {key} in {keys:?}", keys = by_key.keys()));
         let (input, cache_read, output, reasoning) = want.counts();
         assert_eq!(event.counts.input, input, "input is #4.2 for row {}", want.idx);
@@ -383,8 +387,8 @@ fn totals_survive_the_merge_and_no_row_is_silently_dropped() {
     fix.build(SESSION, &refs, &[]);
     let _env = EnvGuard::point_at(fix.path());
 
-    let files = AntigravityAdapter.discover(&DateFilter::default());
-    let audit = AntigravityAdapter.audit(&files);
+    let files = adapter().discover(&DateFilter::default());
+    let audit = adapter().audit(&files);
     assert_eq!(audit.rows, refs.len(), "every fixture row was looked at");
     assert_eq!(audit.split_mismatches, 0, "#4.3 == #4.9 + #4.10 on every row");
     assert_eq!(audit.merged, 0, "one responseId per row in this fixture");
@@ -407,15 +411,15 @@ fn rereading_a_changed_database_is_idempotent_and_a_new_row_adds_exactly_one() {
     let path = fix.build(SESSION, &first, &[]);
     let _env = EnvGuard::point_at(fix.path());
 
-    let before = keys(&AntigravityAdapter.discover(&DateFilter::default()));
+    let before = keys(&adapter().discover(&DateFilter::default()));
     assert_eq!(before.len(), 4, "rows 0..4 all carry usage");
-    assert_eq!(before, keys(&AntigravityAdapter.discover(&DateFilter::default())), "a re-read is a no-op");
+    assert_eq!(before, keys(&adapter().discover(&DateFilter::default())), "a re-read is a no-op");
 
     // The CLI appends the next turn; the file is re-read wholesale and only the
     // new responseId becomes a new event.
     fix.append_gen(&path, 4, &gens[4]);
     touch(&path);
-    let after = keys(&AntigravityAdapter.discover(&DateFilter::default()));
+    let after = keys(&adapter().discover(&DateFilter::default()));
     let added: Vec<&String> = after.difference(&before).collect();
     assert_eq!(added.len(), 1, "one more row, one more event: {added:?}");
     assert!(before.is_subset(&after), "no earlier turn disappeared");
@@ -443,14 +447,14 @@ fn streamed_partials_of_one_response_merge_by_field_max_not_sum() {
     fix.build(SESSION, &[(0, &partial), (1, &real), (2, &partial)], &[]);
     let _env = EnvGuard::point_at(fix.path());
 
-    let files = AntigravityAdapter.discover(&DateFilter::default());
-    let outcome = AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap();
-    let audit = AntigravityAdapter.audit(&files);
+    let files = adapter().discover(&DateFilter::default());
+    let outcome = adapter().read(&files[0], ReadCursor(0)).unwrap();
+    let audit = adapter().audit(&files);
     assert_eq!(outcome.events.len(), 1, "three rows, one call");
     assert_eq!(audit.merged, 2, "both partials folded into the real snapshot");
     let event = &outcome.events[0];
     let (input, cache_read, output, _) = want.counts();
-    assert_eq!(event.dedupe_key.as_deref(), Some(&format!("{SESSION}#{}", want.response_id)[..]));
+    assert_eq!(event.dedupe_key.as_deref(), Some(&format!("{TOOL_ID}#{SESSION}#{}", want.response_id)[..]));
     assert_eq!(event.counts.input, input, "the largest snapshot wins, not the sum");
     assert_eq!(event.counts.cache_read, cache_read);
     assert_eq!(event.counts.output, output);
@@ -468,13 +472,13 @@ fn a_row_without_a_response_id_gets_a_stable_key_instead_of_a_new_one_each_pass(
     fix.build(SESSION, &[(7, &blob)], &[]);
     let _env = EnvGuard::point_at(fix.path());
 
-    let files = AntigravityAdapter.discover(&DateFilter::default());
-    let once = AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap();
-    let twice = AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap();
+    let files = adapter().discover(&DateFilter::default());
+    let once = adapter().read(&files[0], ReadCursor(0)).unwrap();
+    let twice = adapter().read(&files[0], ReadCursor(0)).unwrap();
     assert_eq!(once.events.len(), 1);
     assert_eq!(
         once.events[0].dedupe_key.as_deref(),
-        Some(&format!("{SESSION}#gen7")[..]),
+        Some(&format!("{TOOL_ID}#{SESSION}#gen7")[..]),
         "idx is the integer primary key, so it repeats exactly"
     );
     assert_eq!(once.events[0].dedupe_key, twice.events[0].dedupe_key);
@@ -496,11 +500,11 @@ fn a_missing_gen_metadata_column_or_blob_reads_as_nothing() {
     }
     let _env = EnvGuard::point_at(fix.path());
 
-    let files = AntigravityAdapter.discover(&DateFilter::default());
-    let outcome = AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap();
+    let files = adapter().discover(&DateFilter::default());
+    let outcome = adapter().read(&files[0], ReadCursor(0)).unwrap();
     assert!(outcome.events.is_empty(), "nothing here is billable");
     assert_eq!(outcome.cursor, ReadCursor(0), "a Tree file never advances a cursor");
-    let audit = AntigravityAdapter.audit(&files);
+    let audit = adapter().audit(&files);
     assert_eq!(audit.rows, 4, "a NULL blob is still a row, it just carries no generation");
     assert_eq!(audit.unusable, 0);
     assert_eq!(audit.decoded, 0);
@@ -516,19 +520,19 @@ fn a_missing_gen_metadata_column_or_blob_reads_as_nothing() {
 fn an_absent_or_corrupt_database_never_fails_the_pass() {
     {
         let _env = EnvGuard::point_at(Path::new("/nonexistent/antigravity-install"));
-        assert!(AntigravityAdapter.discover(&DateFilter::default()).is_empty());
+        assert!(adapter().discover(&DateFilter::default()).is_empty());
     }
 
     let fix = Fixture::new();
     let junk = fix.conversations().join("torn.db");
     std::fs::write(&junk, b"this is not sqlite at all, not even a header").unwrap();
     let _env = EnvGuard::point_at(fix.path());
-    let files = AntigravityAdapter.discover(&DateFilter::default());
+    let files = adapter().discover(&DateFilter::default());
     assert_eq!(files.len(), 1, "one file listed, and it happens not to be a database");
     assert_eq!(files.len(), 1);
-    let outcome = AntigravityAdapter.read(&files[0], ReadCursor(0)).expect("read is infallible");
+    let outcome = adapter().read(&files[0], ReadCursor(0)).expect("read is infallible");
     assert_eq!(outcome, usage_core::ReadOutcome::default());
-    assert_eq!(AntigravityAdapter.audit(&files).unusable, 1);
+    assert_eq!(adapter().audit(&files).unusable, 1);
 }
 
 /// The pitfall the reference implementations hit: uncheckpointed rows live in
@@ -547,8 +551,8 @@ fn a_live_wal_database_shows_rows_that_never_reached_the_main_file() {
     assert!(wal.is_file() && std::fs::metadata(&wal).unwrap().len() > 0, "the sidecar carries the rows");
 
     let _env = EnvGuard::point_at(fix.path());
-    let files = AntigravityAdapter.discover(&DateFilter::default());
-    let outcome = AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap();
+    let files = adapter().discover(&DateFilter::default());
+    let outcome = adapter().read(&files[0], ReadCursor(0)).unwrap();
     assert_eq!(outcome.events.len(), 3, "rows still sitting in the -wal are counted");
     let keys: BTreeSet<String> = outcome.events.iter().filter_map(|e| e.dedupe_key.clone()).collect();
     assert_eq!(keys.len(), 3);
@@ -577,8 +581,8 @@ fn a_wal_index_a_read_only_handle_cannot_rebuild_falls_back_to_a_private_copy() 
 
     let events = {
         let _env = EnvGuard::point_at(fix.path());
-        let files = AntigravityAdapter.discover(&DateFilter::default());
-        AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap().events
+        let files = adapter().discover(&DateFilter::default());
+        adapter().read(&files[0], ReadCursor(0)).unwrap().events
     };
     readonly(fix.conversations(), false);
 
@@ -644,8 +648,8 @@ fn a_generation_without_its_own_timestamp_is_dated_from_the_steps_table() {
     fix.build(SESSION, &[(1, &stamped)], &[step.as_slice()]);
     let _env = EnvGuard::point_at(fix.path());
 
-    let files = AntigravityAdapter.discover(&DateFilter::default());
-    let outcome = AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap();
+    let files = adapter().discover(&DateFilter::default());
+    let outcome = adapter().read(&files[0], ReadCursor(0)).unwrap();
     assert_eq!(outcome.events.len(), 1);
     let event = &outcome.events[0];
     assert_eq!(event.counts.input, want.counts().0, "the tokens still came from gen_metadata");

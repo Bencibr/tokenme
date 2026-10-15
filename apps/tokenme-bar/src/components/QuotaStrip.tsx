@@ -70,6 +70,15 @@ function displayWindowName(q: QuotaView): string {
   return translateQuotaVocab(windowName(q));
 }
 
+/** A plan tier's interval suffix ("Cline Pass (Monthly)") restates what the
+ *  window column already says (月), and the parenthetical is what pushed the
+ *  head past its truncation point. The displayed head drops it; the tip keeps
+ *  the vendor's verbatim label. Only ASCII-paren interval words are dropped —
+ *  distinguishing suffixes like （国际版） stay. */
+function shortenTierHead(head: string): string {
+  return head.trim().replace(/\s*\((?:monthly|annual|annually|yearly|weekly)\s*\)$/i, "").trim();
+}
+
 function formatCycleTokens(value: number): string {
   if (!Number.isFinite(value)) return "0";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 2)}M`;
@@ -695,7 +704,8 @@ export function QuotaStrip({
                 // rows of the same plan stop shouting it.
                 const label = displayWindowName(q);
                 const cut = label.indexOf(" · ");
-                const head = balance ? t(BALANCE_HEADS[balanceId].key) : cut === -1 ? label : label.slice(0, cut);
+                const head =
+                    balance ? t(BALANCE_HEADS[balanceId].key) : shortenTierHead(cut === -1 ? label : label.slice(0, cut));
                 const tail = balance ? "" : cut === -1 ? "" : label.slice(cut);
                 // 已用 X/Y tails (the credit packs' spent side) live in the
                 // tooltip only — rendered on every row they read as clutter

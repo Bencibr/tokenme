@@ -38,6 +38,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("funide", &[]),
     ("hermes", &[]),
     ("antigravity", &["Antigravity"]),
+    ("antigravity_ide", &["Antigravity IDE"]),
     ("agnes", &["AgnesCode"]),
     ("atomcode", &[]),
     ("workbuddy", &["WorkBuddy AI"]),
@@ -71,6 +72,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("catpaw", include_bytes!("../assets/catpaw.png")),
     ("dsh", include_bytes!("../assets/dsh.png")),
     ("antigravity", include_bytes!("../assets/antigravity.png")),
+    // Antigravity IDE: the 128-px layer of the installed app's own icns.
+    ("antigravity_ide", include_bytes!("../assets/antigravity_ide.png")),
     ("agnes", include_bytes!("../assets/agnes.png")),
     ("crow5", include_bytes!("../assets/crow5.png")),
     ("joycode", include_bytes!("../assets/joycode.png")),

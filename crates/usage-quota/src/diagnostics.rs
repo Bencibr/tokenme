@@ -214,6 +214,20 @@ mod tests {
     }
 
     #[test]
+    fn safe_host_keeps_only_a_bounded_ascii_authority() {
+        assert_eq!(safe_host("https://User:Password@Example.COM:443/path?key=value#fragment"), Some("example.com:443".into()));
+        assert_eq!(safe_host("https://127.0.0.1:8443/diagnostics"), Some("127.0.0.1:8443".into()));
+        for url in [
+            "not-a-url",
+            "https://",
+            "https://bad host:443/",
+            "https://host:<443/",
+        ] {
+            assert_eq!(safe_host(url), None, "unsafe authority accepted: {url:?}");
+        }
+    }
+
+    #[test]
     fn panic_and_nested_probes_finish_and_restore_the_parent_context() {
         let _guard = TEST_LOCK.lock().unwrap(); let records = Recording::new();
         let mut outer = ProbeTrace::start("diagnostic_outer_test");

@@ -22,6 +22,17 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("dsh", &["DSH Desktop", "dsh-desktop"]),
     ("zcode", &["ZCode", "zcode"]),
     ("antigravity", &["Antigravity"]),
+    // The IDE build's main binary ships as the generic "Electron" (the Trae
+    // rule); its helpers are the only processes that name the product, and
+    // they live and die with the app. Its own tool, its own gate: an
+    // IDE-only machine must probe `antigravity_ide`, not read as "host
+    // exited" for `antigravity`.
+    ("antigravity_ide", &[
+        "Antigravity IDE Helper",
+        "Antigravity IDE Helper (GPU)",
+        "Antigravity IDE Helper (Renderer)",
+        "Antigravity IDE Helper (Plugin)",
+    ]),
     // Windows installs the desktop app as one word; the spaced name is macOS.
     ("workbuddy", &["WorkBuddy AI", "WorkBuddyAI"]),
     ("workbuddy_cn", &["WorkBuddy"]),
@@ -202,6 +213,32 @@ mod tests {
         alive.insert("FunIDE".to_string());
         assert!(matches(&alive, "funide"));
         assert!(matches(&alive, "funide.exe"));
+    }
+
+    /// The IDE build's main binary is the generic "Electron", so only its
+    /// helpers can prove the app is alive — and since the split they gate
+    /// their own tool: an IDE-only machine probes `antigravity_ide`, while
+    /// `antigravity` correctly reads as "host exited".
+    #[test]
+    fn the_antigravity_ide_counts_through_its_helpers() {
+        let desktop_only = HashSet::from(["Antigravity".into()]);
+        let ide_only: HashSet<String> = [
+            "Electron",
+            "Antigravity IDE Helper",
+            "Antigravity IDE Helper (GPU)",
+            "Antigravity IDE Helper (Renderer)",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(any_host_running("antigravity", &desktop_only));
+        assert!(!any_host_running("antigravity", &ide_only), "the editions gate separately");
+        assert!(any_host_running("antigravity_ide", &ide_only));
+        assert!(!any_host_running("antigravity_ide", &desktop_only));
+        assert!(!any_host_running(
+            "antigravity_ide",
+            &HashSet::from(["language_server_macos_arm".into()])
+        ));
     }
 
     /// Cola gates on either the Electron main process or the bundled

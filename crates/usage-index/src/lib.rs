@@ -1015,6 +1015,71 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot split for the Antigravity IDE: rows read from the IDE's own
+        // store (`~/.gemini/antigravity-ide`) used to land under `antigravity`
+        // beside the desktop app's — one login's numbers under a row the other
+        // login owns (the trae split's shape). The loader now prefixes every
+        // key with the tool id, because the dedupe index is one global unique
+        // list, so both sides re-key: the IDE rows re-home first, then
+        // everything left under `antigravity` takes the prefixed spelling.
+        // The rollup is wiped wholesale — the moved rows cannot be un-summed
+        // from their day groups in place, and the cache rebuilds lazily from
+        // `event` on the next report read.
+        const REPAIR_ANTIGRAVITY_IDE_SPLIT: &str = "repair:antigravity-ide-split-1";
+        let ide_split: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_ANTIGRAVITY_IDE_SPLIT],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if ide_split.is_none() {
+            // New-key twins go first: a build that already re-read a store
+            // under the prefixed loader holds `antigravity*#<session>#<id>`
+            // beside the old spelling, and re-keying the old spelling would
+            // hit the unique dedupe index (the trae split's verified lesson).
+            const IDE_STORE: &str = "instr(source, 'antigravity-ide') > 0";
+            let ide_twin = format!(
+                "SELECT id FROM event e WHERE e.tool = 'antigravity' AND {IDE_STORE} AND EXISTS \
+                 (SELECT 1 FROM event t WHERE t.tool = 'antigravity_ide' \
+                  AND t.dedupe_key = 'antigravity_ide#' || e.dedupe_key)"
+            );
+            let desktop_twin = format!(
+                "SELECT id FROM event e WHERE e.tool = 'antigravity' AND NOT {IDE_STORE} AND EXISTS \
+                 (SELECT 1 FROM event t WHERE t.tool = 'antigravity' \
+                  AND t.dedupe_key = 'antigravity#' || e.dedupe_key)"
+            );
+            for twin in [ide_twin, desktop_twin] {
+                for table in ["call", "quota"] {
+                    conn.execute(&format!("DELETE FROM {table} WHERE event_id IN ({twin})"), [])
+                        .map_err(sql_err)?;
+                }
+                conn.execute(&format!("DELETE FROM event WHERE id IN ({twin})"), [])
+                    .map_err(sql_err)?;
+            }
+            conn.execute(
+                "UPDATE event SET tool = 'antigravity_ide', \
+                     dedupe_key = 'antigravity_ide#' || dedupe_key \
+                 WHERE tool = 'antigravity' AND instr(source, 'antigravity-ide') > 0",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "UPDATE event SET dedupe_key = 'antigravity#' || dedupe_key \
+                 WHERE tool = 'antigravity'",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM file_state WHERE tool = 'antigravity_ide'", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_ANTIGRAVITY_IDE_SPLIT],
+            )
+            .map_err(sql_err)?;
+        }
         // One-shot re-homing for the Trae split: rows read from a CN edition's
         // store used to land under `trae` with a `trae#<turn>` key; they are
         // their own tool now. The rollup is wiped wholesale — the moved rows

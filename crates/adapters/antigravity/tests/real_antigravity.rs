@@ -15,7 +15,7 @@ fn real_antigravity_cli_conversations() {
     // to see the real home directory.
     std::env::remove_var("ANTIGRAVITY_DATA_DIR");
 
-    let a = AntigravityAdapter;
+    let a = AntigravityAdapter::default();
     let det = a.probe().expect("Antigravity CLI detected on this machine");
     eprintln!("probe: {} roots={:?} hint={:?}", det.display, det.roots, det.hint);
     assert_eq!(det.id, TOOL_ID);

@@ -173,6 +173,24 @@ tokenme sync stop      # request a stop through the private user Unix socket; ke
 The Panel device-sync sheet exposes the matching primary start/stop, private certificate and invite generation, QR-file save, secondary QR-file read or invite/pair, approve/reject, pause/resume/revoke/unpair, and secondary runtime start/stop actions. After stopping primary, the device can read a new invite and switch directly to secondary; after stopping secondary, it can configure a listener and switch directly to primary. A switch isolates the old trust, stream, receipt and pending-package state while keeping local usage history. A cross-device listener also requires an advertised address; the panel refuses loopback or unspecified addresses in an invite. Primary startup saves identity and certificate in the user-private directory; after a Panel restart the secondary runtime follows the persisted `enabled` state, while an explicit stop persists disabled. `sync run/stop/status` is the same runtime entry for Ubuntu and other headless machines.
 With Allow LAN enabled, the primary also publishes an `_tokenme-sync._tcp.local.` mDNS candidate. Scanning only shows the endpoint, device ID and certificate pin; it never broadcasts an invite secret. “Pair this device” first requests a five-minute one-time invite over pin-verified TLS, then sends the signed request and waits for primary approval. Discovery or publication errors mention local-network permission, UDP 5353 and the listener port, while QR/full-invite fallback remains available. Stopping the primary unregisters the advertisement, and restart restores only a role persisted as enabled.
 
+## diagnostics-stdio
+
+```bash
+tokenme --db ~/.local/share/tokenme/index.db diagnostics-stdio
+```
+
+Starts the local diagnostics MCP newline-delimited JSON-RPC stdio host. It only reads the existing device-sync identity from `--db`; it does not ingest logs or open a listener. stdin/stdout are reserved for protocol responses and operational errors go to stderr. Each start creates a process-scoped diagnostics authority, so grants issued by an older process are not accepted after restart. The command fails with an actionable pairing/start hint when the database has no initialized device-sync state.
+
+Use a Panel-exported diagnostic grant as a real remote bridge configuration:
+
+```bash
+tokenme --db ~/.local/share/tokenme/index.db \
+  --diagnostics-config ~/Downloads/tokenme-diagnostics.json \
+  diagnostics-stdio
+```
+
+This mode loads the debugger private key from the paired secondary identity in `--db`, signs each `initialize`, `tools/list`, `tools/call`, and notification request, and forwards it to the primary's `/diagnostics/mcp` over HTTPS/TLS 1.3 with the DER certificate and SHA-256 pin. `server_name` is optional; older Panel configurations without it derive the name from the HTTPS endpoint host. Without a config file the command remains a local fail-closed host and never connects to a remote endpoint automatically.
+
 ## sync upload
 
 Upload local events to an already-approved primary over strict HTTPS/TLS 1.3. This command does not fake pairing, does not clear local data, and does not change the existing `export/import` file path. The primary must issue `primary_id`, `stream_id` and `data_epoch`; provide its certificate PEM and exact 64-hex SHA-256 pin:

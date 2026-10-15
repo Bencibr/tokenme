@@ -957,6 +957,105 @@ fn the_trae_split_rehomes_cn_rows_without_colliding_on_twins() {
     assert_eq!(back, 1, "the split never runs twice");
 }
 
+/// The Antigravity IDE split: rows read from the IDE's own store used to land
+/// under `antigravity` beside the desktop app's — one login's numbers under a
+/// row the other login owns. The loader gained a tool prefix on every key at
+/// the same time (one global dedupe list), so the IDE rows re-home *and*
+/// everything left under `antigravity` re-keys; a new-key twin deletes first,
+/// or the unique dedupe index would refuse the re-key.
+#[test]
+fn the_antigravity_ide_split_rehomes_ide_rows_and_prefixes_every_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:antigravity-ide-split-1'", [])
+            .unwrap();
+        let ins = |id: i64, key: &str, source: &str| {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+                     VALUES(?1, 'antigravity', 10, 's', 'tokens', 100.0, ?2, ?3)",
+                    rusqlite::params![id, key, source],
+                )
+                .unwrap();
+        };
+        // Mis-filed IDE row whose antigravity_ide twin already exists.
+        ins(1, "s#tw", "/Users/x/.gemini/antigravity-ide/conversations/a.db");
+        idx.conn()
+            .execute(
+                "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+                 VALUES(2, 'antigravity_ide', 10, 's', 'tokens', 100.0, 'antigravity_ide#s#tw', \
+                     '/Users/x/.gemini/antigravity-ide/conversations/a.db')",
+                [],
+            )
+            .unwrap();
+        // The desktop app's own row re-keys in place, old spelling gone.
+        ins(3, "s#desk", "/Users/x/.gemini/antigravity/conversations/b.db");
+        // A row merged from another machine re-keys too: its exporter now
+        // speaks the prefixed spelling, and the next import must dedupe.
+        ins(4, "s#linux", "linux:sp-host/.gemini/antigravity/conversations/c.db");
+        idx.conn()
+            .execute(
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                 VALUES('2026-10-15', '', 'antigravity', 's', '', '', 'tokens', \
+                     0, 0, 300, 0, 0, 0, 3, 3, 10, 10)",
+                [],
+            )
+            .unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 's#tw'"),
+        0,
+        "the old-key twin is a pure duplicate and goes"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 'antigravity_ide#s#tw' AND tool = 'antigravity_ide'"),
+        1,
+        "the IDE tool's own row survives"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 's#desk'"),
+        0,
+        "the unprefixed desktop spelling is gone"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 'antigravity#s#desk' AND tool = 'antigravity'"),
+        1,
+        "the desktop row re-keyed in place, not duplicated"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 'antigravity#s#linux'"),
+        1,
+        "merged rows re-key so the next sync import dedupes"
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM event_rollup"), 0, "the rollup rebuilds lazily");
+    assert_eq!(idx.meta_value("repair:antigravity-ide-split-1").unwrap().as_deref(), Some("1"));
+
+    // One-shot: rows written after the split survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO event(id, tool, ts_ms, session, meter, cr_tok, dedupe_key, source) \
+             VALUES(9, 'antigravity_ide', 11, 's2', 'tokens', 7.0, 'antigravity_ide#s2#r1', \
+                 '/Users/x/.gemini/antigravity-ide/conversations/d.db')",
+            [],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM event WHERE dedupe_key = 'antigravity_ide#s2#r1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 1, "the split never runs twice");
+}
+
 /// The trae adapter keyed each event's session by turn id, so the panel's
 /// 会话 count read one chat conversation as N one-turn sessions. The repair
 /// drops the local trae rows wholesale — the turn→session mapping lives in

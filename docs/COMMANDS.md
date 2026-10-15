@@ -173,6 +173,24 @@ tokenme sync stop      # 通过用户私有 Unix socket 请求停止，不删除
 Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请生成、二维码文件保存、从端二维码识别或粘贴邀请/配对、批准/拒绝、暂停/恢复/撤销/解除配对，以及从端后台 runtime 启停。主端停止后可以直接识别新邀请切换为从端；从端停止后可以配置监听地址直接切换为主端。切换会隔离旧 trust、stream、receipt 和待传包，但保留本机用量历史。跨设备监听还需要填写对外地址；面板会拒绝把回环或未指定地址写进邀请。主端启动使用用户私有目录自动保存 identity 与证书；从端配对配置会在 Panel 重启后按 `enabled` 状态恢复，显式停止会持久化为 disabled。`sync run/stop/status` 是 Ubuntu 等无面板机器的同一 runtime 入口。
 主端开启允许局域网后还会发布 `_tokenme-sync._tcp.local.` mDNS 候选；扫描只展示 endpoint、设备 ID 和证书 pin，不广播 invite secret。面板点击候选的“一键配对”会先用 pin 校验的 TLS 请求 5 分钟一次性邀请，再发送签名请求并等待主端批准；扫描或发布遇到本地网络权限、UDP 5353、监听端口错误时会在面板提示并保留二维码/完整邀请回退。停止主端会注销广播，重启只恢复持久化为 enabled 的角色。
 
+## diagnostics-stdio
+
+```bash
+tokenme --db ~/.local/share/tokenme/index.db diagnostics-stdio
+```
+
+启动本机远程诊断 MCP 的 newline-delimited JSON-RPC stdio host。命令只从 `--db` 读取已有的 device-sync identity，不摄取日志、不启动监听端口；stdin/stdout 仅用于诊断协议响应，运行错误写入 stderr。每次启动都会创建新的进程级诊断 authority，旧进程签发的 grant 不会跨重启继续有效。没有已初始化的 device-sync 数据库时命令会失败并给出配对/启动提示。
+
+Panel 导出的诊断 grant 可以作为真正的远端 bridge 配置传入：
+
+```bash
+tokenme --db ~/.local/share/tokenme/index.db \
+  --diagnostics-config ~/Downloads/tokenme-diagnostics.json \
+  diagnostics-stdio
+```
+
+该模式从当前 `--db` 的 paired secondary identity 加载 debugger 私钥，逐行为 `initialize`、`tools/list`、`tools/call` 和通知请求签名，并通过证书 DER、SHA-256 pin 和 HTTPS/TLS 1.3 透传到 primary 的 `/diagnostics/mcp`。配置中的 `server_name` 可选；旧版 Panel 配置缺少它时从 HTTPS endpoint 的 host 推导。没有配置文件时命令仍保持本机 fail-closed host，不会自动连接任何远端。
+
 ## sync upload
 
 通过严格的 HTTPS/TLS 1.3 通道，把本机事件上传到已批准的主设备。这个命令不会伪造配对、不会自动清理本地数据，也不会改变旧的 `export/import` 文件入口；必须先由主设备签发 `primary_id`、`stream_id` 和 `data_epoch`，并提供证书 PEM 与 64 位 SHA-256 pin：

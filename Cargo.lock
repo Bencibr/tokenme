@@ -1989,6 +1989,7 @@ dependencies = [
 name = "usage-cli"
 version = "0.1.8"
 dependencies = [
+ "base64",
  "chrono",
  "clap",
  "dirs",

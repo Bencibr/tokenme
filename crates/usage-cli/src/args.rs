@@ -63,6 +63,12 @@ pub struct Global {
     /// Explain what was ingested, on stderr
     #[arg(short = 'v', long, global = true)]
     pub verbose: bool,
+
+    /// JSON diagnostics grant/configuration file for the remote MCP stdio
+    /// bridge. Without this file diagnostics-stdio remains a local,
+    /// fail-closed protocol host.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub diagnostics_config: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -135,6 +141,11 @@ pub enum Cmd {
     /// the panel asks for over IPC; written to `icons.json` to review the panel
     /// in a browser.
     Icons,
+
+    /// Serve the diagnostics MCP protocol over newline-delimited JSON-RPC
+    /// stdio. This is intended for a local diagnostics host; stdout is
+    /// reserved for protocol responses and operational errors go to stderr.
+    DiagnosticsStdio,
 
     /// Drive the index explicitly
     Index {
