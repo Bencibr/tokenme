@@ -4,8 +4,11 @@
 //! The IDE app premise "it stores nothing locally" was wrong: `~/.gemini/antigravity`
 //! carries the same `conversations/*.db` schema and holds the bulk of the data
 //! (measured across both roots: 35 databases, 52,058 decodable `gen_metadata`
-//! rows, `#4.3 == #4.9 + #4.10` on every one of them). So both trees are read by
-//! default. `ANTIGRAVITY_DATA_DIR` is a comma-separated list and overrides that.
+//! rows, `#4.3 == #4.9 + #4.10` on every one of them). Every install tree is
+//! read, but each by its own tool now: the desktop adapter takes
+//! `antigravity-cli` / `antigravity` / `antigravity-backup`, the IDE adapter
+//! takes `antigravity-ide`. `ANTIGRAVITY_DATA_DIR` and
+//! `ANTIGRAVITY_IDE_DATA_DIR` are comma-separated lists and override that.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -13,7 +16,13 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 
+use crate::Edition;
+
+/// The desktop install's data-dir override.
 pub(crate) const DATA_DIR_ENV: &str = "ANTIGRAVITY_DATA_DIR";
+/// The IDE install's override. One shared list would bill the same databases
+/// to both tools, so the editions each carry their own.
+pub(crate) const IDE_DATA_DIR_ENV: &str = "ANTIGRAVITY_IDE_DATA_DIR";
 pub(crate) const CONVERSATIONS: &str = "conversations";
 /// Proves a connection can read the one table this adapter ingests. `max(rowid)`
 /// seeks the table btree's rightmost page instead of scanning it.
@@ -28,28 +37,36 @@ pub(crate) const SUMMARIES_DB: &str = "conversation_summaries.db";
 /// wait beats silently reporting nothing for that pass.
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Data roots, in scan order: `$ANTIGRAVITY_DATA_DIR` when set, else every
-/// Antigravity install dir that shares this schema — the CLI and the IDE app.
-fn roots_from(env: Option<&OsStr>, home: Option<&Path>) -> Vec<PathBuf> {
-    if let Some(list) = env.filter(|v| !v.is_empty()) {
-        return list
-            .to_string_lossy()
-            .split(',')
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from)
-            .collect();
+impl crate::Edition {
+    /// Data roots, in scan order: the edition's env override when set, else
+    /// every install dir that shares this schema. The desktop keeps the
+    /// original env name; `antigravity-ide` moves out of it to its own tool.
+    pub(crate) fn roots(self, env: Option<&OsStr>, home: Option<&Path>) -> Vec<PathBuf> {
+        if let Some(list) = env.filter(|v| !v.is_empty()) {
+            return list
+                .to_string_lossy()
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .collect();
+        }
+        let Some(home) = home else { return Vec::new() };
+        let gemini = home.join(".gemini");
+        let names: &[&str] = match self {
+            Edition::Desktop => &["antigravity-cli", "antigravity", "antigravity-backup"],
+            Edition::Ide => &["antigravity-ide"],
+        };
+        names.iter().map(|name| gemini.join(name)).collect()
     }
-    let Some(home) = home else { return Vec::new() };
-    let gemini = home.join(".gemini");
-    ["antigravity-cli", "antigravity", "antigravity-ide", "antigravity-backup"]
-        .iter()
-        .map(|name| gemini.join(name))
-        .collect()
 }
 
-pub(crate) fn roots() -> Vec<PathBuf> {
-    roots_from(std::env::var_os(DATA_DIR_ENV).as_deref(), home().as_deref())
+pub(crate) fn roots(edition: Edition) -> Vec<PathBuf> {
+    let env = match edition {
+        Edition::Desktop => std::env::var_os(DATA_DIR_ENV),
+        Edition::Ide => std::env::var_os(IDE_DATA_DIR_ENV),
+    };
+    edition.roots(env.as_deref(), home().as_deref())
 }
 
 fn home() -> Option<PathBuf> {
@@ -232,24 +249,25 @@ mod tests {
     #[test]
     fn env_list_and_default_root_both_split_correctly() {
         assert_eq!(
-            roots_from(Some(OsStr::new(" /tmp/a , /tmp/b ,, ")), None),
+            Edition::Desktop.roots(Some(OsStr::new(" /tmp/a , /tmp/b ,, ")), None),
             vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]
         );
-        let all = default_roots();
-        assert_eq!(roots_from(Some(OsStr::new("")), Some(Path::new("/home/u"))), all);
-        assert_eq!(roots_from(None, Some(Path::new("/home/u"))), all);
-        assert!(
-            all.iter().any(|p| p.ends_with("antigravity")),
-            "the IDE app tree is a default root, not an opt-in"
+        let desktop = PathBuf::from("/home/u/.gemini");
+        assert_eq!(
+            Edition::Desktop.roots(None, Some(Path::new("/home/u"))),
+            vec![desktop.join("antigravity-cli"), desktop.join("antigravity"), desktop.join("antigravity-backup")]
         );
-        assert!(roots_from(None, None).is_empty(), "no home and no override means no roots");
-    }
-
-    fn default_roots() -> Vec<PathBuf> {
-        ["antigravity-cli", "antigravity", "antigravity-ide", "antigravity-backup"]
-            .iter()
-            .map(|n| PathBuf::from(format!("/home/u/.gemini/{n}")))
-            .collect()
+        assert_eq!(
+            Edition::Ide.roots(None, Some(Path::new("/home/u"))),
+            vec![desktop.join("antigravity-ide")],
+            "the IDE tree is its own tool's only root, never the desktop's"
+        );
+        assert_eq!(
+            Edition::Ide.roots(Some(OsStr::new("")), Some(Path::new("/home/u"))),
+            Edition::Ide.roots(None, Some(Path::new("/home/u"))),
+            "an empty override means the defaults"
+        );
+        assert!(Edition::Desktop.roots(None, None).is_empty(), "no home and no override means no roots");
     }
 
     #[test]

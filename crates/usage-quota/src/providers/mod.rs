@@ -78,7 +78,8 @@ use crate::QuotaProbe;
 pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
     vec![
         Box::new(AgnesQuota),
-        Box::new(AntigravityQuota),
+        Box::new(AntigravityQuota { ide: false }),
+        Box::new(AntigravityQuota { ide: true }),
         Box::new(AtomCodeQuota),
         Box::new(ColaQuota),
         Box::new(KimiCodeQuota),

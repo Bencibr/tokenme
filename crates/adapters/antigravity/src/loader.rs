@@ -16,7 +16,6 @@ use crate::parser::{
     Skip, Stages, StepStamp,
 };
 use crate::paths;
-use crate::TOOL_ID;
 
 /// One row per generation, in the only order the table defines.
 const SELECT_GENS: &str = "SELECT idx, data FROM gen_metadata ORDER BY idx";
@@ -140,7 +139,7 @@ impl Window {
         }
     }
 
-    fn finish(self, session: &str, project: Option<&str>, file: &SourceFile) -> Vec<UsageEvent> {
+    fn finish(self, session: &str, project: Option<&str>, file: &SourceFile, tool_id: &str) -> Vec<UsageEvent> {
         let mut buckets: Vec<(String, Bucket)> = self.turns.into_iter().collect();
         // `idx` order is the only chronology the table defines.
         buckets.sort_by_key(|(_, bucket)| bucket.order);
@@ -149,12 +148,15 @@ impl Window {
             // Defensive: a row that merged away to nothing must not mint an empty
             // event beside its real neighbours.
             let Some(counts) = counts_for(&bucket.stages) else { continue };
-            let mut event = UsageEvent::new(TOOL_ID, bucket.ts_ms, session.to_string());
+            let mut event = UsageEvent::new(tool_id, bucket.ts_ms, session.to_string());
             event.project = project.map(str::to_string);
             event.model = bucket.model;
             event.counts = counts;
             event.meter = Meter::Tokens;
-            event.dedupe_key = Some(format!("{session}#{key}"));
+            // The index dedupes on one global unique key, so the tool id rides
+            // inside it: two installs sharing a responseId spelling must not
+            // collide, and a re-homed row keeps a stable spelling.
+            event.dedupe_key = Some(format!("{tool_id}#{session}#{key}"));
             event.source = file.key();
             events.push(event);
         }
@@ -165,7 +167,7 @@ impl Window {
 /// Reads one conversation database wholesale. Idempotent through `dedupe_key`,
 /// which is why a `Tree` file is re-read in full whenever it changes instead of
 /// being resumed from a rowid cursor.
-pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit) -> ReadOutcome {
+pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit, tool_id: &str) -> ReadOutcome {
     let session = session_of(file);
     let Some(db) = paths::open(&file.path) else {
         // Missing, locked or mid-write: report nothing and leave the file for the
@@ -217,7 +219,7 @@ pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit) -> ReadOutcome {
         }
     }
 
-    let events = window.finish(&session, conv.project.as_deref(), file);
+    let events = window.finish(&session, conv.project.as_deref(), file, tool_id);
     for event in &events {
         audit.counts += &event.counts;
     }
@@ -331,7 +333,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("absent.db");
         let mut audit = Audit::default();
-        let out = read_db(&source_file(&absent.to_string_lossy()), &mut audit);
+        let out = read_db(&source_file(&absent.to_string_lossy()), &mut audit, "antigravity");
         assert!(out.events.is_empty());
         assert_eq!(out.cursor, ReadCursor(0));
         assert_eq!(audit.unusable, 1);
@@ -340,7 +342,7 @@ mod tests {
         let other = dir.path().join("other.db");
         Connection::open(&other).unwrap().execute_batch("CREATE TABLE unrelated (x)").unwrap();
         let mut audit = Audit::default();
-        let out = read_db(&source_file(&other.to_string_lossy()), &mut audit);
+        let out = read_db(&source_file(&other.to_string_lossy()), &mut audit, "antigravity");
         assert!(out.events.is_empty(), "no gen_metadata means no events");
         assert_eq!((audit.dbs, audit.unusable), (0, 1), "another tool's database is not ours");
     }

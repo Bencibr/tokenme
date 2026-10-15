@@ -144,7 +144,7 @@ $ tokenme daily --days 3
 
 ## 支持的工具与实时配额
 
-以下工具全部内置适配器——共 27 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
+以下工具全部内置适配器——共 28 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
 
 | 工具 | 实时配额 | 签到 | 兼容性测试 | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -158,6 +158,7 @@ $ tokenme daily --days 3
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | Credits + 套餐/资源包 | ✅ | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算（CLI `/usage`） | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/antigravity_ide.png" width="20" alt=""> **Antigravity IDE** | 自算（本地会话库） | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/agnes.png" width="20" alt=""> **AgnesCode** | 会员点数（注入一次令牌） | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/atomcode.png" width="20" alt=""> **AtomCode** | CodingPlan 配额 | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy AI**（国际版） | 会员点数 | — | ✅ | ✅ | ✅ |

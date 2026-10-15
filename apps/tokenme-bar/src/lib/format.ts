@@ -31,6 +31,9 @@ const TOOL_ORDER = [
   "kimicode",
   "minimaxcode",
   "omp",
+  // The IDE install is its own tool; it joins at the end so no existing
+  // tool's color slot moves.
+  "antigravity_ide",
 ];
 
 const DISPLAY: Record<string, string> = {
@@ -45,6 +48,7 @@ const DISPLAY: Record<string, string> = {
   qoder: "Qoder",
   qoder_cn: "Qoder CN",
   antigravity: "Antigravity",
+  antigravity_ide: "Antigravity IDE",
   hermes: "Hermes",
   funide: "FunIDE",
   agnes: "AgnesCode",
