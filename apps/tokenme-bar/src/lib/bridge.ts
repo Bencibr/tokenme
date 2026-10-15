@@ -5,7 +5,7 @@ import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
 import { DEFAULT_PET_PREFERENCES } from "./petCompanion";
 import type { PetNotice, PetPreferences, PetResponse } from "./petCompanion";
-import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot, SyncDevicesSnapshot, SyncManagementRequest } from "../types";
+import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot, SyncDevicesSnapshot, SyncManagementRequest, DiagnosticsManagementRequest, DiagnosticsResponse } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -165,6 +165,15 @@ export const bridge: Bridge = {
   async syncDevices(request?: SyncManagementRequest): Promise<SyncDevicesSnapshot> {
     if (!inTauri) return { primary_id: null, role: "unconfigured", service_running: false, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] };
     return invoke<SyncDevicesSnapshot>("sync_devices", { request: request ?? null });
+  },
+
+  async diagnosticsSession(request: DiagnosticsManagementRequest): Promise<DiagnosticsResponse> {
+    if (!inTauri) {
+      return request.action === "status"
+        ? { enabled: false, sessions: [], retained_operations: 0, last_operation: null }
+        : { enabled: false, sessions: [], retained_operations: 0, last_operation: null, error: { code: "preview_only", message: "Remote diagnostics is available in the TokenMe app." } };
+    }
+    return invoke<DiagnosticsResponse>("diagnostics_session", { request });
   },
 
   /**

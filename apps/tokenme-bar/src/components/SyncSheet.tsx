@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import jsQR from "jsqr";
 import QRCode from "qrcode";
-import type { SyncDevicesSnapshot, SyncManagementRequest } from "../types";
+import type { DiagnosticsConfig, DiagnosticsManagementRequest, DiagnosticsOperationView, DiagnosticsResponse, DiagnosticsScope, DiagnosticsSessionView, SyncDevicesSnapshot, SyncManagementRequest } from "../types";
 import { bridge } from "../lib/bridge";
 import { t } from "../lib/i18n";
 import { IconClose, IconRefresh, IconWarn } from "./Icons";
@@ -53,22 +53,8 @@ type PendingConfirmation = {
   onSuccess?: (next: SyncDevicesSnapshot) => void;
 };
 
-type DiagnosticsScope = "diagnostics.read" | "sync.control";
 type DiagnosticsTtl = "15m" | "1h" | "session";
-type DiagnosticsAction = "configure" | "create_qr" | "copy_code" | "revoke_all";
-
-type DiagnosticsOperation = {
-  action: DiagnosticsAction;
-  state: "unavailable";
-  at_ms: number;
-};
-
-type DiagnosticsSession = {
-  session_id: string;
-  device_name: string;
-  scopes: DiagnosticsScope[];
-  expires_at_ms: number;
-};
+type DiagnosticsAction = "configure" | "create_grant" | "revoke_all" | "revoke_grant";
 
 const DIAGNOSTICS_SCOPES: DiagnosticsScope[] = ["diagnostics.read", "sync.control"];
 const DIAGNOSTICS_TTLS: DiagnosticsTtl[] = ["15m", "1h", "session"];
@@ -76,9 +62,17 @@ const DIAGNOSTICS_TTLS: DiagnosticsTtl[] = ["15m", "1h", "session"];
 function diagnosticsActionLabel(action: DiagnosticsAction): string {
   switch (action) {
     case "configure": return t("sync.diagnostics.operation.configure");
-    case "create_qr": return t("sync.diagnostics.operation.create_qr");
-    case "copy_code": return t("sync.diagnostics.operation.copy_code");
+    case "create_grant": return t("sync.diagnostics.operation.create_session");
     case "revoke_all": return t("sync.diagnostics.operation.revoke_all");
+    case "revoke_grant": return t("sync.diagnostics.operation.revoke_session");
+  }
+}
+
+function diagnosticsOperationStateLabel(state: DiagnosticsOperationView["state"]): string {
+  switch (state) {
+    case "running": return t("sync.diagnostics.operation.state.running");
+    case "completed": return t("sync.diagnostics.operation.state.completed");
+    case "failed": return t("sync.diagnostics.operation.state.failed");
   }
 }
 
@@ -101,15 +95,19 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrBusy, setQrBusy] = useState(false);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmation | null>(null);
-  // The diagnostics backend is intentionally not part of this checkout yet.
-  // Keep these as draft UI values instead of deriving them from sync pairing.
   const [diagnosticsEnabled, setDiagnosticsEnabled] = useState(false);
   const [diagnosticsScopes, setDiagnosticsScopes] = useState<DiagnosticsScope[]>(["diagnostics.read"]);
   const [diagnosticsTtl, setDiagnosticsTtl] = useState<DiagnosticsTtl>("15m");
+  const [diagnosticsTarget, setDiagnosticsTarget] = useState("");
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
-  const [diagnosticsOperation, setDiagnosticsOperation] = useState<DiagnosticsOperation | null>(null);
-  const [diagnosticsSessions] = useState<DiagnosticsSession[]>([]);
+  const [diagnosticsOperation, setDiagnosticsOperation] = useState<DiagnosticsOperationView | null>(null);
+  const [diagnosticsSessions, setDiagnosticsSessions] = useState<DiagnosticsSessionView[]>([]);
+  const [diagnosticsConfig, setDiagnosticsConfig] = useState<DiagnosticsConfig | null>(null);
+  const [diagnosticsQrDataUrl, setDiagnosticsQrDataUrl] = useState<string | null>(null);
+  const [diagnosticsConfigUrl, setDiagnosticsConfigUrl] = useState<string | null>(null);
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
   const [diagnosticsRevokeConfirm, setDiagnosticsRevokeConfirm] = useState(false);
+  const diagnosticsConfigRef = useRef<DiagnosticsConfig | null>(null);
   const qrFile = useRef<HTMLInputElement>(null);
   const discoveryInFlight = useRef(false);
   const automaticDiscoveryStarted = useRef(false);
@@ -279,32 +277,91 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const isSecondary = snapshot.role === "secondary";
   const isPrimary = snapshot.role === "primary";
   const isUnconfigured = snapshot.role === "unconfigured";
+  const pairedDiagnosticsDevices = snapshot.devices.filter((device) => device.role === "secondary" && device.status === "paired");
+  const diagnosticsReady = isPrimary && snapshot.service_running && diagnosticsEnabled;
   const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
   const awaitingSecondaryApproval = isSecondary && snapshot.service_running && !snapshot.stream_id;
   const shouldPoll = snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval);
   const commandBusy = busy || initializing || discovering;
 
+  const applyDiagnosticsResponse = useCallback((response: DiagnosticsResponse, generation?: number) => {
+    if (generation !== undefined && generation !== operationGeneration.current) return;
+    setDiagnosticsEnabled(response.enabled);
+    setDiagnosticsSessions(response.sessions);
+    setDiagnosticsOperation(response.last_operation);
+    setDiagnosticsError(response.error?.message ?? null);
+    if (response.config) {
+      diagnosticsConfigRef.current = response.config;
+      setDiagnosticsConfig(response.config);
+      const serialized = JSON.stringify(response.config, null, 2);
+      setDiagnosticsConfigUrl(`data:application/json;charset=utf-8,${encodeURIComponent(serialized)}`);
+      setDiagnosticsCopied(false);
+      void QRCode.toDataURL(serialized, { errorCorrectionLevel: "M", margin: 2, width: 240 })
+        .then((value) => { if (mounted.current && (generation === undefined || generation === operationGeneration.current)) setDiagnosticsQrDataUrl(value); })
+        .catch((error) => { if (mounted.current && (generation === undefined || generation === operationGeneration.current)) setDiagnosticsError(error instanceof Error ? error.message : String(error)); });
+    } else if (!response.enabled || (diagnosticsConfigRef.current && !response.sessions.some((session) => session.session_id === diagnosticsConfigRef.current?.grant.grant_id))) {
+      diagnosticsConfigRef.current = null;
+      setDiagnosticsConfig(null);
+      setDiagnosticsConfigUrl(null);
+      setDiagnosticsQrDataUrl(null);
+      setDiagnosticsCopied(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      const generation = operationGeneration.current;
+      void bridge.diagnosticsSession({ action: "status" }).then((response) => {
+        if (alive && mounted.current && generation === operationGeneration.current && !operationInFlight.current) applyDiagnosticsResponse(response, generation);
+      }).catch((error) => {
+        if (alive && mounted.current) setDiagnosticsError(error instanceof Error ? error.message : String(error));
+      });
+    }, 0);
+    return () => { alive = false; window.clearTimeout(timer); };
+  }, [applyDiagnosticsResponse]);
+
+  const runDiagnostics = useCallback(async (request: DiagnosticsManagementRequest) => {
+    if (!mounted.current || operationInFlight.current) return;
+    if (request.action !== "configure" && !diagnosticsEnabled) return;
+    const generation = ++operationGeneration.current;
+    operationInFlight.current = "mutation";
+    setBusy(true);
+    setDiagnosticsError(null);
+    setDiagnosticsRevokeConfirm(false);
+    try {
+      const response = await bridge.diagnosticsSession(request);
+      if (!mounted.current || generation !== operationGeneration.current) return;
+      applyDiagnosticsResponse(response);
+    } catch (error) {
+      if (mounted.current && generation === operationGeneration.current) setDiagnosticsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (operationInFlight.current === "mutation" && generation === operationGeneration.current) operationInFlight.current = null;
+      if (mounted.current && generation === operationGeneration.current) setBusy(false);
+    }
+  }, [applyDiagnosticsResponse, diagnosticsEnabled]);
+
   const toggleDiagnostics = () => {
     if (commandBusy) return;
-    const next = !diagnosticsEnabled;
-    setDiagnosticsEnabled(next);
-    setDiagnosticsRevokeConfirm(false);
-    if (next) {
-      setDiagnosticsOperation({ action: "configure", state: "unavailable", at_ms: Date.now() });
-      setDiagnosticsError(t("sync.diagnostics.backend_unavailable"));
-    } else {
-      setDiagnosticsOperation(null);
-      setDiagnosticsError(null);
-    }
+    void runDiagnostics({ action: "configure", enabled: !diagnosticsEnabled });
   };
 
-  const runDiagnosticsPlaceholder = (action: DiagnosticsAction) => {
-    if (commandBusy || !diagnosticsEnabled) return;
-    // Keep the same guarded, error-first lifecycle as SyncSheet commands until
-    // a dedicated diagnostics bridge contract exists; never reuse pairing.
-    setDiagnosticsOperation({ action, state: "unavailable", at_ms: Date.now() });
-    setDiagnosticsError(t("sync.diagnostics.backend_unavailable"));
-    setDiagnosticsRevokeConfirm(false);
+  const createDiagnosticsSession = () => {
+    const targetDevice = snapshot.devices.find((device) => device.device_id === diagnosticsTarget && device.role === "secondary" && device.status === "paired");
+    if (!targetDevice || !diagnosticsScopes.length) {
+      setDiagnosticsError(t("sync.diagnostics.invalid_config"));
+      return;
+    }
+    // The protocol caps every grant at one hour; a "session" grant is still
+    // process-scoped and is invalidated on primary restart, so use that cap.
+    const ttl_ms = diagnosticsTtl === "15m" ? 15 * 60 * 1000 : 60 * 60 * 1000;
+    void runDiagnostics({ action: "create_grant", debugger_device_id: targetDevice.device_id, scopes: diagnosticsScopes, ttl_ms });
+  };
+
+  const copyDiagnosticsConfig = async () => {
+    if (!diagnosticsConfig) return;
+    const ok = await copyText(JSON.stringify(diagnosticsConfig, null, 2));
+    if (ok) { setDiagnosticsCopied(true); window.setTimeout(() => setDiagnosticsCopied(false), 1600); }
   };
 
   const toggleDiagnosticsScope = (scope: DiagnosticsScope) => {
@@ -318,7 +375,6 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const clearDiagnosticsErrors = () => {
     setDiagnosticsError(null);
-    setDiagnosticsOperation(null);
   };
 
   const previousRole = useRef(snapshot.role);
@@ -565,11 +621,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                 <div id="sync-diagnostics-title" className="sync-section-title">{t("sync.diagnostics.title")}</div>
                 <div className="sync-card-copy">{t("sync.diagnostics.hint")}</div>
               </div>
-              <button type="button" role="switch" className="switch" aria-label={t("sync.diagnostics.toggle")} aria-checked={diagnosticsEnabled} onClick={toggleDiagnostics} disabled={commandBusy} />
+              <button type="button" role="switch" className="switch" aria-label={t("sync.diagnostics.toggle")} aria-checked={diagnosticsEnabled} onClick={toggleDiagnostics} disabled={commandBusy || !isPrimary || !snapshot.service_running} />
             </div>
-            <div className={`sync-notice ${diagnosticsEnabled ? "" : "is-muted"}`}>{diagnosticsEnabled ? t("sync.diagnostics.draft") : t("sync.diagnostics.disabled")}</div>
+            <div className={`sync-notice ${diagnosticsReady ? "" : "is-muted"}`}>{!isPrimary || !snapshot.service_running ? t("sync.diagnostics.primary_required") : diagnosticsEnabled ? t("sync.diagnostics.ready") : t("sync.diagnostics.disabled")}</div>
             {diagnosticsError ? <div className="sync-diagnostics-error" role="alert"><IconWarn size={12} /><span>{diagnosticsError}</span></div> : null}
-            <fieldset className="sync-diagnostics-settings" disabled={!diagnosticsEnabled || commandBusy}>
+            <fieldset className="sync-diagnostics-settings" disabled={!diagnosticsReady || commandBusy}>
               <legend className="sync-diagnostics-label">{t("sync.diagnostics.scope")}</legend>
               <div className="sync-diagnostics-scope-grid" role="group" aria-label={t("sync.diagnostics.scope.a11y")}>
                 {DIAGNOSTICS_SCOPES.map((scope) => <button type="button" className="sync-diagnostics-scope" key={scope} role="checkbox" aria-checked={diagnosticsScopes.includes(scope)} onClick={() => toggleDiagnosticsScope(scope)}>
@@ -584,26 +640,41 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                 </div>
               </div>
               <div className="sync-diagnostics-field">
+                <label className="sync-field"><span>{t("sync.diagnostics.target")}</span><select className="sync-input" value={diagnosticsTarget} onChange={(event) => setDiagnosticsTarget(event.target.value)} aria-label={t("sync.diagnostics.target")}>
+                  <option value="">{pairedDiagnosticsDevices.length ? t("sync.diagnostics.target.choose") : t("sync.diagnostics.target.empty")}</option>
+                  {pairedDiagnosticsDevices.map((device) => <option key={device.device_id} value={device.device_id}>{device.display_name} · {device.origin} ({device.os})</option>)}
+                </select></label>
+                <div className="sync-card-copy">{t("sync.diagnostics.target.hint")}</div>
+              </div>
+              <div className="sync-diagnostics-field">
                 <div className="sync-diagnostics-label">{t("sync.diagnostics.actions")}</div>
                 <div className="sync-diagnostics-actions">
-                  <button type="button" className="btn-accent" onClick={() => runDiagnosticsPlaceholder("create_qr")}>{t("sync.diagnostics.create_qr")}</button>
-                  <button type="button" className="btn-quiet" onClick={() => runDiagnosticsPlaceholder("copy_code")}>{t("sync.diagnostics.copy_code")}</button>
+                  <button type="button" className="btn-accent" disabled={commandBusy || !diagnosticsScopes.length || !diagnosticsTarget || !pairedDiagnosticsDevices.some((device) => device.device_id === diagnosticsTarget)} onClick={createDiagnosticsSession}>{t("sync.diagnostics.create_qr")}</button>
+                  <button type="button" className="btn-quiet" disabled={!diagnosticsConfig || commandBusy} onClick={() => void copyDiagnosticsConfig()}>{diagnosticsCopied ? t("sync.diagnostics.copied") : t("sync.diagnostics.copy_code")}</button>
                 </div>
                 <div className="sync-card-copy">{t("sync.diagnostics.action_hint")}</div>
               </div>
             </fieldset>
+            {diagnosticsQrDataUrl && diagnosticsConfig ? <div className="sync-qr-block">
+              <img className="sync-qr" src={diagnosticsQrDataUrl} alt={t("sync.diagnostics.qr_alt")} />
+              <div className="sheet-hint">{t("sync.diagnostics.qr_hint")}</div>
+              <div className="sheet-actions">
+                <a className="btn-quiet" href={diagnosticsQrDataUrl} download="tokenme-diagnostics.png">{t("sync.diagnostics.download_qr")}</a>
+                {diagnosticsConfigUrl ? <a className="btn-quiet" href={diagnosticsConfigUrl} download="tokenme-diagnostics.json">{t("sync.diagnostics.download_json")}</a> : null}
+              </div>
+            </div> : null}
             <div className="sync-diagnostics-subsection">
               <div className="sync-diagnostics-label">{t("sync.diagnostics.sessions")}</div>
-              {diagnosticsSessions.length ? <div className="sync-diagnostics-session-list">{diagnosticsSessions.map((session) => <div className="sync-diagnostics-session" key={session.session_id}><strong>{session.device_name}</strong><span>{session.scopes.join(", ")}</span><span>{t("sync.diagnostics.session.expires", { time: new Date(session.expires_at_ms).toLocaleString() })}</span></div>)}</div> : <div className="sync-empty-card"><strong>{t("sync.diagnostics.sessions.empty")}</strong><span>{t("sync.diagnostics.sessions.empty_hint")}</span></div>}
+              {diagnosticsSessions.length ? <div className="sync-diagnostics-session-list">{diagnosticsSessions.map((session) => <div className="sync-diagnostics-session" key={session.session_id}><strong>{session.origin}</strong><span>{session.target_device} · {session.scopes.join(", ")}</span><span>{t("sync.diagnostics.session.expires", { time: new Date(session.expires_at_ms).toLocaleString() })}</span><button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void runDiagnostics({ action: "revoke_grant", grant_id: session.session_id })}>{t("sync.diagnostics.revoke_session")}</button></div>)}</div> : <div className="sync-empty-card"><strong>{t("sync.diagnostics.sessions.empty")}</strong><span>{t("sync.diagnostics.sessions.empty_hint")}</span></div>}
             </div>
             <div className="sync-diagnostics-operation" data-state={diagnosticsOperation?.state ?? "idle"} aria-live="polite">
               <span className="sync-diagnostics-label">{t("sync.diagnostics.operation")}</span>
               <strong>{diagnosticsOperation ? diagnosticsActionLabel(diagnosticsOperation.action) : t("sync.diagnostics.operation.none")}</strong>
-              {diagnosticsOperation ? <span className="sync-diagnostics-operation-state">{t("sync.diagnostics.operation.unavailable")} · {t("sync.diagnostics.operation.at", { time: new Date(diagnosticsOperation.at_ms).toLocaleTimeString() })}</span> : null}
+              {diagnosticsOperation ? <span className="sync-diagnostics-operation-state">{diagnosticsOperationStateLabel(diagnosticsOperation.state)} · {t("sync.diagnostics.operation.at", { time: new Date(diagnosticsOperation.at_ms).toLocaleTimeString() })} · {t("sync.diagnostics.operation.id", { id: diagnosticsOperation.operation_id })}{diagnosticsOperation.error_code ? ` · ${diagnosticsOperation.error_code}` : ""}</span> : null}
             </div>
             {diagnosticsRevokeConfirm ? <div className="sync-confirm" role="alertdialog" aria-live="assertive" aria-label={t("sync.diagnostics.revoke_all.confirm")}>
               <div className="sync-confirm-copy"><strong>{t("sync.diagnostics.revoke_all")}</strong><span>{t("sync.diagnostics.revoke_all.confirm")}</span></div>
-              <div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy} onClick={() => runDiagnosticsPlaceholder("revoke_all")}>{t("sync.confirm.accept")}</button><button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setDiagnosticsRevokeConfirm(false)}>{t("sync.confirm.cancel")}</button></div>
+              <div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy} onClick={() => void runDiagnostics({ action: "revoke_all" })}>{t("sync.confirm.accept")}</button><button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setDiagnosticsRevokeConfirm(false)}>{t("sync.confirm.cancel")}</button></div>
             </div> : null}
             <div className="sync-diagnostics-footer">
               <button type="button" className="btn-quiet" disabled={!diagnosticsEnabled || commandBusy} onClick={() => setDiagnosticsRevokeConfirm(true)}>{t("sync.diagnostics.revoke_all")}</button>

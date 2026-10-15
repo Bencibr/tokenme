@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::diagnostics::{
-    DiagnosticsError, DiagnosticsGrant, DiagnosticsMcpRequest, DiagnosticsMcpResponse,
+    DiagnosticsError, DiagnosticsGrant, DiagnosticsHost, DiagnosticsMcpRequest, DiagnosticsMcpResponse,
     DiagnosticsScope, DiagnosticsService, DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_REQUEST_TIMEOUT,
     MAX_DIAGNOSTICS_BODY_BYTES,
 };
@@ -451,6 +451,45 @@ pub struct HttpsSyncServer {
     context: Arc<ServerContext>,
 }
 
+/// Cloneable control handle for the diagnostics authority owned by a running
+/// HTTPS server.  It intentionally exposes grant/session controls and the
+/// host data setters only; the listener and sync store remain private to the
+/// service loop.
+#[derive(Clone)]
+pub struct HttpsSyncServerHandle {
+    context: Arc<ServerContext>,
+}
+
+impl HttpsSyncServerHandle {
+    pub fn issue_diagnostics_grant(
+        &self,
+        debugger_device_id: &str,
+        scopes: &[DiagnosticsScope],
+        issued_at_ms: i64,
+        ttl: Duration,
+    ) -> Result<DiagnosticsGrant, TransportError> {
+        let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| TransportError::Config("diagnostics grant TTL is too large".into()))?;
+        let store = self.context.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+        self.context.diagnostics.issue_grant(&store, debugger_device_id, scopes, issued_at_ms, ttl_ms).map_err(TransportError::Diagnostics)
+    }
+
+    pub fn revoke_diagnostics_grant(&self, grant_id: &str) -> Result<(), TransportError> {
+        self.context.diagnostics.revoke_grant(grant_id).map_err(TransportError::Diagnostics)
+    }
+
+    pub fn revoke_all_diagnostics(&self) {
+        self.context.diagnostics.revoke_all();
+    }
+
+    pub fn diagnostics_audit_events(&self) -> Result<Vec<crate::diagnostics::DiagnosticsAuditEvent>, TransportError> {
+        self.context.diagnostics.audit_events().map_err(TransportError::Diagnostics)
+    }
+
+    pub fn diagnostics_host(&self) -> DiagnosticsHost {
+        self.context.diagnostics.host()
+    }
+}
+
 struct ServerContext {
     tls_config: Arc<ServerConfig>,
     store: Arc<Mutex<SyncStore>>,
@@ -582,12 +621,20 @@ impl Drop for DevicePermit {
 
 impl HttpsSyncServer {
     pub fn bind(config: HttpsServerConfig, store: SyncStore) -> Result<Self, TransportError> {
+        Self::bind_with_host(config, store, DiagnosticsHost::default())
+    }
+
+    /// Bind a server with the embedding host's explicitly registered
+    /// diagnostics data.  The host handle is shared with the caller, so the
+    /// panel/runtime can append trace events and update check results while
+    /// the HTTPS server is running without exposing arbitrary host access.
+    pub fn bind_with_host(config: HttpsServerConfig, store: SyncStore, host: DiagnosticsHost) -> Result<Self, TransportError> {
         config.validate()?;
         crate::protocol::ensure_private_dir(&config.staging_dir).map_err(TransportError::State)?;
         let tls_config = server_config(&config)?;
         let listener = TcpListener::bind(config.bind_addr).map_err(TransportError::from)?;
         listener.set_nonblocking(false).map_err(TransportError::from)?;
-        let diagnostics = DiagnosticsService::new(store.primary_id()).map_err(TransportError::Diagnostics)?;
+        let diagnostics = DiagnosticsService::new_with_host(store.primary_id(), host).map_err(TransportError::Diagnostics)?;
         let context = ServerContext {
             tls_config: Arc::new(tls_config),
             store: Arc::new(Mutex::new(store)),
@@ -602,6 +649,12 @@ impl HttpsSyncServer {
         Ok(Self { listener, context: Arc::new(context) })
     }
 
+    /// Returns a clone of the host-owned diagnostics handle used by this
+    /// server.  It contains only the allow-listed log/trace/check setters.
+    pub fn diagnostics_host(&self) -> DiagnosticsHost {
+        self.context.diagnostics.host()
+    }
+
     /// Issues a separately-scoped, short-lived diagnostics grant for an
     /// already paired debugger device. The grant authority is process-local;
     /// a restart therefore does not renew old diagnostics access.
@@ -612,21 +665,23 @@ impl HttpsSyncServer {
         issued_at_ms: i64,
         ttl: Duration,
     ) -> Result<DiagnosticsGrant, TransportError> {
-        let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| TransportError::Config("diagnostics grant TTL is too large".into()))?;
-        let store = self.context.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
-        self.context.diagnostics.issue_grant(&store, debugger_device_id, scopes, issued_at_ms, ttl_ms).map_err(TransportError::Diagnostics)
+        self.diagnostics_handle().issue_diagnostics_grant(debugger_device_id, scopes, issued_at_ms, ttl)
     }
 
     pub fn revoke_diagnostics_grant(&self, grant_id: &str) -> Result<(), TransportError> {
-        self.context.diagnostics.revoke_grant(grant_id).map_err(TransportError::Diagnostics)
+        self.diagnostics_handle().revoke_diagnostics_grant(grant_id)
     }
 
     pub fn revoke_all_diagnostics(&self) {
-        self.context.diagnostics.revoke_all();
+        self.diagnostics_handle().revoke_all_diagnostics();
     }
 
     pub fn diagnostics_audit_events(&self) -> Result<Vec<crate::diagnostics::DiagnosticsAuditEvent>, TransportError> {
-        self.context.diagnostics.audit_events().map_err(TransportError::Diagnostics)
+        self.diagnostics_handle().diagnostics_audit_events()
+    }
+
+    pub fn diagnostics_handle(&self) -> HttpsSyncServerHandle {
+        HttpsSyncServerHandle { context: Arc::clone(&self.context) }
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
@@ -1550,7 +1605,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::protocol::{DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, UploadEnvelope};
-    use crate::{DiagnosticsRequestAuth, PairingRequest, SyncStore};
+    use crate::{DiagnosticsHost, DiagnosticsRequestAuth, PairingRequest, SyncStore};
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::thread;
 
@@ -1603,12 +1658,16 @@ mod tests {
         let cert = cert();
         let device = DeviceIdentity::create("diagnostics-client", "Diagnostics client").unwrap();
         let (store, _) = package(&device);
-        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
-        let grant = server
+        let host = DiagnosticsHost::default();
+        host.set_panel_state(Some("visible".into())).unwrap();
+        host.set_build_summary(Some("qa-build".into())).unwrap();
+        let server = HttpsSyncServer::bind_with_host(server_config(&cert), store, host).unwrap();
+        let diagnostics_handle = server.diagnostics_handle();
+        let grant = diagnostics_handle
             .issue_diagnostics_grant(&device.device_id, &[DiagnosticsScope::Read], now_ms(), Duration::from_secs(60))
             .unwrap();
         let addr = server.local_addr().unwrap();
-        let handle = thread::spawn(move || server.run_connections(3));
+        let handle = thread::spawn(move || server.run_connections(4));
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()),
             "localhost",
@@ -1646,7 +1705,7 @@ mod tests {
         assert_eq!(listed.result.unwrap()["tools"].as_array().unwrap().len(), crate::diagnostics::diagnostics_tool_registry().len());
         let called = client
             .diagnostics_mcp(&make_request(
-                Some(session),
+                Some(session.clone()),
                 "tools/call",
                 serde_json::json!({ "name": "device.get_status" }),
                 "mcp-call",
@@ -1654,6 +1713,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(called.result.unwrap()["structuredContent"]["primary_id"], "primary-1");
+        let panel = client
+            .diagnostics_mcp(&make_request(
+                Some(session),
+                "tools/call",
+                serde_json::json!({ "name": "app.get_panel_state" }),
+                "mcp-panel",
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(panel.result.unwrap()["structuredContent"]["state"], "visible");
         assert!(handle.join().unwrap().is_ok());
     }
 

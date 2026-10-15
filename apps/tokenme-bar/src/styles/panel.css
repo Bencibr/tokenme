@@ -2659,6 +2659,39 @@
   border-top: 1px solid var(--hair);
 }
 
+.sheet-mcp-heading {
+  padding: 0;
+  border-top: 0;
+}
+
+.sheet-mcp-config {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 7px 8px;
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
+}
+
+.sheet-mcp-config-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sheet-mcp-config-row .sheet-hint {
+  flex: none;
+  min-width: 58px;
+}
+
+.sheet-mcp-config-row code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+  font-size: var(--t-meta);
+}
+
 .seg-wide {
   display: flex;
   width: 100%;

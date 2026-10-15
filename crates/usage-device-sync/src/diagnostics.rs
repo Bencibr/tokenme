@@ -1,12 +1,15 @@
 //! Bounded remote-diagnostics MCP protocol primitives.
 //!
-//! This module owns the protocol boundary only. Grants and sessions are
-//! intentionally in memory: the Tauri owner still has to provide the user
-//! consent UI, durable audit sink, log redaction source, and semantic sync/UI
-//! handlers before those tools can be enabled. An unimplemented tool returns a
-//! typed error; it is never treated as a successful no-op.
+//! This module owns the bounded protocol boundary and the host-controlled
+//! read-only diagnostics tools. Grants and sessions are intentionally in
+//! memory; the embedding host owns consent and durable audit policy. Sync/UI
+//! control tools still require an explicit host handler and return a typed
+//! unavailable error until one is registered.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +40,10 @@ pub const MAX_DIAGNOSTICS_REPLAY_ENTRIES: usize = 1024;
 pub const MAX_DIAGNOSTICS_AUDIT_EVENTS: usize = 256;
 pub const MAX_DIAGNOSTICS_CONCURRENT_REQUESTS: usize = 2;
 pub const DIAGNOSTICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_DIAGNOSTICS_TRACE_EVENTS: usize = 256;
+pub const MAX_DIAGNOSTICS_OPERATIONS: usize = 64;
+pub const MAX_DIAGNOSTICS_LOG_SCAN_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_DIAGNOSTICS_OUTPUT_BYTES: usize = 64 * 1024;
 
 const GRANT_DOMAIN: &[u8] = b"tokenme-diagnostics/grant/v1";
 const REQUEST_DOMAIN: &[u8] = b"tokenme-diagnostics/request/v1";
@@ -535,11 +542,173 @@ pub struct DiagnosticsToolDefinition {
     pub input_schema: Value,
 }
 
+/// Host-owned, redacted diagnostics data.  The protocol crate never discovers
+/// arbitrary files or executes arbitrary commands: the embedding host must
+/// explicitly register the two allow-listed log paths and append fixed trace
+/// events/check results.
+#[derive(Clone, Default)]
+pub struct DiagnosticsHost {
+    state: Arc<Mutex<DiagnosticsHostState>>,
+}
+
+/// A host-owned callback for the small, semantic control surface.  The
+/// protocol crate only passes a fixed tool name and bounded JSON arguments;
+/// the embedding application remains responsible for routing the action to
+/// its own state machine.  Returning a value lets the host acknowledge an
+/// accepted asynchronous operation without exposing arbitrary execution.
+pub type DiagnosticsControlHandler = Arc<dyn Fn(&str, Value) -> Result<Value, DiagnosticsError> + Send + Sync>;
+
+#[derive(Default)]
+struct DiagnosticsHostState {
+    logs: BTreeMap<String, PathBuf>,
+    trace: VecDeque<DiagnosticsTraceEvent>,
+    operations: BTreeMap<String, DiagnosticsOperation>,
+    check_overrides: BTreeMap<String, DiagnosticsCheckResult>,
+    panel_state: Option<String>,
+    build: Option<String>,
+    control_handler: Option<DiagnosticsControlHandler>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsTraceEvent {
+    pub at_ms: i64,
+    pub event: String,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsCheckResult {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsOperation {
+    pub operation_id: String,
+    pub status: String,
+    pub checks: Vec<String>,
+    pub started_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<BTreeMap<String, DiagnosticsCheckResult>>,
+}
+
+impl DiagnosticsHost {
+    /// Register an explicit log path.  Only `panel` and `sync` are accepted;
+    /// callers cannot turn the diagnostics protocol into a path reader.
+    pub fn set_log_path(&self, log: &str, path: impl Into<PathBuf>) -> Result<(), DiagnosticsError> {
+        if !matches!(log, "panel" | "sync") {
+            return Err(DiagnosticsError::InvalidParams);
+        }
+        let path = path.into();
+        if path.as_os_str().is_empty() || path.to_string_lossy().len() > MAX_DIAGNOSTICS_STRING_BYTES {
+            return Err(DiagnosticsError::Limit);
+        }
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        state.logs.insert(log.into(), path);
+        Ok(())
+    }
+
+    pub fn record_trace(&self, event: DiagnosticsTraceEvent) -> Result<(), DiagnosticsError> {
+        validate_trace_event(&event)?;
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        if state.trace.len() >= MAX_DIAGNOSTICS_TRACE_EVENTS {
+            state.trace.pop_front();
+        }
+        state.trace.push_back(event);
+        Ok(())
+    }
+
+    pub fn set_check_result(&self, check: &str, result: DiagnosticsCheckResult) -> Result<(), DiagnosticsError> {
+        if !valid_check_name(check) || result.status.len() > 64 || result.detail.as_ref().is_some_and(|detail| detail.len() > MAX_DIAGNOSTICS_STRING_BYTES) {
+            return Err(DiagnosticsError::InvalidParams);
+        }
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        state.check_overrides.insert(check.into(), result);
+        Ok(())
+    }
+
+    pub fn set_panel_state(&self, state_value: Option<String>) -> Result<(), DiagnosticsError> {
+        if state_value.as_ref().is_some_and(|value| value.len() > MAX_DIAGNOSTICS_STRING_BYTES) {
+            return Err(DiagnosticsError::Limit);
+        }
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        state.panel_state = state_value;
+        Ok(())
+    }
+
+    pub fn set_build_summary(&self, build: Option<String>) -> Result<(), DiagnosticsError> {
+        if build.as_ref().is_some_and(|value| value.len() > MAX_DIAGNOSTICS_STRING_BYTES) {
+            return Err(DiagnosticsError::Limit);
+        }
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        state.build = build;
+        Ok(())
+    }
+
+    /// Register the embedding application's fixed semantic control handler.
+    /// Replacing the handler is intentional during primary restart; callers
+    /// must not use it as a general command or file execution hook.
+    pub fn set_control_handler<F>(&self, handler: F) -> Result<(), DiagnosticsError>
+    where
+        F: Fn(&str, Value) -> Result<Value, DiagnosticsError> + Send + Sync + 'static,
+    {
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        state.control_handler = Some(Arc::new(handler));
+        Ok(())
+    }
+
+    /// Reserve a bounded operation slot for a host control request.  The
+    /// operation is visible through `diagnostics.get_operation` so an MCP
+    /// client can observe completion after the host schedules the action.
+    pub fn begin_control_operation(&self, action: &str, started_at_ms: i64) -> Result<String, DiagnosticsError> {
+        if !matches!(action, "sync.start_primary" | "sync.stop_primary" | "sync.discover" | "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request" | "sync.pause" | "sync.resume" | "sync.revoke_device" | "sync.refresh" | "ui.open_sync_sheet" | "ui.focus_device") {
+            return Err(DiagnosticsError::UnknownTool);
+        }
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).map_err(|_| DiagnosticsError::Internal)?;
+        let operation_id = format!("doper-{}", hex(&random));
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        if state.operations.len() >= MAX_DIAGNOSTICS_OPERATIONS { return Err(DiagnosticsError::Busy); }
+        state.operations.insert(operation_id.clone(), DiagnosticsOperation {
+            operation_id: operation_id.clone(), status: "running".into(), checks: vec![action.into()],
+            started_at_ms, completed_at_ms: None, results: None,
+        });
+        Ok(operation_id)
+    }
+
+    /// Complete a host control operation with a bounded, secret-free outcome.
+    pub fn complete_control_operation(&self, operation_id: &str, ok: bool, completed_at_ms: i64) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(operation) = state.operations.get_mut(operation_id) {
+                let action = operation.checks.first().cloned().unwrap_or_else(|| "control".into());
+                operation.status = if ok { "completed" } else { "failed" }.into();
+                operation.completed_at_ms = Some(completed_at_ms);
+                operation.results = Some(BTreeMap::from([(action, DiagnosticsCheckResult {
+                    status: if ok { "ok" } else { "error" }.into(),
+                    detail: Some(if ok { "control_completed" } else { "control_failed" }.into()),
+                })]));
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolId {
     DeviceGetStatus,
     SyncGetStatus,
     SyncGetRequests,
+    DeviceGetBuild,
+    LogsTail,
+    LogsSearch,
+    SyncGetTrace,
+    DiagnosticsRunCheck,
+    DiagnosticsGetOperation,
+    AppGetPanelState,
     Other,
 }
 
@@ -553,15 +722,15 @@ struct ToolSpec {
 
 const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { id: ToolId::DeviceGetStatus, name: "device.get_status", scope: DiagnosticsScope::Read, description: "Return bounded device and service status." },
-    ToolSpec { id: ToolId::Other, name: "device.get_build", scope: DiagnosticsScope::Read, description: "Return a safe build summary when the host integration is connected." },
-    ToolSpec { id: ToolId::Other, name: "logs.tail", scope: DiagnosticsScope::Read, description: "Read a bounded, redacted tail from an allow-listed log." },
-    ToolSpec { id: ToolId::Other, name: "logs.search", scope: DiagnosticsScope::Read, description: "Search an allow-listed log with bounded redacted output." },
+    ToolSpec { id: ToolId::DeviceGetBuild, name: "device.get_build", scope: DiagnosticsScope::Read, description: "Return a safe build summary." },
+    ToolSpec { id: ToolId::LogsTail, name: "logs.tail", scope: DiagnosticsScope::Read, description: "Read a bounded, redacted tail from an allow-listed log." },
+    ToolSpec { id: ToolId::LogsSearch, name: "logs.search", scope: DiagnosticsScope::Read, description: "Search an allow-listed log with bounded redacted output." },
     ToolSpec { id: ToolId::SyncGetStatus, name: "sync.get_status", scope: DiagnosticsScope::Read, description: "Return bounded synchronization status." },
     ToolSpec { id: ToolId::SyncGetRequests, name: "sync.get_requests", scope: DiagnosticsScope::Read, description: "Return bounded pairing-request summaries." },
-    ToolSpec { id: ToolId::Other, name: "sync.get_trace", scope: DiagnosticsScope::Read, description: "Return a bounded synchronization trace when the host integration is connected." },
-    ToolSpec { id: ToolId::Other, name: "diagnostics.run_check", scope: DiagnosticsScope::Read, description: "Run fixed diagnostics checks when the host integration is connected." },
-    ToolSpec { id: ToolId::Other, name: "diagnostics.get_operation", scope: DiagnosticsScope::Read, description: "Read a bounded operation result when the host integration is connected." },
-    ToolSpec { id: ToolId::Other, name: "app.get_panel_state", scope: DiagnosticsScope::Read, description: "Return panel state when the host integration is connected." },
+    ToolSpec { id: ToolId::SyncGetTrace, name: "sync.get_trace", scope: DiagnosticsScope::Read, description: "Return a bounded synchronization trace." },
+    ToolSpec { id: ToolId::DiagnosticsRunCheck, name: "diagnostics.run_check", scope: DiagnosticsScope::Read, description: "Run fixed diagnostics checks asynchronously." },
+    ToolSpec { id: ToolId::DiagnosticsGetOperation, name: "diagnostics.get_operation", scope: DiagnosticsScope::Read, description: "Read a bounded diagnostics operation result." },
+    ToolSpec { id: ToolId::AppGetPanelState, name: "app.get_panel_state", scope: DiagnosticsScope::Read, description: "Return the host panel state." },
     ToolSpec { id: ToolId::Other, name: "sync.start_primary", scope: DiagnosticsScope::SyncControl, description: "Start the primary service through the host state machine." },
     ToolSpec { id: ToolId::Other, name: "sync.stop_primary", scope: DiagnosticsScope::SyncControl, description: "Stop the primary service and revoke diagnostics sessions." },
     ToolSpec { id: ToolId::Other, name: "sync.discover", scope: DiagnosticsScope::SyncControl, description: "Start one bounded LAN discovery operation." },
@@ -590,6 +759,7 @@ pub fn diagnostics_tool_registry() -> Vec<DiagnosticsToolDefinition> {
 #[derive(Clone)]
 pub struct DiagnosticsService {
     state: Arc<Mutex<DiagnosticsState>>,
+    host: DiagnosticsHost,
 }
 
 struct DiagnosticsState {
@@ -625,6 +795,10 @@ impl Drop for DiagnosticsRequestPermit {
 
 impl DiagnosticsService {
     pub fn new(target_device_id: impl Into<String>) -> Result<Self, DiagnosticsError> {
+        Self::new_with_host(target_device_id, DiagnosticsHost::default())
+    }
+
+    pub fn new_with_host(target_device_id: impl Into<String>, host: DiagnosticsHost) -> Result<Self, DiagnosticsError> {
         Ok(Self {
             state: Arc::new(Mutex::new(DiagnosticsState {
                 authority: DiagnosticsAuthority::new(target_device_id)?,
@@ -636,7 +810,12 @@ impl DiagnosticsService {
                 active_requests: 0,
                 stopped: false,
             })),
+            host,
         })
+    }
+
+    pub fn host(&self) -> DiagnosticsHost {
+        self.host.clone()
     }
 
     pub fn target_device_id(&self) -> Result<String, DiagnosticsError> {
@@ -681,6 +860,24 @@ impl DiagnosticsService {
         };
         state.sessions.retain(|_, session| session.grant_id != grant.grant_id);
         Ok(())
+    }
+
+    pub fn grant(&self, grant_id: &str) -> Result<Option<DiagnosticsGrant>, DiagnosticsError> {
+        let state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        Ok(state.grants.get(grant_id).cloned())
+    }
+
+    pub fn revoke_session(&self, session_id: &str) -> Result<(), DiagnosticsError> {
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        if state.sessions.remove(session_id).is_none() {
+            return Err(DiagnosticsError::SessionExpired);
+        }
+        Ok(())
+    }
+
+    pub fn session_ids(&self) -> Result<Vec<String>, DiagnosticsError> {
+        let state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        Ok(state.sessions.keys().cloned().collect())
     }
 
     pub fn revoke_all(&self) {
@@ -732,6 +929,43 @@ impl DiagnosticsService {
         validate_request(&request)?;
         let _permit = self.enter()?;
         self.handle_request(store, &request, now_ms, deadline)
+    }
+
+    /// Serve newline-delimited JSON-RPC over an already-owned stdio stream.
+    /// The bridge has no process spawning or socket policy of its own; an
+    /// embedding CLI may choose when to expose it.  Oversized or malformed
+    /// lines receive bounded JSON-RPC errors and do not terminate the loop.
+    pub fn serve_stdio<R: BufRead, W: Write>(
+        &self,
+        store: &SyncStore,
+        reader: &mut R,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        loop {
+            let mut line = Vec::new();
+            let read = reader.read_until(b'\n', &mut line)?;
+            if read == 0 {
+                return Ok(());
+            }
+            let too_large = line.len() > MAX_DIAGNOSTICS_BODY_BYTES;
+            if too_large {
+                write_stdio_response(writer, DiagnosticsError::Limit.rpc_response(None))?;
+                continue;
+            }
+            if line.last() == Some(&b'\n') { line.pop(); }
+            if line.last() == Some(&b'\r') { line.pop(); }
+            let body = &line;
+            if body.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let now_ms = diagnostics_now_ms();
+            let response = match self.handle_json(store, body, now_ms, Instant::now() + DIAGNOSTICS_REQUEST_TIMEOUT) {
+                Ok(Some(response)) => response,
+                Ok(None) => continue,
+                Err(error) => error.rpc_response(json_request_id(body)),
+            };
+            write_stdio_response(writer, response)?;
+        }
     }
 
     pub fn handle_request(
@@ -930,15 +1164,10 @@ impl DiagnosticsService {
         if Instant::now() >= deadline {
             return Err(DiagnosticsError::Timeout);
         }
-        if spec.id == ToolId::Other {
-            return Err(DiagnosticsError::ToolUnavailable);
-        }
-        if !arguments.is_object() {
-            return Err(DiagnosticsError::InvalidParams);
-        }
+        let arguments = arguments.as_object().ok_or(DiagnosticsError::InvalidParams)?;
         match spec.id {
             ToolId::DeviceGetStatus => {
-                if !arguments.as_object().is_some_and(Map::is_empty) {
+                if !arguments.is_empty() {
                     return Err(DiagnosticsError::InvalidParams);
                 }
                 let devices = store.devices()?.into_iter().map(Into::into).collect::<Vec<crate::store::DeviceStatusView>>();
@@ -950,7 +1179,7 @@ impl DiagnosticsService {
                 }))
             }
             ToolId::SyncGetStatus => {
-                if !arguments.as_object().is_some_and(Map::is_empty) {
+                if !arguments.is_empty() {
                     return Err(DiagnosticsError::InvalidParams);
                 }
                 let config = store.primary_config()?;
@@ -965,13 +1194,161 @@ impl DiagnosticsService {
                 }))
             }
             ToolId::SyncGetRequests => {
-                if !arguments.as_object().is_some_and(Map::is_empty) {
+                if !arguments.is_empty() {
                     return Err(DiagnosticsError::InvalidParams);
                 }
                 Ok(serde_json::json!({ "requests": store.pairing_requests_at(now_ms)? }))
             }
-            ToolId::Other => Err(DiagnosticsError::ToolUnavailable),
+            ToolId::DeviceGetBuild => {
+                if !arguments.is_empty() { return Err(DiagnosticsError::InvalidParams); }
+                let state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+                Ok(serde_json::json!({
+                    "available": true,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "target": std::env::consts::ARCH,
+                    "os": std::env::consts::OS,
+                    "build": state.build.clone(),
+                }))
+            }
+            ToolId::LogsTail => {
+                let (log, lines) = parse_log_args(arguments, false)?;
+                self.read_log_tool(&log, None, lines, deadline)
+            }
+            ToolId::LogsSearch => {
+                let (log, limit) = parse_log_args(arguments, true)?;
+                let query = arguments.get("query").and_then(Value::as_str).ok_or(DiagnosticsError::InvalidParams)?;
+                if query.is_empty() || query.len() > MAX_DIAGNOSTICS_STRING_BYTES { return Err(DiagnosticsError::InvalidParams); }
+                let since_ms = arguments.get("since_ms").map(|value| value.as_i64().ok_or(DiagnosticsError::InvalidParams)).transpose()?;
+                self.read_log_tool(&log, Some((query, since_ms)), limit, deadline)
+            }
+            ToolId::SyncGetTrace => {
+                let limit = parse_limit(arguments, "limit", 100)?;
+                if arguments.keys().any(|key| key != "limit") { return Err(DiagnosticsError::InvalidParams); }
+                let state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+                let truncated = state.trace.len() > limit;
+                let events = state.trace.iter().rev().take(limit).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
+                Ok(serde_json::json!({ "events": events, "truncated": truncated }))
+            }
+            ToolId::DiagnosticsRunCheck => {
+                if arguments.keys().any(|key| key != "checks") { return Err(DiagnosticsError::InvalidParams); }
+                let checks = arguments.get("checks").and_then(Value::as_array).ok_or(DiagnosticsError::InvalidParams)?;
+                if checks.is_empty() || checks.len() > 16 { return Err(DiagnosticsError::InvalidParams); }
+                let checks = checks.iter().map(|value| value.as_str().ok_or(DiagnosticsError::InvalidParams)).collect::<Result<Vec<_>, _>>()?;
+                let mut names = BTreeSet::new();
+                for check in checks {
+                    if !valid_check_name(check) { return Err(DiagnosticsError::InvalidParams); }
+                    names.insert(check.to_string());
+                }
+                self.start_check_operation(names.into_iter().collect(), now_ms)
+            }
+            ToolId::DiagnosticsGetOperation => {
+                if arguments.keys().any(|key| key != "operation_id") { return Err(DiagnosticsError::InvalidParams); }
+                let operation_id = arguments.get("operation_id").and_then(Value::as_str).ok_or(DiagnosticsError::InvalidParams)?;
+                if operation_id.is_empty() || operation_id.len() > 128 { return Err(DiagnosticsError::InvalidParams); }
+                let state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+                Ok(state.operations.get(operation_id).cloned().map_or_else(
+                    || serde_json::json!({ "operation_id": operation_id, "status": "unknown" }),
+                    |operation| serde_json::to_value(operation).unwrap_or_else(|_| serde_json::json!({ "operation_id": operation_id, "status": "unknown" })),
+                ))
+            }
+            ToolId::AppGetPanelState => {
+                if !arguments.is_empty() { return Err(DiagnosticsError::InvalidParams); }
+                let state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+                Ok(serde_json::json!({ "available": state.panel_state.is_some(), "state": state.panel_state.clone() }))
+            }
+            ToolId::Other => {
+                let handler = {
+                    let state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+                    state.control_handler.clone()
+                };
+                let Some(handler) = handler else { return Err(DiagnosticsError::ToolUnavailable); };
+                let arguments = Value::Object(arguments.clone());
+                if serde_json::to_vec(&arguments).map_err(|_| DiagnosticsError::InvalidParams)?.len() > MAX_DIAGNOSTICS_PARAMS_BYTES {
+                    return Err(DiagnosticsError::Limit);
+                }
+                handler(spec.name, arguments)
+            }
         }
+    }
+
+    fn read_log_tool(&self, log: &str, search: Option<(&str, Option<i64>)>, limit: usize, deadline: Instant) -> Result<Value, DiagnosticsError> {
+        let path = {
+            let state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+            state.logs.get(log).cloned()
+        };
+        let Some(path) = path else {
+            return Ok(serde_json::json!({ "available": false, "log": log, "lines": [], "truncated": false, "redacted": true, "reason": "not_configured" }));
+        };
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| DiagnosticsError::ToolUnavailable)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(DiagnosticsError::ToolUnavailable);
+        }
+        let file = File::open(&path).map_err(|_| DiagnosticsError::ToolUnavailable)?;
+        let mut reader = BufReader::new(file);
+        let mut selected = VecDeque::new();
+        let mut scanned = 0usize;
+        let mut truncated = false;
+        loop {
+            if Instant::now() >= deadline { return Err(DiagnosticsError::Timeout); }
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).map_err(|_| DiagnosticsError::ToolUnavailable)?;
+            if read == 0 { break; }
+            scanned = scanned.saturating_add(read);
+            if scanned > MAX_DIAGNOSTICS_LOG_SCAN_BYTES {
+                truncated = true;
+                break;
+            }
+            if line.len() > MAX_DIAGNOSTICS_STRING_BYTES { line.truncate(MAX_DIAGNOSTICS_STRING_BYTES); truncated = true; }
+            let line = line.trim_end_matches(['\r', '\n']);
+            let include = match search {
+                Some((query, since_ms)) => line.contains(query) && since_ms.is_none_or(|since| line_timestamp_ms(line).is_none_or(|at| at >= since)),
+                None => true,
+            };
+            if !include { continue; }
+            let redacted = redact_diagnostics_text(line);
+            if selected.len() >= limit { selected.pop_front(); }
+            selected.push_back(redacted);
+        }
+        let mut lines = Vec::new();
+        let mut output_bytes = 0usize;
+        for line in selected {
+            let bytes = line.len();
+            if output_bytes.saturating_add(bytes) > MAX_DIAGNOSTICS_OUTPUT_BYTES {
+                truncated = true;
+                break;
+            }
+            output_bytes = output_bytes.saturating_add(bytes);
+            lines.push(line);
+        }
+        Ok(serde_json::json!({ "available": true, "log": log, "lines": lines, "truncated": truncated, "redacted": true }))
+    }
+
+    fn start_check_operation(&self, checks: Vec<String>, now_ms: i64) -> Result<Value, DiagnosticsError> {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).map_err(|_| DiagnosticsError::Internal)?;
+        let operation_id = format!("doper-{}", hex(&random));
+        let mut state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        if state.operations.len() >= MAX_DIAGNOSTICS_OPERATIONS { return Err(DiagnosticsError::Busy); }
+        state.operations.insert(operation_id.clone(), DiagnosticsOperation {
+            operation_id: operation_id.clone(), status: "queued".into(), checks: checks.clone(),
+            started_at_ms: now_ms, completed_at_ms: None, results: None,
+        });
+        let host_state = Arc::clone(&self.host.state);
+        let operation_for_thread = operation_id.clone();
+        std::thread::spawn(move || {
+            std::thread::yield_now();
+            let Ok(mut state) = host_state.lock() else { return; };
+            let results = checks.into_iter().map(|check| {
+                let result = state.check_overrides.get(&check).cloned().unwrap_or(DiagnosticsCheckResult { status: "unavailable".into(), detail: Some("host_check_not_configured".into()) });
+                (check, result)
+            }).collect::<BTreeMap<_, _>>();
+            if let Some(operation) = state.operations.get_mut(&operation_for_thread) {
+                operation.status = "completed".into();
+                operation.completed_at_ms = Some(diagnostics_now_ms());
+                operation.results = Some(results);
+            }
+        });
+        Ok(serde_json::json!({ "operation_id": operation_id, "status": "queued", "checks": state.operations.get(&operation_id).map(|operation| operation.checks.clone()).unwrap_or_default() }))
     }
 
     fn record_audit(&self, event: DiagnosticsAuditEvent) {
@@ -979,6 +1356,96 @@ impl DiagnosticsService {
             push_audit(&mut state.audit, event);
         }
     }
+}
+
+fn valid_check_name(value: &str) -> bool {
+    matches!(value, "listener" | "tls" | "pin" | "database" | "ipc")
+}
+
+fn validate_trace_event(event: &DiagnosticsTraceEvent) -> Result<(), DiagnosticsError> {
+    if event.event.len() > 64 || event.outcome.len() > 64 || event.event.is_empty() || event.outcome.is_empty() {
+        return Err(DiagnosticsError::InvalidParams);
+    }
+    if !matches!(event.event.as_str(), "sync.started" | "sync.stopped" | "sync.connected" | "sync.uploaded" | "sync.failed" | "sync.discovery") {
+        return Err(DiagnosticsError::InvalidParams);
+    }
+    if !matches!(event.outcome.as_str(), "ok" | "error" | "pending" | "offline" | "cancelled") {
+        return Err(DiagnosticsError::InvalidParams);
+    }
+    Ok(())
+}
+
+fn parse_limit(arguments: &Map<String, Value>, name: &str, default: usize) -> Result<usize, DiagnosticsError> {
+    let value = arguments.get(name).map(|value| value.as_u64().ok_or(DiagnosticsError::InvalidParams)).transpose()?.map(|value| value as usize).unwrap_or(default);
+    if value == 0 || value > 200 { return Err(DiagnosticsError::InvalidParams); }
+    Ok(value)
+}
+
+fn parse_log_args(arguments: &Map<String, Value>, search: bool) -> Result<(String, usize), DiagnosticsError> {
+    let allowed = if search { ["log", "limit", "query", "since_ms"].as_slice() } else { ["log", "lines"].as_slice() };
+    if arguments.keys().any(|key| !allowed.contains(&key.as_str())) { return Err(DiagnosticsError::InvalidParams); }
+    let log = arguments.get("log").and_then(Value::as_str).ok_or(DiagnosticsError::InvalidParams)?;
+    if !matches!(log, "panel" | "sync") { return Err(DiagnosticsError::InvalidParams); }
+    let limit = parse_limit(arguments, if search { "limit" } else { "lines" }, if search { 100 } else { 100 })?;
+    Ok((log.into(), limit))
+}
+
+fn line_timestamp_ms(line: &str) -> Option<i64> {
+    let value = line.split(|character: char| !character.is_ascii_digit() && character != '-').next()?;
+    let parsed = value.parse::<i64>().ok()?;
+    Some(if parsed.abs() < 10_000_000_000 { parsed.saturating_mul(1000) } else { parsed })
+}
+
+/// Redact credentials and pairing material without echoing the query or path
+/// supplied by a caller.  This deliberately uses a fixed key list rather
+/// than a user-controlled regular expression.
+fn redact_diagnostics_text(line: &str) -> String {
+    let mut output = line.to_string();
+    // Handle bearer credentials before key/value replacement.  Otherwise an
+    // `authorization=Bearer ...` field would first replace only `Bearer` and
+    // make the remaining credential invisible to this pass.
+    let lower = output.to_ascii_lowercase();
+    if let Some(offset) = lower.find("bearer ") {
+        let start = offset + "bearer ".len();
+        let end = output[start..].find(char::is_whitespace).map(|value| start + value).unwrap_or(output.len());
+        output.replace_range(start..end, "[REDACTED]");
+    }
+    for key in ["secret", "token", "access_token", "api_key", "apikey", "authorization", "password", "private_key", "cookie"] {
+        for marker in [format!("{key}="), format!("{key}:"), format!("\"{key}\":"), format!("'{key}':")] {
+            let mut cursor = 0usize;
+            while let Some(offset) = output[cursor..].to_ascii_lowercase().find(&marker.to_ascii_lowercase()) {
+                let marker_end = cursor + offset + marker.len();
+                let quote = output[marker_end..].chars().next().filter(|character| *character == '"' || *character == '\'');
+                let start = quote.map_or(marker_end, |_| marker_end + 1);
+                let end = if let Some(quote) = quote {
+                    output[start..].find(quote).map(|value| start + value).unwrap_or(output.len())
+                } else {
+                    output[start..].find(|character: char| character.is_whitespace() || character == '&' || character == ',' || character == '}' || character == ']').map(|value| start + value).unwrap_or(output.len())
+                };
+                output.replace_range(start..end, "[REDACTED]");
+                cursor = start + "[REDACTED]".len();
+                if cursor >= output.len() { break; }
+            }
+        }
+    }
+    output
+}
+
+fn diagnostics_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+fn json_request_id(body: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(body).ok().and_then(|value| value.get("id").cloned()).filter(|value| valid_jsonrpc_id(Some(value)))
+}
+
+fn write_stdio_response<W: Write>(writer: &mut W, response: DiagnosticsMcpResponse) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, &response).map_err(io::Error::other)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
 }
 
 impl DiagnosticsState {
@@ -1069,6 +1536,9 @@ fn tool_call_spec(params: &Value) -> Result<Option<(ToolSpec, Value)>, Diagnosti
     let Some(params) = params.as_object() else {
         return Err(DiagnosticsError::InvalidParams);
     };
+    if params.keys().any(|key| key != "name" && key != "arguments") {
+        return Err(DiagnosticsError::InvalidParams);
+    }
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Err(DiagnosticsError::InvalidParams);
     };
@@ -1157,6 +1627,8 @@ mod tests {
     use crate::protocol::PairingRequest;
     use crate::store::SyncStore;
     use serde_json::json;
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex};
 
     fn clock() -> i64 {
         1_000_000
@@ -1200,6 +1672,79 @@ mod tests {
     }
 
     #[test]
+    fn host_tools_redact_logs_and_expose_async_check_state() {
+        let (store, identity) = paired_store();
+        let host = DiagnosticsHost::default();
+        let mut log = tempfile::NamedTempFile::new().unwrap();
+        writeln!(log, "1700000000000 authorization=Bearer super-secret-token").unwrap();
+        writeln!(log, "1700000001000 sync.connected outcome=ok").unwrap();
+        writeln!(log, "1700000002000 {{\"access_token\":\"json-secret\"}}").unwrap();
+        host.set_log_path("panel", log.path()).unwrap();
+        host.record_trace(DiagnosticsTraceEvent { at_ms: clock(), event: "sync.connected".into(), outcome: "ok".into(), duration_ms: Some(3) }).unwrap();
+        host.set_check_result("database", DiagnosticsCheckResult { status: "ok".into(), detail: None }).unwrap();
+        let service = DiagnosticsService::new_with_host(store.primary_id(), host).unwrap();
+        let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
+        let session = service.handle_request(&store, &request(&grant, &identity, None, "initialize", json!({}), "host-init"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap().result.unwrap()["sessionId"].as_str().unwrap().to_string();
+
+        let tail = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/call", json!({"name":"logs.tail","arguments":{"log":"panel","lines":10}}), "host-tail"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let tail_result = tail.result.unwrap();
+        let tail_lines = tail_result["structuredContent"]["lines"].as_array().unwrap().iter().filter_map(Value::as_str).collect::<Vec<_>>();
+        let tail_text = tail_lines.join("\n");
+        assert!(tail_text.contains("[REDACTED]"));
+        assert!(!tail_text.contains("super-secret-token"));
+        assert!(!tail_text.contains("json-secret"));
+
+        let trace = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/call", json!({"name":"sync.get_trace","arguments":{"limit":10}}), "host-trace"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(trace.result.unwrap()["structuredContent"]["events"].as_array().unwrap().len(), 1);
+
+        let started = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/call", json!({"name":"diagnostics.run_check","arguments":{"checks":["database","tls"]}}), "host-check"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let operation_id = started.result.unwrap()["structuredContent"]["operation_id"].as_str().unwrap().to_string();
+        std::thread::sleep(Duration::from_millis(5));
+        let operation = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({"name":"diagnostics.get_operation","arguments":{"operation_id":operation_id}}), "host-operation"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let operation = &operation.result.unwrap()["structuredContent"];
+        assert!(matches!(operation["status"].as_str(), Some("queued") | Some("completed")));
+    }
+
+    #[test]
+    fn stdio_bridge_returns_bounded_errors_and_continues_with_jsonrpc() {
+        let (store, identity) = paired_store();
+        let service = DiagnosticsService::new(store.primary_id()).unwrap();
+        let issued_at_ms = diagnostics_now_ms();
+        let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], issued_at_ms, 10_000).unwrap();
+        let params = json!({});
+        let auth = DiagnosticsRequestAuth::new_signed(
+            &grant,
+            &identity,
+            None,
+            "initialize",
+            &params,
+            "stdio-init",
+            issued_at_ms,
+            issued_at_ms + 1_000,
+        ).unwrap();
+        let request = DiagnosticsMcpRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("stdio-init")),
+            auth,
+            method: "initialize".into(),
+            params,
+        };
+        let mut input = b"not-json\n".to_vec();
+        input.extend(serde_json::to_vec(&request).unwrap());
+        input.push(b'\n');
+        let mut output = Vec::new();
+        service.serve_stdio(&store, &mut Cursor::new(input), &mut output).unwrap();
+        let responses = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 2);
+        assert!(responses[0].get("error").is_some());
+        assert_eq!(responses[1]["result"]["serverInfo"]["name"], "tokenme-diagnostics");
+    }
+
+    #[test]
     fn mcp_initialize_list_and_store_backed_call_use_a_fixed_registry() {
         let (store, identity) = paired_store();
         let service = DiagnosticsService::new(store.primary_id()).unwrap();
@@ -1208,9 +1753,52 @@ mod tests {
         let session = init.result.as_ref().unwrap()["sessionId"].as_str().unwrap().to_string();
         let listed = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/list", json!({}), "r-list"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
         assert_eq!(listed.result.as_ref().unwrap()["tools"].as_array().unwrap().len(), TOOL_SPECS.len());
-        let status = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({"name":"device.get_status"}), "r-call"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let status = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/call", json!({"name":"device.get_status"}), "r-call"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
         assert_eq!(status.result.as_ref().unwrap()["structuredContent"]["primary_id"], "primary-diagnostics");
         assert!(diagnostics_tool_registry().iter().all(|tool| !tool.name.contains("shell") && !tool.name.contains("screenshot")));
+        let invalid = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({"name":"device.get_status", "extra":true}), "r-extra"), clock(), Instant::now() + Duration::from_secs(1)).unwrap_err();
+        assert_eq!(invalid, DiagnosticsError::InvalidParams);
+    }
+
+    #[test]
+    fn control_tools_use_a_bounded_host_handler() {
+        let (store, identity) = paired_store();
+        let host = DiagnosticsHost::default();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_by_handler = Arc::clone(&seen);
+        host.set_control_handler(move |tool, arguments| {
+            assert!(tool.starts_with("sync."));
+            assert!(serde_json::to_vec(&arguments).unwrap().len() <= MAX_DIAGNOSTICS_PARAMS_BYTES);
+            seen_by_handler.lock().unwrap().push((tool.into(), arguments));
+            Ok(json!({ "accepted": true, "action": tool }))
+        }).unwrap();
+        let service = DiagnosticsService::new_with_host(store.primary_id(), host).unwrap();
+        let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::SyncControl], clock(), 10_000).unwrap();
+        let init = service.handle_request(&store, &request(&grant, &identity, None, "initialize", json!({}), "control-init"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let session = init.result.unwrap()["sessionId"].as_str().unwrap().to_string();
+        let response = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({
+            "name": "sync.refresh", "arguments": {}
+        }), "control-refresh"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(response.result.unwrap()["structuredContent"]["accepted"], true);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "sync.refresh");
+        assert!(seen[0].1.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn control_operation_is_queryable_until_completion() {
+        let host = DiagnosticsHost::default();
+        let operation_id = host.begin_control_operation("sync.refresh", clock()).unwrap();
+        {
+            let state = host.state.lock().unwrap();
+            assert_eq!(state.operations[&operation_id].status, "running");
+        }
+        host.complete_control_operation(&operation_id, true, clock().saturating_add(1));
+        let state = host.state.lock().unwrap();
+        let operation = &state.operations[&operation_id];
+        assert_eq!(operation.status, "completed");
+        assert_eq!(operation.results.as_ref().unwrap()["sync.refresh"].status, "ok");
     }
 
     #[test]

@@ -2,16 +2,19 @@
 //! `usage_core::report::summarize`; this file only slices events and formats.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::thread;
 
 use chrono::{Datelike, Local, TimeZone};
+use base64::Engine as _;
+use serde::Deserialize;
 use usage_core::{summarize, CallKind, DateFilter, Item, Meter, Summary, UsageEvent, Window};
 use usage_device_sync::{
-    hash_bytes, identity_bytes, DeviceIdentity, HttpsServerConfig, HttpsTransportConfig, NetworkCall, NetworkCounts,
+    hash_bytes, identity_bytes, DeviceIdentity, DiagnosticsGrant, DiagnosticsMcpRequest, DiagnosticsRequestAuth,
+    DiagnosticsService, HttpsServerConfig, HttpsTransportConfig, NetworkCall, NetworkCounts,
     NetworkPackage, NetworkRow, PairingInvite, PairingRequest, SignedUpload,
     SyncRuntime, SyncRuntimeConfig, SyncStore, Tls13HttpsTransport,
 };
@@ -23,6 +26,303 @@ use crate::render::{self, cost_cell, Table};
 
 const MS_DAY: i64 = 86_400_000;
 pub const MAX_PERIODS: i64 = 90;
+
+/// Serve the diagnostics MCP protocol from the current sync database.
+///
+/// The protocol owns authentication and grants; the CLI host only opens the
+/// local SyncStore and hands its stdin/stdout to the bounded stdio bridge.
+/// Keeping this command outside `context::build` is intentional: it must not
+/// ingest logs, print progress, or put anything except JSON-RPC responses on
+/// stdout. The debugger identity is carried by each signed MCP request; the
+/// service authority is intentionally process-scoped, so a restarted command
+/// cannot accept grants issued by the previous process.
+pub fn diagnostics_stdio(global: &crate::args::Global) -> Result<(), String> {
+    let db_path = global
+        .db
+        .clone()
+        .or_else(usage_index::Index::default_path)
+        .ok_or_else(|| "diagnostics stdio needs --db <path> on this platform".to_string())?;
+    if !db_path.exists() {
+        return Err(format!("diagnostics stdio requires an existing sync database: {}", db_path.display()));
+    }
+    let status = SyncStore::read_status(&db_path).map_err(|error| format!("cannot read sync identity from {}: {error}", db_path.display()))?;
+    let primary_id = if let Some(primary_id) = status.primary_id {
+        primary_id
+    } else {
+        SyncStore::read_secondary_config(&db_path)
+            .map_err(|error| format!("cannot read secondary identity from {}: {error}", db_path.display()))?
+            .map(|config| config.primary_id)
+            .ok_or_else(|| format!("no device-sync identity is stored in {}; pair or start sync first", db_path.display()))?
+    };
+    if let Some(config_path) = &global.diagnostics_config {
+        return diagnostics_bridge_stdio(&db_path, &primary_id, config_path);
+    }
+    let store = SyncStore::open(&db_path, primary_id).map_err(|error| format!("cannot open sync store {}: {error}", db_path.display()))?;
+    let service = DiagnosticsService::new(store.primary_id()).map_err(|error| format!("cannot start diagnostics service: {error}"))?;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut reader = stdin.lock();
+    let mut writer = stdout.lock();
+    service.serve_stdio(&store, &mut reader, &mut writer).map_err(|error| format!("diagnostics stdio failed: {error}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct DiagnosticsBridgeConfig {
+    schema: String,
+    endpoint: String,
+    #[serde(default, alias = "serverName")]
+    server_name: Option<String>,
+    certificate_pin: String,
+    certificate_der_b64: String,
+    grant: DiagnosticsGrant,
+}
+
+fn diagnostics_bridge_stdio(db_path: &std::path::Path, primary_id: &str, config_path: &std::path::Path) -> Result<(), String> {
+    let config = load_diagnostics_bridge_config(config_path)?;
+    if config.schema != "tokenme-diagnostics-grant/v1" {
+        return Err("diagnostics config schema is unsupported".into());
+    }
+    if config.grant.target_device_id != primary_id {
+        return Err("diagnostics grant target does not match the --db primary identity".into());
+    }
+    let secondary = SyncStore::read_secondary_config(db_path)
+        .map_err(|error| format!("cannot read debugger identity from {}: {error}", db_path.display()))?
+        .ok_or_else(|| "diagnostics bridge requires a paired secondary identity in --db".to_string())?;
+    if secondary.device_id != config.grant.debugger_device_id || secondary.origin != config.grant.debugger_origin {
+        return Err("diagnostics grant debugger identity does not match the paired --db identity".into());
+    }
+    if !secondary.identity_path.exists() {
+        return Err(format!("diagnostics debugger identity is missing: {}", secondary.identity_path.display()));
+    }
+    let identity = DeviceIdentity::load_or_create(&secondary.identity_path, secondary.origin.clone(), "tokenme diagnostics bridge")
+        .map_err(|error| format!("cannot load diagnostics debugger identity: {error}"))?;
+    if identity.device_id != config.grant.debugger_device_id || identity.origin != config.grant.debugger_origin {
+        return Err("diagnostics identity file does not match the grant".into());
+    }
+    let server_name = config.server_name.clone().filter(|name| !name.trim().is_empty()).unwrap_or(endpoint_server_name(&config.endpoint)?);
+    let mut transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(config.endpoint.clone(), server_name, config.certificate_der_b64_bytes()?))
+        .map_err(|error| format!("cannot configure diagnostics TLS transport: {error}"))?;
+    let pin = parse_sha256(&config.certificate_pin)?;
+    if transport.config().pinned_certificate_sha256 != pin {
+        return Err("diagnostics certificate pin does not match certificate_der_b64".into());
+    }
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut writer = stdout.lock();
+    let mut session_id = None;
+    let mut sequence = 0u64;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).map_err(|error| format!("diagnostics stdio read failed: {error}"))?;
+        if read == 0 { return Ok(()); }
+        if line.len() > usage_device_sync::MAX_DIAGNOSTICS_BODY_BYTES {
+            let id = serde_json::from_str::<serde_json::Value>(line.trim_end()).ok().and_then(|value| json_rpc_id(&value));
+            eprintln!("tokenme diagnostics: request exceeds the configured size limit");
+            write_diagnostics_bridge_error(&mut writer, id, -32600, "limit_exceeded", "diagnostics request exceeds the configured size limit")?;
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(line.trim_end()) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("tokenme diagnostics: invalid JSON-RPC request");
+                write_diagnostics_bridge_error(&mut writer, None, -32700, "parse_error", "invalid JSON-RPC request")?;
+                continue;
+            }
+        };
+        let id = json_rpc_id(&value);
+        sequence = sequence.saturating_add(1);
+        let request = match build_diagnostics_bridge_request(&config.grant, &identity, session_id.clone(), value, sequence) {
+            Ok(request) => request,
+            Err(error) => {
+                let message = bounded_diagnostics_error(&error);
+                eprintln!("tokenme diagnostics: {message}");
+                write_diagnostics_bridge_error(&mut writer, id, -32600, "invalid_request", &message)?;
+                continue;
+            }
+        };
+        let method = request.method.clone();
+        let request_id = request.id.clone();
+        match transport.diagnostics_mcp(&request) {
+            Ok(Some(response)) => {
+                if method == "initialize" {
+                    session_id = response.result.as_ref().and_then(|result| result.get("sessionId")).and_then(serde_json::Value::as_str).map(str::to_owned);
+                }
+                serde_json::to_writer(&mut writer, &response).map_err(|error| format!("diagnostics stdio write failed: {error}"))?;
+                writer.write_all(b"\n").map_err(|error| format!("diagnostics stdio write failed: {error}"))?;
+                writer.flush().map_err(|error| format!("diagnostics stdio flush failed: {error}"))?;
+            }
+            Ok(None) => {
+                if request_id.is_some() {
+                    eprintln!("tokenme diagnostics: remote diagnostics returned no response for a request");
+                    write_diagnostics_bridge_error(&mut writer, request_id, -32099, "transport_error", "remote diagnostics returned no response")?;
+                }
+            }
+            Err(error) => {
+                let detail = bounded_diagnostics_error(&error.to_string());
+                eprintln!("tokenme diagnostics: {detail}");
+                if request_id.is_some() {
+                    write_diagnostics_bridge_error(&mut writer, request_id, -32099, "transport_error", "remote diagnostics transport failed")?;
+                }
+            }
+        }
+    }
+}
+
+impl DiagnosticsBridgeConfig {
+    fn certificate_der_b64_bytes(&self) -> Result<Vec<u8>, String> {
+        base64::engine::general_purpose::STANDARD.decode(&self.certificate_der_b64).map_err(|_| "diagnostics certificate_der_b64 is invalid".to_string())
+    }
+}
+
+fn load_diagnostics_bridge_config(path: &std::path::Path) -> Result<DiagnosticsBridgeConfig, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("cannot read diagnostics config {}: {error}", path.display()))?;
+    if bytes.len() > usage_device_sync::MAX_DIAGNOSTICS_BODY_BYTES { return Err("diagnostics config exceeds the configured size limit".into()); }
+    serde_json::from_slice(&bytes).map_err(|error| format!("invalid diagnostics config: {error}"))
+}
+
+fn endpoint_server_name(endpoint: &str) -> Result<String, String> {
+    let authority = endpoint.strip_prefix("https://").ok_or_else(|| "diagnostics endpoint must use https://".to_string())?;
+    let authority = authority.split('/').next().unwrap_or_default();
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        authority.rsplit_once(':').map(|(host, _)| host).unwrap_or(authority)
+    };
+    if host.is_empty() { return Err("diagnostics endpoint has no server name".into()); }
+    Ok(host.to_string())
+}
+
+fn build_diagnostics_bridge_request(
+    grant: &DiagnosticsGrant,
+    identity: &DeviceIdentity,
+    session_id: Option<String>,
+    value: serde_json::Value,
+    sequence: u64,
+) -> Result<DiagnosticsMcpRequest, String> {
+    let object = value.as_object().ok_or_else(|| "JSON-RPC request must be an object".to_string())?;
+    let jsonrpc = object.get("jsonrpc").and_then(serde_json::Value::as_str).ok_or_else(|| "JSON-RPC version is missing".to_string())?;
+    if jsonrpc != "2.0" { return Err("JSON-RPC version must be 2.0".into()); }
+    let method = object.get("method").and_then(serde_json::Value::as_str).ok_or_else(|| "JSON-RPC method is missing".to_string())?;
+    let id = object.get("id").cloned();
+    if id.as_ref().is_some_and(|value| !matches!(value, serde_json::Value::Null | serde_json::Value::String(_) | serde_json::Value::Number(_))) {
+        return Err("JSON-RPC id must be a string, number, or null".into());
+    }
+    if method != "initialize" && session_id.is_none() {
+        return Err("MCP session is not initialized; send initialize first".into());
+    }
+    let params = object.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let request_id = id.as_ref().and_then(|value| match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }).filter(|value| !value.is_empty()).unwrap_or_else(|| format!("tokenme-stdio-{sequence}"));
+    let now_ms = usage_core::report::now_ms();
+    let expires_at_ms = now_ms.saturating_add(usage_device_sync::MAX_DIAGNOSTICS_REQUEST_TTL_MS.min(5_000));
+    let auth = DiagnosticsRequestAuth::new_signed(grant, identity, session_id, method, &params, request_id, now_ms, expires_at_ms)
+        .map_err(|error| format!("cannot sign diagnostics request: {error}"))?;
+    Ok(DiagnosticsMcpRequest { jsonrpc: jsonrpc.into(), id, method: method.into(), params, auth })
+}
+
+fn json_rpc_id(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let id = value.as_object()?.get("id")?;
+    if matches!(id, serde_json::Value::Null | serde_json::Value::String(_) | serde_json::Value::Number(_)) { Some(id.clone()) } else { None }
+}
+
+fn write_diagnostics_bridge_error<W: Write>(writer: &mut W, id: Option<serde_json::Value>, code: i32, error_code: &str, message: &str) -> Result<(), String> {
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id.unwrap_or(serde_json::Value::Null),
+        "error": {
+            "code": code,
+            "message": bounded_diagnostics_error(message),
+            "data": { "errorCode": error_code },
+        },
+    });
+    serde_json::to_writer(&mut *writer, &response).map_err(|error| format!("diagnostics stdio write failed: {error}"))?;
+    writer.write_all(b"\n").map_err(|error| format!("diagnostics stdio write failed: {error}"))?;
+    writer.flush().map_err(|error| format!("diagnostics stdio flush failed: {error}"))
+}
+
+fn bounded_diagnostics_error(error: &str) -> String {
+    let mut value = error.replace(['\r', '\n'], " ");
+    if value.len() > 512 { value.truncate(512); value.push('…'); }
+    value
+}
+
+#[cfg(test)]
+mod diagnostics_bridge_tests {
+    use super::*;
+    use usage_device_sync::DiagnosticsScope;
+
+    #[test]
+    fn diagnostics_config_deserializes_and_request_auth_is_signed() {
+        let identity = DeviceIdentity::create("debugger-origin", "Debugger").unwrap();
+        let grant = DiagnosticsGrant {
+            grant_id: "dgrant-test".into(),
+            target_device_id: "primary-test".into(),
+            debugger_device_id: identity.device_id.clone(),
+            debugger_origin: identity.origin.clone(),
+            scopes: vec![DiagnosticsScope::Read],
+            issued_at_ms: 1_000,
+            expires_at_ms: 20_000,
+            signature: [0; 64],
+        };
+        let encoded_signature = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
+        let config: DiagnosticsBridgeConfig = serde_json::from_value(serde_json::json!({
+            "schema": "tokenme-diagnostics-grant/v1",
+            "endpoint": "https://localhost:47821",
+            "server_name": "diagnostics.local",
+            "certificate_pin": "00".repeat(32),
+            "certificate_der_b64": base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]),
+            "grant": {
+                "grant_id": grant.grant_id,
+                "target_device_id": grant.target_device_id,
+                "debugger_device_id": grant.debugger_device_id,
+                "debugger_origin": grant.debugger_origin,
+                "scopes": ["diagnostics.read"],
+                "issued_at_ms": grant.issued_at_ms,
+                "expires_at_ms": grant.expires_at_ms,
+                "signature": encoded_signature,
+            }
+        })).unwrap();
+        assert_eq!(config.schema, "tokenme-diagnostics-grant/v1");
+        assert_eq!(config.server_name.as_deref(), Some("diagnostics.local"));
+        assert_eq!(config.certificate_der_b64_bytes().unwrap(), vec![1, 2, 3]);
+        let camel_case_config: DiagnosticsBridgeConfig = serde_json::from_value(serde_json::json!({
+            "schema": "tokenme-diagnostics-grant/v1",
+            "endpoint": "https://localhost:47821",
+            "serverName": "diagnostics.local",
+            "certificate_pin": "00".repeat(32),
+            "certificate_der_b64": base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]),
+            "grant": serde_json::to_value(&config.grant).unwrap(),
+        })).unwrap();
+        assert_eq!(camel_case_config.server_name.as_deref(), Some("diagnostics.local"));
+        let request = build_diagnostics_bridge_request(&config.grant, &identity, None, serde_json::json!({
+            "jsonrpc": "2.0", "id": "probe", "method": "initialize", "params": {}
+        }), 1).unwrap();
+        assert_eq!(request.auth.debugger_device_id, identity.device_id);
+        assert_eq!(request.auth.origin, identity.origin);
+        assert_eq!(request.auth.request_id, "probe");
+        assert_ne!(request.auth.signature, [0; 64]);
+
+        let error = build_diagnostics_bridge_request(&config.grant, &identity, None, serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+        }), 2).unwrap_err();
+        assert!(error.contains("session is not initialized"));
+        let list = build_diagnostics_bridge_request(&config.grant, &identity, Some("session-1".into()), serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}
+        }), 3).unwrap();
+        assert_eq!(list.auth.session_id.as_deref(), Some("session-1"));
+        assert_eq!(list.method, "tools/list");
+        let call = build_diagnostics_bridge_request(&config.grant, &identity, Some("session-1".into()), serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "logs.tail", "arguments": {}}
+        }), 4).unwrap();
+        assert_eq!(call.auth.session_id.as_deref(), Some("session-1"));
+        assert_eq!(call.method, "tools/call");
+    }
+}
 
 // ---------------------------------------------------------------- budget
 

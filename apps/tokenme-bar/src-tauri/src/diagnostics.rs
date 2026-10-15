@@ -8,7 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 use std::sync::Mutex;
+use std::time::Duration;
 
+use base64::Engine as _;
+use rand::RngExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -29,6 +32,8 @@ pub const CODE_INVALID_PARAMS: &str = "invalid_params";
 pub const CODE_HANDLER_FAILED: &str = "handler_failed";
 pub const CODE_OPERATION_NOT_FOUND: &str = "operation_not_found";
 pub const CODE_TOOL_UNAVAILABLE: &str = "tool_unavailable";
+pub const CODE_PRIMARY_UNAVAILABLE: &str = "primary_unavailable";
+pub const CODE_GRANT_FAILED: &str = "grant_failed";
 
 const MAX_SESSION_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_PARAMS_BYTES: usize = 32 * 1024;
@@ -94,6 +99,71 @@ pub struct DiagnosticsStatus {
     pub retained_operations: usize,
 }
 
+/// The state returned to the panel.  Session values are intentionally bounded
+/// metadata only; the exported config never contains logs, credentials, or
+/// device usage data.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsSnapshot {
+    pub enabled: bool,
+    pub sessions: Vec<SessionView>,
+    pub retained_operations: usize,
+    pub last_operation: Option<DiagnosticsOperationView>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsOperationView {
+    pub operation_id: String,
+    pub action: String,
+    pub state: String,
+    pub at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsConfig {
+    pub schema: String,
+    pub endpoint: String,
+    /// TLS verification name for the self-issued certificate.  LAN clients
+    /// connect to the advertised endpoint host, but the certificate remains
+    /// issued for localhost by the primary certificate generator.
+    pub server_name: String,
+    pub certificate_pin: String,
+    pub certificate_der_b64: String,
+    pub grant: usage_device_sync::DiagnosticsGrant,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsResponse {
+    #[serde(flatten)]
+    pub snapshot: DiagnosticsSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<DiagnosticsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<DiagnosticsErrorView>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsErrorView {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum DiagnosticsManagementRequest {
+    Status,
+    Configure { enabled: bool },
+    CreateGrant { debugger_device_id: String, scopes: Vec<String>, ttl_ms: i64 },
+    RevokeGrant { grant_id: String },
+    RevokeAll,
+}
+
+#[derive(Debug, Clone)]
+struct GrantSession {
+    view: SessionView,
+}
+
 #[derive(Debug, Clone)]
 struct Session {
     view: SessionView,
@@ -116,8 +186,11 @@ struct OperationView {
 struct Inner {
     enabled: bool,
     next_operation: u64,
+    next_management_operation: u64,
     sessions: BTreeMap<String, Session>,
+    grants: BTreeMap<String, GrantSession>,
     operations: BTreeMap<String, OperationView>,
+    last_operation: Option<DiagnosticsOperationView>,
 }
 
 #[derive(Debug, Default)]
@@ -130,8 +203,28 @@ impl DiagnosticsState {
         let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         DiagnosticsStatus {
             enabled: state.enabled,
-            active_sessions: state.sessions.values().filter(|session| session.revoked.is_none()).count(),
+            active_sessions: state.sessions.values().filter(|session| session.revoked.is_none()).count()
+                + state.grants.values().count(),
             retained_operations: state.operations.len(),
+        }
+    }
+
+    pub fn snapshot(&self) -> DiagnosticsSnapshot {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let now = now_ms();
+        for session in state.sessions.values_mut() {
+            if session.revoked.is_none() && now >= session.view.expires_at_ms {
+                session.revoked = Some(CODE_SESSION_EXPIRED);
+            }
+        }
+        state.grants.retain(|_, grant| now < grant.view.expires_at_ms);
+        DiagnosticsSnapshot {
+            enabled: state.enabled,
+            sessions: state.sessions.values().filter(|session| session.revoked.is_none()).map(|session| session.view.clone())
+                .chain(state.grants.values().map(|grant| grant.view.clone()))
+                .collect(),
+            retained_operations: state.operations.len(),
+            last_operation: state.last_operation.clone(),
         }
     }
 
@@ -142,6 +235,7 @@ impl DiagnosticsState {
             for session in state.sessions.values_mut() {
                 session.revoked = Some(CODE_DIAGNOSTICS_DISABLED);
             }
+            state.grants.clear();
         }
         self.status_after(state)
     }
@@ -149,9 +243,92 @@ impl DiagnosticsState {
     fn status_after(&self, state: std::sync::MutexGuard<'_, Inner>) -> DiagnosticsStatus {
         DiagnosticsStatus {
             enabled: state.enabled,
-            active_sessions: state.sessions.values().filter(|session| session.revoked.is_none()).count(),
+            active_sessions: state.sessions.values().filter(|session| session.revoked.is_none()).count()
+                + state.grants.values().count(),
             retained_operations: state.operations.len(),
         }
+    }
+
+    fn record_grant(&self, config: DiagnosticsConfig) {
+        let grant = &config.grant;
+        let view = SessionView {
+            session_id: grant.grant_id.clone(),
+            target_device: grant.target_device_id.clone(),
+            origin: grant.debugger_origin.clone(),
+            scopes: grant.scopes.iter().map(|scope| scope.as_str().into()).collect(),
+            issued_at_ms: grant.issued_at_ms,
+            expires_at_ms: grant.expires_at_ms,
+        };
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.grants.insert(grant.grant_id.clone(), GrantSession { view });
+    }
+
+    fn revoke_grant(&self, grant_id: &str) -> Result<(), DiagnosticsError> {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if state.grants.remove(grant_id).is_none() {
+            return Err(DiagnosticsError::new(CODE_SESSION_NOT_FOUND, "diagnostics grant is not active"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_real_grants(&self) {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.grants.clear();
+    }
+
+    fn begin_management_operation(&self, action: &str) -> String {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.next_management_operation = state.next_management_operation.saturating_add(1);
+        let operation_id = format!("diag-control-{}", state.next_management_operation);
+        state.last_operation = Some(DiagnosticsOperationView {
+            operation_id: operation_id.clone(),
+            action: action.to_string(),
+            state: "running".into(),
+            at_ms: now_ms(),
+            error_code: None,
+        });
+        operation_id
+    }
+
+    fn complete_management_operation(&self, operation_id: &str, action: &str, result: Result<(), &DiagnosticsError>) {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.last_operation = Some(DiagnosticsOperationView {
+            operation_id: operation_id.to_string(),
+            action: action.to_string(),
+            state: if result.is_ok() { "completed" } else { "failed" }.into(),
+            at_ms: now_ms(),
+            error_code: result.err().map(|error| error.code.to_string()),
+        });
+    }
+
+    fn new_session_id() -> String {
+        format!("diag-session-{:032x}", rand::rng().random::<u128>())
+    }
+
+    pub(crate) fn create_session_for_panel(
+        &self,
+        target_device: String,
+        origin: String,
+        scopes: Vec<String>,
+        ttl_ms: i64,
+    ) -> Result<SessionView, DiagnosticsError> {
+        self.create_session(SessionRequest {
+            session_id: Self::new_session_id(),
+            target_device,
+            origin,
+            scopes,
+            issued_at_ms: now_ms(),
+            expires_at_ms: now_ms().saturating_add(ttl_ms),
+        })
+    }
+
+    pub(crate) fn revoke_session(&self, session_id: &str) -> Result<(), DiagnosticsError> {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(session) = state.sessions.get_mut(session_id) else {
+            return Err(DiagnosticsError::new(CODE_SESSION_NOT_FOUND, "diagnostics session is not active"));
+        };
+        session.revoked = Some(CODE_SESSION_REVOKED);
+        Ok(())
     }
 
     pub(crate) fn create_session(&self, request: SessionRequest) -> Result<SessionView, DiagnosticsError> {
@@ -204,6 +381,7 @@ impl DiagnosticsState {
         for session in state.sessions.values_mut() {
             session.revoked = Some(CODE_SESSION_REVOKED);
         }
+        state.grants.clear();
     }
 
     pub(crate) fn revoke_target(&self, target_device: &str) {
@@ -211,6 +389,7 @@ impl DiagnosticsState {
         for session in state.sessions.values_mut().filter(|session| session.view.target_device == target_device) {
             session.revoked = Some(CODE_SESSION_REVOKED);
         }
+        state.grants.retain(|_, grant| grant.view.target_device != target_device);
     }
 
     fn authorize(&self, request: &ToolRequest, scope: Scope) -> Result<Session, DiagnosticsError> {
@@ -640,6 +819,18 @@ fn parse_scopes(scopes: &[String]) -> Result<BTreeSet<String>, DiagnosticsError>
     Ok(scopes.into_iter().map(str::to_string).collect())
 }
 
+fn parse_grant_scopes(scopes: &[String]) -> Result<Vec<usage_device_sync::DiagnosticsScope>, DiagnosticsError> {
+    let mut parsed = scopes.iter().map(|scope| match scope.as_str() {
+        "diagnostics.read" => Ok(usage_device_sync::DiagnosticsScope::Read),
+        "sync.control" => Ok(usage_device_sync::DiagnosticsScope::SyncControl),
+        _ => Err(invalid_params()),
+    }).collect::<Result<Vec<_>, _>>()?;
+    parsed.sort_unstable();
+    parsed.dedup();
+    if parsed.is_empty() { return Err(invalid_params()); }
+    Ok(parsed)
+}
+
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && value.chars().all(|character| !character.is_control() && character != '/' && character != '\\')
 }
@@ -692,6 +883,8 @@ fn required_identifier<'a>(params: &'a Value, name: &str) -> Result<&'a str, Dia
 
 fn invalid_params() -> DiagnosticsError { DiagnosticsError::new(CODE_INVALID_PARAMS, "diagnostics parameters are invalid") }
 fn handler_error() -> DiagnosticsError { DiagnosticsError::new(CODE_HANDLER_FAILED, "diagnostics handler failed") }
+fn primary_unavailable() -> DiagnosticsError { DiagnosticsError::new(CODE_PRIMARY_UNAVAILABLE, "the primary HTTPS service is not running") }
+fn grant_failed() -> DiagnosticsError { DiagnosticsError::new(CODE_GRANT_FAILED, "the primary rejected the diagnostics grant") }
 
 #[tauri::command]
 pub fn set_diagnostics_enabled(enabled: bool, state: State<'_, DiagnosticsState>) -> Result<DiagnosticsStatus, String> {
@@ -707,6 +900,108 @@ pub fn get_diagnostics_status(state: State<'_, DiagnosticsState>) -> Diagnostics
 pub fn revoke_diagnostics_sessions(state: State<'_, DiagnosticsState>) -> DiagnosticsStatus {
     state.revoke_all();
     state.status()
+}
+
+fn diagnostics_action_name(request: &DiagnosticsManagementRequest) -> &'static str {
+    match request {
+        DiagnosticsManagementRequest::Status => "status",
+        DiagnosticsManagementRequest::Configure { .. } => "configure",
+        DiagnosticsManagementRequest::CreateGrant { .. } => "create_grant",
+        DiagnosticsManagementRequest::RevokeGrant { .. } => "revoke_grant",
+        DiagnosticsManagementRequest::RevokeAll => "revoke_all",
+    }
+}
+
+/// The panel-facing diagnostics contract.  Domain failures are returned as a
+/// response with the operation id retained, so the UI can show the exact
+/// failure and offer a retry without losing the audit trail.
+#[tauri::command]
+pub fn diagnostics_session(
+    request: DiagnosticsManagementRequest,
+    state: State<'_, DiagnosticsState>,
+    control: State<'_, SyncControl>,
+) -> Result<DiagnosticsResponse, String> {
+    let action = diagnostics_action_name(&request);
+    if matches!(request, DiagnosticsManagementRequest::Status) {
+        // Grants are held by the in-process HTTPS authority.  If the primary
+        // service was stopped or crashed, its authority is gone; discard the
+        // panel mirror before returning status so expired credentials cannot
+        // remain visible as ready to export.
+        if commands::primary_diagnostics_context(&control).is_err() {
+            state.clear_real_grants();
+        }
+        return Ok(DiagnosticsResponse { snapshot: state.snapshot(), config: None, error: None });
+    }
+    let operation_id = state.begin_management_operation(action);
+    let outcome = match request {
+        DiagnosticsManagementRequest::Configure { enabled } => {
+            if enabled {
+                // Enabling diagnostics without a live primary would leave a
+                // misleading "ready" state with no authority to issue grants.
+                if commands::primary_diagnostics_context(&control).is_err() {
+                    Err(primary_unavailable())
+                } else {
+                    state.set_enabled(true);
+                    Ok(None::<DiagnosticsConfig>)
+                }
+            } else {
+                if let Ok(context) = commands::primary_diagnostics_context(&control) {
+                    context.handle.revoke_all_diagnostics();
+                }
+                state.revoke_all();
+                state.set_enabled(false);
+                Ok(None::<DiagnosticsConfig>)
+            }
+        }
+        DiagnosticsManagementRequest::CreateGrant { debugger_device_id, scopes, ttl_ms } => {
+            if ttl_ms <= 0 || ttl_ms > usage_device_sync::MAX_DIAGNOSTICS_GRANT_TTL_MS {
+                Err(DiagnosticsError::new(CODE_SESSION_EXPIRED, "session lifetime is invalid"))
+            } else if !state.status().enabled {
+                Err(DiagnosticsError::new(CODE_DIAGNOSTICS_DISABLED, "remote diagnostics is disabled"))
+            } else {
+                let context = commands::primary_diagnostics_context(&control).map_err(|_| primary_unavailable());
+                context.and_then(|context| {
+                    let parsed_scopes = parse_grant_scopes(&scopes)?;
+                    let grant = context.handle.issue_diagnostics_grant(
+                        &debugger_device_id,
+                        &parsed_scopes,
+                        now_ms(),
+                        Duration::from_millis(ttl_ms as u64),
+                    ).map_err(|_| grant_failed())?;
+                    let config = DiagnosticsConfig {
+                        schema: "tokenme-diagnostics-grant/v1".into(),
+                        endpoint: context.endpoint,
+                        server_name: "localhost".into(),
+                        certificate_pin: context.certificate_pin,
+                        certificate_der_b64: base64::engine::general_purpose::STANDARD.encode(&context.certificate_der),
+                        grant,
+                    };
+                    state.record_grant(config.clone());
+                    Ok(Some(config))
+                })
+            }
+        }
+        DiagnosticsManagementRequest::RevokeGrant { grant_id } => {
+            let context = commands::primary_diagnostics_context(&control).map_err(|_| primary_unavailable());
+            context.and_then(|context| {
+                context.handle.revoke_diagnostics_grant(&grant_id).map_err(|_| grant_failed())?;
+                state.revoke_grant(&grant_id).map(|_| None::<DiagnosticsConfig>)
+            })
+        }
+        DiagnosticsManagementRequest::RevokeAll => {
+            let context = commands::primary_diagnostics_context(&control).map_err(|_| primary_unavailable());
+            context.map(|context| {
+                context.handle.revoke_all_diagnostics();
+                state.revoke_all();
+                None::<DiagnosticsConfig>
+            })
+        }
+        DiagnosticsManagementRequest::Status => unreachable!(),
+    };
+    let error = outcome.as_ref().err().map(|error| DiagnosticsErrorView { code: error.code.to_string(), message: error.to_string() });
+    state.complete_management_operation(&operation_id, action, outcome.as_ref().map(|_| ()).map_err(|error| error));
+    let config = outcome.as_ref().ok().and_then(|config| config.clone());
+    Ok(DiagnosticsResponse { snapshot: state.snapshot(), config, error })
 }
 
 fn now_ms() -> i64 { usage_core::report::now_ms() }
@@ -780,5 +1075,24 @@ mod tests {
         state.create_session(request.clone()).unwrap();
         let tool = ToolRequest { session_id: request.session_id, request_id: "request-1".into(), origin: request.origin, target_device: None, tool: "sync.start_primary".into(), params: Value::Null };
         assert_eq!(state.authorize(&tool, Scope::Control).unwrap_err().code, CODE_SCOPE_DENIED);
+    }
+
+    #[test]
+    fn panel_session_lifecycle_exports_and_revokes_bounded_config() {
+        let state = state();
+        let session = state.create_session_for_panel(
+            "target-device".into(),
+            "debugger-device".into(),
+            vec!["diagnostics.read".into()],
+            15 * 60 * 1000,
+        ).unwrap();
+        assert!(session.session_id.starts_with("diag-session-"));
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.sessions, vec![session.clone()]);
+        let json = serde_json::to_string(&serde_json::json!({ "schema": "tokenme-diagnostics-local/v1", "session": session.clone() })).unwrap();
+        assert!(json.contains("tokenme-diagnostics-local/v1"));
+        assert!(!json.contains("password"));
+        state.revoke_session(&session.session_id).unwrap();
+        assert!(state.snapshot().sessions.is_empty());
     }
 }

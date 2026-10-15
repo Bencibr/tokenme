@@ -78,6 +78,7 @@ pub fn run() {
             diagnostics::set_diagnostics_enabled,
             diagnostics::get_diagnostics_status,
             diagnostics::revoke_diagnostics_sessions,
+            diagnostics::diagnostics_session,
             servers::commands::get_servers,
             servers::commands::server_public_key,
             servers::commands::server_probe,

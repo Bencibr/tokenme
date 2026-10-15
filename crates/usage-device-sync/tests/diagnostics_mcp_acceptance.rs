@@ -1,15 +1,18 @@
 //! Acceptance probes for the bounded diagnostics MCP protocol.
 //!
-//! These tests use the public protocol surface and deliberately keep the
-//! remaining host-integration gaps ignored instead of treating placeholders as
-//! successful remote diagnostics.
+//! These tests use the public protocol surface. Host-controlled read-only
+//! diagnostics are exercised through `DiagnosticsHost`; only the semantic UI
+//! bridge remains outside this crate's acceptance scope.
 
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use usage_device_sync::{
-    DeviceIdentity, DiagnosticsError, DiagnosticsMcpRequest, DiagnosticsRequestAuth,
-    DiagnosticsScope, DiagnosticsService, PairingRequest, SyncStore, MAX_DIAGNOSTICS_BODY_BYTES,
+    DeviceIdentity, DiagnosticsError, DiagnosticsHost, DiagnosticsMcpRequest, DiagnosticsRequestAuth,
+    DiagnosticsScope, DiagnosticsService, PairingRequest, SyncStore, MAX_DIAGNOSTICS_ARRAY_ITEMS,
+    MAX_DIAGNOSTICS_BODY_BYTES, MAX_DIAGNOSTICS_CONCURRENT_REQUESTS, MAX_DIAGNOSTICS_GRANTS,
+    MAX_DIAGNOSTICS_JSON_DEPTH, MAX_DIAGNOSTICS_OBJECT_ITEMS, MAX_DIAGNOSTICS_PARAMS_BYTES,
 };
 
 fn clock() -> i64 { 1_000_000 }
@@ -133,6 +136,63 @@ fn unknown_tools_and_insufficient_scopes_are_rejected() {
 }
 
 #[test]
+fn tool_registry_is_fixed_and_contains_no_execution_surface() {
+    let expected = [
+        "device.get_status", "device.get_build", "logs.tail", "logs.search", "sync.get_status",
+        "sync.get_requests", "sync.get_trace", "diagnostics.run_check", "diagnostics.get_operation",
+        "app.get_panel_state", "sync.start_primary", "sync.stop_primary", "sync.discover",
+        "sync.approve_pairing", "sync.reject_pairing", "sync.clear_expired_request", "sync.pause",
+        "sync.resume", "sync.revoke_device", "sync.refresh", "ui.open_sync_sheet", "ui.focus_device",
+    ];
+    let actual = usage_device_sync::diagnostics_tool_registry().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    assert!(actual.iter().all(|name| !name.contains("shell") && !name.contains("exec") && !name.contains("file") && !name.contains("screenshot") && !name.contains("click")));
+}
+
+#[test]
+fn json_shape_limits_fail_closed_before_tool_dispatch() {
+    let (store, identity) = paired_store();
+    let service = DiagnosticsService::new(store.primary_id()).unwrap();
+    let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
+
+    let oversized = request(&grant, &identity, None, "initialize", json!({ "value": "x".repeat(MAX_DIAGNOSTICS_PARAMS_BYTES) }), "oversized", clock());
+    assert_eq!(service.handle_json(&store, &serde_json::to_vec(&oversized).unwrap(), clock(), Instant::now() + Duration::from_secs(1)).unwrap_err(), DiagnosticsError::Limit);
+
+    let mut nested = Value::Null;
+    for _ in 0..=MAX_DIAGNOSTICS_JSON_DEPTH { nested = Value::Array(vec![nested]); }
+    let too_deep = request(&grant, &identity, None, "initialize", nested, "too-deep", clock());
+    assert_eq!(service.handle_json(&store, &serde_json::to_vec(&too_deep).unwrap(), clock(), Instant::now() + Duration::from_secs(1)).unwrap_err(), DiagnosticsError::Limit);
+
+    let too_many_items = request(&grant, &identity, None, "initialize", Value::Array((0..=MAX_DIAGNOSTICS_ARRAY_ITEMS).map(|value| json!(value)).collect()), "too-many-items", clock());
+    assert_eq!(service.handle_json(&store, &serde_json::to_vec(&too_many_items).unwrap(), clock(), Instant::now() + Duration::from_secs(1)).unwrap_err(), DiagnosticsError::Limit);
+
+    let mut object = serde_json::Map::new();
+    for value in 0..=MAX_DIAGNOSTICS_OBJECT_ITEMS { object.insert(format!("key-{value}"), json!(value)); }
+    let too_many_keys = request(&grant, &identity, None, "initialize", Value::Object(object), "too-many-keys", clock());
+    assert_eq!(service.handle_json(&store, &serde_json::to_vec(&too_many_keys).unwrap(), clock(), Instant::now() + Duration::from_secs(1)).unwrap_err(), DiagnosticsError::Limit);
+}
+
+#[test]
+fn concurrent_request_budget_is_bounded_and_recovers() {
+    let service = DiagnosticsService::new("primary-diagnostics-acceptance").unwrap();
+    let mut permits = Vec::new();
+    for _ in 0..MAX_DIAGNOSTICS_CONCURRENT_REQUESTS { permits.push(service.enter().unwrap()); }
+    assert!(matches!(service.enter(), Err(DiagnosticsError::Busy)));
+    drop(permits.pop());
+    assert!(service.enter().is_ok());
+}
+
+#[test]
+fn grant_budget_is_bounded() {
+    let (store, identity) = paired_store();
+    let service = DiagnosticsService::new(store.primary_id()).unwrap();
+    for _ in 0..MAX_DIAGNOSTICS_GRANTS {
+        service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
+    }
+    assert_eq!(service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap_err(), DiagnosticsError::Busy);
+}
+
+#[test]
 fn output_is_bounded_by_body_and_deadline() {
     let (store, identity) = paired_store();
     let service = DiagnosticsService::new(store.primary_id()).unwrap();
@@ -153,24 +213,54 @@ fn stopping_the_primary_invalidates_sessions_and_grants() {
     service.stop();
     let request = request(&grant, &identity, Some(session), "tools/list", json!({}), "after-stop", clock());
     assert_eq!(service.handle_request(&store, &request, clock(), Instant::now() + Duration::from_secs(1)).unwrap_err(), DiagnosticsError::Stopped);
+    assert_eq!(service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap_err(), DiagnosticsError::Stopped);
 }
 
 #[test]
-fn host_integrations_remain_explicitly_unverified() {
-    // The protocol must expose an explicit failure for tools that still need
-    // the Tauri host bridge; this prevents a silent successful no-op.
+fn a_restart_does_not_accept_grants_from_the_previous_authority() {
+    let (store, identity) = paired_store();
+    let old_service = DiagnosticsService::new(store.primary_id()).unwrap();
+    let old_grant = old_service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
+    let restarted_service = DiagnosticsService::new(store.primary_id()).unwrap();
+    let old_request = request(&old_grant, &identity, None, "initialize", json!({}), "old-authority", clock());
+    assert_eq!(restarted_service.handle_request(&store, &old_request, clock(), Instant::now() + Duration::from_secs(1)).unwrap_err(), DiagnosticsError::Unauthorized);
+}
+
+#[test]
+fn host_integrations_return_explicit_safe_unconfigured_results() {
+    // Built-in diagnostics tools remain callable even before the embedding
+    // host registers a log path. They must return a bounded, explicit state,
+    // never a successful-looking empty result or a path outside the allowlist.
     let (store, identity) = paired_store();
     let service = DiagnosticsService::new(store.primary_id()).unwrap();
     let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
     let session = initialize(&service, &store, &grant, &identity, "bridge-init");
     let request = request(&grant, &identity, Some(session), "tools/call", json!({"name":"logs.tail","arguments":{"log":"panel","lines":1}}), "bridge-tool", clock());
-    assert_eq!(service.handle_request(&store, &request, clock(), Instant::now() + Duration::from_secs(1)).unwrap_err(), DiagnosticsError::ToolUnavailable);
+    let response = service.handle_request(&store, &request, clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["structuredContent"]["available"], false);
+    assert_eq!(result["structuredContent"]["reason"], "not_configured");
 }
 
 #[test]
-#[ignore = "requires the Tauri stdio bridge and response redaction integration"]
 fn logs_are_redacted_at_the_response_boundary() {
-    panic!("host log bridge is intentionally not part of the protocol crate");
+    let (store, identity) = paired_store();
+    let host = DiagnosticsHost::default();
+    let mut log = tempfile::NamedTempFile::new().unwrap();
+    writeln!(log, "authorization=Bearer acceptance-secret").unwrap();
+    writeln!(log, "{{\"access_token\":\"json-acceptance-secret\"}}").unwrap();
+    host.set_log_path("panel", log.path()).unwrap();
+    let service = DiagnosticsService::new_with_host(store.primary_id(), host).unwrap();
+    let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
+    let session = initialize(&service, &store, &grant, &identity, "redaction-init");
+    let request = request(&grant, &identity, Some(session), "tools/call", json!({"name":"logs.tail","arguments":{"log":"panel","lines":10}}), "redaction-tool", clock());
+    let response = service.handle_request(&store, &request, clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+    let result = response.result.unwrap();
+    let lines = result["structuredContent"]["lines"].as_array().unwrap();
+    let text = lines.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("[REDACTED]"));
+    assert!(!text.contains("acceptance-secret"));
+    assert!(!text.contains("json-acceptance-secret"));
 }
 
 #[test]

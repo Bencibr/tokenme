@@ -151,10 +151,60 @@ fn help_is_printable() {
     let out = run(&["--help"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
-    for cmd in ["detect", "daily", "weekly", "monthly", "report", "sessions", "quota", "index", "budget", "pricing"] {
+    for cmd in ["detect", "daily", "weekly", "monthly", "report", "sessions", "quota", "index", "budget", "pricing", "diagnostics-stdio"] {
         assert!(text.contains(cmd), "help omits {cmd}");
     }
     assert!(text.contains("--pricing-override"), "help omits global flags");
+}
+
+#[test]
+fn diagnostics_stdio_is_a_jsonrpc_only_cli_host() {
+    let db = temp_db("diagnostics-stdio");
+    SyncStore::open(&db, "primary-cli").expect("initialize sync identity");
+    let mut child = tokenme()
+        .args(["--db", db.to_str().unwrap(), "diagnostics-stdio"])
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tokenme diagnostics stdio starts");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"not-json\n{\"jsonrpc\":\"2.0\",\"id\":\"probe\",\"method\":\"initialize\",\"params\":{}}\n")
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.stderr.is_empty(), "stdio operational errors must not be emitted on success: {}", stderr(&output));
+    let responses = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("each stdout line is JSON-RPC"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 2, "stdout must contain one bounded response per request");
+    assert!(responses.iter().all(|response| response.get("error").is_some()), "unauthenticated requests must fail closed: {responses:?}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("tokenme:"), "CLI diagnostics host must not mix logs into stdout");
+    remove_db(&db);
+}
+
+#[test]
+fn diagnostics_stdio_rejects_invalid_remote_config_without_stdout() {
+    let db = temp_db("diagnostics-stdio-config");
+    SyncStore::open(&db, "primary-cli").expect("initialize sync identity");
+    let config = db.with_extension("diagnostics.json");
+    std::fs::write(&config, b"{\"schema\":\"wrong\"}\n").unwrap();
+    let out = run(&[
+        "--db", &db.to_string_lossy(),
+        "--diagnostics-config", &config.to_string_lossy(),
+        "diagnostics-stdio",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stdout(&out).is_empty(), "config errors must never reach stdout");
+    assert!(stderr(&out).contains("invalid diagnostics config") || stderr(&out).contains("unsupported"), "{}", stderr(&out));
+    let _ = std::fs::remove_file(config);
+    remove_db(&db);
 }
 
 #[test]

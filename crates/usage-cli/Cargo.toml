@@ -19,6 +19,7 @@ usage-adapter-dsh = { path = "../adapters/dsh" }
 usage-adapter-codex = { path = "../adapters/codex" }
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dirs.workspace = true

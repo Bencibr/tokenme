@@ -24,7 +24,7 @@ const production = [
 
 const checks = [
   ["design keeps the MCP implementation boundary explicit", () => {
-    assert.match(design, /实现状态：`PARTIAL`/);
+    assert.match(design, /实现状态：`(?:PARTIAL|CODE_COMPLETE)`/);
     assert.match(design, /未接通的工具必须返回 `tool_unavailable`/);
   }],
   ["design fixes the supported MCP methods and endpoint", () => {
