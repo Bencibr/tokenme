@@ -228,6 +228,16 @@ mod tests {
         assert_eq!(parse_ts_ms("not-a-date"), None);
     }
 
+    /// Cline's gateway answers `resetsAt` with nanosecond precision
+    /// (`…T15:18:18.565960906Z`, measured live 2026-10-15). A dialect the
+    /// parser rejects is a quota row whose expiry reads as unknown forever.
+    #[test]
+    fn nanosecond_rfc3339_parses() {
+        let ms = parse_ts_ms("2026-10-15T15:18:18.565960906Z").expect("9-digit fraction parses");
+        assert_eq!(ms, parse_ts_ms("2026-10-15T15:18:18.565Z").unwrap(), "truncated to milliseconds");
+        assert!(parse_ts_ms("2026-10-22T10:18:18.56819099Z").is_some(), "8 digits too");
+    }
+
     #[test]
     fn zero_counts_are_not_a_billable_event() {
         assert!(TokenCounts::default().is_zero());
