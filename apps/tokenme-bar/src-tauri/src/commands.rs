@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -19,6 +20,8 @@ use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
 use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Theme, TrayMode};
 use crate::tray;
+
+const DEFAULT_PRIMARY_BIND: &str = "0.0.0.0:47821";
 
 /// Terminates the tray application, rather than merely hiding its panel.
 #[tauri::command]
@@ -473,11 +476,20 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let cert_path = directory.join("server-cert.pem");
     let key_path = directory.join("server-key.pem");
     let (certificate_der, private_key_der) = usage_device_sync::ensure_server_certificate(&cert_path, &key_path, "localhost").map_err(|e| format!("cannot create private sync certificate: {e}"))?;
-    let bind_text = bind.unwrap_or_else(|| "127.0.0.1:47821".into());
+    let bind_text = bind.unwrap_or_else(|| DEFAULT_PRIMARY_BIND.into());
     let bind_addr: std::net::SocketAddr = bind_text.parse().map_err(|e| format!("sync bind address is invalid: {e}"))?;
     if allow_lan && bind_addr.ip().is_loopback() {
         return Err("LAN/VPN access requires a non-loopback listen address".into());
     }
+    if !allow_lan && !bind_addr.ip().is_loopback() {
+        return Err("a non-loopback primary listener requires LAN/VPN access; enable Allow LAN/VPN or use a loopback bind for local testing".into());
+    }
+    let host = match advertise_host.filter(|host| !host.trim().is_empty()) {
+        Some(host) => host,
+        None if bind_addr.ip().is_loopback() => "127.0.0.1".into(),
+        None => infer_advertise_host().ok_or_else(|| "could not determine a reachable LAN address; enter one such as 192.168.1.20 in Advertised address".to_string())?,
+    };
+    let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
     let existing_primary_id = SyncStore::read_status(&index_path).map_err(|error| format!("cannot read sync role: {error}"))?.primary_id;
     let current_primary_id = existing_primary_id.unwrap_or_else(|| identity.device_id.clone());
     let mut store = SyncStore::open(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
@@ -504,13 +516,6 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         staging_quota_bytes: 512 * 1024 * 1024,
     }, store).map_err(|e| format!("cannot start sync listener: {e}"))?;
     let address = server.local_addr().map_err(|e| e.to_string())?;
-    let host = match advertise_host {
-        Some(host) => host,
-        None if address.ip().is_loopback() => "127.0.0.1".into(),
-        None if address.ip().is_unspecified() => return Err("a LAN/VPN listener needs an advertise host such as 192.168.1.20".into()),
-        None => address.ip().to_string(),
-    };
-    let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
     let endpoint = format!("https://{endpoint_host}:{}", address.port());
     let mut persisted = SyncStore::open(&index_path, identity.device_id.clone()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
     persisted.save_primary_config(&PrimarySyncConfig {
@@ -593,6 +598,18 @@ fn mdns_permission_hint(detail: &str) -> String {
     detail.to_string()
 }
 
+fn is_loopback_advertise_host(value: &str) -> bool {
+    let host = value.trim().trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("localhost.") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn infer_advertise_host() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect(("8.8.8.8", 80)).ok()?;
+    let address = socket.local_addr().ok()?.ip();
+    (!address.is_loopback() && !address.is_unspecified()).then(|| address.to_string())
+}
+
 fn merge_discovered_primary(results: &mut Vec<DiscoveredPrimaryView>, candidate: DiscoveredPrimaryView) {
     if let Some(existing) = results.iter_mut().find(|item| item.primary_id == candidate.primary_id) {
         if existing.certificate_pin != candidate.certificate_pin { existing.identity_conflict = true; }
@@ -655,14 +672,17 @@ fn discover_mdns_primaries() -> Result<Vec<DiscoveredPrimaryView>, String> {
     Ok(results)
 }
 
-fn advertised_endpoint_host(value: &str, allow_lan: bool) -> Result<String, String> {
+fn advertised_endpoint_host(value: &str, _allow_lan: bool) -> Result<String, String> {
     let host = value.trim().trim_start_matches('[').trim_end_matches(']').to_string();
     if host.is_empty() || host.contains('/') || host.contains('?') || host.contains('#') {
         return Err("sync advertise host is invalid".into());
     }
+    if _allow_lan && is_loopback_advertise_host(&host) {
+        return Err("sync advertise host must be reachable; localhost and loopback addresses are not valid".into());
+    }
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if allow_lan && (ip.is_loopback() || ip.is_unspecified()) {
-            return Err("LAN/VPN invites cannot advertise a loopback or unspecified address".into());
+        if ip.is_unspecified() {
+            return Err("sync advertise host must be reachable; unspecified addresses such as 0.0.0.0 are not valid".into());
         }
         return Ok(match ip {
             std::net::IpAddr::V6(_) => format!("[{host}]"),
@@ -1773,7 +1793,7 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
 
 #[cfg(test)]
 mod sync_tests {
-    use super::{advertised_endpoint_host, merge_discovered_primary, rearm_pending_pairing_retry, sync_action_name, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, MDNS_SERVICE_TYPE};
+    use super::{advertised_endpoint_host, merge_discovered_primary, rearm_pending_pairing_retry, sync_action_name, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
 
@@ -1783,7 +1803,16 @@ mod sync_tests {
         assert_eq!(advertised_endpoint_host("2001:db8::20", true).unwrap(), "[2001:db8::20]");
         assert!(advertised_endpoint_host("0.0.0.0", true).is_err());
         assert!(advertised_endpoint_host("127.0.0.1", true).is_err());
+        assert_eq!(advertised_endpoint_host("127.0.0.1", false).unwrap(), "127.0.0.1");
+        assert_eq!(advertised_endpoint_host("localhost", false).unwrap(), "localhost");
+        assert!(advertised_endpoint_host("localhost", true).is_err());
+        assert!(advertised_endpoint_host("::", false).is_err());
         assert!(advertised_endpoint_host("2001:db8::20/path", true).is_err());
+    }
+
+    #[test]
+    fn primary_defaults_to_a_reachable_listener() {
+        assert_eq!(DEFAULT_PRIMARY_BIND, "0.0.0.0:47821");
     }
 
     #[test]

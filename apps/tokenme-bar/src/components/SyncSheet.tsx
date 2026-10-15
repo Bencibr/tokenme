@@ -55,9 +55,9 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [phase, setPhase] = useState<SyncDevicesSnapshot["operation_state"]>(snapshot.operation_state);
   const [pollStopped, setPollStopped] = useState(false);
   const [pollGeneration, setPollGeneration] = useState(0);
-  const [bind, setBind] = useState("127.0.0.1:47821");
+  const [bind, setBind] = useState("0.0.0.0:47821");
   const [advertiseHost, setAdvertiseHost] = useState("");
-  const [allowLan, setAllowLan] = useState(false);
+  const [allowLan, setAllowLan] = useState(true);
   const [invite, setInvite] = useState("");
   const [origin, setOrigin] = useState("secondary");
   const [displayName, setDisplayName] = useState("");
@@ -363,6 +363,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             <span>{discovering ? t("sync.discovery.scanning") : phaseLabel}</span>
             {snapshot.last_checked_at_ms ? <span className="sheet-hint"> · {t("sync.last_checked")} {new Date(snapshot.last_checked_at_ms).toLocaleTimeString()}</span> : null}
           </div>
+          {isUnconfigured && setupMode === "discovery" ? <div className="sync-section sync-role-picker">
+            <div className="sync-section-title">{t("sync.role.choose")}</div>
+            <div className="sync-choice-grid">
+              <button type="button" className="sync-choice-card" disabled={commandBusy} onClick={() => chooseSetupMode("manual")}><strong>{t("sync.role.secondary")}</strong><span>{t("sync.pair.hint")}</span></button>
+              <button type="button" className="sync-choice-card" disabled={commandBusy} onClick={() => chooseSetupMode("primary")}><strong>{t("sync.role.primary")}</strong><span>{t("sync.primary.hint")}</span></button>
+            </div>
+          </div> : null}
           {isSecondary ? <>
             <div className="sheet-row">
               <div><div className="sheet-label">{t("sync.secondary")}</div><div className="sheet-hint">{t("sync.secondary.hint")}</div></div>
@@ -439,7 +446,6 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               <button type="button" className="btn-quiet" disabled={commandBusy || discovering} onClick={() => void discover()}>{discovering ? t("sync.refreshing") : t("sync.refresh")}</button>
             </div>
             {snapshot.discovered_primaries.length ? <div className="sync-device-list">{snapshot.discovered_primaries.map((primary) => <article className="sync-device-card" key={primary.primary_id}><div className="sync-device-head"><strong>{primary.display_name}</strong><span className={primary.identity_conflict ? "sync-device-status is-error" : "sync-device-status"}>{primary.identity_conflict ? t("sync.discovery.conflict") : t("sync.discovery.trust")}</span></div><div className="sync-device-meta"><code>{primary.endpoint}</code><span>sha256:{primary.certificate_pin}</span></div><div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy || primary.identity_conflict} onClick={() => void run({ action: "pair_discovered", primary_id: primary.primary_id, endpoint: primary.endpoint, certificate_pin: primary.certificate_pin, origin, display_name: displayName.trim() || null, os: null })}>{t("sync.discovery.pair")}</button><button type="button" className="btn-quiet" disabled={commandBusy || primary.identity_conflict} onClick={() => void copyText(primary.endpoint).then(setCopied)}>{copied ? t("sync.copied") : t("sync.discovery.copy_endpoint")}</button></div></article>)}</div> : <div className="sync-empty-card"><strong>{t("sync.discovery.empty")}</strong><span>{t("sync.discovery.empty_hint")}</span></div>}
-            <div className="sync-choice-grid"><button type="button" className="sync-choice-card" disabled={commandBusy} onClick={() => chooseSetupMode("manual")}><strong>{t("sync.pair")}</strong><span>{t("sync.qr.hint")}</span></button><button type="button" className="sync-choice-card" disabled={commandBusy} onClick={() => chooseSetupMode("primary")}><strong>{t("sync.primary")}</strong><span>{t("sync.primary.hint")}</span></button></div>
           </div> : setupMode === "manual" ? <div className="sync-section sync-manual-panel">
             <div className="sync-section-title">{t("sync.pair")}</div><div className="sync-card-copy">{t("sync.pair.hint")}</div>
             <div className="sync-field-grid"><label className="sync-field"><span>{t("sync.origin")}</span><input className="sync-input" value={origin} onChange={(event) => setOrigin(event.target.value)} placeholder={t("sync.origin")} disabled={commandBusy} /></label><label className="sync-field"><span>{t("sync.display_name")}</span><input className="sync-input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("sync.display_name.placeholder")} disabled={commandBusy} /></label></div>
