@@ -24,8 +24,8 @@ const production = [
 
 const checks = [
   ["design keeps the MCP implementation boundary explicit", () => {
-    assert.match(design, /实现状态：`NOT_STARTED`/);
-    assert.match(design, /当前没有 MCP Server/);
+    assert.match(design, /实现状态：`PARTIAL`/);
+    assert.match(design, /未接通的工具必须返回 `tool_unavailable`/);
   }],
   ["design fixes the supported MCP methods and endpoint", () => {
     for (const method of ["initialize", "notifications/initialized", "tools/list", "tools/call"]) assert.ok(design.includes(`\`${method}\``), method);
@@ -62,9 +62,9 @@ const checks = [
     assert.match(audit, /三端真实互通.*`UNVERIFIED`/s);
   }],
   ["audit preserves the not-yet-implemented evidence boundary", () => {
-    assert.match(audit, /实现结论：`UNVERIFIED`/);
-    assert.match(audit, /MCP 服务器尚未实现/);
-    assert.match(audit, /远端 UI 语义操作尚未接入/);
+    assert.match(audit, /实现结论：`PARTIAL`/);
+    assert.match(audit, /stdio bridge、Tauri grant\/session 签发到远端/);
+    assert.match(audit, /远端 UI 语义操作的跨设备调用尚未接入/);
   }],
   ["existing TLS path verifies the leaf pin before HTTP bytes", () => {
     const connect = transport.slice(transport.indexOf("fn connect("), transport.indexOf("fn register_socket("));
@@ -94,8 +94,10 @@ const checks = [
       assert.match(commands, new RegExp(`\\b${action.replace("_", "_")}\\b`));
     }
   }],
-  ["production does not accidentally claim an MCP endpoint exists", () => {
-    assert.doesNotMatch(production, /\/diagnostics\/mcp|DiagnosticsMcp|diagnostics_mcp/);
+  ["production exposes only the bounded diagnostics MCP endpoint", () => {
+    assert.match(production, /\/diagnostics\/mcp|DiagnosticsMcp|diagnostics_mcp/);
+    assert.match(transport, /DIAGNOSTICS_MCP_PATH/);
+    assert.match(transport, /MAX_DIAGNOSTICS_BODY_BYTES/);
   }],
 ];
 
