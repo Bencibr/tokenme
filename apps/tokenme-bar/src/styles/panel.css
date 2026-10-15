@@ -3055,6 +3055,40 @@
 .sync-poll-status { justify-content: space-between; }
 .sync-manual-discovery { margin: 2px 0 6px; }
 
+.sync-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 5px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 42%, var(--hair));
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+}
+
+.sync-confirm-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.sync-confirm-copy strong {
+  color: var(--ink);
+  font-size: var(--t-meta);
+}
+
+.sync-confirm-copy span {
+  color: var(--ink-2);
+  font-size: var(--t-meta);
+  line-height: 1.4;
+}
+
+.sync-confirm .sync-actions {
+  flex: none;
+  margin-top: 0;
+}
+
 
 /* Device setup follows the prototype's discovery-first flow: the scan is the
    primary action, while manual pairing and primary setup remain explicit

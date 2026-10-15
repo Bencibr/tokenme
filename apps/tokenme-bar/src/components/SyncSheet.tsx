@@ -47,6 +47,12 @@ async function decodeInviteFile(file: File): Promise<string> {
   }
 }
 
+type PendingConfirmation = {
+  message: string;
+  request: SyncManagementRequest;
+  onSuccess?: (next: SyncDevicesSnapshot) => void;
+};
+
 export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDevicesSnapshot; onSnapshot: (next: SyncDevicesSnapshot) => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -65,6 +71,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [copied, setCopied] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrBusy, setQrBusy] = useState(false);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmation | null>(null);
   const qrFile = useRef<HTMLInputElement>(null);
   const discoveryInFlight = useRef(false);
   const automaticDiscoveryStarted = useRef(false);
@@ -99,6 +106,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const run = async (request: SyncManagementRequest, onSuccess?: (next: SyncDevicesSnapshot) => void) => {
     if (!mounted.current || operationInFlight.current) return;
+    setPendingConfirm(null);
     clearAutomaticDiscovery();
     manualDiscoveryRequested.current = true;
     const generation = ++operationGeneration.current;
@@ -325,6 +333,17 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
           : phase === "cancelled"
             ? t("sync.phase.cancelled")
             : t("sync.phase.offline");
+  const askConfirmation = (request: SyncManagementRequest, message: string, onSuccess?: (next: SyncDevicesSnapshot) => void) => {
+    if (commandBusy) return;
+    setError(null);
+    setPendingConfirm({ request, message, onSuccess });
+  };
+  const confirmPending = () => {
+    if (!pendingConfirm) return;
+    const { request, onSuccess } = pendingConfirm;
+    setPendingConfirm(null);
+    void run(request, onSuccess);
+  };
   const chooseSetupMode = (mode: "discovery" | "manual" | "primary") => {
     setError(null);
     clearAutomaticDiscovery();
@@ -363,6 +382,10 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             <span>{discovering ? t("sync.discovery.scanning") : phaseLabel}</span>
             {snapshot.last_checked_at_ms ? <span className="sheet-hint"> · {t("sync.last_checked")} {new Date(snapshot.last_checked_at_ms).toLocaleTimeString()}</span> : null}
           </div>
+          {pendingConfirm ? <div className="sync-confirm" role="alertdialog" aria-live="assertive" aria-label={t("sync.confirm.title")}>
+            <div className="sync-confirm-copy"><strong>{t("sync.confirm.title")}</strong><span>{pendingConfirm.message}</span></div>
+            <div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy} onClick={confirmPending}>{t("sync.confirm.accept")}</button><button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setPendingConfirm(null)}>{t("sync.confirm.cancel")}</button></div>
+          </div> : null}
           {isUnconfigured && setupMode === "discovery" ? <div className="sync-section sync-role-picker">
             <div className="sync-section-title">{t("sync.role.choose")}</div>
             <div className="sync-choice-grid">
@@ -376,7 +399,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               <div className="sheet-actions">
                 <button type="button" className="btn-accent" disabled={commandBusy || snapshot.service_running} onClick={() => void run({ action: "start_secondary" })}>{t("sync.start")}</button>
                 <button type="button" className="btn-quiet" disabled={commandBusy || !snapshot.service_running} onClick={() => void run({ action: "stop" })}>{t("sync.stop")}</button>
-                <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => { if (window.confirm(t("sync.unpair.confirm"))) void run({ action: "unpair" }); }}>{t("sync.unpair")}</button>
+                <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => askConfirmation({ action: "unpair" }, t("sync.unpair.confirm"))}>{t("sync.unpair")}</button>
               </div>
             </div>
             {!snapshot.service_running ? <div className="sheet-block">
@@ -394,7 +417,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                 <div><div className="sheet-label">{t("sync.allow_lan")}</div><div className="sheet-hint">{t("sync.allow_lan.hint")}</div></div>
                 <button type="button" role="switch" className="switch" aria-label={t("sync.allow_lan")} aria-checked={allowLan} onClick={() => setAllowLan((value) => !value)} disabled={commandBusy} />
               </div>
-              <button type="button" className="btn-accent" disabled={commandBusy} onClick={() => { if (window.confirm(t("sync.switch_primary.confirm"))) void run({ action: "start_primary", bind, advertise_host: advertiseHost.trim() || null, allow_lan: allowLan }); }}>{t("sync.switch_primary")}</button>
+              <button type="button" className="btn-accent" disabled={commandBusy} onClick={() => askConfirmation({ action: "start_primary", bind, advertise_host: advertiseHost.trim() || null, allow_lan: allowLan }, t("sync.switch_primary.confirm"))}>{t("sync.switch_primary")}</button>
             </div> : null}
           </> : (isPrimary || setupMode === "primary") ? <>
             <div className="sheet-row">
@@ -402,7 +425,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               <div className="sheet-actions">
                 <button type="button" className="btn-accent" disabled={commandBusy || snapshot.service_running} onClick={() => void run({ action: "start_primary", bind, advertise_host: advertiseHost.trim() || null, allow_lan: allowLan })}>{t("sync.start")}</button>
                 <button type="button" className="btn-quiet" disabled={commandBusy || !snapshot.service_running} onClick={() => void run({ action: "stop" })}>{t("sync.stop")}</button>
-                {isPrimary && !snapshot.service_running ? <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => { if (window.confirm(t("sync.switch_secondary.confirm"))) void run({ action: "switch_to_secondary" }, () => chooseSetupMode("discovery")); }}>{t("sync.switch_secondary")}</button> : null}
+                {isPrimary && !snapshot.service_running ? <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => askConfirmation({ action: "switch_to_secondary" }, t("sync.switch_secondary.confirm"), () => chooseSetupMode("discovery"))}>{t("sync.switch_secondary")}</button> : null}
                 {isUnconfigured && setupMode === "primary" ? <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => chooseSetupMode("discovery")}>{t("sync.discovery.back")}</button> : null}
               </div>
             </div>
@@ -458,7 +481,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             return <div className="sheet-row" key={request.request_id}><div><div className="sheet-label">{request.display_name} · {request.origin}</div><div className="sheet-hint">{request.os} · {request.device_id} · {requestStatus}</div></div>{request.status === "pending" ? <div className="sheet-actions"><button type="button" className="btn-accent" disabled={commandBusy} onClick={() => void run({ action: "approve", request_id: request.request_id })}>{t("sync.approve")}</button><button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void run({ action: "reject", request_id: request.request_id })}>{t("sync.reject")}</button></div> : null}</div>;
           })}{hasPendingRequest ? <div className="sync-poll-status">{pollStopped ? t("sync.pairing.polling_stopped") : <Loading size={14} label={t("sync.pairing.polling")} />}<button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void refresh()}>{t("sync.pairing.retry_status")}</button></div> : null}</div> : null}
           {awaitingSecondaryApproval ? <div className="sheet-block"><div className="sheet-hint">{t("sync.pairing.waiting_primary")}</div><div className="sync-poll-status">{pollStopped ? t("sync.pairing.polling_stopped") : <Loading size={14} label={t("sync.pairing.polling")} />}<button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void refresh()}>{t("sync.pairing.retry_status")}</button></div></div> : null}
-          {snapshot.devices.length ? <div className="sheet-block"><div className="sheet-label">{t("sync.devices")}</div>{snapshot.devices.map((device) => <div className="sheet-row" key={device.device_id}><div><div className="sheet-label">{device.display_name} · {device.origin}</div><div className="sheet-hint">{device.os} · {t(`scope.device.${device.status === "reconcile_required" ? "reconcile" : device.status}` as "scope.device.paired")}</div></div><div className="sheet-actions">{device.status === "paused" ? <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void run({ action: "resume", device_id: device.device_id })}>{t("sync.resume")}</button> : device.status === "paired" ? <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void run({ action: "pause", device_id: device.device_id })}>{t("sync.pause")}</button> : null}<button type="button" className="btn-quiet" disabled={commandBusy || device.status === "revoked"} onClick={() => { if (window.confirm(t("sync.revoke.confirm", { name: device.display_name }))) void run({ action: "revoke", device_id: device.device_id }); }}>{t("sync.revoke")}</button></div></div>)}</div> : null}
+          {snapshot.devices.length ? <div className="sheet-block"><div className="sheet-label">{t("sync.devices")}</div>{snapshot.devices.map((device) => <div className="sheet-row" key={device.device_id}><div><div className="sheet-label">{device.display_name} · {device.origin}</div><div className="sheet-hint">{device.os} · {t(`scope.device.${device.status === "reconcile_required" ? "reconcile" : device.status}` as "scope.device.paired")}</div></div><div className="sheet-actions">{device.status === "paused" ? <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void run({ action: "resume", device_id: device.device_id })}>{t("sync.resume")}</button> : device.status === "paired" ? <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void run({ action: "pause", device_id: device.device_id })}>{t("sync.pause")}</button> : null}<button type="button" className="btn-quiet" disabled={commandBusy || device.status === "revoked"} onClick={() => askConfirmation({ action: "revoke", device_id: device.device_id }, t("sync.revoke.confirm", { name: device.display_name }))}>{t("sync.revoke")}</button></div></div>)}</div> : null}
           {!isSecondary ? <div className="sheet-hint">{snapshot.role === "unconfigured" ? t("sync.auto_disabled") : null}</div> : null}
           <div className="sheet-summary num">{t("sync.queue", { pending: snapshot.pending, bytes: snapshot.pending_bytes })}</div>
         </div>
