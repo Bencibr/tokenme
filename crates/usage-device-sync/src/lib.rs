@@ -6,10 +6,22 @@
 //! transport used by the primary and secondary runtimes.
 
 mod protocol;
+mod diagnostics;
 mod runtime;
 mod store;
 mod transport;
 
+pub use diagnostics::{
+    diagnostics_tool_registry, DiagnosticsAuditEvent, DiagnosticsAuthority, DiagnosticsError,
+    DiagnosticsErrorCode, DiagnosticsGrant, DiagnosticsMcpRequest, DiagnosticsMcpResponse,
+    DiagnosticsRequestAuth, DiagnosticsScope, DiagnosticsService, DiagnosticsToolDefinition,
+    DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_PROTOCOL_VERSION, DIAGNOSTICS_REQUEST_TIMEOUT,
+    MAX_DIAGNOSTICS_ARRAY_ITEMS, MAX_DIAGNOSTICS_AUDIT_EVENTS, MAX_DIAGNOSTICS_BODY_BYTES,
+    MAX_DIAGNOSTICS_CONCURRENT_REQUESTS, MAX_DIAGNOSTICS_GRANTS, MAX_DIAGNOSTICS_JSON_DEPTH,
+    MAX_DIAGNOSTICS_OBJECT_ITEMS, MAX_DIAGNOSTICS_PARAMS_BYTES, MAX_DIAGNOSTICS_REPLAY_ENTRIES,
+    MAX_DIAGNOSTICS_SESSIONS, MAX_DIAGNOSTICS_STRING_BYTES, MAX_DIAGNOSTICS_REQUEST_TTL_MS,
+    MAX_DIAGNOSTICS_GRANT_TTL_MS, MAX_DIAGNOSTICS_SESSION_TTL_MS,
+};
 pub use protocol::{
     hash_bytes, identity_bytes, DeviceIdentity, NetworkCall, NetworkCounts, NetworkManifest,
     NetworkPackage, NetworkRow, PairingInvite, PairingRequest, SignedUpload, StreamOpenReceipt,

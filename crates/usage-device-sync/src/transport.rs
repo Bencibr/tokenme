@@ -22,6 +22,11 @@ use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStor
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::diagnostics::{
+    DiagnosticsError, DiagnosticsGrant, DiagnosticsMcpRequest, DiagnosticsMcpResponse,
+    DiagnosticsRequestAuth, DiagnosticsScope, DiagnosticsService, DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_REQUEST_TIMEOUT,
+    MAX_DIAGNOSTICS_BODY_BYTES,
+};
 use crate::protocol::{
     hash_bytes, verify_private_file, AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest,
     SignedUpload, StreamOpenReceipt, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES,
@@ -77,6 +82,8 @@ pub enum TransportError {
     PeerRejected(IpAddr),
     #[error("sync state error: {0}")]
     State(#[source] SyncError),
+    #[error("diagnostics request failed: {0}")]
+    Diagnostics(#[source] DiagnosticsError),
 }
 
 impl From<io::Error> for TransportError {
@@ -323,6 +330,29 @@ impl Tls13HttpsTransport {
         Ok(receipt)
     }
 
+    /// Sends one authenticated MCP JSON-RPC request over the same TLS 1.3 and
+    /// leaf-certificate pinning path as sync. The diagnostics route is a
+    /// separate application endpoint and never enters upload framing.
+    pub fn diagnostics_mcp(&mut self, request: &DiagnosticsMcpRequest) -> Result<Option<DiagnosticsMcpResponse>, TransportError> {
+        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode diagnostics MCP request: {e}")))?;
+        if body.len() > MAX_DIAGNOSTICS_BODY_BYTES {
+            return Err(TransportError::Limit);
+        }
+        let response = self.request(DIAGNOSTICS_MCP_PATH, body)?;
+        if response.status != 200 {
+            let message = serde_json::from_slice::<DiagnosticsMcpResponse>(&response.body)
+                .ok()
+                .and_then(|value| value.error.map(|error| error.message))
+                .or_else(|| serde_json::from_slice::<WireError>(&response.body).ok().map(|error| error.message))
+                .unwrap_or_else(|| "diagnostics request rejected".into());
+            return Err(TransportError::HttpStatus { status: response.status, message });
+        }
+        if response.body.is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_slice(&response.body).map(Some).map_err(|e| TransportError::Protocol(format!("invalid diagnostics MCP response: {e}")))
+    }
+
     fn request(&self, path: &str, body: Vec<u8>) -> Result<HttpResponse, TransportError> {
         if body.len() > DEFAULT_BODY_BYTES {
             return Err(TransportError::Limit);
@@ -424,6 +454,7 @@ pub struct HttpsSyncServer {
 struct ServerContext {
     tls_config: Arc<ServerConfig>,
     store: Arc<Mutex<SyncStore>>,
+    diagnostics: Arc<DiagnosticsService>,
     pairing_limiter: PairingRateLimiter,
     gate: Arc<ConcurrencyGate>,
     config: HttpsServerConfig,
@@ -556,9 +587,11 @@ impl HttpsSyncServer {
         let tls_config = server_config(&config)?;
         let listener = TcpListener::bind(config.bind_addr).map_err(TransportError::from)?;
         listener.set_nonblocking(false).map_err(TransportError::from)?;
+        let diagnostics = DiagnosticsService::new(store.primary_id()).map_err(TransportError::Diagnostics)?;
         let context = ServerContext {
             tls_config: Arc::new(tls_config),
             store: Arc::new(Mutex::new(store)),
+            diagnostics: Arc::new(diagnostics),
             pairing_limiter: PairingRateLimiter::new(),
             gate: Arc::new(ConcurrencyGate::new(&config)),
             config,
@@ -567,6 +600,33 @@ impl HttpsSyncServer {
             next_socket_id: AtomicU64::new(1),
         };
         Ok(Self { listener, context: Arc::new(context) })
+    }
+
+    /// Issues a separately-scoped, short-lived diagnostics grant for an
+    /// already paired debugger device. The grant authority is process-local;
+    /// a restart therefore does not renew old diagnostics access.
+    pub fn issue_diagnostics_grant(
+        &self,
+        debugger_device_id: &str,
+        scopes: &[DiagnosticsScope],
+        issued_at_ms: i64,
+        ttl: Duration,
+    ) -> Result<DiagnosticsGrant, TransportError> {
+        let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| TransportError::Config("diagnostics grant TTL is too large".into()))?;
+        let store = self.context.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+        self.context.diagnostics.issue_grant(&store, debugger_device_id, scopes, issued_at_ms, ttl_ms).map_err(TransportError::Diagnostics)
+    }
+
+    pub fn revoke_diagnostics_grant(&self, grant_id: &str) -> Result<(), TransportError> {
+        self.context.diagnostics.revoke_grant(grant_id).map_err(TransportError::Diagnostics)
+    }
+
+    pub fn revoke_all_diagnostics(&self) {
+        self.context.diagnostics.revoke_all();
+    }
+
+    pub fn diagnostics_audit_events(&self) -> Result<Vec<crate::diagnostics::DiagnosticsAuditEvent>, TransportError> {
+        self.context.diagnostics.audit_events().map_err(TransportError::Diagnostics)
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
@@ -682,6 +742,7 @@ impl ServerContext {
     }
 
     fn cancel_active(&self) {
+        self.diagnostics.stop();
         if let Ok(active) = self.active_sockets.lock() {
             self.cancel.store(true, AtomicOrdering::Release);
             for stream in active.values() {
@@ -753,6 +814,21 @@ impl ServerContext {
             }
         } else if (head.path == PAIRING_PATH || head.path == PAIRING_INVITE_PATH) && !self.pairing_limiter.allow(peer.ip()) {
             (429, serde_json::to_vec(&WireError { message: "pairing rate limit exceeded; retry later".into() }).unwrap_or_else(|_| b"{\"message\":\"pairing rate limit exceeded\"}".to_vec()))
+        } else if head.path == DIAGNOSTICS_MCP_PATH {
+            let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
+            let store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+            let diagnostics_deadline = Instant::now()
+                .checked_add(DIAGNOSTICS_REQUEST_TIMEOUT)
+                .map(|value| value.min(deadline))
+                .ok_or(TransportError::Timeout)?;
+            match self.diagnostics.handle_json(&store, &body, now_ms(), diagnostics_deadline) {
+                Ok(Some(response)) => (200, serde_json::to_vec(&response).map_err(|e| TransportError::Protocol(format!("encode diagnostics MCP response: {e}")))?),
+                Ok(None) => (200, Vec::new()),
+                Err(error) => {
+                    let body = serde_json::to_vec(&error.rpc_response(None)).map_err(|e| TransportError::Protocol(format!("encode diagnostics MCP error: {e}")))?;
+                    (error.http_status(), body)
+                }
+            }
         } else if head.path == PAIRING_INVITE_PATH {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
             let request = serde_json::from_slice::<WirePairingInviteRequest>(&body)
@@ -1163,7 +1239,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST is supported".into()));
     }
     let known_path = match path {
-        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | RECOVERY_PATH => Some(()),
+        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | RECOVERY_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
@@ -1201,7 +1277,13 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
     let content_type = content_type.unwrap_or_default().split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
     if known_path.is_some() {
         if content_length.is_none() { return Err(TransportError::Protocol("known endpoint lacks content-length".into())); }
-        let limit = if path == UPLOAD_PATH { max_body } else { MAX_CONTROL_BODY_BYTES };
+        let limit = if path == UPLOAD_PATH {
+            max_body
+        } else if path == DIAGNOSTICS_MCP_PATH {
+            max_body.min(MAX_DIAGNOSTICS_BODY_BYTES)
+        } else {
+            MAX_CONTROL_BODY_BYTES
+        };
         if length > limit { return Err(TransportError::Limit); }
         let expected = if path == UPLOAD_PATH { "application/octet-stream" } else { "application/json" };
         if content_type != expected { return Err(TransportError::Protocol(format!("unexpected content-type for {path}"))); }
@@ -1344,7 +1426,7 @@ fn read_response_body<S: Read>(stream: &mut S, head: HttpResponseHead, max_respo
 
 fn write_response<S: Write>(stream: &mut S, status: u16, body: &[u8], max_body: usize) -> Result<(), TransportError> {
     if body.len() > max_body { return Err(TransportError::Limit); }
-    let reason = match status { 200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 409 => "Conflict", 413 => "Payload Too Large", 426 => "Upgrade Required", 429 => "Too Many Requests", 503 => "Service Unavailable", _ => "Error" };
+    let reason = match status { 200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 408 => "Request Timeout", 409 => "Conflict", 413 => "Payload Too Large", 426 => "Upgrade Required", 429 => "Too Many Requests", 503 => "Service Unavailable", _ => "Error" };
     write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).map_err(TransportError::from)?;
     stream.write_all(body).map_err(TransportError::from)?;
     stream.flush().map_err(TransportError::from)
@@ -1513,6 +1595,65 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn loopback_tls13_diagnostics_mcp_route_uses_a_separate_fixed_protocol() {
+        let cert = cert();
+        let device = DeviceIdentity::create("diagnostics-client", "Diagnostics client").unwrap();
+        let (store, _) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let grant = server
+            .issue_diagnostics_grant(&device.device_id, &[DiagnosticsScope::Read], now_ms(), Duration::from_secs(60))
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(3));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()),
+            "localhost",
+            cert.cert_der,
+        ))
+        .unwrap();
+        let make_request = |session_id: Option<String>, method: &str, params: serde_json::Value, request_id: &str| {
+            DiagnosticsMcpRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(serde_json::json!(request_id)),
+                method: method.into(),
+                auth: DiagnosticsRequestAuth::new_signed(
+                    &grant,
+                    &device,
+                    session_id,
+                    method,
+                    &params,
+                    request_id,
+                    now_ms(),
+                    now_ms() + 1_000,
+                )
+                .unwrap(),
+                params,
+            }
+        };
+        let initialized = client
+            .diagnostics_mcp(&make_request(None, "initialize", serde_json::json!({}), "mcp-init"))
+            .unwrap()
+            .unwrap();
+        let session = initialized.result.unwrap()["sessionId"].as_str().unwrap().to_string();
+        let listed = client
+            .diagnostics_mcp(&make_request(Some(session.clone()), "tools/list", serde_json::json!({}), "mcp-list"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(listed.result.unwrap()["tools"].as_array().unwrap().len(), crate::diagnostics::diagnostics_tool_registry().len());
+        let called = client
+            .diagnostics_mcp(&make_request(
+                Some(session),
+                "tools/call",
+                serde_json::json!({ "name": "device.get_status" }),
+                "mcp-call",
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(called.result.unwrap()["structuredContent"]["primary_id"], "primary-1");
         assert!(handle.join().unwrap().is_ok());
     }
 
