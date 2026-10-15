@@ -885,7 +885,7 @@ fn decode_hex(value: &str, label: &str) -> SyncResult<Vec<u8>> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingRequest {
     pub request_id: String,
     pub invite_id: String,
@@ -895,6 +895,7 @@ pub struct PairingRequest {
     pub display_name: String,
     pub os: String,
     pub public_key: [u8; 32],
+    #[serde(with = "signature_serde")]
     pub signature: [u8; 64],
 }
 
@@ -1143,6 +1144,17 @@ mod tests {
         fs::write(&tmp, b"sentinel").unwrap();
         assert!(identity.save(&path).is_err());
         assert_eq!(fs::read(&tmp).unwrap(), b"sentinel");
+    }
+
+    #[test]
+    fn pairing_request_json_round_trip_preserves_signature() {
+        let identity = DeviceIdentity::create("linux", "Linux").unwrap();
+        let invite = PairingInvite::new("https://127.0.0.1:47821", &"ab".repeat(32), i64::MAX).unwrap();
+        let request = PairingRequest::new(&invite, &identity, "linux").unwrap();
+        let bytes = serde_json::to_vec(&request).unwrap();
+        let restored: PairingRequest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, request);
+        restored.verify().unwrap();
     }
 
     fn row(key: Option<&str>) -> NetworkRow {
