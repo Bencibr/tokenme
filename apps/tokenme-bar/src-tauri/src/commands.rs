@@ -8,7 +8,7 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use usage_core::pricing::PricingOptions;
@@ -56,6 +56,29 @@ pub enum SyncManagementRequest {
     Revoke { device_id: String },
 }
 
+/// Keep command diagnostics useful without ever serializing invite URLs,
+/// endpoints, device IDs, or other request payloads into the panel log.
+fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
+    match request {
+        None => "snapshot",
+        Some(SyncManagementRequest::Status) => "status",
+        Some(SyncManagementRequest::Discover) => "discover",
+        Some(SyncManagementRequest::StartPrimary { .. }) => "start_primary",
+        Some(SyncManagementRequest::StartSecondary) => "start_secondary",
+        Some(SyncManagementRequest::Stop) => "stop",
+        Some(SyncManagementRequest::SwitchToSecondary) => "switch_to_secondary",
+        Some(SyncManagementRequest::Unpair) => "unpair",
+        Some(SyncManagementRequest::CreateInvite { .. }) => "create_invite",
+        Some(SyncManagementRequest::Pair { .. }) => "pair",
+        Some(SyncManagementRequest::PairDiscovered { .. }) => "pair_discovered",
+        Some(SyncManagementRequest::Approve { .. }) => "approve",
+        Some(SyncManagementRequest::Reject { .. }) => "reject",
+        Some(SyncManagementRequest::Pause { .. }) => "pause",
+        Some(SyncManagementRequest::Resume { .. }) => "resume",
+        Some(SyncManagementRequest::Revoke { .. }) => "revoke",
+    }
+}
+
 #[derive(Debug)]
 pub struct SyncControl {
     state: Mutex<SyncControlState>,
@@ -77,6 +100,7 @@ struct SyncControlState {
     last_checked_at_ms: Option<i64>,
     discovered_primaries: Vec<DiscoveredPrimaryView>,
     pending_pairing_attempted: bool,
+    discovery_in_flight: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -542,9 +566,21 @@ fn register_mdns_primary(primary_id: &str, certificate_pin: &str, endpoint: &str
     let monitor = daemon.monitor().ok().map(|events| thread::spawn(move || {
         loop {
             match events.recv() {
-                Ok(event) => eprintln!("tokenme sync mDNS: {event:?}"),
-                Err(error) => {
-                    if let Ok(mut slot) = error_for_thread.lock() { *slot = Some(mdns_permission_hint(&format!("mDNS monitor failed: {error}"))); }
+                Ok(event) => {
+                    let event_name = match event {
+                        DaemonEvent::Announce(_, _) => "announce",
+                        DaemonEvent::Error(_) => "error",
+                        DaemonEvent::IpAdd(_) => "ip_add",
+                        DaemonEvent::IpDel(_) => "ip_del",
+                        DaemonEvent::NameChange(_) => "name_change",
+                        DaemonEvent::Respond(_) => "respond",
+                        _ => "other",
+                    };
+                    eprintln!("tokenme sync mDNS: event={event_name}");
+                }
+                Err(_) => {
+                    if let Ok(mut slot) = error_for_thread.lock() { *slot = Some(mdns_permission_hint("mDNS monitor stopped")); }
+                    eprintln!("tokenme sync mDNS: event=monitor_stopped");
                     break;
                 }
             }
@@ -563,6 +599,24 @@ fn merge_discovered_primary(results: &mut Vec<DiscoveredPrimaryView>, candidate:
         return;
     }
     results.push(candidate);
+}
+
+fn apply_discovery_result(state: &mut SyncControlState, result: Result<Vec<DiscoveredPrimaryView>, String>, started: Instant) {
+    match result {
+        Ok(primaries) => {
+            let result_count = primaries.len();
+            state.discovered_primaries = primaries;
+            state.discovery_error = None;
+            state.phase = SyncPhase::Success;
+            eprintln!("tokenme sync: action=discover duration_ms={} result_count={} outcome=ok", started.elapsed().as_millis(), result_count);
+        }
+        Err(error) => {
+            state.discovered_primaries.clear();
+            state.discovery_error = Some(mdns_permission_hint(&error));
+            state.phase = SyncPhase::Error;
+            eprintln!("tokenme sync: action=discover duration_ms={} result_count=0 outcome=error", started.elapsed().as_millis());
+        }
+    }
 }
 
 fn discover_mdns_primaries() -> Result<Vec<DiscoveredPrimaryView>, String> {
@@ -909,11 +963,7 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
             Ok(())
         },
         SyncManagementRequest::Discover => {
-            match discover_mdns_primaries() {
-                Ok(primaries) => { state.discovered_primaries = primaries; state.discovery_error = None; }
-                Err(error) => { state.discovered_primaries.clear(); state.discovery_error = Some(mdns_permission_hint(&error)); }
-            }
-            Ok(())
+            Err("mDNS discovery must run asynchronously".into())
         }
         SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan } => start_primary(state, bind, advertise_host, allow_lan),
         SyncManagementRequest::StartSecondary => {
@@ -1060,10 +1110,44 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
 }
 
 #[tauri::command]
-pub fn sync_devices(request: Option<SyncManagementRequest>, control: State<SyncControl>) -> Result<SyncDevicesView, String> {
-    let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
-    if let Some(request) = request { run_sync_action(&mut state, request)?; }
-    sync_snapshot(&mut state)
+pub async fn sync_devices(request: Option<SyncManagementRequest>, control: State<'_, SyncControl>) -> Result<SyncDevicesView, String> {
+    let action = sync_action_name(request.as_ref());
+    let started = Instant::now();
+    if matches!(request.as_ref(), Some(SyncManagementRequest::Discover)) {
+        {
+            let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+            if state.discovery_in_flight {
+                let error = Err("mDNS discovery is already running".into());
+                eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
+                return error;
+            }
+            state.discovery_in_flight = true;
+            state.phase = SyncPhase::Running;
+        }
+        let discovery_started = Instant::now();
+        let discovery = match tauri::async_runtime::spawn_blocking(discover_mdns_primaries).await {
+            Ok(result) => result,
+            Err(error) => Err(format!("mDNS discovery worker stopped: {error}")),
+        };
+        let result = (|| {
+            let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+            state.discovery_in_flight = false;
+            apply_discovery_result(&mut state, discovery, discovery_started);
+            sync_snapshot(&mut state)
+        })();
+        eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
+        return result;
+    }
+    let result = (|| {
+        let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+        if state.discovery_in_flight && !matches!(request.as_ref(), Some(SyncManagementRequest::Status)) {
+            return Err("mDNS discovery is already running".into());
+        }
+        if let Some(request) = request { run_sync_action(&mut state, request)?; }
+        sync_snapshot(&mut state)
+    })();
+    eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
+    result
 }
 
 /// Returns the last report; `force` asks the engine for an immediate re-index.
@@ -1689,7 +1773,7 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
 
 #[cfg(test)]
 mod sync_tests {
-    use super::{advertised_endpoint_host, merge_discovered_primary, rearm_pending_pairing_retry, DiscoveredPrimaryView, SyncControlState, MDNS_SERVICE_TYPE};
+    use super::{advertised_endpoint_host, merge_discovered_primary, rearm_pending_pairing_retry, sync_action_name, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
 
@@ -1715,6 +1799,19 @@ mod sync_tests {
         let mut state = SyncControlState { pending_pairing_attempted: true, ..SyncControlState::default() };
         rearm_pending_pairing_retry(&mut state);
         assert!(!state.pending_pairing_attempted, "refresh must allow the persisted request to retry");
+    }
+
+    #[test]
+    fn sync_timing_action_names_do_not_include_request_payloads() {
+        let request = SyncManagementRequest::Pair {
+            invite: "tokenme://device-pair?secret=private".into(),
+            origin: Some("workstation".into()),
+            display_name: Some("Private device".into()),
+            os: Some("macOS".into()),
+        };
+        assert_eq!(sync_action_name(None), "snapshot");
+        assert_eq!(sync_action_name(Some(&request)), "pair");
+        assert_eq!(sync_action_name(Some(&SyncManagementRequest::Discover)), "discover");
     }
 
     #[test]
