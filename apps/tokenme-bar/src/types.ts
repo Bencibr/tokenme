@@ -306,6 +306,7 @@ export type SyncManagementRequest =
   | { action: "start_primary"; bind?: string | null; advertise_host?: string | null; allow_lan: boolean }
   | { action: "start_secondary" }
   | { action: "stop" }
+  | { action: "switch_to_secondary" }
   | { action: "unpair" }
   | { action: "create_invite"; expires_at_ms?: number | null }
   | { action: "pair"; invite: string; origin?: string | null; display_name?: string | null; os?: string | null }

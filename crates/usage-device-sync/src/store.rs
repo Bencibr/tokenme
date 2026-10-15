@@ -683,6 +683,26 @@ impl SyncStore {
         })
     }
 
+    /// Removes the primary role configuration while retaining all usage,
+    /// device history, receipts, and dirty/outbox state. Role switching uses
+    /// this after the listener has been stopped so a later restart cannot
+    /// resurrect the old primary role.
+    pub fn clear_primary_config(&mut self, now_ms: i64) -> SyncResult<()> {
+        self.index.with_network_transaction(|tx| {
+            tx.execute(
+                "DELETE FROM device_sync_primary_config
+                  WHERE config_key = 'primary' AND primary_id = ?1",
+                params![self.primary_id],
+            ).map_err(sql_err)?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_last_primary_unpaired_at_ms', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![now_ms.to_string()],
+            ).map_err(sql_err)?;
+            Ok(())
+        })
+    }
+
     pub fn secondary_has_history(&self, config: &SecondarySyncConfig) -> SyncResult<bool> {
         if config.last_ack_generation.is_some()
             || config.last_ack_receipt_hash.is_some()
@@ -3356,6 +3376,8 @@ mod tests {
         let stopped = store.primary_config().unwrap().unwrap();
         assert!(!stopped.enabled);
         assert_eq!(stopped.primary_id, config.primary_id);
+        store.clear_primary_config(12).unwrap();
+        assert!(store.primary_config().unwrap().is_none());
         assert_eq!(store.index().event_count().unwrap(), 1, "stopping the listener must not clear local history");
     }
 

@@ -59,12 +59,24 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [invite, setInvite] = useState("");
   const [origin, setOrigin] = useState("secondary");
   const [displayName, setDisplayName] = useState("");
+  const [setupMode, setSetupMode] = useState<"discovery" | "manual" | "primary">("discovery");
   const [copied, setCopied] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrBusy, setQrBusy] = useState(false);
   const qrFile = useRef<HTMLInputElement>(null);
 
-  const run = async (request: SyncManagementRequest) => {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  const run = async (request: SyncManagementRequest, onSuccess?: (next: SyncDevicesSnapshot) => void) => {
     setBusy(true);
     setPhase("running");
     setError(null);
@@ -72,6 +84,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       const next = await bridge.syncDevices(request);
       onSnapshot(next);
       setPhase(next.operation_state);
+      onSuccess?.(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setPhase("error");
@@ -109,8 +122,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
         try {
           const discovered = await bridge.syncDevices({ action: "discover" });
           if (alive) { onSnapshot(discovered); setPhase(discovered.operation_state); }
-        } catch {
-          // mDNS is optional on some networks; manual invite remains available.
+        } catch (e) {
+          if (alive) {
+            setError(e instanceof Error ? e.message : String(e));
+            setPhase("offline");
+          }
         }
       }
     }).catch((e) => {
@@ -123,6 +139,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const isSecondary = snapshot.role === "secondary";
   const isPrimary = snapshot.role === "primary";
+  const isUnconfigured = snapshot.role === "unconfigured";
   const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
   const awaitingSecondaryApproval = isSecondary && snapshot.service_running && !snapshot.stream_id;
   const shouldPoll = snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval);
@@ -138,7 +155,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       let retryDelay = 5000;
       try {
         const next = await bridge.syncDevices({ action: "status" });
-        if (alive) { onSnapshot(next); setPhase(next.operation_state); }
+        if (alive) { onSnapshot(next); setError(null); setPhase(next.operation_state); }
       } catch (e) {
         retryDelay = Math.min(30000, 5000 * 2 ** Math.max(0, attempts - 1));
         if (alive) { setError(e instanceof Error ? e.message : String(e)); setPhase("offline"); }
@@ -168,13 +185,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     try {
       setInvite(await decodeInviteFile(file));
     } catch (e) {
+      setInvite("");
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setQrBusy(false);
     }
   };
 
-  const canPair = snapshot.role === "unconfigured" || (isPrimary && !snapshot.service_running);
   const statusText = isSecondary
     ? snapshot.service_running ? t("sync.auto_running") : t("sync.auto_offline")
     : snapshot.service_running ? t("sync.running") : t("sync.stopped");
@@ -194,6 +211,10 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
           : phase === "cancelled"
             ? t("sync.phase.cancelled")
             : t("sync.phase.offline");
+  const chooseSetupMode = (mode: "discovery" | "manual" | "primary") => {
+    setError(null);
+    setSetupMode(mode);
+  };
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet sheet-srv" role="dialog" aria-modal="true" aria-label={t("sync.title")} onClick={(event) => event.stopPropagation()}>
@@ -204,8 +225,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             <button type="button" className="sheet-close" aria-label={t("sync.close")} onClick={onClose}><IconClose size={12} /></button>
           </div>
         </div>
-        <div className="sheet-body">
-          <div className="sheet-summary">
+        <div className="sheet-body sync-body">
+          <div className="sheet-summary sync-summary">
             <span>{t("sync.role")}: {roleLabel}</span>
             <span className="dot-sep" aria-hidden="true" />
             <span>{statusText}</span>
@@ -220,7 +241,6 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             <span>{phaseLabel}</span>
             {snapshot.last_checked_at_ms ? <span className="sheet-hint"> · {t("sync.last_checked")} {new Date(snapshot.last_checked_at_ms).toLocaleTimeString()}</span> : null}
           </div>
-          <div className="sheet-hint sync-manual-discovery">{t("sync.discovery.hint")}</div>
           {isSecondary ? <>
             <div className="sheet-row">
               <div><div className="sheet-label">{t("sync.secondary")}</div><div className="sheet-hint">{t("sync.secondary.hint")}</div></div>
@@ -243,16 +263,18 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               </div>
               <div className="sheet-row">
                 <div><div className="sheet-label">{t("sync.allow_lan")}</div><div className="sheet-hint">{t("sync.allow_lan.hint")}</div></div>
-                <button type="button" role="switch" className="switch" aria-checked={allowLan} onClick={() => setAllowLan((value) => !value)} disabled={busy} />
+                <button type="button" role="switch" className="switch" aria-label={t("sync.allow_lan")} aria-checked={allowLan} onClick={() => setAllowLan((value) => !value)} disabled={busy} />
               </div>
               <button type="button" className="btn-accent" disabled={busy} onClick={() => { if (window.confirm(t("sync.switch_primary.confirm"))) void run({ action: "start_primary", bind, advertise_host: advertiseHost.trim() || null, allow_lan: allowLan }); }}>{t("sync.switch_primary")}</button>
             </div> : null}
-          </> : <>
+          </> : (isPrimary || setupMode === "primary") ? <>
             <div className="sheet-row">
               <div><div className="sheet-label">{t("sync.primary")}</div><div className="sheet-hint">{t("sync.primary.hint")}</div></div>
               <div className="sheet-actions">
                 <button type="button" className="btn-accent" disabled={busy || snapshot.service_running} onClick={() => void run({ action: "start_primary", bind, advertise_host: advertiseHost.trim() || null, allow_lan: allowLan })}>{t("sync.start")}</button>
                 <button type="button" className="btn-quiet" disabled={busy || !snapshot.service_running} onClick={() => void run({ action: "stop" })}>{t("sync.stop")}</button>
+                {isPrimary && !snapshot.service_running ? <button type="button" className="btn-quiet" disabled={busy} onClick={() => { if (window.confirm(t("sync.switch_secondary.confirm"))) void run({ action: "switch_to_secondary" }, () => chooseSetupMode("discovery")); }}>{t("sync.switch_secondary")}</button> : null}
+                {isUnconfigured && setupMode === "primary" ? <button type="button" className="btn-quiet" disabled={busy} onClick={() => chooseSetupMode("discovery")}>{t("sync.discovery.back")}</button> : null}
               </div>
             </div>
             <div className="sheet-row">
@@ -266,7 +288,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             </div>
             <div className="sheet-row">
               <div><div className="sheet-label">{t("sync.allow_lan")}</div><div className="sheet-hint">{t("sync.allow_lan.hint")}</div></div>
-              <button type="button" role="switch" className="switch" aria-checked={allowLan} onClick={() => setAllowLan((value) => !value)} disabled={busy || snapshot.service_running} />
+              <button type="button" role="switch" className="switch" aria-label={t("sync.allow_lan")} aria-checked={allowLan} onClick={() => setAllowLan((value) => !value)} disabled={busy || snapshot.service_running} />
             </div>
             <div className="sheet-row">
               <div><div className="sheet-label">{t("sync.invite")}</div><div className="sheet-hint">{t("sync.invite.hint")}</div></div>
@@ -284,24 +306,25 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                 {snapshot.invite_expires_at_ms ? <span className="sheet-hint">{t("sync.invite.expires", { time: new Date(snapshot.invite_expires_at_ms).toLocaleString() })}</span> : null}
               </div>
             </div> : null}
-          </>}
-          {isPrimary && snapshot.service_running ? <div className="sheet-block"><div className="sheet-hint">{t("sync.pair.primary_guard")}</div></div> : isSecondary ? <div className="sheet-block"><div className="sheet-hint">{t("sync.pair.secondary_guard")}</div></div> : canPair ? <div className="sheet-block">
-            <div className="sheet-label">{t("sync.pair")}</div>
-            <div className="sheet-hint">{t("sync.pair.hint")}</div>
-            <div className="sheet-actions">
-              <button type="button" className="btn-quiet" disabled={busy} onClick={() => void run({ action: "discover" })}>{t("sync.discovery.scan")}</button>
-              <span className="sheet-hint">{t("sync.discovery.trust")}</span>
+          </> : null}
+          {isPrimary && snapshot.service_running ? <div className="sync-notice is-muted">{t("sync.pair.primary_guard")}</div> : null}
+          {isSecondary ? <div className="sync-notice is-muted">{t("sync.pair.secondary_guard")}</div> : null}
+          {isUnconfigured ? setupMode === "discovery" ? <div className="sync-section sync-discovery-panel">
+            <div className="sync-section-title">{t("sync.discovery.scan")}</div>
+            <div className={`sync-scan-card${busy ? " is-scanning" : ""}`}>
+              {busy ? <Loading size={18} label={t("sync.phase.running")} /> : <span className="sync-scan-dot" aria-hidden="true" />}
+              <div><strong>{snapshot.discovered_primaries.length ? `${snapshot.discovered_primaries.length} ${t("sync.discovery.scan")}` : t("sync.discovery.scan")}</strong><span>{t("sync.discovery.hint")}</span></div>
+              <button type="button" className="btn-quiet" disabled={busy} onClick={() => void run({ action: "discover" })}>{busy ? t("sync.refreshing") : t("sync.refresh")}</button>
             </div>
-            {snapshot.discovered_primaries.length ? <div className="sync-discovery-list">{snapshot.discovered_primaries.map((primary) => <div className="sheet-row" key={primary.primary_id}><div><div className="sheet-label">{primary.display_name}</div><div className="sheet-hint">{primary.endpoint} · sha256:{primary.certificate_pin}</div>{primary.identity_conflict ? <div className="sheet-hint">{t("sync.discovery.conflict")}</div> : null}</div><div className="sheet-actions"><button type="button" className="btn-accent" disabled={busy || primary.identity_conflict} onClick={() => void run({ action: "pair_discovered", primary_id: primary.primary_id, endpoint: primary.endpoint, certificate_pin: primary.certificate_pin, origin, display_name: displayName.trim() || null, os: null })}>{t("sync.discovery.pair")}</button><button type="button" className="btn-quiet" disabled={busy || primary.identity_conflict} onClick={() => void copyText(primary.endpoint).then(setCopied)}>{t("sync.discovery.copy_endpoint")}</button></div></div>)}</div> : null}
-            <input className="sync-input" value={origin} onChange={(event) => setOrigin(event.target.value)} placeholder={t("sync.origin")} disabled={busy} />
-            <input className="sync-input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("sync.display_name.placeholder")} aria-label={t("sync.display_name")} disabled={busy} />
-            <textarea className="sync-invite" value={invite} onChange={(event) => setInvite(event.target.value)} placeholder={t("sync.paste_invite")} />
+            {snapshot.discovered_primaries.length ? <div className="sync-device-list">{snapshot.discovered_primaries.map((primary) => <article className="sync-device-card" key={primary.primary_id}><div className="sync-device-head"><strong>{primary.display_name}</strong><span className={primary.identity_conflict ? "sync-device-status is-error" : "sync-device-status"}>{primary.identity_conflict ? t("sync.discovery.conflict") : t("sync.discovery.trust")}</span></div><div className="sync-device-meta"><code>{primary.endpoint}</code><span>sha256:{primary.certificate_pin}</span></div><div className="sync-actions"><button type="button" className="btn-accent" disabled={busy || primary.identity_conflict} onClick={() => void run({ action: "pair_discovered", primary_id: primary.primary_id, endpoint: primary.endpoint, certificate_pin: primary.certificate_pin, origin, display_name: displayName.trim() || null, os: null })}>{t("sync.discovery.pair")}</button><button type="button" className="btn-quiet" disabled={busy || primary.identity_conflict} onClick={() => void copyText(primary.endpoint).then(setCopied)}>{copied ? t("sync.copied") : t("sync.discovery.copy_endpoint")}</button></div></article>)}</div> : <div className="sync-empty-card"><strong>{t("sync.discovery.empty")}</strong><span>{t("sync.discovery.empty_hint")}</span></div>}
+            <div className="sync-choice-grid"><button type="button" className="sync-choice-card" disabled={busy} onClick={() => chooseSetupMode("manual")}><strong>{t("sync.pair")}</strong><span>{t("sync.qr.hint")}</span></button><button type="button" className="sync-choice-card" disabled={busy} onClick={() => chooseSetupMode("primary")}><strong>{t("sync.primary")}</strong><span>{t("sync.primary.hint")}</span></button></div>
+          </div> : setupMode === "manual" ? <div className="sync-section sync-manual-panel">
+            <div className="sync-section-title">{t("sync.pair")}</div><div className="sync-card-copy">{t("sync.pair.hint")}</div>
+            <div className="sync-field-grid"><label className="sync-field"><span>{t("sync.origin")}</span><input className="sync-input" value={origin} onChange={(event) => setOrigin(event.target.value)} placeholder={t("sync.origin")} disabled={busy} /></label><label className="sync-field"><span>{t("sync.display_name")}</span><input className="sync-input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("sync.display_name.placeholder")} disabled={busy} /></label></div>
+            <textarea className="sync-invite" value={invite} onChange={(event) => setInvite(event.target.value)} placeholder={t("sync.paste_invite")} aria-label={t("sync.paste_invite")} />
             <input ref={qrFile} type="file" accept="image/png,image/jpeg,image/webp" className="sync-file" onChange={(event) => { void selectQrFile(event.target.files?.[0]); event.currentTarget.value = ""; }} />
-            <div className="sheet-actions">
-              <button type="button" className="btn-quiet" disabled={busy || qrBusy} onClick={() => qrFile.current?.click()}>{qrBusy ? t("sync.scanning_qr") : t("sync.scan_qr")}</button>
-              <button type="button" className="btn-accent" disabled={busy || !invite.trim()} onClick={() => void run({ action: "pair", invite: invite.trim(), origin, display_name: displayName.trim() || null, os: null })}>{t("sync.pair")}</button>
-            </div>
-          </div> : null}
+            <div className="sync-actions"><button type="button" className="btn-quiet" disabled={busy || qrBusy} onClick={() => void qrFile.current?.click()}>{qrBusy ? t("sync.scanning_qr") : t("sync.scan_qr")}</button><button type="button" className="btn-accent" disabled={busy || qrBusy || !invite.trim()} onClick={() => void run({ action: "pair", invite: invite.trim(), origin, display_name: displayName.trim() || null, os: null })}>{t("sync.pair")}</button><button type="button" className="btn-quiet" disabled={busy} onClick={() => chooseSetupMode("discovery")}>{t("sync.discovery.back")}</button></div>
+          </div> : null : null}
           {snapshot.pairing_requests.length ? <div className="sheet-block"><div className="sheet-label">{t("sync.requests")}</div>{snapshot.pairing_requests.map((request) => {
             const requestStatus = request.status === "pending" ? t("sync.request.pending") : request.status === "expired" ? t("sync.request.expired") : request.status === "rejected" ? t("sync.request.rejected") : request.status;
             return <div className="sheet-row" key={request.request_id}><div><div className="sheet-label">{request.display_name} · {request.origin}</div><div className="sheet-hint">{request.os} · {request.device_id} · {requestStatus}</div></div>{request.status === "pending" ? <div className="sheet-actions"><button type="button" className="btn-accent" disabled={busy} onClick={() => void run({ action: "approve", request_id: request.request_id })}>{t("sync.approve")}</button><button type="button" className="btn-quiet" disabled={busy} onClick={() => void run({ action: "reject", request_id: request.request_id })}>{t("sync.reject")}</button></div> : null}</div>;
