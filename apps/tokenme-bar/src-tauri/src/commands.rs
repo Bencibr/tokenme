@@ -4,12 +4,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
+use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use usage_core::pricing::PricingOptions;
 use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
-use usage_device_sync::{hash_bytes, ClientTransportCancellation, DeviceIdentity, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, HttpsServerConfig, PairingInvite, PairingRequest, PairingRequestState, SecondarySyncConfig, SyncError, SyncRuntime, SyncRuntimeConfig, SyncStore, TransportError, Tls13HttpsTransport, HttpsTransportConfig};
+use usage_device_sync::{hash_bytes, ClientTransportCancellation, DeviceIdentity, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, HttpsServerConfig, PairingInvite, PairingInviteDetails, PairingRequest, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SyncError, SyncRuntime, SyncRuntimeConfig, SyncStore, TransportError, Tls13HttpsTransport, HttpsTransportConfig};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
@@ -34,12 +36,14 @@ pub struct TrayState {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum SyncManagementRequest {
     Status,
+    Discover,
     StartPrimary { bind: Option<String>, advertise_host: Option<String>, allow_lan: bool },
     StartSecondary,
     Stop,
     Unpair,
     CreateInvite { expires_at_ms: Option<i64> },
     Pair { invite: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
+    PairDiscovered { primary_id: String, endpoint: String, certificate_pin: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
     Approve { request_id: String },
     Reject { request_id: String },
     Pause { device_id: String },
@@ -63,6 +67,30 @@ struct SyncControlState {
     invite_url: Option<String>,
     invite_expires_at_ms: Option<i64>,
     last_error: Option<String>,
+    discovery_error: Option<String>,
+    phase: SyncPhase,
+    last_checked_at_ms: Option<i64>,
+    discovered_primaries: Vec<DiscoveredPrimaryView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncPhase { Idle, Running, Success, Error, Cancelled, Offline }
+
+impl Default for SyncPhase {
+    fn default() -> Self { Self::Idle }
+}
+
+impl SyncPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Offline => "offline",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -70,6 +98,40 @@ struct SyncService {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<Result<(), TransportError>>>,
     certificate_der: Vec<u8>,
+    mdns: Option<MdnsAdvertisement>,
+}
+
+const MDNS_SERVICE_TYPE: &str = "_tokenme-sync._tcp.local.";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredPrimaryView {
+    pub service_name: String,
+    pub primary_id: String,
+    pub display_name: String,
+    pub endpoint: String,
+    pub certificate_pin: String,
+    pub identity_conflict: bool,
+}
+
+struct MdnsAdvertisement {
+    daemon: ServiceDaemon,
+    fullname: String,
+    monitor: Option<JoinHandle<()>>,
+    error: Arc<Mutex<Option<String>>>,
+}
+
+impl std::fmt::Debug for MdnsAdvertisement {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("MdnsAdvertisement").field("fullname", &self.fullname).finish_non_exhaustive()
+    }
+}
+
+impl Drop for MdnsAdvertisement {
+    fn drop(&mut self) {
+        let _ = self.daemon.unregister(&self.fullname);
+        let _ = self.daemon.shutdown();
+        if let Some(monitor) = self.monitor.take() { let _ = monitor.join(); }
+    }
 }
 
 #[derive(Debug)]
@@ -127,9 +189,13 @@ pub struct SyncDevicesView {
     pub in_flight: u64,
     pub pending_bytes: u64,
     pub last_error: Option<String>,
+    pub discovery_error: Option<String>,
     pub last_connected_at_ms: Option<i64>,
+    pub operation_state: String,
+    pub last_checked_at_ms: Option<i64>,
     pub invite_url: Option<String>,
     pub invite_expires_at_ms: Option<i64>,
+    pub discovered_primaries: Vec<DiscoveredPrimaryView>,
     pub devices: Vec<SyncDeviceView>,
     pub pairing_requests: Vec<PairingRequestState>,
 }
@@ -182,6 +248,7 @@ fn reap_service(state: &mut SyncControlState) {
     if let Some(join) = service.join.take() {
         if let Err(error) = join.join().unwrap_or_else(|_| Err(TransportError::Config("sync service thread panicked".into()))) {
             state.last_error = Some(error.to_string());
+            state.phase = SyncPhase::Error;
         }
     }
     state.endpoint = None;
@@ -191,6 +258,23 @@ fn reap_service(state: &mut SyncControlState) {
 fn stop_service(state: &mut SyncControlState) {
     state.runtime.take();
     state.service.take();
+}
+
+fn clear_secondary_binding(index_path: &std::path::Path, config: &SecondarySyncConfig) -> Result<(), String> {
+    let mut store = SyncStore::open(index_path, config.primary_id.clone()).map_err(|error| error.to_string())?;
+    let removed_path = store.clear_secondary_config(current_ms()).map_err(|error| error.to_string())?;
+    let directory = sync_dir()?;
+    if removed_path.as_ref().is_some_and(|path| path == &config.identity_path) && config.identity_path.parent() == Some(directory.as_path()) {
+        let _ = std::fs::remove_file(&config.identity_path);
+    }
+    Ok(())
+}
+
+fn primary_endpoint(config: &PrimarySyncConfig) -> Option<String> {
+    let address: std::net::SocketAddr = config.bind_addr.parse().ok()?;
+    let host = config.advertise_host.as_deref()?;
+    let host = advertised_endpoint_host(host, config.allow_lan).ok()?;
+    Some(format!("https://{host}:{}", address.port()))
 }
 
 fn reap_runtime(state: &mut SyncControlState) {
@@ -203,7 +287,10 @@ fn reap_runtime(state: &mut SyncControlState) {
         let result = join.join()
             .map_err(|_| SyncError::Security("secondary runtime thread panicked".into()))
             .and_then(|result| result);
-        if let Err(error) = result { state.last_error = Some(error.to_string()); }
+        if let Err(error) = result {
+            state.last_error = Some(error.to_string());
+            state.phase = SyncPhase::Error;
+        }
     }
 }
 
@@ -252,16 +339,21 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
 }
 
 fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_host: Option<String>, allow_lan: bool) -> Result<(), String> {
-    if state.role == "secondary" || state.runtime.is_some() {
-        return Err("this TokenMe instance is paired as a secondary; stop or revoke that pairing before starting primary".into());
-    }
-    if let Some(path) = usage_index::Index::default_path() {
-        if SyncStore::read_secondary_config(&path).map_err(|error| error.to_string())?.is_some() {
-            return Err("this TokenMe instance is paired as a secondary; start the primary on another device".into());
-        }
-    }
+    let index_path = sync_index_path()?;
     reap_service(state);
     if state.service.is_some() { return Ok(()); }
+    if state.runtime.is_some() {
+        return Err("stop secondary sync before switching this device to primary".into());
+    }
+    let secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| error.to_string())?;
+    if let Some(config) = &secondary_config {
+        if config.enabled {
+            // A crashed/stale secondary has no runtime to stop, so make the
+            // persisted stop explicit before switching roles.
+            let mut stopped = SyncStore::open(&index_path, config.primary_id.clone()).map_err(|e| e.to_string())?;
+            stopped.set_secondary_enabled(false, current_ms()).map_err(|e| format!("cannot stop stale secondary sync: {e}"))?;
+        }
+    }
     let directory = sync_dir()?;
     let identity_path = directory.join("primary-identity.json");
     let identity = DeviceIdentity::load_or_create(&identity_path, "primary", "TokenMe primary").map_err(|e| format!("cannot create primary identity: {e}"))?;
@@ -273,7 +365,18 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     if allow_lan && bind_addr.ip().is_loopback() {
         return Err("LAN/VPN access requires a non-loopback listen address".into());
     }
-    let store = SyncStore::open(sync_index_path()?, identity.device_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
+    let existing_primary_id = SyncStore::read_status(&index_path).map_err(|error| format!("cannot read sync role: {error}"))?.primary_id;
+    let current_primary_id = existing_primary_id.unwrap_or_else(|| identity.device_id.clone());
+    let mut store = SyncStore::open(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
+    if current_primary_id != identity.device_id {
+        store.rotate_primary_id(identity.device_id.clone(), current_ms()).map_err(|e| format!("cannot switch sync role: {e}"))?;
+        if let Some(config) = &secondary_config {
+            if config.identity_path.parent() == Some(directory.as_path()) { let _ = std::fs::remove_file(&config.identity_path); }
+        }
+    } else if let Some(config) = &secondary_config {
+        store.clear_secondary_config(current_ms()).map_err(|e| format!("cannot clear stopped secondary binding: {e}"))?;
+        if config.identity_path.parent() == Some(directory.as_path()) { let _ = std::fs::remove_file(&config.identity_path); }
+    }
     let server = usage_device_sync::HttpsSyncServer::bind(HttpsServerConfig {
         bind_addr,
         certificate_der: certificate_der.clone(),
@@ -296,6 +399,25 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     };
     let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
     let endpoint = format!("https://{endpoint_host}:{}", address.port());
+    let mut persisted = SyncStore::open(&index_path, identity.device_id.clone()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
+    persisted.save_primary_config(&PrimarySyncConfig {
+        primary_id: identity.device_id.clone(),
+        // Persist the port actually bound; `:0` is valid for tests and must
+        // not come back as an unusable endpoint after an app restart.
+        bind_addr: address.to_string(),
+        advertise_host: Some(host),
+        allow_lan,
+        enabled: true,
+    }, current_ms()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
+    let mdns = if allow_lan {
+        let certificate_pin = hex_bytes(&hash_bytes(&certificate_der));
+        match register_mdns_primary(&identity.device_id, &certificate_pin, &endpoint) {
+            Ok(advertisement) => Some(advertisement),
+            Err(error) => { eprintln!("tokenme sync: {error}"); None }
+        }
+    } else {
+        None
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let join = thread::spawn(move || server.run_until(&thread_stop));
@@ -303,12 +425,92 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     state.primary_id = Some(identity.device_id);
     state.endpoint = Some(endpoint);
     state.certificate_pin = Some(hex_bytes(&hash_bytes(&certificate_der)));
+    state.discovery_error = if allow_lan && mdns.is_none() { Some(mdns_permission_hint("mDNS publish failed")) } else { None };
     state.last_error = None;
-    state.service = Some(SyncService { stop, join: Some(join), certificate_der });
+    state.invite_url = None;
+    state.invite_expires_at_ms = None;
+    state.service = Some(SyncService { stop, join: Some(join), certificate_der, mdns });
     Ok(())
 }
 
 fn hex_bytes(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
+
+fn register_mdns_primary(primary_id: &str, certificate_pin: &str, endpoint: &str) -> Result<MdnsAdvertisement, String> {
+    let port = endpoint.rsplit(':').next().and_then(|value| value.parse::<u16>().ok()).ok_or_else(|| "mDNS cannot read the primary port".to_string())?;
+    let short_id: String = primary_id.chars().filter(|ch| ch.is_ascii_alphanumeric()).take(10).collect();
+    let short_id = if short_id.is_empty() { "primary".into() } else { short_id };
+    let instance = format!("TokenMe-{short_id}");
+    let hostname = format!("tokenme-{short_id}.local.");
+    let properties = vec![("v".to_string(), "1".to_string()), ("proto".to_string(), "tokenme-device-sync/1".to_string()), ("role".to_string(), "primary".to_string()), ("id".to_string(), primary_id.to_string()), ("name".to_string(), "TokenMe primary".to_string()), ("pin".to_string(), format!("sha256:{certificate_pin}")), ("caps".to_string(), "pair,upload".to_string())];
+    let daemon = ServiceDaemon::new().map_err(|error| format!("mDNS unavailable: {error}"))?;
+    let service = ServiceInfo::new(MDNS_SERVICE_TYPE, &instance, &hostname, "", port, &properties[..])
+        .map_err(|error| format!("mDNS service is invalid: {error}"))?
+        .enable_addr_auto();
+    daemon.register(service).map_err(|error| format!("mDNS registration failed: {error}"))?;
+    let fullname = format!("{instance}.{MDNS_SERVICE_TYPE}");
+    let monitor_error = Arc::new(Mutex::new(None));
+    let error_for_thread = Arc::clone(&monitor_error);
+    let monitor = daemon.monitor().ok().map(|events| thread::spawn(move || {
+        loop {
+            match events.recv() {
+                Ok(event) => eprintln!("tokenme sync mDNS: {event:?}"),
+                Err(error) => {
+                    if let Ok(mut slot) = error_for_thread.lock() { *slot = Some(mdns_permission_hint(&format!("mDNS monitor failed: {error}"))); }
+                    break;
+                }
+            }
+        }
+    }));
+    Ok(MdnsAdvertisement { daemon, fullname, monitor, error: monitor_error })
+}
+
+fn mdns_permission_hint(detail: &str) -> String {
+    detail.to_string()
+}
+
+fn merge_discovered_primary(results: &mut Vec<DiscoveredPrimaryView>, candidate: DiscoveredPrimaryView) {
+    if let Some(existing) = results.iter_mut().find(|item| item.primary_id == candidate.primary_id) {
+        if existing.certificate_pin != candidate.certificate_pin { existing.identity_conflict = true; }
+        return;
+    }
+    results.push(candidate);
+}
+
+fn discover_mdns_primaries() -> Result<Vec<DiscoveredPrimaryView>, String> {
+    let daemon = ServiceDaemon::new().map_err(|error| format!("mDNS unavailable: {error}"))?;
+    let receiver = daemon.browse(MDNS_SERVICE_TYPE).map_err(|error| format!("mDNS browse failed: {error}"))?;
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut results = Vec::new();
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        match receiver.recv_timeout(remaining) {
+            Ok(ServiceEvent::ServiceResolved(service)) => {
+                if service.get_property_val_str("v") != Some("1") || service.get_property_val_str("proto") != Some("tokenme-device-sync/1") || service.get_property_val_str("role") != Some("primary") || !service.get_property_val_str("caps").is_some_and(|caps| caps.split(',').any(|cap| cap == "pair") && caps.split(',').any(|cap| cap == "upload")) { continue; }
+                let Some(primary_id) = service.get_property_val_str("id") else { continue; };
+                let Some(pin) = service.get_property_val_str("pin") else { continue; };
+                if !pin.strip_prefix("sha256:").is_some_and(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))) { continue; }
+                let Some(address) = service.get_addresses().iter().find(|address| !address.is_loopback() && !address.to_ip_addr().is_unspecified()) else { continue; };
+                let address = address.to_string();
+                let endpoint = if address.contains(':') { format!("https://[{address}]:{}", service.port) } else { format!("https://{address}:{}", service.port) };
+                let certificate_pin = pin.strip_prefix("sha256:").unwrap_or(pin).to_string();
+                let service_name = service.fullname.split('.').next().unwrap_or("TokenMe").to_string();
+                merge_discovered_primary(&mut results, DiscoveredPrimaryView {
+                    service_name,
+                    primary_id: primary_id.to_string(),
+                    display_name: service.get_property_val_str("name").unwrap_or("TokenMe primary").to_string(),
+                    endpoint,
+                    certificate_pin,
+                    identity_conflict: false,
+                });
+            }
+            Ok(ServiceEvent::SearchStopped(_)) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let _ = daemon.stop_browse(MDNS_SERVICE_TYPE);
+    let _ = daemon.shutdown();
+    Ok(results)
+}
 
 fn advertised_endpoint_host(value: &str, allow_lan: bool) -> Result<String, String> {
     let host = value.trim().trim_start_matches('[').trim_end_matches(']').to_string();
@@ -343,8 +545,12 @@ fn parse_pin(value: &str) -> Result<[u8; 32], String> {
 fn sync_snapshot(state: &mut SyncControlState) -> Result<SyncDevicesView, String> {
     reap_service(state);
     reap_runtime(state);
+    if let Some(error) = state.service.as_ref().and_then(|service| service.mdns.as_ref()).and_then(|mdns| mdns.error.lock().ok().and_then(|slot| slot.clone())) {
+        state.discovery_error = Some(error);
+    }
     let index_path = sync_index_path()?;
     let secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| format!("cannot read secondary sync configuration: {error}"))?;
+    let primary_config = SyncStore::read_primary_config(&index_path).map_err(|error| format!("cannot read primary sync configuration: {error}"))?;
     if state.role.is_empty() {
         if let Some(config) = &secondary_config {
             state.role = "secondary".into();
@@ -353,21 +559,48 @@ fn sync_snapshot(state: &mut SyncControlState) -> Result<SyncDevicesView, String
             state.certificate_pin = Some(hex_bytes(&config.certificate_pin));
             state.last_error = config.last_error.clone();
             if config.enabled && state.runtime.is_none() {
-                if let Err(error) = start_secondary_runtime(state) { state.last_error = Some(error); }
+                if let Err(error) = start_secondary_runtime(state) {
+                    state.last_error = Some(error);
+                    state.phase = SyncPhase::Error;
+                    if let Ok(mut store) = SyncStore::open(&index_path, config.primary_id.clone()) {
+                        let now = current_ms();
+                        let _ = store.set_secondary_enabled(false, now);
+                        let _ = store.set_secondary_last_error(state.last_error.as_deref(), now);
+                    }
+                } else {
+                    state.phase = SyncPhase::Success;
+                }
+            }
+        } else if let Some(config) = &primary_config {
+            state.role = "primary".into();
+            state.primary_id = Some(config.primary_id.clone());
+            state.endpoint = primary_endpoint(config);
+            if config.enabled && state.service.is_none() {
+                if let Err(error) = start_primary(state, Some(config.bind_addr.clone()), config.advertise_host.clone(), config.allow_lan) {
+                    state.last_error = Some(error);
+                    state.phase = SyncPhase::Error;
+                } else {
+                    state.phase = SyncPhase::Success;
+                }
             }
         }
     }
     if state.runtime.is_some() {
         state.last_error = secondary_config.as_ref().and_then(|config| config.last_error.clone());
+    } else if state.role == "secondary" && secondary_config.as_ref().is_some_and(|config| !config.enabled) {
+        state.phase = SyncPhase::Offline;
     }
     let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
     let primary_id = state.primary_id.clone().or(snapshot.primary_id.clone()).or_else(|| secondary_config.as_ref().map(|config| config.primary_id.clone()));
     let summary = primary_id.as_ref().and_then(|id| SyncStore::open(&index_path, id.clone()).ok()?.outbox_summary().ok());
-    let endpoint = state.endpoint.clone().or_else(|| secondary_config.as_ref().map(|config| config.endpoint.clone()));
+    let endpoint = state.endpoint.clone()
+        .or_else(|| secondary_config.as_ref().map(|config| config.endpoint.clone()))
+        .or_else(|| primary_config.as_ref().and_then(primary_endpoint));
     let certificate_pin = state.certificate_pin.clone().or_else(|| secondary_config.as_ref().map(|config| hex_bytes(&config.certificate_pin)));
     let stream_id = secondary_config.as_ref().and_then(|config| config.stream_id.clone());
     let data_epoch = secondary_config.as_ref().and_then(|config| config.data_epoch);
     let last_error = state.last_error.clone().or_else(|| secondary_config.as_ref().and_then(|config| config.last_error.clone()));
+    state.last_checked_at_ms = Some(current_ms());
     Ok(SyncDevicesView {
         primary_id,
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
@@ -380,36 +613,170 @@ fn sync_snapshot(state: &mut SyncControlState) -> Result<SyncDevicesView, String
         in_flight: summary.as_ref().map(|s| s.in_flight).unwrap_or(0),
         pending_bytes: summary.as_ref().map(|s| s.bytes).unwrap_or(0),
         last_error,
+        discovery_error: state.discovery_error.clone(),
         last_connected_at_ms: secondary_config.as_ref().and_then(|config| config.last_connected_at_ms),
+        operation_state: state.phase.as_str().into(),
+        last_checked_at_ms: state.last_checked_at_ms,
         invite_url: state.invite_url.clone(),
         invite_expires_at_ms: state.invite_expires_at_ms,
+        discovered_primaries: state.discovered_primaries.clone(),
         devices: snapshot.devices.into_iter().map(sync_device_view).collect(),
         pairing_requests: snapshot.pairing_requests,
     })
 }
 
+/// Restore an explicitly enabled sync role before the WebView asks for its
+/// first snapshot. A disabled config is an intentional user stop and must not
+/// be treated as an autostart request.
+pub fn restore_sync_on_launch(app: &tauri::AppHandle) {
+    let Some(control) = app.try_state::<SyncControl>() else { return; };
+    let Ok(mut state) = control.state.lock() else { return; };
+    if let Err(error) = sync_snapshot(&mut state) {
+        state.last_error = Some(error);
+        state.phase = SyncPhase::Error;
+        return;
+    }
+    // A primary bind failure is deterministic until the user changes the
+    // address or resolves the port conflict; persist the stop so startup does
+    // not retry the same failure forever.
+    if state.role == "primary" && state.service.is_none() {
+        if let Ok(index_path) = sync_index_path() {
+            if let Ok(Some(config)) = SyncStore::read_primary_config(&index_path) {
+                if config.enabled {
+                    if let Ok(mut store) = SyncStore::open(&index_path, config.primary_id) {
+                        let _ = store.set_primary_enabled(false, current_ms());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn pair_secondary_with_details(
+    state: &mut SyncControlState,
+    index_path: &std::path::Path,
+    snapshot: &DeviceSyncSnapshot,
+    details: PairingInviteDetails,
+    certificate_der: Vec<u8>,
+    origin: Option<String>,
+    display_name: Option<String>,
+    os: Option<String>,
+) -> Result<(), String> {
+    reap_service(state);
+    if state.service.is_some() { return Err("stop the primary sync service before pairing this device as a secondary".into()); }
+    if state.runtime.is_some() || state.role == "secondary" || SyncStore::read_secondary_config(index_path).map_err(|e| e.to_string())?.is_some() {
+        return Err("this device is already paired; unpair it before using a new invite".into());
+    }
+    let primary_id = details.primary_id.clone().ok_or_else(|| "pairing response did not include the primary id".to_string())?;
+    let certificate_pin = parse_pin(&details.invite.certificate_pin)?;
+    if hash_bytes(&certificate_der) != certificate_pin { return Err("pairing certificate does not match its advertised pin".into()); }
+    if state.role == "primary" {
+        if let Some(config) = SyncStore::read_primary_config(index_path).map_err(|e| e.to_string())? {
+            if config.enabled {
+                let mut store = SyncStore::open(index_path, config.primary_id).map_err(|e| e.to_string())?;
+                store.set_primary_enabled(false, current_ms()).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    let directory = sync_dir()?;
+    let identity_path = directory.join("secondary-identity.json");
+    let identity = DeviceIdentity::load_or_create(identity_path.clone(), origin.unwrap_or_else(|| "secondary".into()), display_name.unwrap_or_else(|| "TokenMe secondary".into())).map_err(|e| e.to_string())?;
+    let request = PairingRequest::new(&details.invite, &identity, os.unwrap_or_else(|| std::env::consts::OS.into())).map_err(|e| e.to_string())?;
+    let server_name = details.server_name.unwrap_or_else(|| "localhost".into());
+    let mut transport_config = HttpsTransportConfig::pinned(details.invite.endpoint.clone(), server_name.clone(), certificate_der.clone());
+    transport_config.pinned_certificate_sha256 = certificate_pin;
+    let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|e| e.to_string())?;
+    transport.send_pairing_request(&request).map_err(|e| format!("pairing request failed: {e}"))?;
+    let current_primary_id = snapshot.primary_id.clone().or_else(|| state.primary_id.clone());
+    let mut store = if let Some(current_primary_id) = current_primary_id {
+        let mut store = SyncStore::open(index_path, current_primary_id.clone()).map_err(|e| e.to_string())?;
+        if current_primary_id != primary_id { store.rotate_primary_id(primary_id.clone(), current_ms()).map_err(|e| e.to_string())?; }
+        store
+    } else { SyncStore::open(index_path, primary_id.clone()).map_err(|e| e.to_string())? };
+    store.save_secondary_config(&SecondarySyncConfig {
+        primary_id: primary_id.clone(), device_id: identity.device_id.clone(), origin: identity.origin.clone(),
+        endpoint: details.invite.endpoint.clone(), server_name, certificate_der, certificate_pin,
+        identity_path, stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+        last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+        last_ack_generation: None, last_ack_receipt_hash: None,
+    }, current_ms()).map_err(|e| e.to_string())?;
+    state.role = "secondary".into();
+    state.primary_id = Some(primary_id.clone());
+    state.endpoint = Some(details.invite.endpoint);
+    state.certificate_pin = Some(hex_bytes(&certificate_pin));
+    state.last_error = None;
+    match start_secondary_runtime(state) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let mut rollback = SyncStore::open(index_path, primary_id).map_err(|open_error| open_error.to_string())?;
+            let now = current_ms();
+            let _ = rollback.set_secondary_enabled(false, now);
+            let _ = rollback.set_secondary_last_error(Some(error.as_str()), now);
+            Err(error)
+        }
+    }
+}
+
 fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) -> Result<(), String> {
-    let index_path = sync_index_path()?;
-    let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
-    match action {
+    let is_status = matches!(&action, SyncManagementRequest::Status);
+    if !is_status { state.phase = SyncPhase::Running; }
+    let result = (|| {
+        let index_path = sync_index_path()?;
+        let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
+        match action {
         SyncManagementRequest::Status => Ok(()),
+        SyncManagementRequest::Discover => {
+            match discover_mdns_primaries() {
+                Ok(primaries) => { state.discovered_primaries = primaries; state.discovery_error = None; }
+                Err(error) => { state.discovered_primaries.clear(); state.discovery_error = Some(mdns_permission_hint(&error)); }
+            }
+            Ok(())
+        }
         SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan } => start_primary(state, bind, advertise_host, allow_lan),
         SyncManagementRequest::StartSecondary => {
             let config = SyncStore::read_secondary_config(&index_path)
                 .map_err(|error| format!("cannot read secondary sync configuration: {error}"))?
                 .ok_or_else(|| "pair this device before starting secondary sync".to_string())?;
-            let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
+            let primary_id = config.primary_id.clone();
+            let mut store = SyncStore::open(&index_path, primary_id.clone()).map_err(|error| error.to_string())?;
             store.set_secondary_enabled(true, current_ms()).map_err(|error| error.to_string())?;
-            start_secondary_runtime(state)
+            store.set_secondary_last_error(None, current_ms()).map_err(|error| error.to_string())?;
+            match start_secondary_runtime(state) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    // Do not leave an unusable config enabled: a failed manual
+                    // start must be retried by an explicit user action.
+                    let mut rollback = SyncStore::open(&index_path, primary_id).map_err(|open_error| open_error.to_string())?;
+                    let now = current_ms();
+                    let _ = rollback.set_secondary_enabled(false, now);
+                    let _ = rollback.set_secondary_last_error(Some(error.as_str()), now);
+                    Err(error)
+                }
+            }
         }
         SyncManagementRequest::Stop => {
-            if state.role == "secondary" || state.runtime.is_some() {
-                if let Some(config) = SyncStore::read_secondary_config(&index_path).map_err(|error| error.to_string())? {
+            let was_running = state.service.is_some() || state.runtime.is_some();
+            let secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| error.to_string())?;
+            let primary_config = SyncStore::read_primary_config(&index_path).map_err(|error| error.to_string())?;
+            if state.runtime.is_some() || state.role == "secondary" || (state.role.is_empty() && secondary_config.is_some()) {
+                if let Some(config) = secondary_config {
                     let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
                     store.set_secondary_enabled(false, current_ms()).map_err(|error| error.to_string())?;
                 }
+            } else if let Some(config) = primary_config {
+                if state.role.is_empty() {
+                    state.role = "primary".into();
+                    state.primary_id = Some(config.primary_id.clone());
+                    state.endpoint = primary_endpoint(&config);
+                }
+                let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
+                store.set_primary_enabled(false, current_ms()).map_err(|error| error.to_string())?;
             }
             stop_service(state);
+            state.invite_url = None;
+            state.invite_expires_at_ms = None;
+            state.discovery_error = None;
+            state.phase = if was_running { SyncPhase::Cancelled } else { SyncPhase::Idle };
             Ok(())
         },
         SyncManagementRequest::Unpair => {
@@ -420,18 +787,13 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
                 return Err("this device is not paired".into());
             };
             stop_service(state);
-            let identity_path = config.identity_path.clone();
-            let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|e| e.to_string())?;
-            let removed_path = store.clear_secondary_config(current_ms()).map_err(|e| e.to_string())?;
-            let directory = sync_dir()?;
-            if removed_path.as_ref().is_some_and(|path| path == &identity_path) && identity_path.parent() == Some(directory.as_path()) {
-                let _ = std::fs::remove_file(identity_path);
-            }
+            clear_secondary_binding(&index_path, &config)?;
             state.role.clear();
             state.primary_id = None;
             state.endpoint = None;
             state.certificate_pin = None;
             state.last_error = None;
+            state.discovery_error = None;
             Ok(())
         },
         SyncManagementRequest::CreateInvite { expires_at_ms } => {
@@ -447,42 +809,15 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
             Ok(())
         }
         SyncManagementRequest::Pair { invite, origin, display_name, os } => {
-            if state.service.is_some() || state.role == "primary" {
-                return Err("stop the primary sync service before pairing this device as a secondary".into());
-            }
-            if state.runtime.is_some() || state.role == "secondary" || SyncStore::read_secondary_config(&index_path).map_err(|e| e.to_string())?.is_some() {
-                return Err("this device is already paired; unpair it before using a new invite".into());
-            }
             let details = PairingInvite::parse_url(&invite).map_err(|e| format!("invalid pairing invite: {e}"))?;
-            let certificate_der = details.certificate_der.ok_or_else(|| "invite does not contain the public server certificate; ask the primary for a fresh invite".to_string())?;
-            let primary_id = details.primary_id.clone().ok_or_else(|| "invite does not contain the primary id; ask the primary for a fresh invite".to_string())?;
-            let certificate_pin = parse_pin(&details.invite.certificate_pin)?;
-            if hash_bytes(&certificate_der) != certificate_pin {
-                return Err("pairing invite certificate does not match its advertised pin".into());
-            }
-            let directory = sync_dir()?;
-            let identity_path = directory.join("secondary-identity.json");
-            let identity = DeviceIdentity::load_or_create(identity_path.clone(), origin.unwrap_or_else(|| "secondary".into()), display_name.unwrap_or_else(|| "TokenMe secondary".into())).map_err(|e| e.to_string())?;
-            let request = PairingRequest::new(&details.invite, &identity, os.unwrap_or_else(|| std::env::consts::OS.into())).map_err(|e| e.to_string())?;
-            let server_name = details.server_name.unwrap_or_else(|| "localhost".into());
-            let mut transport_config = HttpsTransportConfig::pinned(details.invite.endpoint.clone(), server_name.clone(), certificate_der.clone());
-            transport_config.pinned_certificate_sha256 = certificate_pin;
-            let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|e| e.to_string())?;
-            transport.send_pairing_request(&request).map_err(|e| format!("pairing request failed: {e}"))?;
-            let mut store = SyncStore::open(&index_path, primary_id.clone()).map_err(|e| e.to_string())?;
-            store.save_secondary_config(&SecondarySyncConfig {
-                primary_id: primary_id.clone(), device_id: identity.device_id.clone(), origin: identity.origin.clone(),
-                endpoint: details.invite.endpoint.clone(), server_name, certificate_der, certificate_pin,
-                identity_path, stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
-                last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
-                last_ack_generation: None, last_ack_receipt_hash: None,
-            }, current_ms()).map_err(|e| e.to_string())?;
-            state.role = "secondary".into();
-            state.primary_id = Some(primary_id);
-            state.endpoint = Some(details.invite.endpoint);
-            state.certificate_pin = Some(hex_bytes(&certificate_pin));
-            state.last_error = None;
-            start_secondary_runtime(state)
+            let certificate_der = details.certificate_der.clone().ok_or_else(|| "invite does not contain the public server certificate; ask the primary for a fresh invite".to_string())?;
+            pair_secondary_with_details(state, &index_path, &snapshot, details, certificate_der, origin, display_name, os)
+        }
+        SyncManagementRequest::PairDiscovered { primary_id, endpoint, certificate_pin, origin, display_name, os } => {
+            let pin = parse_pin(&certificate_pin)?;
+            let mut transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned_hash(endpoint.clone(), "localhost", pin)).map_err(|e| e.to_string())?;
+            let (invite, certificate_der) = transport.request_pairing_invite(&primary_id, &endpoint).map_err(|e| format!("cannot obtain a secure pairing invite: {e}"))?;
+            pair_secondary_with_details(state, &index_path, &snapshot, PairingInviteDetails { invite, primary_id: Some(primary_id), server_name: Some("localhost".into()), certificate_der: Some(certificate_der.clone()) }, certificate_der, origin, display_name, os)
         }
         SyncManagementRequest::Approve { request_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
@@ -503,6 +838,19 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest) 
         SyncManagementRequest::Revoke { device_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
             SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.revoke_device(&device_id, current_ms()).map(|_| ()).map_err(|e| e.to_string())
+        }
+        }
+    })();
+    match result {
+        Ok(()) => {
+            if !is_status { state.last_error = None; }
+            if state.phase == SyncPhase::Running { state.phase = SyncPhase::Success; }
+            Ok(())
+        }
+        Err(error) => {
+            state.last_error = Some(error.clone());
+            state.phase = SyncPhase::Error;
+            Err(error)
         }
     }
 }
@@ -1137,7 +1485,9 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
 
 #[cfg(test)]
 mod sync_tests {
-    use super::advertised_endpoint_host;
+    use super::{advertised_endpoint_host, merge_discovered_primary, DiscoveredPrimaryView, MDNS_SERVICE_TYPE};
+    use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn advertised_hosts_are_safe_for_invites() {
@@ -1146,5 +1496,40 @@ mod sync_tests {
         assert!(advertised_endpoint_host("0.0.0.0", true).is_err());
         assert!(advertised_endpoint_host("127.0.0.1", true).is_err());
         assert!(advertised_endpoint_host("2001:db8::20/path", true).is_err());
+    }
+
+    #[test]
+    fn mdns_same_id_with_different_pin_is_blocked() {
+        let mut results = vec![DiscoveredPrimaryView { service_name: "one".into(), primary_id: "same".into(), display_name: "One".into(), endpoint: "https://192.168.1.2:47821".into(), certificate_pin: "a".repeat(64), identity_conflict: false }];
+        merge_discovered_primary(&mut results, DiscoveredPrimaryView { service_name: "two".into(), primary_id: "same".into(), display_name: "Two".into(), endpoint: "https://192.168.1.3:47821".into(), certificate_pin: "b".repeat(64), identity_conflict: false });
+        assert_eq!(results.len(), 1);
+        assert!(results[0].identity_conflict);
+    }
+
+    #[test]
+    #[ignore = "requires a host with multicast loopback support"]
+    fn mdns_register_and_browse_round_trip() {
+        let port = 54_543;
+        let publisher = ServiceDaemon::new_with_port(port).unwrap();
+        let browser = ServiceDaemon::new_with_port(port).unwrap();
+        let properties = [("v", "1"), ("proto", "tokenme-device-sync/1"), ("role", "primary"), ("id", "qa-primary"), ("name", "TokenMe QA"), ("pin", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), ("caps", "pair,upload")];
+        let service = ServiceInfo::new(MDNS_SERVICE_TYPE, "TokenMe-QA", "tokenme-qa.local.", "", 47_821, &properties[..]).unwrap().enable_addr_auto();
+        publisher.register(service).unwrap();
+        let events = browser.browse(MDNS_SERVICE_TYPE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut found = false;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            if let Ok(ServiceEvent::ServiceResolved(service)) = events.recv_timeout(remaining) {
+                if service.get_property_val_str("id") == Some("qa-primary") && service.get_port() == 47_821 {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "mDNS publisher was not resolved by the local browser");
+        let _ = browser.stop_browse(MDNS_SERVICE_TYPE);
+        let _ = publisher.unregister("TokenMe-QA._tokenme-sync._tcp.local.");
+        let _ = browser.shutdown();
+        let _ = publisher.shutdown();
     }
 }

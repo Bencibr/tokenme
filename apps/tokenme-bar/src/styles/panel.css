@@ -3029,6 +3029,32 @@
   flex-wrap: wrap;
 }
 
+.sync-operation,
+.sync-poll-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 3px 0;
+  color: var(--ink-2);
+  font-size: var(--t-meta);
+}
+
+.sync-operation-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+
+.sync-operation-success .sync-operation-dot { background: var(--accent); }
+.sync-operation-error .sync-operation-dot { background: var(--danger); }
+.sync-operation-offline .sync-operation-dot,
+.sync-operation-cancelled .sync-operation-dot { background: var(--warn); }
+.sync-poll-status { justify-content: space-between; }
+.sync-manual-discovery { margin: 2px 0 6px; }
+
 .sheet-srv .sheet-foot {
   flex: none;
   margin: 0;

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>TokenMe uses the local network to discover and connect trusted devices. / TokenMe 使用本地网络发现并连接受信任的设备。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_tokenme-sync._tcp</string>
+	</array>
+</dict>
+</plist>

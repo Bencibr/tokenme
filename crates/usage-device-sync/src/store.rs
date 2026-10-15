@@ -18,7 +18,7 @@ use crate::protocol::{
     PairingRequest, SignedUpload, StreamOpenReceipt, UploadEnvelope,
 };
 
-const STATE_VERSION: i64 = 4;
+const STATE_VERSION: i64 = 5;
 const MAX_PENDING_PAIRING_REQUESTS: i64 = 32;
 const MAX_OUTBOX_ENTRIES: i64 = 4_096;
 const MAX_OUTBOX_BYTES: i64 = 512 * 1024 * 1024;
@@ -208,6 +208,34 @@ pub struct SecondarySyncConfig {
     pub last_connected_at_ms: Option<i64>,
     pub last_ack_generation: Option<u64>,
     pub last_ack_receipt_hash: Option<[u8; 32]>,
+}
+
+/// Persisted primary listener settings. `enabled` is the user's last start
+/// choice; stopping the listener only flips that bit and leaves sync history
+/// and trust state untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrimarySyncConfig {
+    pub primary_id: String,
+    pub bind_addr: String,
+    pub advertise_host: Option<String>,
+    pub allow_lan: bool,
+    pub enabled: bool,
+}
+
+impl PrimarySyncConfig {
+    fn validate(&self, bound_primary: &str) -> SyncResult<()> {
+        if self.primary_id != bound_primary {
+            return Err(SyncError::Security("primary config targets another primary".into()));
+        }
+        validate_identifier("primary_id", &self.primary_id)?;
+        if self.bind_addr.parse::<std::net::SocketAddr>().is_err() {
+            return Err(SyncError::Invalid("primary bind address is invalid".into()));
+        }
+        if self.advertise_host.as_deref().is_some_and(|host| host.is_empty() || host.len() > 16 * 1024 || host.chars().any(char::is_control)) {
+            return Err(SyncError::Invalid("primary advertised host is invalid".into()));
+        }
+        Ok(())
+    }
 }
 
 impl SecondarySyncConfig {
@@ -453,6 +481,51 @@ impl SyncStore {
         &self.primary_id
     }
 
+    /// Starts a new sync role/primary epoch without deleting local usage
+    /// events. Trust, streams, receipts and unsent packages belong to the old
+    /// role and must not be reused by the new role.
+    pub fn rotate_primary_id(&mut self, new_primary_id: impl Into<String>, now_ms: i64) -> SyncResult<()> {
+        let new_primary_id = new_primary_id.into();
+        validate_identifier("primary_id", &new_primary_id)?;
+        if new_primary_id == self.primary_id { return Ok(()); }
+        self.index.with_network_transaction(|tx| {
+            for table in [
+                "device_registry", "device_stream", "device_receipt", "device_package_marker",
+                "device_package_tombstone", "device_highwater", "device_sync_conflict",
+                "device_sync_outbox", "device_sync_snapshot_cursor", "device_sync_journal",
+                "device_sync_outbox_sequence", "device_sync_scheduler_lease", "device_sync_recovery",
+                "device_sync_secondary_config", "device_sync_primary_config", "device_pairing_invite",
+                "device_pairing_request",
+            ] {
+                tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
+            }
+            // Keep the retained local dirty journal's byte accounting valid
+            // after the old role's outbox is isolated.
+            let dirty_json_bytes: i64 = tx.query_row(
+                "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty",
+                [], |row| row.get(0),
+            ).map_err(sql_err)?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![dirty_json_bytes.to_string()],
+            ).map_err(sql_err)?;
+            tx.execute(
+                "INSERT INTO device_sync_meta(key, value) VALUES('primary_id', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![new_primary_id],
+            ).map_err(sql_err)?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_last_role_switch_at_ms', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![now_ms.to_string()],
+            ).map_err(sql_err)?;
+            Ok::<_, SyncError>(())
+        })?;
+        self.primary_id = new_primary_id;
+        Ok(())
+    }
+
     /// Reads the additive sync tables without migrating or writing the index.
     /// The panel can therefore inspect state while the engine owns the write
     /// connection, and an older process never creates newer sync tables just
@@ -535,6 +608,20 @@ impl SyncStore {
         read_secondary_config_conn(&conn)
     }
 
+    /// Read the persisted primary listener settings without migrating or
+    /// taking a writer connection. This is the restart recovery gate used by
+    /// the panel.
+    pub fn read_primary_config(path: impl AsRef<std::path::Path>) -> SyncResult<Option<PrimarySyncConfig>> {
+        let path = path.as_ref();
+        if !path.exists() { return Ok(None); }
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| SyncError::Io(path.to_path_buf(), error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(SyncError::Security(format!("sync index is a symlink: {}", path.display())));
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        read_primary_config_conn(&conn)
+    }
+
     pub fn devices(&self) -> SyncResult<Vec<DeviceRecord>> {
         let mut stmt = self.index.conn().prepare(
             "SELECT device_id FROM device_registry ORDER BY origin, device_id",
@@ -553,6 +640,47 @@ impl SyncStore {
 
     pub fn secondary_config(&self) -> SyncResult<Option<SecondarySyncConfig>> {
         read_secondary_config_conn(self.index.conn())
+    }
+
+    pub fn primary_config(&self) -> SyncResult<Option<PrimarySyncConfig>> {
+        read_primary_config_conn(self.index.conn())
+    }
+
+    pub fn save_primary_config(&mut self, config: &PrimarySyncConfig, now_ms: i64) -> SyncResult<()> {
+        config.validate(&self.primary_id)?;
+        self.index.with_network_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO device_sync_primary_config(
+                    config_key, primary_id, bind_addr, advertise_host, allow_lan, enabled, updated_at_ms
+                 ) VALUES('primary', ?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(config_key) DO UPDATE SET
+                    primary_id = excluded.primary_id,
+                    bind_addr = excluded.bind_addr,
+                    advertise_host = excluded.advertise_host,
+                    allow_lan = excluded.allow_lan,
+                    enabled = excluded.enabled,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    config.primary_id, config.bind_addr, config.advertise_host,
+                    if config.allow_lan { 1_i64 } else { 0_i64 },
+                    if config.enabled { 1_i64 } else { 0_i64 }, now_ms,
+                ],
+            ).map_err(sql_err)?;
+            Ok::<_, SyncError>(())
+        })
+    }
+
+    pub fn set_primary_enabled(&mut self, enabled: bool, now_ms: i64) -> SyncResult<()> {
+        self.index.with_network_transaction(|tx| {
+            let changed = tx.execute(
+                "UPDATE device_sync_primary_config
+                    SET enabled = ?1, updated_at_ms = ?2
+                  WHERE config_key = 'primary' AND primary_id = ?3",
+                params![if enabled { 1_i64 } else { 0_i64 }, now_ms, self.primary_id],
+            ).map_err(sql_err)?;
+            if changed != 1 { return Err(SyncError::NotFound("primary sync configuration".into())); }
+            Ok(())
+        })
     }
 
     pub fn secondary_has_history(&self, config: &SecondarySyncConfig) -> SyncResult<bool> {
@@ -1849,6 +1977,15 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
                  last_ack_generation INTEGER, last_ack_receipt_hash BLOB,
                  updated_at_ms INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS device_sync_primary_config(
+                 config_key TEXT PRIMARY KEY,
+                 primary_id TEXT NOT NULL,
+                 bind_addr TEXT NOT NULL,
+                 advertise_host TEXT,
+                 allow_lan INTEGER NOT NULL,
+                 enabled INTEGER NOT NULL,
+                 updated_at_ms INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS device_pairing_invite(
                  invite_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, certificate_pin TEXT NOT NULL,
                  secret_hash BLOB NOT NULL, expires_at_ms INTEGER NOT NULL, consumed INTEGER NOT NULL,
@@ -1907,6 +2044,33 @@ fn validate_identifier(label: &str, value: &str) -> SyncResult<()> {
         return Err(SyncError::Invalid(format!("{label} is empty, too long, or contains control characters")));
     }
     Ok(())
+}
+
+fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncConfig>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_primary_config')",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    if !exists { return Ok(None); }
+    let row: Option<(String, String, Option<String>, i64, i64)> = conn.query_row(
+        "SELECT primary_id, bind_addr, advertise_host, allow_lan, enabled
+           FROM device_sync_primary_config WHERE config_key = 'primary'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(sql_err)?;
+    let Some((primary_id, bind_addr, advertise_host, allow_lan, enabled)) = row else { return Ok(None); };
+    let allow_lan = match allow_lan {
+        0 => false,
+        1 => true,
+        value => return Err(SyncError::Security(format!("primary allow_lan flag is invalid: {value}"))),
+    };
+    let enabled = match enabled {
+        0 => false,
+        1 => true,
+        value => return Err(SyncError::Security(format!("primary enabled flag is invalid: {value}"))),
+    };
+    let config = PrimarySyncConfig { primary_id: primary_id.clone(), bind_addr, advertise_host, allow_lan, enabled };
+    config.validate(&primary_id)?;
+    Ok(Some(config))
 }
 
 fn read_secondary_config_conn(conn: &Connection) -> SyncResult<Option<SecondarySyncConfig>> {
@@ -3170,6 +3334,67 @@ mod tests {
         ).unwrap(), 1);
         store.mark_secondary_connected(42).unwrap();
         assert_eq!(store.secondary_config().unwrap().unwrap().last_connected_at_ms, Some(42));
+    }
+
+    #[test]
+    fn primary_config_round_trips_and_stop_preserves_sync_history() {
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        store.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source) VALUES('local', 1, 'session', 'tokens', 3, 'local')",
+            [],
+        ).unwrap();
+        let config = PrimarySyncConfig {
+            primary_id: "primary-1".into(),
+            bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()),
+            allow_lan: false,
+            enabled: true,
+        };
+        store.save_primary_config(&config, 10).unwrap();
+        assert_eq!(store.primary_config().unwrap(), Some(config.clone()));
+        store.set_primary_enabled(false, 11).unwrap();
+        let stopped = store.primary_config().unwrap().unwrap();
+        assert!(!stopped.enabled);
+        assert_eq!(stopped.primary_id, config.primary_id);
+        assert_eq!(store.index().event_count().unwrap(), 1, "stopping the listener must not clear local history");
+    }
+
+    #[test]
+    fn primary_config_rejects_corrupt_boolean_flags() {
+        let store = SyncStore::open_in_memory("primary-1").unwrap();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_primary_config(
+                 config_key, primary_id, bind_addr, advertise_host, allow_lan, enabled, updated_at_ms
+             ) VALUES('primary', 'primary-1', '127.0.0.1:47821', '127.0.0.1', 2, 1, 1)",
+            [],
+        ).unwrap();
+        assert!(matches!(store.primary_config(), Err(SyncError::Security(message)) if message.contains("allow_lan")));
+    }
+
+    #[test]
+    fn rotating_primary_id_isolates_sync_state_but_keeps_usage_history() {
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        store.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source) VALUES('local', 1, 'session', 'tokens', 3, 'local')",
+            [],
+        ).unwrap();
+        store.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: false,
+        }, 1).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('event:local', 'local', '{\"in_tok\":3}', 1, 1, 1, 1)",
+            [],
+        ).unwrap();
+        store.rotate_primary_id("primary-2", 2).unwrap();
+        assert_eq!(store.primary_id(), "primary-2");
+        assert!(store.primary_config().unwrap().is_none());
+        assert_eq!(store.index().event_count().unwrap(), 1);
+        assert_eq!(store.index().conn().query_row::<String, _, _>(
+            "SELECT value FROM meta WHERE key = 'device_sync_dirty_json_bytes'", [], |row| row.get(0),
+        ).unwrap(), "12");
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_registry", [], |row| row.get(0)).unwrap(), 0);
     }
 
     #[test]

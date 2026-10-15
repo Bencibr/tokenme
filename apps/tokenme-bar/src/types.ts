@@ -302,12 +302,14 @@ export type SyncDeviceStatus = "pending" | "paired" | "paused" | "revoked" | "re
 
 export type SyncManagementRequest =
   | { action: "status" }
+  | { action: "discover" }
   | { action: "start_primary"; bind?: string | null; advertise_host?: string | null; allow_lan: boolean }
   | { action: "start_secondary" }
   | { action: "stop" }
   | { action: "unpair" }
   | { action: "create_invite"; expires_at_ms?: number | null }
   | { action: "pair"; invite: string; origin?: string | null; display_name?: string | null; os?: string | null }
+  | { action: "pair_discovered"; primary_id: string; endpoint: string; certificate_pin: string; origin?: string | null; display_name?: string | null; os?: string | null }
   | { action: "approve"; request_id: string }
   | { action: "reject"; request_id: string }
   | { action: "pause"; device_id: string }
@@ -336,6 +338,15 @@ export interface SyncPairingRequestView {
   status: string;
 }
 
+export interface DiscoveredPrimaryView {
+  service_name: string;
+  primary_id: string;
+  display_name: string;
+  endpoint: string;
+  certificate_pin: string;
+  identity_conflict: boolean;
+}
+
 export interface SyncDevicesSnapshot {
   primary_id: string | null;
   role: SyncDeviceRole | "unconfigured";
@@ -348,9 +359,13 @@ export interface SyncDevicesSnapshot {
   in_flight: number;
   pending_bytes: number;
   last_error: string | null;
+  discovery_error: string | null;
   last_connected_at_ms: number | null;
+  operation_state: "idle" | "running" | "success" | "error" | "cancelled" | "offline";
+  last_checked_at_ms: number | null;
   invite_url: string | null;
   invite_expires_at_ms: number | null;
+  discovered_primaries: DiscoveredPrimaryView[];
   devices: SyncDeviceView[];
   pairing_requests: SyncPairingRequestView[];
 }

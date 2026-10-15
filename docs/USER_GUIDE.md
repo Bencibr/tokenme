@@ -115,7 +115,7 @@ MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline�
 
 一台以上机器报数时，头部下拉把整个面板——每个周期、模型与项目排行、调用序列、会话列表——折叠到 **全部机器**、**本机** 或按名字选任意一台远程机器。这是对同一份索引的重新汇总，瞬间完成：全部 = 各机之和。触发行显示当前范围：全部机器 带最多三枚机器色点与远程占比（远程 42%），单机带自己的色点、占比与最近合并时间。有机器超期时 全部机器 行出现警示标记。没有任何导入时这个控件整个不渲染——单机面板与从前一模一样。
 
-严格设备同步的已登记设备也会进入这个下拉：没有数据的设备显示 0，暂停、撤销或需对账会显示对应状态。打开设备同步面板可以执行主从角色管理、主端服务启停、创建邀请、保存二维码文件、在从设备识别二维码并配对、批准/拒绝、暂停/恢复、撤销和解除配对；跨设备监听必须填写对外地址，不能把 127.0.0.1 或 0.0.0.0 放进邀请。从设备还会显示 endpoint、stream/epoch、待传量、最后连接和可操作错误。设备状态和这些管理操作共用一个私有 Tauri IPC 命令，不开 loopback TCP 控制面。
+严格设备同步的已登记设备也会进入这个下拉：没有数据的设备显示 0，暂停、撤销或需对账会显示对应状态。打开设备同步面板可以执行主从角色管理、主端服务启停、创建邀请、保存二维码文件、在从设备识别二维码并配对、批准/拒绝、暂停/恢复、撤销和解除配对；主端停止后可以直接识别新邀请切换为从端，从端停止后可以直接配置监听地址切换为主端。角色切换会隔离旧的 trust、stream、receipt 和待传包，但保留本机用量历史；跨设备监听必须填写对外地址，不能把 127.0.0.1 或 0.0.0.0 放进邀请。从设备还会显示 endpoint、stream/epoch、待传量、最后连接和可操作错误。设备状态和这些管理操作共用一个私有 Tauri IPC 命令，不开 loopback TCP 控制面。
 
 ### 3.12 启动首屏
 
@@ -150,7 +150,9 @@ MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline�
 
 当前已交付协议库、TLS transport、共享 SQLite outbox/journal/FIFO scheduler、认证 status/recovery、CLI 的 `sync run/stop/status` 和低层 `invite/approve/open-stream/serve/upload` 路径，以及 Panel 的主从配对和设备管理面板。完整 invite 配对后，从设备会持久化 endpoint、证书 pin、主设备绑定和 identity，并由 runtime 自动获取 stream/epoch、生成本机快照、写 journal/outbox、通过 TLS 上传并 ACK；普通用户不需要填写 stream 或 generation。旧 `export/import` 文件入口和 SSH importer 不会切换到这个协议。Windows 已提供当前 SID 私有 DACL 的 `cfg(windows)` 实现，但本机无法编译/运行 Windows 分支，仍标为未验证。
 
-Panel 主设备可以一键启动/停止监听并生成用户私有证书和邀请；从设备粘贴完整邀请后配对，主设备在面板批准/拒绝、暂停/恢复或撤销。Ubuntu/headless 从设备使用同一配置运行 `tokenme sync run`，`sync stop` 通过用户私有 Unix socket 停止，`sync status` 显示待传、最后连接和错误：
+Panel 主设备可以一键启动/停止监听并生成用户私有证书和邀请；从设备可以在局域网发现列表中点击“一键配对”，也可以粘贴完整邀请或扫描二维码。发现配对先用证书 pin 请求一个 5 分钟一次性邀请，仍由主设备在面板批准/拒绝、暂停/恢复或撤销。Ubuntu/headless 从设备使用同一配置运行 `tokenme sync run`，`sync stop` 通过用户私有 Unix socket 停止，`sync status` 显示待传、最后连接和错误：
+
+主设备开启“允许局域网”后会发布 `_tokenme-sync._tcp.local.` mDNS/Bonjour 候选；从设备打开配对页会在 1.5 秒内扫描并展示地址、设备 ID 和证书 pin。点击“一键配对”时不会广播 invite secret，而是先通过 pin 校验的 TLS 请求临时邀请，再走原有签名请求和主端批准；扫描失败或权限不足时，界面会提示本地网络权限、UDP 5353、监听端口，并保留二维码/完整邀请回退。停止主端会注销广播，应用重启只恢复之前明确启用的角色。
 
 ```bash
 tokenme sync upload \

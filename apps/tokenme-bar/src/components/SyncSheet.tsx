@@ -5,6 +5,7 @@ import type { SyncDevicesSnapshot, SyncManagementRequest } from "../types";
 import { bridge } from "../lib/bridge";
 import { t } from "../lib/i18n";
 import { IconClose, IconRefresh, IconWarn } from "./Icons";
+import { Loading } from "./Loading";
 
 async function copyText(value: string): Promise<boolean> {
   try {
@@ -24,7 +25,8 @@ async function copyText(value: string): Promise<boolean> {
 }
 
 async function decodeInviteFile(file: File): Promise<string> {
-  if (!file.type.startsWith("image/")) throw new Error(t("sync.qr.invalid"));
+  if (!new Set(["image/png", "image/jpeg", "image/webp"]).has(file.type)) throw new Error(t("sync.qr.invalid"));
+  if (typeof createImageBitmap !== "function") throw new Error(t("sync.qr.invalid"));
   const bitmap = await createImageBitmap(file);
   try {
     const scale = Math.min(1, 2400 / Math.max(bitmap.width, bitmap.height));
@@ -48,6 +50,9 @@ async function decodeInviteFile(file: File): Promise<string> {
 export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDevicesSnapshot; onSnapshot: (next: SyncDevicesSnapshot) => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<SyncDevicesSnapshot["operation_state"]>(snapshot.operation_state);
+  const [pollStopped, setPollStopped] = useState(false);
+  const [pollGeneration, setPollGeneration] = useState(0);
   const [bind, setBind] = useState("127.0.0.1:47821");
   const [advertiseHost, setAdvertiseHost] = useState("");
   const [allowLan, setAllowLan] = useState(false);
@@ -61,11 +66,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const run = async (request: SyncManagementRequest) => {
     setBusy(true);
+    setPhase("running");
     setError(null);
     try {
-      onSnapshot(await bridge.syncDevices(request));
+      const next = await bridge.syncDevices(request);
+      onSnapshot(next);
+      setPhase(next.operation_state);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setPhase("error");
     } finally {
       setBusy(false);
     }
@@ -73,11 +82,16 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const refresh = async () => {
     setBusy(true);
+    setPhase("running");
     setError(null);
+    setPollGeneration((value) => value + 1);
     try {
-      onSnapshot(await bridge.syncDevices());
+      const next = await bridge.syncDevices({ action: "status" });
+      onSnapshot(next);
+      setPhase(next.operation_state);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setPhase("offline");
     } finally {
       setBusy(false);
     }
@@ -86,15 +100,56 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   useEffect(() => {
     let alive = true;
     setBusy(true);
-    void bridge.syncDevices().then((next) => {
-      if (alive) onSnapshot(next);
+    setPhase("running");
+    void bridge.syncDevices().then(async (next) => {
+      if (!alive) return;
+      onSnapshot(next);
+      setPhase(next.operation_state);
+      if (next.role === "unconfigured" || (next.role === "primary" && !next.service_running)) {
+        try {
+          const discovered = await bridge.syncDevices({ action: "discover" });
+          if (alive) { onSnapshot(discovered); setPhase(discovered.operation_state); }
+        } catch {
+          // mDNS is optional on some networks; manual invite remains available.
+        }
+      }
     }).catch((e) => {
-      if (alive) setError(e instanceof Error ? e.message : String(e));
+      if (alive) { setError(e instanceof Error ? e.message : String(e)); setPhase("offline"); }
     }).finally(() => {
       if (alive) setBusy(false);
     });
     return () => { alive = false; };
   }, [onSnapshot]);
+
+  const isSecondary = snapshot.role === "secondary";
+  const isPrimary = snapshot.role === "primary";
+  const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
+  const awaitingSecondaryApproval = isSecondary && snapshot.service_running && !snapshot.stream_id;
+  const shouldPoll = snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval);
+  useEffect(() => {
+    if (!shouldPoll) { setPollStopped(false); return; }
+    let alive = true;
+    let attempts = 0;
+    let timer: number | undefined;
+    const poll = async () => {
+      if (!alive) return;
+      if (attempts >= 12) { setPollStopped(true); return; }
+      attempts += 1;
+      let retryDelay = 5000;
+      try {
+        const next = await bridge.syncDevices({ action: "status" });
+        if (alive) { onSnapshot(next); setPhase(next.operation_state); }
+      } catch (e) {
+        retryDelay = Math.min(30000, 5000 * 2 ** Math.max(0, attempts - 1));
+        if (alive) { setError(e instanceof Error ? e.message : String(e)); setPhase("offline"); }
+      }
+      if (alive && attempts < 12) timer = window.setTimeout(() => void poll(), retryDelay);
+      else if (alive) setPollStopped(true);
+    };
+    setPollStopped(false);
+    timer = window.setTimeout(() => void poll(), 5000);
+    return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
+  }, [shouldPoll, pollGeneration]);
 
   useEffect(() => {
     let alive = true;
@@ -119,8 +174,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     }
   };
 
-  const isSecondary = snapshot.role === "secondary";
-  const isPrimary = snapshot.role === "primary";
+  const canPair = snapshot.role === "unconfigured" || (isPrimary && !snapshot.service_running);
   const statusText = isSecondary
     ? snapshot.service_running ? t("sync.auto_running") : t("sync.auto_offline")
     : snapshot.service_running ? t("sync.running") : t("sync.stopped");
@@ -129,6 +183,17 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     : snapshot.role === "secondary"
       ? t("sync.role.secondary")
       : t("sync.role.unconfigured");
+  const phaseLabel = phase === "idle"
+    ? t("sync.phase.idle")
+    : phase === "running"
+      ? t("sync.phase.running")
+      : phase === "success"
+        ? t("sync.phase.success")
+        : phase === "error"
+          ? t("sync.phase.error")
+          : phase === "cancelled"
+            ? t("sync.phase.cancelled")
+            : t("sync.phase.offline");
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet sheet-srv" role="dialog" aria-modal="true" aria-label={t("sync.title")} onClick={(event) => event.stopPropagation()}>
@@ -149,14 +214,40 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             <span className="dot-sep" aria-hidden="true" /><span>{t("sync.last_connected")}: {snapshot.last_connected_at_ms ? new Date(snapshot.last_connected_at_ms).toLocaleString() : "-"}</span>
           </div>
           {error || snapshot.last_error ? <div className="sheet-notice" role="alert"><IconWarn size={12} />{error ?? snapshot.last_error}</div> : null}
-          {isSecondary ? <div className="sheet-row">
-            <div><div className="sheet-label">{t("sync.secondary")}</div><div className="sheet-hint">{t("sync.secondary.hint")}</div></div>
-            <div className="sheet-actions">
-              <button type="button" className="btn-accent" disabled={busy || snapshot.service_running} onClick={() => void run({ action: "start_secondary" })}>{t("sync.start")}</button>
-              <button type="button" className="btn-quiet" disabled={busy || !snapshot.service_running} onClick={() => void run({ action: "stop" })}>{t("sync.stop")}</button>
-              <button type="button" className="btn-quiet" disabled={busy} onClick={() => { if (window.confirm(t("sync.unpair.confirm"))) void run({ action: "unpair" }); }}>{t("sync.unpair")}</button>
+          {snapshot.discovery_error ? <div className="sheet-notice" role="status"><IconWarn size={12} />{t("sync.discovery.permission_error", { message: snapshot.discovery_error })}</div> : null}
+          <div className={`sync-operation sync-operation-${phase}`} aria-live="polite">
+            {phase === "running" ? <Loading size={16} label={t("sync.phase.running")} /> : <span className="sync-operation-dot" aria-hidden="true" />}
+            <span>{phaseLabel}</span>
+            {snapshot.last_checked_at_ms ? <span className="sheet-hint"> · {t("sync.last_checked")} {new Date(snapshot.last_checked_at_ms).toLocaleTimeString()}</span> : null}
+          </div>
+          <div className="sheet-hint sync-manual-discovery">{t("sync.discovery.hint")}</div>
+          {isSecondary ? <>
+            <div className="sheet-row">
+              <div><div className="sheet-label">{t("sync.secondary")}</div><div className="sheet-hint">{t("sync.secondary.hint")}</div></div>
+              <div className="sheet-actions">
+                <button type="button" className="btn-accent" disabled={busy || snapshot.service_running} onClick={() => void run({ action: "start_secondary" })}>{t("sync.start")}</button>
+                <button type="button" className="btn-quiet" disabled={busy || !snapshot.service_running} onClick={() => void run({ action: "stop" })}>{t("sync.stop")}</button>
+                <button type="button" className="btn-quiet" disabled={busy} onClick={() => { if (window.confirm(t("sync.unpair.confirm"))) void run({ action: "unpair" }); }}>{t("sync.unpair")}</button>
+              </div>
             </div>
-          </div> : <>
+            {!snapshot.service_running ? <div className="sheet-block">
+              <div className="sheet-label">{t("sync.switch_primary")}</div>
+              <div className="sheet-hint">{t("sync.switch_primary.hint")}</div>
+              <div className="sheet-row">
+                <label className="sheet-label" htmlFor="sync-bind-switch">{t("sync.bind")}</label>
+                <input id="sync-bind-switch" className="sync-input" value={bind} onChange={(event) => setBind(event.target.value)} disabled={busy} />
+              </div>
+              <div className="sheet-row">
+                <label className="sheet-label" htmlFor="sync-advertise-switch">{t("sync.advertise")}</label>
+                <input id="sync-advertise-switch" className="sync-input" value={advertiseHost} onChange={(event) => setAdvertiseHost(event.target.value)} placeholder={t("sync.advertise.placeholder")} disabled={busy} />
+              </div>
+              <div className="sheet-row">
+                <div><div className="sheet-label">{t("sync.allow_lan")}</div><div className="sheet-hint">{t("sync.allow_lan.hint")}</div></div>
+                <button type="button" role="switch" className="switch" aria-checked={allowLan} onClick={() => setAllowLan((value) => !value)} disabled={busy} />
+              </div>
+              <button type="button" className="btn-accent" disabled={busy} onClick={() => { if (window.confirm(t("sync.switch_primary.confirm"))) void run({ action: "start_primary", bind, advertise_host: advertiseHost.trim() || null, allow_lan: allowLan }); }}>{t("sync.switch_primary")}</button>
+            </div> : null}
+          </> : <>
             <div className="sheet-row">
               <div><div className="sheet-label">{t("sync.primary")}</div><div className="sheet-hint">{t("sync.primary.hint")}</div></div>
               <div className="sheet-actions">
@@ -194,19 +285,28 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               </div>
             </div> : null}
           </>}
-          {isPrimary ? <div className="sheet-block"><div className="sheet-hint">{t("sync.pair.primary_guard")}</div></div> : <div className="sheet-block">
+          {isPrimary && snapshot.service_running ? <div className="sheet-block"><div className="sheet-hint">{t("sync.pair.primary_guard")}</div></div> : isSecondary ? <div className="sheet-block"><div className="sheet-hint">{t("sync.pair.secondary_guard")}</div></div> : canPair ? <div className="sheet-block">
             <div className="sheet-label">{t("sync.pair")}</div>
             <div className="sheet-hint">{t("sync.pair.hint")}</div>
+            <div className="sheet-actions">
+              <button type="button" className="btn-quiet" disabled={busy} onClick={() => void run({ action: "discover" })}>{t("sync.discovery.scan")}</button>
+              <span className="sheet-hint">{t("sync.discovery.trust")}</span>
+            </div>
+            {snapshot.discovered_primaries.length ? <div className="sync-discovery-list">{snapshot.discovered_primaries.map((primary) => <div className="sheet-row" key={primary.primary_id}><div><div className="sheet-label">{primary.display_name}</div><div className="sheet-hint">{primary.endpoint} · sha256:{primary.certificate_pin}</div>{primary.identity_conflict ? <div className="sheet-hint">{t("sync.discovery.conflict")}</div> : null}</div><div className="sheet-actions"><button type="button" className="btn-accent" disabled={busy || primary.identity_conflict} onClick={() => void run({ action: "pair_discovered", primary_id: primary.primary_id, endpoint: primary.endpoint, certificate_pin: primary.certificate_pin, origin, display_name: displayName.trim() || null, os: null })}>{t("sync.discovery.pair")}</button><button type="button" className="btn-quiet" disabled={busy || primary.identity_conflict} onClick={() => void copyText(primary.endpoint).then(setCopied)}>{t("sync.discovery.copy_endpoint")}</button></div></div>)}</div> : null}
             <input className="sync-input" value={origin} onChange={(event) => setOrigin(event.target.value)} placeholder={t("sync.origin")} disabled={busy} />
             <input className="sync-input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("sync.display_name.placeholder")} aria-label={t("sync.display_name")} disabled={busy} />
             <textarea className="sync-invite" value={invite} onChange={(event) => setInvite(event.target.value)} placeholder={t("sync.paste_invite")} />
-            <input ref={qrFile} type="file" accept="image/*" className="sync-file" onChange={(event) => { void selectQrFile(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+            <input ref={qrFile} type="file" accept="image/png,image/jpeg,image/webp" className="sync-file" onChange={(event) => { void selectQrFile(event.target.files?.[0]); event.currentTarget.value = ""; }} />
             <div className="sheet-actions">
               <button type="button" className="btn-quiet" disabled={busy || qrBusy} onClick={() => qrFile.current?.click()}>{qrBusy ? t("sync.scanning_qr") : t("sync.scan_qr")}</button>
               <button type="button" className="btn-accent" disabled={busy || !invite.trim()} onClick={() => void run({ action: "pair", invite: invite.trim(), origin, display_name: displayName.trim() || null, os: null })}>{t("sync.pair")}</button>
             </div>
-          </div>}
-          {snapshot.pairing_requests.length ? <div className="sheet-block"><div className="sheet-label">{t("sync.requests")}</div>{snapshot.pairing_requests.filter((request) => request.status === "pending").map((request) => <div className="sheet-row" key={request.request_id}><div><div className="sheet-label">{request.display_name} · {request.origin}</div><div className="sheet-hint">{request.os} · {request.device_id}</div></div><div className="sheet-actions"><button type="button" className="btn-accent" disabled={busy} onClick={() => void run({ action: "approve", request_id: request.request_id })}>{t("sync.approve")}</button><button type="button" className="btn-quiet" disabled={busy} onClick={() => void run({ action: "reject", request_id: request.request_id })}>{t("sync.reject")}</button></div></div>)}</div> : null}
+          </div> : null}
+          {snapshot.pairing_requests.length ? <div className="sheet-block"><div className="sheet-label">{t("sync.requests")}</div>{snapshot.pairing_requests.map((request) => {
+            const requestStatus = request.status === "pending" ? t("sync.request.pending") : request.status === "expired" ? t("sync.request.expired") : request.status === "rejected" ? t("sync.request.rejected") : request.status;
+            return <div className="sheet-row" key={request.request_id}><div><div className="sheet-label">{request.display_name} · {request.origin}</div><div className="sheet-hint">{request.os} · {request.device_id} · {requestStatus}</div></div>{request.status === "pending" ? <div className="sheet-actions"><button type="button" className="btn-accent" disabled={busy} onClick={() => void run({ action: "approve", request_id: request.request_id })}>{t("sync.approve")}</button><button type="button" className="btn-quiet" disabled={busy} onClick={() => void run({ action: "reject", request_id: request.request_id })}>{t("sync.reject")}</button></div> : null}</div>;
+          })}{hasPendingRequest ? <div className="sync-poll-status">{pollStopped ? t("sync.pairing.polling_stopped") : <Loading size={14} label={t("sync.pairing.polling")} />}<button type="button" className="btn-quiet" disabled={busy} onClick={() => void refresh()}>{t("sync.pairing.retry_status")}</button></div> : null}</div> : null}
+          {awaitingSecondaryApproval ? <div className="sheet-block"><div className="sheet-hint">{t("sync.pairing.waiting_primary")}</div><div className="sync-poll-status">{pollStopped ? t("sync.pairing.polling_stopped") : <Loading size={14} label={t("sync.pairing.polling")} />}<button type="button" className="btn-quiet" disabled={busy} onClick={() => void refresh()}>{t("sync.pairing.retry_status")}</button></div></div> : null}
           {snapshot.devices.length ? <div className="sheet-block"><div className="sheet-label">{t("sync.devices")}</div>{snapshot.devices.map((device) => <div className="sheet-row" key={device.device_id}><div><div className="sheet-label">{device.display_name} · {device.origin}</div><div className="sheet-hint">{device.os} · {t(`scope.device.${device.status === "reconcile_required" ? "reconcile" : device.status}` as "scope.device.paired")}</div></div><div className="sheet-actions">{device.status === "paused" ? <button type="button" className="btn-quiet" disabled={busy} onClick={() => void run({ action: "resume", device_id: device.device_id })}>{t("sync.resume")}</button> : device.status === "paired" ? <button type="button" className="btn-quiet" disabled={busy} onClick={() => void run({ action: "pause", device_id: device.device_id })}>{t("sync.pause")}</button> : null}<button type="button" className="btn-quiet" disabled={busy || device.status === "revoked"} onClick={() => { if (window.confirm(t("sync.revoke.confirm", { name: device.display_name }))) void run({ action: "revoke", device_id: device.device_id }); }}>{t("sync.revoke")}</button></div></div>)}</div> : null}
           {!isSecondary ? <div className="sheet-hint">{snapshot.role === "unconfigured" ? t("sync.auto_disabled") : null}</div> : null}
           <div className="sheet-summary num">{t("sync.queue", { pending: snapshot.pending, bytes: snapshot.pending_bytes })}</div>

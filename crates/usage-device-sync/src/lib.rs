@@ -19,7 +19,7 @@ pub use protocol::{
 pub use store::{
     DeviceRecord, DeviceRole, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, ImportReceipt,
     DirtyJournalEntry, DirtyJournalInput, MergeOutcome, OutboxEntry, OutboxState, OutboxSummary,
-    PairingRequestState, SecondarySyncConfig, SnapshotCursor, SyncError, SyncResult, SyncStore,
+    PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SnapshotCursor, SyncError, SyncResult, SyncStore,
 };
 pub use runtime::{export_index_snapshot, export_index_snapshots, export_index_snapshots_from_snapshot, LocalSnapshot, RuntimeRunReport, SyncRuntime, SyncRuntimeConfig};
 pub use transport::{

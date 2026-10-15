@@ -145,6 +145,9 @@ pub fn run() {
             // telling different stories.
             bubble::configure(&handle)?;
             engine_start(handle.clone(), rx);
+            // Restore a user-enabled sync role before the first WebView
+            // snapshot; an explicit Stop remains persisted as disabled.
+            commands::restore_sync_on_launch(&handle);
             servers::hub::start(
                 handle.clone(),
                 handle.state::<std::sync::Arc<servers::ServersState>>().inner().clone(),

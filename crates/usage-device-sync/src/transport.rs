@@ -16,13 +16,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig, ServerConnection, SignatureScheme, StreamOwned};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::protocol::{
-    hash_bytes, verify_private_file, AuthenticatedStatus, AuthenticatedStatusRequest, PairingRequest,
+    hash_bytes, verify_private_file, AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest,
     SignedUpload, StreamOpenReceipt, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES,
     MAX_STRING_BYTES,
 };
@@ -40,11 +41,13 @@ const MAX_DEVICE_CONCURRENT: usize = 1;
 const MAX_CONTROL_BODY_BYTES: usize = 64 * 1024;
 const MAX_PAIRING_PER_IP: usize = 5;
 const PAIRING_WINDOW: Duration = Duration::from_secs(60);
+const DISCOVERY_INVITE_TTL_MS: i64 = 5 * 60 * 1000;
 const MAX_TRACKED_PAIRING_IPS: usize = 1024;
 const UPLOAD_MAGIC: &[u8; 8] = b"TMSYNC01";
 const UPLOAD_WIRE_VERSION: u8 = 1;
 const UPLOAD_PATH: &str = "/v1/upload";
 const PAIRING_PATH: &str = "/v1/pairing/request";
+const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
 const STATUS_PATH: &str = "/v1/status";
 const RECOVERY_PATH: &str = "/v1/recovery";
 
@@ -119,12 +122,27 @@ impl HttpsTransportConfig {
         }
     }
 
+    /// Configures a client from a discovery-provided leaf hash. The first
+    /// request is still TLS-pinned; the server returns the public certificate
+    /// only after this handshake, so mDNS never carries the invite secret.
+    pub fn pinned_hash(endpoint: impl Into<String>, server_name: impl Into<String>, certificate_pin: [u8; 32]) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            server_name: server_name.into(),
+            trust_anchors_der: Vec::new(),
+            pinned_certificate_sha256: certificate_pin,
+            connect_timeout: DEFAULT_TIMEOUT,
+            request_timeout: DEFAULT_TIMEOUT,
+            max_response_bytes: MAX_RESPONSE_BYTES,
+        }
+    }
+
     pub fn validate(&self) -> Result<ParsedEndpoint, TransportError> {
         let parsed = parse_endpoint(&self.endpoint)?;
         if self.server_name.trim().is_empty() {
             return Err(TransportError::Config("server_name must not be empty".into()));
         }
-        if self.trust_anchors_der.is_empty() {
+        if self.trust_anchors_der.is_empty() && self.pinned_certificate_sha256 == [0; 32] {
             return Err(TransportError::Config("at least one TLS trust anchor is required".into()));
         }
         if self.connect_timeout.is_zero() || self.request_timeout.is_zero() {
@@ -272,6 +290,16 @@ impl Tls13HttpsTransport {
         let body = WirePairingRequest::from_request(request)?.encode()?;
         let response = self.request(PAIRING_PATH, body)?;
         response.json()
+    }
+
+    /// Requests a short-lived invite over a certificate-pin-only TLS channel.
+    /// The primary still requires the normal signed pairing request and an
+    /// explicit approval after this method returns.
+    pub fn request_pairing_invite(&mut self, primary_id: &str, endpoint: &str) -> Result<(PairingInvite, Vec<u8>), TransportError> {
+        let body = serde_json::to_vec(&WirePairingInviteRequest { primary_id: primary_id.to_string(), endpoint: endpoint.to_string() })
+            .map_err(|e| TransportError::Protocol(format!("encode discovery pairing request: {e}")))?;
+        let response = self.request(PAIRING_INVITE_PATH, body)?;
+        response.json::<WirePairingInvite>()?.into_invite()
     }
 
     pub fn status(&mut self, request: &AuthenticatedStatusRequest) -> Result<AuthenticatedStatus, TransportError> {
@@ -723,8 +751,17 @@ impl ServerContext {
                     }
                 }
             }
-        } else if head.path == PAIRING_PATH && !self.pairing_limiter.allow(peer.ip()) {
+        } else if (head.path == PAIRING_PATH || head.path == PAIRING_INVITE_PATH) && !self.pairing_limiter.allow(peer.ip()) {
             (429, serde_json::to_vec(&WireError { message: "pairing rate limit exceeded; retry later".into() }).unwrap_or_else(|_| b"{\"message\":\"pairing rate limit exceeded\"}".to_vec()))
+        } else if head.path == PAIRING_INVITE_PATH {
+            let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
+            let request = serde_json::from_slice::<WirePairingInviteRequest>(&body)
+                .map_err(|e| TransportError::Protocol(format!("invalid discovery pairing JSON: {e}")))?;
+            let mut store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+            match issue_pairing_invite(&mut store, request, &self.config.certificate_der) {
+                Ok(body) => (200, body),
+                Err(error) => (status_for_error(&error), serde_json::to_vec(&WireError { message: safe_error_message(&error) }).unwrap_or_else(|_| b"{\"message\":\"request rejected\"}".to_vec())),
+            }
         } else {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
             let request = HttpRequest { path: head.path, content_type: head.content_type, body };
@@ -899,8 +936,74 @@ impl WirePairingRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct WirePairingInviteRequest {
+    primary_id: String,
+    endpoint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WirePairingInvite {
+    invite_id: String,
+    endpoint: String,
+    certificate_pin: String,
+    expires_at_ms: i64,
+    secret_b64: String,
+    certificate_der_b64: String,
+}
+
+impl WirePairingInvite {
+    fn from_invite(invite: &PairingInvite, certificate_der: &[u8]) -> Self {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        Self {
+            invite_id: invite.invite_id.clone(), endpoint: invite.endpoint.clone(),
+            certificate_pin: invite.certificate_pin.clone(), expires_at_ms: invite.expires_at_ms,
+            secret_b64: b64.encode(&invite.secret), certificate_der_b64: b64.encode(certificate_der),
+        }
+    }
+
+    fn into_invite(self) -> Result<(PairingInvite, Vec<u8>), TransportError> {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let secret = b64.decode(self.secret_b64).map_err(|e| TransportError::Protocol(format!("pairing invite secret encoding: {e}")))?;
+        let certificate_der = b64.decode(self.certificate_der_b64).map_err(|e| TransportError::Protocol(format!("pairing certificate encoding: {e}")))?;
+        let pin = parse_pairing_pin(&self.certificate_pin)?;
+        if secret.len() != 32 || certificate_der.is_empty() || hash_bytes(&certificate_der) != pin {
+            return Err(TransportError::Protocol("discovery pairing response failed certificate or secret validation".into()));
+        }
+        crate::protocol::valid_text("invite_id", &self.invite_id, false).map_err(|e| TransportError::Protocol(e.to_string()))?;
+        crate::protocol::valid_text("endpoint", &self.endpoint, false).map_err(|e| TransportError::Protocol(e.to_string()))?;
+        parse_endpoint(&self.endpoint)?;
+        crate::protocol::validate_certificate_pin(&self.certificate_pin).map_err(|e| TransportError::Protocol(e.to_string()))?;
+        Ok((PairingInvite { invite_id: self.invite_id, endpoint: self.endpoint, certificate_pin: self.certificate_pin, expires_at_ms: self.expires_at_ms, secret }, certificate_der))
+    }
+}
+
+fn parse_pairing_pin(value: &str) -> Result<[u8; 32], TransportError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TransportError::Protocol("pairing response certificate pin is invalid".into()));
+    }
+    let mut pin = [0u8; 32];
+    for (index, slot) in pin.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| TransportError::Protocol("pairing response certificate pin is invalid".into()))?;
+    }
+    Ok(pin)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct WireError {
     message: String,
+}
+
+fn issue_pairing_invite(store: &mut SyncStore, request: WirePairingInviteRequest, certificate_der: &[u8]) -> Result<Vec<u8>, SyncError> {
+    if request.primary_id != store.primary_id() {
+        return Err(SyncError::Auth("primary identity does not match the discovered service".into()));
+    }
+    let pin = hex_bytes(&hash_bytes(certificate_der));
+    let invite = store.create_pairing_invite(request.endpoint, pin, now_ms().saturating_add(DISCOVERY_INVITE_TTL_MS))?;
+    serde_json::to_vec(&WirePairingInvite::from_invite(&invite, certificate_der)).map_err(|e| SyncError::Protocol(format!("encode discovery pairing response: {e}")))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn dispatch_request(store: &mut SyncStore, request: &HttpRequest) -> (u16, Vec<u8>) {
@@ -946,14 +1049,51 @@ fn status_for_error(error: &SyncError) -> u16 {
 }
 
 fn client_config(config: &HttpsTransportConfig) -> Result<ClientConfig, TransportError> {
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| TransportError::Tls(e.to_string()))?;
+    if config.trust_anchors_der.is_empty() {
+        return Ok(builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinOnlyVerifier { expected: config.pinned_certificate_sha256 }))
+            .with_no_client_auth());
+    }
     let mut roots = RootCertStore::empty();
     for der in &config.trust_anchors_der {
         roots.add(CertificateDer::from(der.clone())).map_err(|e| TransportError::Config(format!("invalid TLS trust anchor: {e}")))?;
     }
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| TransportError::Tls(e.to_string()))
-        .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
+    Ok(builder.with_root_certificates(roots).with_no_client_auth())
+}
+
+#[derive(Debug)]
+struct PinOnlyVerifier {
+    expected: [u8; 32],
+}
+
+impl ServerCertVerifier for PinOnlyVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        if hash_bytes(end_entity.as_ref()) == self.expected { Ok(ServerCertVerified::assertion()) }
+        else { Err(rustls::Error::General("server certificate pin mismatch".into())) }
+    }
+
+    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &rustls::crypto::ring::default_provider().signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &rustls::crypto::ring::default_provider().signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+    }
 }
 
 fn server_config(config: &HttpsServerConfig) -> Result<ServerConfig, TransportError> {
@@ -1023,7 +1163,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST is supported".into()));
     }
     let known_path = match path {
-        UPLOAD_PATH | PAIRING_PATH | STATUS_PATH | RECOVERY_PATH => Some(()),
+        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | RECOVERY_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
@@ -1373,6 +1513,29 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn discovery_can_issue_a_pinned_short_lived_invite_without_broadcasting_secret() {
+        let cert = cert();
+        let primary = SyncStore::open_in_memory("primary-1").unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), primary).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(2));
+        let endpoint = format!("https://127.0.0.1:{}", addr.port());
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned_hash(endpoint.clone(), "localhost", hash_bytes(&cert.cert_der))).unwrap();
+        let (invite, returned_cert) = client.request_pairing_invite("primary-1", &endpoint).unwrap();
+        assert_eq!(returned_cert, cert.cert_der);
+        assert_eq!(hash_bytes(&returned_cert), hash_bytes(&cert.cert_der));
+        assert_eq!(invite.endpoint, endpoint);
+        assert_eq!(invite.secret.len(), 32);
+        assert!(invite.expires_at_ms > now_ms());
+        let identity = DeviceIdentity::create("discovered-secondary", "Secondary").unwrap();
+        let request = PairingRequest::new(&invite, &identity, "linux").unwrap();
+        let mut pairing_client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(endpoint.clone(), "localhost", returned_cert)).unwrap();
+        let state = pairing_client.send_pairing_request(&request).unwrap();
+        assert_eq!(state.status, "pending");
         assert!(handle.join().unwrap().is_ok());
     }
 
