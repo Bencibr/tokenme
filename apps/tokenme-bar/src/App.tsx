@@ -563,6 +563,8 @@ const [page, setPage] = useState<PageKey>(() => {
             onPolling={setQuotaPolling}
             onQuotaDisplayMode={setQuotaDisplayMode}
             onShowCycleTokens={setShowCycleTokens}
+            onQuotaHideUnused={setHideUnusedQuota}
+            onCycleHideUnusedEstimation={setHideUnusedEstimation}
             displays={Object.fromEntries(report.sources.map((s) => [s.id, s.display]))}
           />
         ) : null}

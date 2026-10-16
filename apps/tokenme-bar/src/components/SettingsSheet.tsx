@@ -85,10 +85,15 @@ export function SettingsSheet({
   onPolling,
   onQuotaDisplayMode,
   onShowCycleTokens,
+  onQuotaHideUnused,
+  onCycleHideUnusedEstimation,
   displays,
 }: {
   onClose: () => void;
   onEmptyTools: (on: boolean) => void;
+  /** The quota strip hides the unused tools the moment the switch moves. */
+  onQuotaHideUnused: (on: boolean) => void;
+  onCycleHideUnusedEstimation: (on: boolean) => void;
   /** The panel times its "updates stopped" line against this cadence. */
   onRefreshSecs: (secs: number) => void;
   /** Dollar figures on/off, so the panel repaints without waiting for a report. */
@@ -257,6 +262,7 @@ export function SettingsSheet({
     try {
       await bridge.setHideUnusedEstimation(on);
       setSettings((s) => s ? { ...s, hide_unused_estimation: on } : s);
+      onCycleHideUnusedEstimation(on);
     } catch {
       setSettings((s) => s ? { ...s, hide_unused_estimation: !on } : s);
     }
@@ -278,6 +284,7 @@ export function SettingsSheet({
 
   const setHideUnusedQuota = (on: boolean) => {
     patch((s) => ({ ...s, hide_unused_quota: on }));
+    onQuotaHideUnused(on);
     void bridge.setHideUnusedQuota(on);
   };
 

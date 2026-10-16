@@ -445,20 +445,15 @@ export function QuotaStrip({
     rows.push(q);
     byTool.set(q.tool, rows);
   }
-  // “没在用”的判断，各自独立：
-  // · 隐藏未使用配额（含工具页同名开关的会话口径）：本期没有会话 → 整块隐藏；
-  // · 隐藏未使用 Token 估算：0 tokens 的行整行隐藏，全部行为 0 的工具
-  //   随之消失。任何一行给不出周期数据（积分行、无窗口的预算行）都保留：
-  //   拿不到证据不等于零。
-  const rowVisible = (q: QuotaView) => !hideUnusedEstimation || !(q.cycle != null && q.cycle.observed_tokens === 0);
+  // 隐藏未使用配额：本期没有会话的工具整块隐藏。0 tokens 的行不受它管——
+  // 它们的进度条和百分比是厂商的真实答案；它们藏的是下面的“已用”噪音行。
   const filtering = usedTools != null && hideUnusedQuota;
   const kept = new Set<string>();
   for (const [tool, rows] of byTool) {
     if (filtering && !rows.some((r) => usedTools.has(r.tool))) continue;
-    if (!rows.some((r) => rowVisible(r))) continue;
     kept.add(tool);
   }
-  const visible = live.filter((q) => kept.has(q.tool) && rowVisible(q));
+  const visible = live.filter((q) => kept.has(q.tool));
   if (visible.length === 0) {
     // pending 为假且为空 = 真没有配额，而不是让配额区块无声消失。
     return null;
@@ -476,7 +471,7 @@ export function QuotaStrip({
   // would render the very blocks the not-in-use judgement just removed.
   const groups = ordered([...kept], order.tools, (t) => t).map((tool) => ({
     tool,
-    rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey).filter((r) => rowVisible(r)),
+    rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
   }));
   // The strip rides the bottom of the overview page, so its last two rows flip
   // the click tip above the row — a below-tip there would leave the panel
@@ -852,7 +847,7 @@ export function QuotaStrip({
                     )}
                     <span className="quota-reset num">{resetNode}</span>
                     </div>
-                    {showCycleTokens && cycle ? (
+                    {showCycleTokens && cycle && (cycle.observed_tokens > 0 || cycle.estimated_tokens != null) ? (
                       <div className="quota-cycle" role="status">
                         <span>{t("quota.cycle.observed", { tokens: formatCycleTokens(cycle.observed_tokens) })}</span>
                         {cycle.estimated_tokens != null ? (
@@ -866,7 +861,7 @@ export function QuotaStrip({
                         {cycle.previous_tokens != null && cycle.previous_tokens > 0 ? (
                           <span>{t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })}</span>
                         ) : null}
-                        {cycle.estimated_tokens == null && !hideUnusedEstimation ? (
+                        {cycle.estimated_tokens == null ? (
                           cycle.status === "unavailable" ? (
                             <>
                               <button
@@ -885,9 +880,9 @@ export function QuotaStrip({
                                 <span className="rank-tip quota-warntip">{t("quota.cycle.unsupported")}</span>
                               ) : null}
                             </>
-                          ) : (
+                          ) : !hideUnusedEstimation ? (
                             <em>{cycleStatus}</em>
-                          )
+                          ) : null
                         ) : null}
                         {cycle.models && cycle.models.length > 0 && cycle.estimated_tokens != null ? (
                           <button
