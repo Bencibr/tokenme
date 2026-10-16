@@ -5,10 +5,15 @@ import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
 import { DEFAULT_PET_PREFERENCES } from "./petCompanion";
 import type { PetNotice, PetPreferences, PetResponse } from "./petCompanion";
-import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot, SyncDevicesSnapshot, SyncManagementRequest, DiagnosticsManagementRequest, DiagnosticsResponse, McpClientConfig } from "../types";
+import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, DiagnosticsSnapshot, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot, SyncDevicesSnapshot, SyncManagementRequest, DiagnosticsManagementRequest, DiagnosticsResponse, McpClientConfig } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** Last answers, handed back to the QA stubs so a scripted state machine can
+ *  branch on the current snapshot instead of re-deriving it. */
+let syncCurrent: SyncDevicesSnapshot = { primary_id: null, role: "unconfigured", service_running: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, invite_url: null, invite_expires_at_ms: null, operation_state: "idle", last_checked_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] };
+let diagCurrent: DiagnosticsResponse = { enabled: false, lan_control_enabled: false, lan_control_expires_at_ms: null, sessions: [], retained_operations: 0, last_operation: null };
 
 /** The dismiss control is a Windows tray-panel affordance; macOS uses the
  * native non-activating panel behavior and should not show a duplicate close. */
@@ -57,6 +62,10 @@ export function applyMoney(on: boolean): void {
 declare global {
   interface Window {
     __TOKENME_REPORT__?: Report;
+    /** Browser-QA seams: scripted sync/diagnostics state machines for Playwright
+     *  DOM runs against the preview build; never consulted inside the app. */
+    __TOKENME_SYNC_STUB__?: (request: SyncManagementRequest | null, current: SyncDevicesSnapshot) => SyncDevicesSnapshot | Promise<SyncDevicesSnapshot>;
+    __TOKENME_DIAG_STUB__?: (request: DiagnosticsManagementRequest, current: DiagnosticsSnapshot) => DiagnosticsResponse | Promise<DiagnosticsResponse>;
   }
 }
 let real: Report | null | undefined;
@@ -163,17 +172,25 @@ export const bridge: Bridge = {
   },
 
   async syncDevices(request?: SyncManagementRequest): Promise<SyncDevicesSnapshot> {
-    if (!inTauri) return { primary_id: null, role: "unconfigured", service_running: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, invite_url: null, invite_expires_at_ms: null, operation_state: "idle", last_checked_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] };
-    return invoke<SyncDevicesSnapshot>("sync_devices", { request: request ?? null });
+    if (!inTauri) {
+      const stub = window.__TOKENME_SYNC_STUB__;
+      if (stub) { syncCurrent = await stub(request ?? null, syncCurrent); return syncCurrent; }
+      return { primary_id: null, role: "unconfigured", service_running: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, invite_url: null, invite_expires_at_ms: null, operation_state: "idle", last_checked_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] };
+    }
+    syncCurrent = await invoke<SyncDevicesSnapshot>("sync_devices", { request: request ?? null });
+    return syncCurrent;
   },
 
   async diagnosticsSession(request: DiagnosticsManagementRequest): Promise<DiagnosticsResponse> {
     if (!inTauri) {
+      const stub = window.__TOKENME_DIAG_STUB__;
+      if (stub) { diagCurrent = await stub(request, diagCurrent); return diagCurrent; }
       return request.action === "status"
         ? { enabled: false, lan_control_enabled: false, lan_control_expires_at_ms: null, sessions: [], retained_operations: 0, last_operation: null }
         : { enabled: false, lan_control_enabled: false, lan_control_expires_at_ms: null, sessions: [], retained_operations: 0, last_operation: null, error: { code: "preview_only", message: "Remote diagnostics is available in the TokenMe app." } };
     }
-    return invoke<DiagnosticsResponse>("diagnostics_session", { request });
+    diagCurrent = await invoke<DiagnosticsResponse>("diagnostics_session", { request });
+    return diagCurrent;
   },
 
   async mcpClientConfig(): Promise<McpClientConfig> {
