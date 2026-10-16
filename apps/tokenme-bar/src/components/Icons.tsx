@@ -218,27 +218,29 @@ export function IconCheck(p: IconProps) {
   );
 }
 
-/** Device sync setup: the primary role card (broadcast tower). */
+/** Device sync setup: the primary role card (lucide radio-tower). */
 export function IconRadioTower(p: IconProps) {
   return (
     <Svg {...p}>
-      <path d="M5.8 5.8a9 9 0 0 1 12.4 0" />
-      <path d="M8.5 8.5a5 5 0 0 1 7 0" />
-      <circle cx="12" cy="11" r="1" />
-      <path d="M12 12v10" />
-      <path d="M8 22l4-8 4 8" />
+      <path d="M4.9 16.1C1 12.2 1 5.8 4.9 1.9" />
+      <path d="M7.8 4.7a6.14 6.14 0 0 0-.8 7.5" />
+      <circle cx="12" cy="9" r="2" />
+      <path d="M16.2 4.8c2 2 2.26 5.11.8 7.47" />
+      <path d="M19.1 1.9a9.96 9.96 0 0 1 0 14.1" />
+      <path d="M9.5 18h5" />
+      <path d="m8 22 4-11 4 11" />
     </Svg>
   );
 }
 
-/** Device sync setup: the secondary role card (pull from a primary). */
+/** Device sync setup: the secondary role card (lucide monitor-down). */
 export function IconMonitorDown(p: IconProps) {
   return (
     <Svg {...p}>
-      <rect x="3" y="4" width="18" height="12" rx="2" />
-      <path d="M12 6.5v5" />
-      <path d="M9.5 9.5L12 12l2.5-2.5" />
-      <path d="M12 16v5" />
+      <rect width="20" height="14" x="2" y="3" rx="2" />
+      <path d="M12 13V7" />
+      <path d="m15 10-3 3-3-3" />
+      <path d="M12 17v4" />
       <path d="M8 21h8" />
     </Svg>
   );

@@ -3632,19 +3632,41 @@
 }
 
 /* 设备同步 · 向导屏与总览行卡（原型 device-ui-redesign 定稿） */
+/* 设备同步 sheet 表头按高保真稿放大一档 */
+.sheet-srv .sec-label {
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.sheet-srv .sheet-close svg {
+  width: 16px;
+  height: 16px;
+}
+
+.sheet-srv .sheet-body {
+  padding: 4px 22px 18px;
+}
+
 .sync-ask {
   color: var(--ink);
-  font-size: 14px;
-  font-weight: 500;
-  margin: 4px 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  margin: 8px 0 14px;
+}
+
+.sync-choice-grid {
+  gap: 16px;
+  margin-top: 0;
 }
 
 .sync-choice-card {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  min-height: 104px;
-  padding: 14px;
+  padding: 18px 18px 16px;
+  border: 1px solid var(--hair-2);
+  border-radius: 14px;
+  background: var(--surface-solid);
 }
 
 .sync-choice-card[aria-pressed="true"] {
@@ -3656,25 +3678,55 @@
   color: var(--accent);
 }
 
-.sync-choice-ico {
+/* (0,2,0) 压过下方 `.sync-choice-card span` 的 ink-3，图标保持青绿 */
+.sync-choice-card .sync-choice-ico {
   color: var(--accent-ink);
-  margin-bottom: 8px;
+  margin: 2px 0 14px;
 }
 
 .sync-choice-ico svg {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
+}
+
+.sync-choice-card strong {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.sync-choice-card > span:last-child {
+  margin-top: 0;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .sync-btnrow {
   display: flex;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 16px;
 }
 
 .sync-btnrow .btn-accent,
 .sync-btnrow .btn-quiet {
   flex: 1;
+}
+
+/* 下一步：高保真稿的填充式主按钮（禁用态仍为青绿，降透明） */
+.sync-btnrow .btn-accent {
+  justify-content: center;
+  padding: 12px 0;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sync-btnrow .btn-accent:disabled {
+  background: var(--accent);
+  color: #ffffff;
+  opacity: 0.45;
+  cursor: default;
+  filter: none;
 }
 
 .sync-crumb {
