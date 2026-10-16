@@ -1245,7 +1245,8 @@
   grid-column: 1 / -1;
   border: 1px solid var(--hair-2);
   border-radius: 8px;
-  margin: 0 0 4px;
+  /* left edge lines up with the 已用 text above (the cycle line's indent) */
+  margin: 0 0 4px 26px;
   background: var(--surface-solid);
 }
 
