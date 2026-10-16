@@ -899,6 +899,15 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
         }
     };
     q.extend(usage_quota::collect_gated(usage_quota::BUDGET, gate));
+    // Off means off: a tool whose probe switch is closed leaves the panel
+    // entirely — the switch reads "I don't use this", and a frozen last
+    // answer under it is clutter, not information. Budget rows are the
+    // user's own construction and stay. Only the switch hides here: a
+    // host that merely quit keeps the freeze, because its rows are the
+    // "last known answer" the strip promises while the app is closed.
+    q.retain(|view| {
+        view.origin == usage_core::QuotaOrigin::Budget || settings.probe_allowed(&view.tool)
+    });
     // Edge-triggered, because the gate stays off for hours and a line every 60 s
     // would bury the pass timings this log exists to show.
     static OFF_LOGGED: AtomicBool = AtomicBool::new(false);
