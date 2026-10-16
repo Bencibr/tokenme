@@ -312,7 +312,7 @@ export function QuotaStrip({
     if (modelTipKey === null) return;
     const close = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
-      if (!target?.closest(".quota-mbar, .quota-mname, .rank-tip")) setModelTipKey(null);
+      if (!target?.closest(".quota-mbar, .quota-mname, .quota-cycwarn, .rank-tip")) setModelTipKey(null);
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
@@ -787,7 +787,7 @@ export function QuotaStrip({
                       ? t("quota.cycle.collecting")
                       : cycle?.status === "unverified"
                         ? t("quota.cycle.unverified")
-                        : t("quota.cycle.unavailable");
+                        : ""; // unavailable rows answer through the ⚠ marker instead
                 return (
                   <div key={rowKey(q)}>
                     <div
@@ -869,7 +869,29 @@ export function QuotaStrip({
                         {cycle.previous_tokens != null && cycle.previous_tokens > 0 ? (
                           <span>{t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })}</span>
                         ) : null}
-                        {cycle.estimated_tokens == null && !hideUnusedEstimation ? <em>{cycleStatus}</em> : null}
+                        {cycle.estimated_tokens == null ? (
+                          cycle.status === "unavailable" ? (
+                            <>
+                              <button
+                                type="button"
+                                className="quota-cycwarn"
+                                aria-label={t("quota.cycle.unsupported")}
+                                title={t("quota.cycle.unsupported")}
+                                onClick={() => {
+                                  const wk = `w:${rowKey(q)}`;
+                                  setModelTipKey(modelTipKey === wk ? null : wk);
+                                }}
+                              >
+                                !
+                              </button>
+                              {modelTipKey === `w:${rowKey(q)}` ? (
+                                <span className="rank-tip quota-warntip">{t("quota.cycle.unsupported")}</span>
+                              ) : null}
+                            </>
+                          ) : (
+                            !hideUnusedEstimation ? <em>{cycleStatus}</em> : null
+                          )
+                        ) : null}
                         {cycle.models && cycle.models.length > 0 && cycle.estimated_tokens != null ? (
                           <button
                             type="button"
