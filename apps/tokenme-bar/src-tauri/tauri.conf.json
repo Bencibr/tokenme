@@ -60,6 +60,7 @@
         "type": "downloadBootstrapper"
       },
       "nsis": {
+        "template": "./nsis/installer.nsi",
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "installMode": "both",

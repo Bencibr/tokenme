@@ -5577,6 +5577,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
+ "httparse",
  "mac-usernotifications",
  "mdns-sd",
  "notify-rust",

@@ -76,6 +76,11 @@ function diagnosticsOperationStateLabel(state: DiagnosticsOperationView["state"]
   }
 }
 
+function bindForLan(value: string): string {
+  const match = value.trim().match(/^(?:127\.0\.0\.1|\[?::1\]?):(\d+)$/);
+  return match ? `0.0.0.0:${match[1]}` : value;
+}
+
 export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDevicesSnapshot; onSnapshot: (next: SyncDevicesSnapshot) => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -96,7 +101,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [qrBusy, setQrBusy] = useState(false);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmation | null>(null);
   const [diagnosticsEnabled, setDiagnosticsEnabled] = useState(false);
-  const [diagnosticsScopes, setDiagnosticsScopes] = useState<DiagnosticsScope[]>(["diagnostics.read"]);
+  const [diagnosticsScopes, setDiagnosticsScopes] = useState<DiagnosticsScope[]>(DIAGNOSTICS_SCOPES);
   const [diagnosticsTtl, setDiagnosticsTtl] = useState<DiagnosticsTtl>("15m");
   const [diagnosticsTarget, setDiagnosticsTarget] = useState("");
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
@@ -278,7 +283,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const isPrimary = snapshot.role === "primary";
   const isUnconfigured = snapshot.role === "unconfigured";
   const pairedDiagnosticsDevices = snapshot.devices.filter((device) => device.role === "secondary" && device.status === "paired");
-  const diagnosticsReady = isPrimary && snapshot.service_running && diagnosticsEnabled;
+  const diagnosticsReady = diagnosticsEnabled;
+  const remoteDiagnosticsReady = isPrimary && snapshot.service_running && diagnosticsEnabled;
   const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
   const awaitingSecondaryApproval = isSecondary && snapshot.service_running && !snapshot.stream_id;
   const shouldPoll = snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval);
@@ -488,6 +494,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     }
     setSetupMode(mode);
   };
+  const toggleAllowLan = () => {
+    setAllowLan((value) => {
+      const next = !value;
+      if (next) setBind((current) => bindForLan(current));
+      return next;
+    });
+  };
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet sheet-srv" role="dialog" aria-modal="true" aria-label={t("sync.title")} onClick={(event) => event.stopPropagation()}>
@@ -547,7 +560,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               </div>
               <div className="sheet-row">
                 <div><div className="sheet-label">{t("sync.allow_lan")}</div><div className="sheet-hint">{t("sync.allow_lan.hint")}</div></div>
-                <button type="button" role="switch" className="switch" aria-label={t("sync.allow_lan")} aria-checked={allowLan} onClick={() => setAllowLan((value) => !value)} disabled={commandBusy} />
+                <button type="button" role="switch" className="switch" aria-label={t("sync.allow_lan")} aria-checked={allowLan} onClick={toggleAllowLan} disabled={commandBusy} />
               </div>
               <button type="button" className="btn-accent" disabled={commandBusy} onClick={() => askConfirmation({ action: "start_primary", bind, advertise_host: advertiseHost.trim() || null, allow_lan: allowLan }, t("sync.switch_primary.confirm"))}>{t("sync.switch_primary")}</button>
             </div> : null}
@@ -572,7 +585,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             </div>
             <div className="sheet-row">
               <div><div className="sheet-label">{t("sync.allow_lan")}</div><div className="sheet-hint">{t("sync.allow_lan.hint")}</div></div>
-              <button type="button" role="switch" className="switch" aria-label={t("sync.allow_lan")} aria-checked={allowLan} onClick={() => setAllowLan((value) => !value)} disabled={commandBusy || snapshot.service_running} />
+              <button type="button" role="switch" className="switch" aria-label={t("sync.allow_lan")} aria-checked={allowLan} onClick={toggleAllowLan} disabled={commandBusy || snapshot.service_running} />
             </div>
             <div className="sheet-row">
               <div><div className="sheet-label">{t("sync.invite")}</div><div className="sheet-hint">{t("sync.invite.hint")}</div></div>
@@ -621,12 +634,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                 <div id="sync-diagnostics-title" className="sync-section-title">{t("sync.diagnostics.title")}</div>
                 <div className="sync-card-copy">{t("sync.diagnostics.hint")}</div>
               </div>
-              <button type="button" role="switch" className="switch" aria-label={t("sync.diagnostics.toggle")} aria-checked={diagnosticsEnabled} onClick={toggleDiagnostics} disabled={commandBusy || !isPrimary || !snapshot.service_running} />
+              <button type="button" role="switch" className="switch" aria-label={t("sync.diagnostics.toggle")} aria-checked={diagnosticsEnabled} onClick={toggleDiagnostics} disabled={commandBusy} />
             </div>
-            <div className={`sync-notice ${diagnosticsReady ? "" : "is-muted"}`}>{!isPrimary || !snapshot.service_running ? t("sync.diagnostics.primary_required") : diagnosticsEnabled ? t("sync.diagnostics.ready") : t("sync.diagnostics.disabled")}</div>
+            <div className={`sync-notice ${diagnosticsReady ? "" : "is-muted"}`}>{!diagnosticsEnabled ? t("sync.diagnostics.disabled") : remoteDiagnosticsReady ? t("sync.diagnostics.ready") : t("sync.diagnostics.local_ready")}</div>
             {diagnosticsError ? <div className="sync-diagnostics-error" role="alert"><IconWarn size={12} /><span>{diagnosticsError}</span></div> : null}
-            <fieldset className="sync-diagnostics-settings" disabled={!diagnosticsReady || commandBusy}>
-              <legend className="sync-diagnostics-label">{t("sync.diagnostics.scope")}</legend>
+            <fieldset className="sync-diagnostics-settings" disabled={!remoteDiagnosticsReady || commandBusy}>
+              <legend className="sync-diagnostics-label"><span>{t("sync.diagnostics.scope")}</span><button type="button" className="btn-quiet" disabled={diagnosticsScopes.length === DIAGNOSTICS_SCOPES.length} onClick={() => { setDiagnosticsScopes(DIAGNOSTICS_SCOPES); setDiagnosticsError(null); }}>{t("sync.diagnostics.scope.all")}</button></legend>
               <div className="sync-diagnostics-scope-grid" role="group" aria-label={t("sync.diagnostics.scope.a11y")}>
                 {DIAGNOSTICS_SCOPES.map((scope) => <button type="button" className="sync-diagnostics-scope" key={scope} role="checkbox" aria-checked={diagnosticsScopes.includes(scope)} onClick={() => toggleDiagnosticsScope(scope)}>
                   <strong>{scope === "diagnostics.read" ? t("sync.diagnostics.scope.read") : t("sync.diagnostics.scope.control")}</strong>
@@ -677,7 +690,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               <div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy} onClick={() => void runDiagnostics({ action: "revoke_all" })}>{t("sync.confirm.accept")}</button><button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setDiagnosticsRevokeConfirm(false)}>{t("sync.confirm.cancel")}</button></div>
             </div> : null}
             <div className="sync-diagnostics-footer">
-              <button type="button" className="btn-quiet" disabled={!diagnosticsEnabled || commandBusy} onClick={() => setDiagnosticsRevokeConfirm(true)}>{t("sync.diagnostics.revoke_all")}</button>
+              <button type="button" className="btn-quiet" disabled={!remoteDiagnosticsReady || commandBusy} onClick={() => setDiagnosticsRevokeConfirm(true)}>{t("sync.diagnostics.revoke_all")}</button>
               <button type="button" className="btn-quiet" disabled={!diagnosticsError && !diagnosticsOperation} onClick={clearDiagnosticsErrors}>{t("sync.diagnostics.clear_errors")}</button>
             </div>
           </section>

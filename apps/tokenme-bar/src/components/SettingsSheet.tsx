@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { BubbleSkin, DiagnosticsResponse, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, QuotaDisplayMode, SyncDevicesSnapshot, ThemeKey, UpdateStatus } from "../types";
+import type { BubbleSkin, DiagnosticsResponse, McpClientConfig, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, QuotaDisplayMode, SyncDevicesSnapshot, ThemeKey, UpdateStatus } from "../types";
 import { bridge, isMac, isWindows } from "../lib/bridge";
 import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
 import { t } from "../lib/i18n";
@@ -119,6 +119,7 @@ export function SettingsSheet({
   const [ttftError, setTtftError] = useState(false);
   const [mcpSync, setMcpSync] = useState<SyncDevicesSnapshot | null>(null);
   const [mcpStatus, setMcpStatus] = useState<DiagnosticsResponse | null>(null);
+  const [mcpConfig, setMcpConfig] = useState<McpClientConfig | null>(null);
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpError, setMcpError] = useState<string | null>(null);
   const [mcpCopied, setMcpCopied] = useState(false);
@@ -161,6 +162,12 @@ export function SettingsSheet({
       ]);
       setMcpSync(sync);
       setMcpStatus(diagnostics);
+      try {
+        setMcpConfig(await bridge.mcpClientConfig());
+      } catch (error) {
+        setMcpConfig(null);
+        setMcpError(error instanceof Error ? error.message : String(error));
+      }
       if (diagnostics.error) setMcpError(diagnostics.error.message);
     } catch (error) {
       setMcpError(error instanceof Error ? error.message : String(error));
@@ -181,6 +188,14 @@ export function SettingsSheet({
     try {
       const response = await bridge.diagnosticsSession({ action: "configure", enabled });
       setMcpStatus(response);
+      if (enabled) {
+        try {
+          setMcpConfig(await bridge.mcpClientConfig());
+        } catch (error) {
+          setMcpConfig(null);
+          setMcpError(error instanceof Error ? error.message : String(error));
+        }
+      }
       if (response.error) setMcpError(response.error.message);
     } catch (error) {
       setMcpError(error instanceof Error ? error.message : String(error));
@@ -456,27 +471,17 @@ export function SettingsSheet({
   const listedOn = list === "probe" ? listed.filter((p) => p.polling).length : listed.filter((p) => !isMuted(p.id)).length;
   const probeLocked = settings ? !settings.quota_polling : false;
   const muteLocked = notify !== "granted";
-  const mcpPrimary = mcpSync?.role === "primary";
-  const mcpReady = mcpPrimary && mcpSync?.service_running === true;
-  // The diagnostics flag is retained in memory across a primary stop, but its
-  // HTTPS authority is revoked with the service.  Do not render that stale
-  // flag as an active MCP endpoint until the primary is serving again.
-  const mcpEnabled = mcpReady && mcpStatus?.enabled === true;
+  // MCP is a local debugging capability. Sync role only controls whether this
+  // device can issue a remote grant; it must not disable the local switch on
+  // a secondary device.
+  const mcpEnabled = mcpStatus?.enabled === true;
   const mcpHint = !mcpSync
     ? t("set.mcp.loading")
-    : !mcpPrimary
-      ? t("set.mcp.primary.required")
-      : !mcpSync.service_running
-        ? t("set.mcp.service.required")
-        : t("set.mcp.hint");
+    : t("set.mcp.local.hint");
 
   const copyMcpConfig = async () => {
-    if (!mcpSync?.endpoint || !mcpSync.certificate_pin) return;
-    const ok = await copyText(JSON.stringify({
-      server_name: "localhost",
-      endpoint: mcpSync.endpoint,
-      certificate_pin: mcpSync.certificate_pin,
-    }, null, 2));
+    if (!mcpConfig?.config_json) return;
+    const ok = await copyText(mcpConfig.config_json);
     if (ok) {
       setMcpCopied(true);
       window.setTimeout(() => setMcpCopied(false), 1600);
@@ -706,43 +711,39 @@ export function SettingsSheet({
               mcpHint,
               mcpEnabled,
               (on) => void setMcpEnabled(on),
-              !mcpReady || mcpBusy,
+              mcpBusy,
             )}
             <div className="sheet-block sheet-mcp-block">
               <div className="sheet-row sheet-mcp-heading">
                 <div>
-                  <div className="sheet-label">{t("set.mcp.config")}</div>
-                  <div className="sheet-hint">{t("set.mcp.config.hint")}</div>
+                  <div className="sheet-label">{t("set.mcp.client.config")}</div>
+                  <div className="sheet-hint">{t("set.mcp.client.config.hint")}</div>
                 </div>
                 <button type="button" className="sheet-action" disabled={mcpBusy} onClick={() => void refreshMcp()}>
-                  {mcpBusy ? t("set.busy") : t("set.mcp.refresh")}
+                  {mcpBusy ? t("set.busy") : t("set.mcp.check")}
                 </button>
               </div>
-              {mcpReady && mcpSync.endpoint && mcpSync.certificate_pin ? (
-                <div className="sheet-mcp-config" aria-label={t("set.mcp.config")}>
-                  <div className="sheet-mcp-config-row">
-                    <span className="sheet-hint">{t("set.mcp.server")}</span>
-                    <code>localhost</code>
-                  </div>
-                  <div className="sheet-mcp-config-row">
-                    <span className="sheet-hint">{t("set.mcp.endpoint")}</span>
-                    <code>{mcpSync.endpoint}</code>
-                  </div>
-                  <div className="sheet-mcp-config-row">
-                    <span className="sheet-hint">{t("set.mcp.pin")}</span>
-                    <code>{mcpSync.certificate_pin}</code>
-                  </div>
+              {mcpEnabled && mcpConfig?.config_json ? (
+                <div className="sheet-mcp-config" aria-label={t("set.mcp.client.config")}>
+                  <textarea
+                    className="sheet-mcp-json"
+                    readOnly
+                    value={mcpConfig.config_json}
+                    aria-label={t("set.mcp.client.config")}
+                    onFocus={(event) => event.currentTarget.select()}
+                  />
                   <button type="button" className="sheet-action" onClick={() => void copyMcpConfig()}>
-                    {mcpCopied ? t("set.mcp.copied") : t("set.mcp.copy")}
+                    {mcpCopied ? t("set.mcp.client.copied") : t("set.mcp.client.copy")}
                   </button>
+                  {mcpConfig.reason ? <p className="sheet-hint" role="alert">{mcpConfig.reason}</p> : null}
                 </div>
               ) : (
                 <p className="sheet-hint" role={mcpError ? "alert" : undefined}>
-                  {mcpError ?? t("set.mcp.config.unavailable")}
+                  {mcpError ?? t("set.mcp.client.unavailable")}
                 </p>
               )}
             </div>
-            {mcpError && mcpReady ? <p className="sheet-hint" role="alert">{mcpError}</p> : null}
+            {mcpError && mcpEnabled && mcpConfig?.config_json ? <p className="sheet-hint" role="alert">{mcpError}</p> : null}
             {switchRow(t("set.polling"), t("set.polling.hint"), settings.quota_polling, setQuotaPolling)}
             {switchRow(t("set.cycle.tokens"), t("set.cycle.tokens.hint"), settings.show_cycle_tokens, setCycleTokens)}
             {switchRow(t("set.ttft"), t("set.ttft.hint"), settings.ttft_enabled, (on) => void setTtft(on), ttftBusy)}
