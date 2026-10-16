@@ -55,6 +55,14 @@ struct CycleState {
 
 const RESET_JITTER_TOLERANCE_MS: i64 = 60_000;
 
+/// Convert a token sample and a token-like used percentage into the implied
+/// full-window total. The percentage is always the normalized *used* meter;
+/// callers must not pass the UI's remaining percentage.
+fn estimate_cycle_tokens(observed_tokens: f64, used_percent: f64) -> Option<f64> {
+    (observed_tokens.is_finite() && observed_tokens > 0.0 && used_percent.is_finite() && used_percent >= 0.1)
+        .then(|| observed_tokens * 100.0 / used_percent.clamp(0.1, 100.0))
+}
+
 fn cycle_state_key(q: &QuotaView) -> String {
     format!("{CYCLE_META_PREFIX}{}:{}:{}", q.tool, q.window_minutes, cycle_bucket_key(q))
 }
@@ -163,14 +171,14 @@ impl Index {
                 let effective = state.meter.clone().unwrap_or_else(|| {
                     if trusted { "confirmed".to_string() } else if unverified { "unverified".to_string() } else { "unknown".to_string() }
                 });
-                let estimated_tokens = if state.observed_tokens > 0.0 && state.period_end_ms > state.last_sampled_at_ms {
+                let estimated_tokens = if state.period_end_ms > state.last_sampled_at_ms {
                     match effective.as_str() {
                         // data-proven: the reconciliation itself vouches for the meter
-                        "confirmed" if state.meter.is_some() => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
+                        "confirmed" if state.meter.is_some() => estimate_cycle_tokens(state.observed_tokens, state.last_used_percent),
                         // hand-verified seed: the older, stricter terms
-                        "confirmed" if state.identity != "unknown" && state.last_used_percent >= 1.0 => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
+                        "confirmed" if state.identity != "unknown" && state.last_used_percent >= 1.0 => estimate_cycle_tokens(state.observed_tokens, state.last_used_percent),
                         // assumed: the caveat rides along, the gates stay lenient
-                        "unverified" => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
+                        "unverified" => estimate_cycle_tokens(state.observed_tokens, state.last_used_percent),
                         _ => None,
                     }
                 } else {
@@ -194,6 +202,7 @@ impl Index {
                 q.cycle = Some(CycleUsage {
                     observed_tokens: state.observed_tokens,
                     estimated_tokens,
+                    estimated_used_percent: estimated_tokens.map(|_| state.last_used_percent),
                     previous_tokens: state.previous_tokens,
                     status,
                     period_start_ms: state.period_start_ms,
@@ -266,7 +275,7 @@ impl Index {
                     "unverified" => q.used_percent >= 0.1,
                     _ => false,
                 };
-                allowed.then(|| observed_tokens * 100.0 / q.used_percent.clamp(0.1, 100.0))
+                allowed.then(|| estimate_cycle_tokens(observed_tokens, q.used_percent)).flatten()
             } else {
                 None
             };
@@ -306,6 +315,7 @@ impl Index {
             q.cycle = Some(CycleUsage {
                 observed_tokens,
                 estimated_tokens,
+                estimated_used_percent: estimated_tokens.map(|_| q.used_percent),
                 previous_tokens,
                 status,
                 period_start_ms: start,
@@ -921,6 +931,14 @@ mod golden {
 
     fn counts(input: f64) -> TokenCounts {
         TokenCounts { input, ..Default::default() }
+    }
+
+    #[test]
+    fn cycle_estimate_uses_normalized_used_percent() {
+        let estimate = estimate_cycle_tokens(4_810_500.0, 1.86856).expect("valid used meter");
+        assert!((estimate - 257_400_000.0).abs() < 100_000.0, "4.81M at 1.86856% → ≈257.4M, got {estimate}");
+        assert!(estimate_cycle_tokens(4_810_500.0, 98.13144).unwrap() < 5_000_000.0, "remaining percent must not be used as the denominator");
+        assert_eq!(estimate_cycle_tokens(1_000.0, f64::NAN), None);
     }
 
     fn ev(tool: &str, ts: i64, session: &str, model: Option<&str>, project: Option<&str>, c: TokenCounts) -> UsageEvent {

@@ -105,6 +105,7 @@ export interface QuotaView {
   cycle?: {
     observed_tokens: number;
     estimated_tokens?: number | null;
+    estimated_used_percent?: number | null;
     previous_tokens?: number | null;
     status: "collecting" | "partial" | "complete" | "unavailable" | "unverified";
     period_start_ms: number;

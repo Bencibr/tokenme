@@ -171,6 +171,11 @@ pub struct CycleUsage {
     pub observed_tokens: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_tokens: Option<f64>,
+    /// The normalized used percentage used as the estimate denominator. This
+    /// keeps the UI honest when it is displaying the complementary remaining
+    /// percentage, and preserves the cached sample's basis on stale reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_used_percent: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_tokens: Option<f64>,
     pub status: CycleStatus,

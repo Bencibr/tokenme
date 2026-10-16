@@ -106,6 +106,11 @@ function formatCycleTokens(value: number): string {
   return Math.round(value).toLocaleString();
 }
 
+function formatUsedPercent(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  return value < 10 ? value.toFixed(1) : Math.round(value).toString();
+}
+
 /** Tools whose quota probe owns a daily check-in: the group header grows the
  *  badge/button for exactly these. */
 const CHECKIN_TOOLS = ["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn"];
@@ -855,6 +860,7 @@ export function QuotaStrip({
                             {t("quota.cycle.estimated", {
                               window: cycleWindow(q.label),
                               tokens: formatLimitTokens(cycle.estimated_tokens),
+                              used: formatUsedPercent(cycle.estimated_used_percent ?? q.used_percent),
                             })}
                           </span>
                         ) : null}
