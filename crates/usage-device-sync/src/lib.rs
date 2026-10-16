@@ -16,7 +16,7 @@ pub use diagnostics::{
     DiagnosticsError,
     DiagnosticsErrorCode, DiagnosticsGrant, DiagnosticsMcpRequest, DiagnosticsMcpResponse,
     DiagnosticsControlHandler, DiagnosticsHost, DiagnosticsOperation, DiagnosticsRequestAuth, DiagnosticsScope,
-    DiagnosticsService, DiagnosticsToolDefinition, DiagnosticsTraceEvent,
+    DiagnosticsCheckRunner, DiagnosticsService, DiagnosticsToolDefinition, DiagnosticsTraceEvent,
     DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_PROTOCOL_VERSION, DIAGNOSTICS_REQUEST_TIMEOUT,
     MAX_DIAGNOSTICS_ARRAY_ITEMS, MAX_DIAGNOSTICS_AUDIT_EVENTS, MAX_DIAGNOSTICS_BODY_BYTES,
     MAX_DIAGNOSTICS_CONCURRENT_REQUESTS, MAX_DIAGNOSTICS_GRANTS, MAX_DIAGNOSTICS_JSON_DEPTH,

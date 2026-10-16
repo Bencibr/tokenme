@@ -163,7 +163,7 @@ export const bridge: Bridge = {
   },
 
   async syncDevices(request?: SyncManagementRequest): Promise<SyncDevicesSnapshot> {
-    if (!inTauri) return { primary_id: null, role: "unconfigured", service_running: false, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] };
+    if (!inTauri) return { primary_id: null, role: "unconfigured", service_running: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, invite_url: null, invite_expires_at_ms: null, operation_state: "idle", last_checked_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] };
     return invoke<SyncDevicesSnapshot>("sync_devices", { request: request ?? null });
   },
 

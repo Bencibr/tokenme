@@ -181,12 +181,16 @@ Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请�
 {
   "mcpServers": {
     "tokenme": {
-      "url": "http://192.168.1.20:<port>/mcp"
+      "url": "http://192.168.1.20:<port>/mcp",
+      "headers": {
+        "Authorization": "Bearer tm_<短期只读凭据>"
+      }
     }
   }
 }
 ```
 
+配置中的 bearer 由 TokenMe 随机生成，有效期 15 分钟，只授予 `diagnostics.read`；不会默认开放 `sync.control`、配对、撤销或坐标点击。关闭 MCP 开关会立即撤销会话并使 bearer 失效，过期后需要重新打开开关并复制新配置。控制操作必须使用现有 HTTPS/TLS 1.3 诊断 authority 签发的独立 grant，并可单独撤销。该兼容入口仍使用 HTTP，bearer 只能防止未持有配置的请求，不能提供传输保密性；跨不可信网络或需要控制权限时应使用带证书 DER、pin 和 grant 的 HTTPS 诊断配置。
 把这段 JSON 粘贴到同一局域网内另一台电脑上的 Claude、Cursor、Cline 或其他 MCP 客户端即可连接；如果默认端口 `47822` 已被占用，TokenMe 会自动切换到空闲端口，并把实际端口写进配置。关闭开关会停止 endpoint 并撤销 MCP 会话。Windows 防火墙若拦截入站连接，需要允许 TokenMe 使用配置中显示的 TCP 端口。
 
 ## diagnostics-stdio

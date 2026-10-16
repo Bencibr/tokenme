@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
+use std::path::Path;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -44,6 +45,10 @@ const LOCAL_MCP_PATH: &str = "/mcp";
 const LOCAL_MCP_PORT: u16 = 47822;
 const LOCAL_MCP_MAX_HEADER_BYTES: usize = 64 * 1024;
 const LOCAL_MCP_MAX_BODY_BYTES: usize = 256 * 1024;
+const LOCAL_MCP_TOKEN_TTL_MS: i64 = 15 * 60 * 1000;
+const LOCAL_MCP_MAX_AUTH_BYTES: usize = 256;
+const LOCAL_MCP_MAX_CONNECTIONS: usize = 4;
+const LOCAL_MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn infer_local_lan_host() -> Result<String, String> {
     // Connecting a UDP socket only asks the OS which interface it would use;
@@ -56,6 +61,19 @@ fn infer_local_lan_host() -> Result<String, String> {
         IpAddr::V4(address) if !address.is_loopback() && !address.is_unspecified() => Ok(address.to_string()),
         _ => Err("无法确定可供局域网访问的 IPv4 地址；请先连接 Wi‑Fi 或以太网后再开启 MCP".into()),
     }
+}
+
+fn new_local_mcp_token() -> String {
+    let bytes: [u8; 32] = rand::rng().random();
+    format!("tm_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    let mut difference: u8 = if left.len() == right.len() { 0 } else { 1 };
+    for index in 0..left.len().max(right.len()) {
+        difference |= left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0);
+    }
+    difference == 0
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -215,6 +233,8 @@ struct Inner {
 #[derive(Debug)]
 struct LocalMcpHttpServer {
     endpoint: String,
+    read_token: String,
+    expires_at_ms: i64,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
@@ -227,13 +247,44 @@ pub struct DiagnosticsState {
 
 impl DiagnosticsState {
     pub(crate) fn local_http_endpoint(&self) -> Option<String> {
-        self.local_http.lock().ok().and_then(|server| server.as_ref().map(|server| server.endpoint.clone()))
+        if !self.status().enabled { return None; }
+        self.local_http.lock().ok().and_then(|server| {
+            server.as_ref().filter(|server| now_ms() < server.expires_at_ms).map(|server| server.endpoint.clone())
+        })
+    }
+
+    pub(crate) fn local_http_client_config(&self) -> Option<(String, String, i64)> {
+        if !self.status().enabled { return None; }
+        self.local_http.lock().ok().and_then(|server| {
+            server.as_ref().filter(|server| now_ms() < server.expires_at_ms)
+                .map(|server| (server.endpoint.clone(), server.read_token.clone(), server.expires_at_ms))
+        })
+    }
+
+    fn local_http_authorized(&self, authorization: Option<&str>) -> Result<(), &'static str> {
+        if !self.status().enabled { return Err("mcp_disabled") }
+        let Some(authorization) = authorization else { return Err("bearer_missing") };
+        let Some(token) = authorization.strip_prefix("Bearer ") else { return Err("bearer_invalid") };
+        if token.len() > LOCAL_MCP_MAX_AUTH_BYTES { return Err("bearer_invalid") }
+        let server = self.local_http.lock().map_err(|_| "mcp_state_busy")?;
+        let Some(server) = server.as_ref() else { return Err("mcp_disabled") };
+        if now_ms() >= server.expires_at_ms { return Err("bearer_expired") }
+        if !constant_time_equal(token.as_bytes(), server.read_token.as_bytes()) { return Err("bearer_invalid") }
+        Ok(())
     }
 
     pub(crate) fn start_local_http(&self, app: &AppHandle) -> Result<String, String> {
         let mut current = self.local_http.lock().map_err(|_| "MCP HTTP 服务状态被占用".to_string())?;
-        if let Some(server) = current.as_ref() {
-            return Ok(server.endpoint.clone());
+        if let Some(server) = current.take() {
+            if now_ms() < server.expires_at_ms {
+                let endpoint = server.endpoint.clone();
+                *current = Some(server);
+                return Ok(endpoint);
+            }
+            // An expired token must never be revived by toggling the switch.
+            // Stop and join the old listener before minting the replacement.
+            server.stop.store(true, Ordering::Release);
+            if let Some(join) = server.join { let _ = join.join(); }
         }
         let host = infer_local_lan_host()?;
         // Keep the documented port stable when possible.  If another process
@@ -245,6 +296,8 @@ impl DiagnosticsState {
         listener.set_nonblocking(true).map_err(|error| format!("无法配置局域网 MCP HTTP 服务: {error}"))?;
         let port = listener.local_addr().map_err(|error| format!("无法读取局域网 MCP HTTP 端口: {error}"))?.port();
         let endpoint = format!("http://{host}:{port}{LOCAL_MCP_PATH}");
+        let read_token = new_local_mcp_token();
+        let expires_at_ms = now_ms().saturating_add(LOCAL_MCP_TOKEN_TTL_MS);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let app = app.clone();
@@ -252,7 +305,7 @@ impl DiagnosticsState {
             .name("tokenme-mcp-http".into())
             .spawn(move || run_local_mcp_http(listener, app, thread_stop))
             .map_err(|error| format!("无法启动局域网 MCP HTTP 服务线程: {error}"))?;
-        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), stop, join: Some(join) });
+        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms, stop, join: Some(join) });
         Ok(endpoint)
     }
 
@@ -566,19 +619,52 @@ struct LocalHttpRequest {
     path: String,
     body: Vec<u8>,
     session_id: Option<String>,
+    authorization: Option<String>,
 }
 
 fn run_local_mcp_http(listener: TcpListener, app: AppHandle, stop: Arc<AtomicBool>) {
+    let mut handlers: Vec<JoinHandle<()>> = Vec::new();
     while !stop.load(Ordering::Acquire) {
+        let mut active_handlers = Vec::with_capacity(handlers.len());
+        for handler in handlers.drain(..) {
+            if handler.is_finished() { let _ = handler.join(); } else { active_handlers.push(handler); }
+        }
+        handlers = active_handlers;
         match listener.accept() {
-            Ok((mut stream, _peer)) => {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-                let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
-                if let Err(error) = handle_local_mcp_http(&mut stream, &app) {
-                    let body = serde_json::to_vec(&json_rpc_error(Value::Null, -32600, &error)).unwrap_or_else(|_| b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}".to_vec());
-                    let _ = write_local_http_response(&mut stream, 400, &body, None);
-                }
+            Ok((stream, _peer)) if handlers.len() >= LOCAL_MCP_MAX_CONNECTIONS => {
+                let mut stream = stream;
+                let _ = stream.set_write_timeout(Some(LOCAL_MCP_REQUEST_TIMEOUT));
+                let body = serde_json::to_vec(&json_rpc_error(Value::Null, -32000, "local MCP connection limit reached")).unwrap_or_default();
+                let _ = write_local_http_response(&mut stream, 429, &body, None);
                 let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            Ok((mut stream, _peer)) => {
+                let app = app.clone();
+                let handler = thread::Builder::new().name("tokenme-mcp-http-request".into()).spawn(move || {
+                    let _ = stream.set_read_timeout(Some(LOCAL_MCP_REQUEST_TIMEOUT));
+                    let _ = stream.set_write_timeout(Some(LOCAL_MCP_REQUEST_TIMEOUT));
+                    if let Err(error) = handle_local_mcp_http(&mut stream, &app) {
+                        logging::diagnostic_event(
+                            "diagnostics.request.denied",
+                            Some("denied"),
+                            Some("diagnostics.read"),
+                            Some("mcp-http"),
+                            None,
+                            Some("invalid_request"),
+                            None,
+                            Some("http"),
+                        );
+                        let body = serde_json::to_vec(&json_rpc_error(Value::Null, -32600, &error)).unwrap_or_else(|_| b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}".to_vec());
+                        let _ = write_local_http_response(&mut stream, 400, &body, None);
+                    }
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                });
+                match handler {
+                    Ok(handler) => handlers.push(handler),
+                    Err(error) => {
+                        logging::error(&format!("tokenme mcp http: request worker unavailable: {error}"));
+                    }
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(10)),
             Err(error) => {
@@ -587,19 +673,28 @@ fn run_local_mcp_http(listener: TcpListener, app: AppHandle, stop: Arc<AtomicBoo
             }
         }
     }
+    for handler in handlers { let _ = handler.join(); }
 }
 
 fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), String> {
     let request = read_local_http_request(stream)?;
     if request.method == "OPTIONS" {
+        audit_local_http("options", None, "ok", None);
         return write_local_http_response(stream, 204, &[], None);
     }
     if request.method != "POST" || request.path != LOCAL_MCP_PATH {
+        audit_local_http("http", None, "denied", Some("endpoint_not_found"));
         return write_local_http_response(stream, 404, br#"{"error":"MCP endpoint not found"}"#, None);
+    }
+    let state = app.state::<DiagnosticsState>();
+    if let Err(error_code) = state.local_http_authorized(request.authorization.as_deref()) {
+        audit_local_http("http", None, "denied", Some(error_code));
+        return write_local_http_response(stream, 401, br#"{"error":"MCP bearer authorization required"}"#, None);
     }
     let value: Value = serde_json::from_slice(&request.body).map_err(|_| "invalid JSON-RPC request".to_string())?;
     let object = value.as_object().ok_or_else(|| "invalid JSON-RPC request".to_string())?;
     let id = object.get("id").cloned().unwrap_or(Value::Null);
+    let audit_id = json_rpc_id_string(&id);
     let method = object.get("method").and_then(Value::as_str).ok_or_else(|| "invalid JSON-RPC method".to_string())?;
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(id, -32600, "JSON-RPC version must be 2.0")).unwrap_or_default(), request.session_id.as_deref());
@@ -608,7 +703,6 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
         return write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(Value::Null, -32600, "JSON-RPC request id is required")).unwrap_or_default(), request.session_id.as_deref());
     }
     let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
-    let state = app.state::<DiagnosticsState>();
     let mut response_session = request.session_id.clone();
     let response = match method {
         "initialize" => {
@@ -618,8 +712,8 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
                 let session = state.create_session_for_panel(
                     "local-http".into(),
                     "mcp-http".into(),
-                    vec!["diagnostics.read".into(), "sync.control".into()],
-                    MAX_SESSION_TTL_MS,
+                    vec!["diagnostics.read".into()],
+                    LOCAL_MCP_TOKEN_TTL_MS,
                 ).map_err(|error| error.to_string())?;
                 response_session = Some(session.session_id.clone());
                 Ok(json_rpc_result(id.clone(), json!({
@@ -630,11 +724,24 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
                 })))
             }
         }
-        "notifications/initialized" => return write_local_http_response(stream, 202, &[], request.session_id.as_deref()),
-        "ping" => Ok(json_rpc_result(id.clone(), json!({}))),
+        "notifications/initialized" => {
+            if request.session_id.as_deref().is_some_and(|session_id| state.is_active(session_id)) {
+                audit_local_http(method, audit_id.as_deref(), "ok", None);
+                return write_local_http_response(stream, 202, &[], request.session_id.as_deref());
+            }
+            audit_local_http(method, audit_id.as_deref(), "denied", Some(CODE_SESSION_NOT_FOUND));
+            return write_local_http_response(stream, 401, br#"{"error":"Mcp-Session-Id is required; initialize first"}"#, None);
+        }
+        "ping" => {
+            if !request.session_id.as_deref().is_some_and(|session_id| state.is_active(session_id)) {
+                Err("Mcp-Session-Id is required; initialize first".to_string())
+            } else {
+                Ok(json_rpc_result(id.clone(), json!({})))
+            }
+        }
         "tools/list" => {
-            if request.session_id.is_none() { Err("Mcp-Session-Id is required; initialize first".to_string()) }
-            else { Ok(json_rpc_result(id.clone(), json!({ "tools": usage_device_sync::diagnostics_tool_registry() }))) }
+            if !request.session_id.as_deref().is_some_and(|session_id| state.is_active(session_id)) { Err("Mcp-Session-Id is required; initialize first".to_string()) }
+            else { Ok(json_rpc_result(id.clone(), json!({ "tools": local_read_only_tool_registry() }))) }
         }
         "tools/call" => {
             let session_id = request.session_id.clone().ok_or_else(|| "Mcp-Session-Id is required; initialize first".to_string())?;
@@ -656,9 +763,43 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
         _ => Err(format!("unsupported MCP method: {method}")),
     };
     match response {
-        Ok(response) => write_local_http_response(stream, 200, &serde_json::to_vec(&response).map_err(|_| "MCP response could not be encoded".to_string())?, response_session.as_deref()),
-        Err(error) => write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(id.clone(), -32602, &error)).unwrap_or_default(), response_session.as_deref()),
+        Ok(response) => {
+            audit_local_http(method, audit_id.as_deref(), "ok", None);
+            write_local_http_response(stream, 200, &serde_json::to_vec(&response).map_err(|_| "MCP response could not be encoded".to_string())?, response_session.as_deref())
+        }
+        Err(error) => {
+            audit_local_http(method, audit_id.as_deref(), "error", Some("mcp_request_failed"));
+            write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(id.clone(), -32602, &error)).unwrap_or_default(), response_session.as_deref())
+        }
     }
+}
+
+fn json_rpc_id_string(id: &Value) -> Option<String> {
+    match id {
+        Value::String(value) => Some(value.chars().take(128).collect()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn local_read_only_tool_registry() -> Vec<usage_device_sync::DiagnosticsToolDefinition> {
+    usage_device_sync::diagnostics_tool_registry()
+        .into_iter()
+        .filter(|tool| tool_scope(&tool.name).is_ok_and(|scope| scope == Scope::Read))
+        .collect()
+}
+
+fn audit_local_http(action: &str, request_id: Option<&str>, outcome: &str, error_code: Option<&str>) {
+    logging::diagnostic_event(
+        "diagnostics.operation.completed",
+        Some(outcome),
+        Some("diagnostics.read"),
+        Some("mcp-http"),
+        request_id,
+        error_code,
+        None,
+        Some(action),
+    );
 }
 
 /// Convert the private host image marker into the standard MCP image result.
@@ -668,16 +809,16 @@ fn local_mcp_tool_result(value: Value) -> Result<Value, String> {
         let text = serde_json::to_string(&value).map_err(|_| "MCP tool result could not be encoded".to_string())?;
         return Ok(json!({ "content": [{ "type": "text", "text": text }], "structuredContent": value }));
     };
-    let mime_type = marker.get("mime_type").and_then(Value::as_str).ok_or_else(|| "MCP image MIME type is invalid".to_string())?;
-    if !matches!(mime_type, "image/png" | "image/jpeg" | "image/bmp") {
+    let mime_type = marker.get("mime_type").and_then(Value::as_str).ok_or_else(|| "MCP image MIME type is invalid".to_string())?.to_owned();
+    if !matches!(mime_type.as_str(), "image/png" | "image/jpeg" | "image/bmp") {
         return Err("MCP image MIME type is invalid".into());
     }
-    let encoded = marker.get("data_base64").and_then(Value::as_str).ok_or_else(|| "MCP image data is invalid".to_string())?;
+    let encoded = marker.get("data_base64").and_then(Value::as_str).ok_or_else(|| "MCP image data is invalid".to_string())?.to_owned();
     let max_encoded = 4 * ((usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES + 2) / 3);
     if encoded.len() > max_encoded {
         return Err("MCP image is too large".into());
     }
-    let data = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "MCP image data is invalid".to_string())?;
+    let data = base64::engine::general_purpose::STANDARD.decode(&encoded).map_err(|_| "MCP image data is invalid".to_string())?;
     if data.is_empty() || data.len() > usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES {
         return Err("MCP image is too large".into());
     }
@@ -707,11 +848,17 @@ fn read_local_http_request(stream: &mut TcpStream) -> Result<LocalHttpRequest, S
     let path = parsed.path.ok_or_else(|| "MCP HTTP path is missing".to_string())?.to_string();
     let mut content_length = 0usize;
     let mut session_id = None;
+    let mut authorization = None;
     for header in parsed.headers.iter() {
         if header.name.eq_ignore_ascii_case("content-length") {
             content_length = std::str::from_utf8(header.value).ok().and_then(|value| value.trim().parse().ok()).ok_or_else(|| "invalid MCP HTTP content length".to_string())?;
         } else if header.name.eq_ignore_ascii_case("mcp-session-id") {
             session_id = Some(std::str::from_utf8(header.value).map_err(|_| "invalid MCP session header".to_string())?.trim().to_string());
+        } else if header.name.eq_ignore_ascii_case("authorization") {
+            if authorization.is_some() { return Err("duplicate MCP authorization header".into()); }
+            let value = std::str::from_utf8(header.value).map_err(|_| "invalid MCP authorization header".to_string())?.trim();
+            if value.len() > LOCAL_MCP_MAX_AUTH_BYTES { return Err("MCP authorization header exceeds the size limit".into()); }
+            authorization = Some(value.to_owned());
         }
     }
     if content_length > LOCAL_MCP_MAX_BODY_BYTES { return Err("MCP HTTP body exceeds the size limit".into()); }
@@ -724,11 +871,11 @@ fn read_local_http_request(stream: &mut TcpStream) -> Result<LocalHttpRequest, S
         if read == 0 { return Err("MCP HTTP body ended early".into()); }
         body.extend_from_slice(&chunk[..read]);
     }
-    Ok(LocalHttpRequest { method, path, body, session_id })
+    Ok(LocalHttpRequest { method, path, body, session_id, authorization })
 }
 
 fn write_local_http_response(stream: &mut TcpStream, status: u16, body: &[u8], session_id: Option<&str>) -> Result<(), String> {
-    let reason = match status { 200 => "OK", 202 => "Accepted", 204 => "No Content", 400 => "Bad Request", 404 => "Not Found", _ => "Error" };
+    let reason = match status { 200 => "OK", 202 => "Accepted", 204 => "No Content", 400 => "Bad Request", 401 => "Unauthorized", 404 => "Not Found", _ => "Error" };
     let content_type = if body.is_empty() { "text/plain; charset=utf-8" } else { "application/json" };
     let mut head = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
     if let Some(session_id) = session_id { head.push_str(&format!("Mcp-Session-Id: {session_id}\r\n")); }
@@ -1012,6 +1159,92 @@ async fn sync_status(app: &AppHandle) -> Result<SyncDevicesView, DiagnosticsErro
         .map_err(|_| handler_error())
 }
 
+#[derive(Debug)]
+struct SyncProbeResults {
+    listener: Result<(), String>,
+    tls: Result<(), String>,
+    database: Result<(), String>,
+}
+
+fn parse_certificate_pin(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut pin = [0u8; 32];
+    for (index, slot) in pin.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(pin)
+}
+
+fn sync_database_probe(path: &Path) -> Result<(), String> {
+    let snapshot = usage_device_sync::SyncStore::read_status(path).map_err(|error| format!("sync database status failed: {error}"))?;
+    let Some(primary_id) = snapshot.primary_id else {
+        return Err("sync database has no configured primary".into());
+    };
+    let store = usage_device_sync::SyncStore::open(path.to_path_buf(), primary_id)
+        .map_err(|error| format!("sync database open failed: {error}"))?;
+    store.outbox_summary().map(|_| ()).map_err(|error| format!("sync database outbox check failed: {error}"))
+}
+
+fn default_sync_database_probe() -> Result<(), String> {
+    let path = usage_index::Index::default_path().ok_or_else(|| "sync database path is unavailable".to_string())?;
+    sync_database_probe(&path)
+}
+
+fn sync_probe_results(status: &SyncDevicesView, database: Result<(), String>) -> SyncProbeResults {
+    if !status.service_running || !matches!(status.role.as_str(), "primary" | "secondary") {
+        return SyncProbeResults {
+            listener: Err("sync service is not running".into()),
+            tls: Err("sync service is not running".into()),
+            database,
+        };
+    }
+    let Some(endpoint) = status.endpoint.clone() else {
+        return SyncProbeResults {
+            listener: Err("sync endpoint is unavailable".into()),
+            tls: Err("sync endpoint is unavailable".into()),
+            database: database.clone(),
+        };
+    };
+    let Some(pin_text) = status.certificate_pin.as_deref() else {
+        return SyncProbeResults {
+            listener: Err("sync certificate pin is unavailable".into()),
+            tls: Err("sync certificate pin is unavailable".into()),
+            database: database.clone(),
+        };
+    };
+    let Some(pin) = parse_certificate_pin(pin_text) else {
+        return SyncProbeResults {
+            listener: Err("sync certificate pin is invalid".into()),
+            tls: Err("sync certificate pin is invalid".into()),
+            database: database.clone(),
+        };
+    };
+    // Keep the host runner bounded below the protocol's five-second operation
+    // deadline.  A connect/TLS black hole must finish before the remote
+    // diagnostics worker returns its timeout result, otherwise the detached
+    // Tauri blocking task could outlive the operation and make the final
+    // status ambiguous.
+    let mut config = usage_device_sync::HttpsTransportConfig::pinned_hash(endpoint, "localhost", pin);
+    config.connect_timeout = Duration::from_secs(4);
+    config.request_timeout = Duration::from_secs(4);
+    let transport = match usage_device_sync::Tls13HttpsTransport::new(config) {
+        Ok(transport) => transport,
+        Err(error) => {
+            let detail = error.to_string();
+            return SyncProbeResults {
+                listener: Err(detail.clone()),
+                tls: Err(detail),
+                database,
+            };
+        }
+    };
+    let listener = transport.probe_tcp().map_err(|error| format!("TCP listener probe failed: {error}"));
+    let tls = transport.probe_tls().map_err(|error| format!("TLS 1.3 probe failed: {error}"));
+    SyncProbeResults { listener, tls, database }
+}
+
 async fn control_sync(app: &AppHandle, request: SyncManagementRequest) -> Result<Value, DiagnosticsError> {
     let control = app.state::<SyncControl>();
     let status = commands::sync_devices(app.clone(), Some(request), control)
@@ -1046,12 +1279,13 @@ async fn device_action(app: &AppHandle, params: &Value, pause: bool) -> Result<V
 
 async fn run_checks(app: &AppHandle, params: &Value) -> Result<Value, DiagnosticsError> {
     let params = object_or_empty(params)?;
+    if params.keys().any(|key| key != "checks") { return Err(invalid_params()); }
     let checks = match params.get("checks") {
         None => vec!["listener", "tls", "pin", "database", "ipc"],
         Some(Value::Array(values)) => values.iter().map(|value| value.as_str().ok_or_else(|| invalid_params())).collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err(invalid_params()),
     };
-    if checks.len() > 5 || checks.iter().any(|check| !matches!(*check, "listener" | "tls" | "pin" | "database" | "ipc")) {
+    if checks.is_empty() || checks.len() > 5 || checks.iter().any(|check| !matches!(*check, "listener" | "tls" | "pin" | "database" | "ipc")) {
         return Err(invalid_params());
     }
     let sync = if checks.iter().any(|check| matches!(*check, "listener" | "tls" | "pin" | "database")) {
@@ -1059,18 +1293,81 @@ async fn run_checks(app: &AppHandle, params: &Value) -> Result<Value, Diagnostic
     } else {
         None
     };
+    let probes = if checks.iter().any(|check| matches!(*check, "listener" | "tls" | "database")) {
+        if let Some(status) = sync.clone() {
+            Some(tauri::async_runtime::spawn_blocking(move || {
+                let database = default_sync_database_probe().map_err(|error| format!("database probe failed: {error}"));
+                sync_probe_results(&status, database)
+            }).await.map_err(|_| handler_error())?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let results = checks.into_iter().map(|check| {
         let (ok, detail) = match check {
-            "listener" => (sync.as_ref().is_some_and(|status| status.service_running && matches!(status.role.as_str(), "primary" | "secondary")), "listener state reports a running sync service"),
-            "tls" => (sync.is_some(), "TLS state readable"),
-            "pin" => (sync.as_ref().is_some_and(|status| status.certificate_pin.as_ref().is_none_or(|pin| pin.len() == 64 && pin.bytes().all(|byte| byte.is_ascii_hexdigit()))), "certificate pin shape valid"),
-            "database" => (sync.is_some(), "sync database readable"),
-            "ipc" => (true, "Tauri adapter reachable"),
-            _ => (false, "check unavailable"),
+            "listener" => match probes.as_ref().map(|probes| &probes.listener) {
+                Some(Ok(())) => (true, "TCP listener probe succeeded".into()),
+                Some(Err(detail)) => (false, detail.clone()),
+                None => (false, "listener probe unavailable".into()),
+            },
+            "tls" => match probes.as_ref().map(|probes| &probes.tls) {
+                Some(Ok(())) => (true, "TLS 1.3 handshake and certificate pin probe succeeded".into()),
+                Some(Err(detail)) => (false, detail.clone()),
+                None => (false, "TLS probe unavailable".into()),
+            },
+            "pin" => {
+                let valid = sync.as_ref().and_then(|status| status.certificate_pin.as_deref()).and_then(parse_certificate_pin).is_some();
+                (valid, if valid { "certificate pin shape valid" } else { "certificate pin unavailable or invalid" }.into())
+            }
+            "database" => match probes.as_ref().map(|probes| &probes.database) {
+                Some(Ok(())) => (true, "sync database and outbox probe succeeded".into()),
+                Some(Err(detail)) => (false, detail.clone()),
+                None => (false, "database probe unavailable".into()),
+            },
+            "ipc" => {
+                let sync_state = app.try_state::<SyncControl>().is_some();
+                let diagnostics_state = app.try_state::<DiagnosticsState>().is_some();
+                let ok = sync_state && diagnostics_state;
+                let detail = match (sync_state, diagnostics_state) {
+                    (true, true) => "Tauri SyncControl and DiagnosticsState are registered".into(),
+                    (false, true) => "Tauri SyncControl state is unavailable".into(),
+                    (true, false) => "Tauri DiagnosticsState is unavailable".into(),
+                    (false, false) => "Tauri SyncControl and DiagnosticsState are unavailable".into(),
+                };
+                (ok, detail)
+            }
+            _ => (false, "check unavailable".into()),
         };
         json!({ "check": check, "ok": ok, "detail": detail })
     }).collect::<Vec<_>>();
     Ok(json!({ "checks": results }))
+}
+
+/// Synchronous bridge used by the HTTPS diagnostics authority.  The protocol
+/// worker invokes this on its own bounded runner thread; the bridge enters the
+/// Tauri runtime only long enough to execute the same checks used by local MCP.
+pub(crate) fn run_remote_checks(
+    app: AppHandle,
+    checks: Vec<String>,
+) -> Result<BTreeMap<String, usage_device_sync::DiagnosticsCheckResult>, usage_device_sync::DiagnosticsError> {
+    let value = tauri::async_runtime::block_on(run_checks(&app, &json!({ "checks": checks })))
+        .map_err(|_| usage_device_sync::DiagnosticsError::Internal)?;
+    let values = value.get("checks").and_then(Value::as_array).ok_or(usage_device_sync::DiagnosticsError::Internal)?;
+    values.iter().map(|value| {
+        let check = value.get("check").and_then(Value::as_str).ok_or(usage_device_sync::DiagnosticsError::Internal)?;
+        let ok = value.get("ok").and_then(Value::as_bool).ok_or(usage_device_sync::DiagnosticsError::Internal)?;
+        let detail = value.get("detail").and_then(Value::as_str).map(str::to_owned);
+        let status = if ok {
+            "ok"
+        } else if detail.as_deref().is_some_and(|detail| detail.contains("unavailable")) {
+            "unavailable"
+        } else {
+            "error"
+        };
+        Ok((check.to_owned(), usage_device_sync::DiagnosticsCheckResult { status: status.into(), detail }))
+    }).collect()
 }
 
 fn safe_sync_view(status: &SyncDevicesView) -> Value {
@@ -1078,6 +1375,8 @@ fn safe_sync_view(status: &SyncDevicesView) -> Value {
         "primary_id": status.primary_id,
         "role": status.role,
         "service_running": status.service_running,
+        "service_health": status.service_health,
+        "endpoint": status.endpoint,
         "stream_id": status.stream_id,
         "data_epoch": status.data_epoch,
         "pending": status.pending,
@@ -1404,5 +1703,91 @@ mod tests {
         assert_eq!(result["content"][0]["mimeType"], "image/png");
         assert_eq!(result["structuredContent"]["width"], 2);
         assert!(result["structuredContent"].get("_mcp_image").is_none());
+    }
+
+    #[test]
+    fn local_mcp_bearer_is_high_entropy_read_only_and_revoked_on_disable() {
+        let state = state();
+        let token = new_local_mcp_token();
+        assert!(token.starts_with("tm_"));
+        assert!(token.len() >= 40);
+        assert_ne!(token, new_local_mcp_token());
+        *state.local_http.lock().unwrap() = Some(LocalMcpHttpServer {
+            endpoint: "http://192.0.2.1:47822/mcp".into(),
+            read_token: token.clone(),
+            expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS,
+            stop: Arc::new(AtomicBool::new(false)),
+            join: None,
+        });
+        assert!(state.local_http_authorized(Some(&format!("Bearer {token}"))).is_ok());
+        assert!(state.local_http_authorized(None).is_err());
+        assert!(state.local_http_authorized(Some("Bearer wrong")).is_err());
+        state.set_enabled(false);
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))).unwrap_err(), "mcp_disabled");
+    }
+
+    #[test]
+    fn local_mcp_bearer_expires_and_constant_time_compare_does_not_accept_prefixes() {
+        assert!(constant_time_equal(b"same-token", b"same-token"));
+        assert!(!constant_time_equal(b"same-token", b"same-token-extra"));
+        let state = state();
+        let token = new_local_mcp_token();
+        *state.local_http.lock().unwrap() = Some(LocalMcpHttpServer {
+            endpoint: "http://192.0.2.1:47822/mcp".into(),
+            read_token: token.clone(),
+            expires_at_ms: now_ms() - 1,
+            stop: Arc::new(AtomicBool::new(false)),
+            join: None,
+        });
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))).unwrap_err(), "bearer_expired");
+    }
+
+    #[test]
+    fn local_mcp_tool_list_is_read_only() {
+        let tools = local_read_only_tool_registry();
+        assert!(!tools.is_empty());
+        assert!(tools.iter().all(|tool| tool_scope(&tool.name) == Ok(Scope::Read)));
+        assert!(!tools.iter().any(|tool| tool.name == "sync.start_primary" || tool.name == "ui.click_panel"));
+    }
+
+    #[test]
+    fn stopped_sync_service_cannot_report_listener_or_tls_ok() {
+        let status = SyncDevicesView {
+            primary_id: Some("primary-1".into()),
+            role: "primary".into(),
+            service_running: false,
+            service_health: Some("stopped".into()),
+            endpoint: Some("https://127.0.0.1:47821".into()),
+            certificate_pin: Some("a".repeat(64)),
+            stream_id: None,
+            data_epoch: None,
+            pending: 0,
+            in_flight: 0,
+            pending_bytes: 0,
+            last_error: None,
+            discovery_error: None,
+            last_connected_at_ms: None,
+            operation_state: "offline".into(),
+            last_checked_at_ms: None,
+            invite_url: None,
+            invite_expires_at_ms: None,
+            discovered_primaries: Vec::new(),
+            devices: Vec::new(),
+            pairing_requests: Vec::new(),
+        };
+        let probes = sync_probe_results(&status, Err("database probe not run in this unit test".into()));
+        assert!(probes.listener.is_err());
+        assert!(probes.tls.is_err());
+        assert_eq!(probes.listener.unwrap_err(), "sync service is not running");
+        assert_eq!(probes.tls.unwrap_err(), "sync service is not running");
+    }
+
+    #[test]
+    fn database_probe_reports_unconfigured_without_creating_a_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.db");
+        let error = sync_database_probe(&path).unwrap_err();
+        assert!(error.contains("no configured primary"));
+        assert!(!path.exists());
     }
 }

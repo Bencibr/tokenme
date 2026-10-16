@@ -58,6 +58,13 @@ type DiagnosticsAction = "configure" | "create_grant" | "revoke_all" | "revoke_g
 
 const DIAGNOSTICS_SCOPES: DiagnosticsScope[] = ["diagnostics.read", "sync.control"];
 const DIAGNOSTICS_TTLS: DiagnosticsTtl[] = ["15m", "1h", "session"];
+const DIAGNOSTICS_MAX_POLLS = 12;
+const DIAGNOSTICS_POLL_INITIAL_DELAY_MS = 250;
+const DIAGNOSTICS_POLL_MAX_DELAY_MS = 4000;
+
+export function diagnosticsPollDelayMs(attempt: number): number {
+  return Math.min(DIAGNOSTICS_POLL_MAX_DELAY_MS, DIAGNOSTICS_POLL_INITIAL_DELAY_MS * 2 ** Math.max(0, attempt));
+}
 
 function diagnosticsActionLabel(action: DiagnosticsAction): string {
   switch (action) {
@@ -118,6 +125,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const automaticDiscoveryStarted = useRef(false);
   const manualDiscoveryRequested = useRef(false);
   const automaticDiscoveryTimer = useRef<number | undefined>();
+  const diagnosticsPollTimer = useRef<number | undefined>();
+  const diagnosticsPollGeneration = useRef(0);
   const operationGeneration = useRef(0);
   const operationInFlight = useRef<"initial" | "mutation" | "refresh" | "discover" | "poll" | null>(null);
   const mounted = useRef(false);
@@ -129,10 +138,18 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     }
   }, []);
 
+  const clearDiagnosticsPoll = useCallback(() => {
+    diagnosticsPollGeneration.current += 1;
+    if (diagnosticsPollTimer.current !== undefined) {
+      window.clearTimeout(diagnosticsPollTimer.current);
+      diagnosticsPollTimer.current = undefined;
+    }
+  }, []);
+
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
+    return () => { mounted.current = false; clearDiagnosticsPoll(); };
+  }, [clearDiagnosticsPoll]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -149,6 +166,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     if (!mounted.current || operationInFlight.current) return;
     setPendingConfirm(null);
     clearAutomaticDiscovery();
+    clearDiagnosticsPoll();
     manualDiscoveryRequested.current = true;
     const generation = ++operationGeneration.current;
     operationInFlight.current = "mutation";
@@ -183,6 +201,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const refresh = async () => {
     if (!mounted.current || operationInFlight.current) return;
     clearAutomaticDiscovery();
+    clearDiagnosticsPoll();
     const generation = ++operationGeneration.current;
     operationInFlight.current = "refresh";
     setBusy(true);
@@ -211,6 +230,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     if (operationInFlight.current) return;
     if (automatic && (automaticDiscoveryStarted.current || manualDiscoveryRequested.current)) return;
     clearAutomaticDiscovery();
+    clearDiagnosticsPoll();
     if (automatic) automaticDiscoveryStarted.current = true;
     else manualDiscoveryRequested.current = true;
     discoveryInFlight.current = true;
@@ -235,7 +255,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       if (operationInFlight.current === "discover" && generation === operationGeneration.current) operationInFlight.current = null;
       if (mounted.current) setDiscovering(false);
     }
-  }, [clearAutomaticDiscovery, onSnapshot]);
+  }, [clearAutomaticDiscovery, clearDiagnosticsPoll, onSnapshot]);
 
   const scheduleAutomaticDiscovery = useCallback(() => {
     clearAutomaticDiscovery();
@@ -314,22 +334,57 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     }
   }, []);
 
+  const pollDiagnosticsStatus = useCallback((operationId: string, generation: number) => {
+    clearDiagnosticsPoll();
+    const pollGeneration = diagnosticsPollGeneration.current;
+    let attempts = 0;
+    const poll = () => {
+      if (!mounted.current || generation !== operationGeneration.current || pollGeneration !== diagnosticsPollGeneration.current || attempts >= DIAGNOSTICS_MAX_POLLS) return;
+      const delay = diagnosticsPollDelayMs(attempts);
+      attempts += 1;
+      diagnosticsPollTimer.current = window.setTimeout(() => {
+        diagnosticsPollTimer.current = undefined;
+        if (!mounted.current || generation !== operationGeneration.current || pollGeneration !== diagnosticsPollGeneration.current) return;
+        void bridge.diagnosticsSession({ action: "status" }).then((response) => {
+          if (!mounted.current || generation !== operationGeneration.current || pollGeneration !== diagnosticsPollGeneration.current) return;
+          applyDiagnosticsResponse(response, generation);
+          const operation = response.last_operation;
+          if (operation?.state !== "running") return;
+          if (operation.operation_id !== operationId) {
+            pollDiagnosticsStatus(operation.operation_id, generation);
+            return;
+          }
+          poll();
+        }).catch((error) => {
+          if (!mounted.current || generation !== operationGeneration.current || pollGeneration !== diagnosticsPollGeneration.current) return;
+          setDiagnosticsError(error instanceof Error ? error.message : String(error));
+          poll();
+        });
+      }, delay);
+    };
+    poll();
+  }, [applyDiagnosticsResponse, clearDiagnosticsPoll]);
+
   useEffect(() => {
     let alive = true;
     const timer = window.setTimeout(() => {
       const generation = operationGeneration.current;
       void bridge.diagnosticsSession({ action: "status" }).then((response) => {
-        if (alive && mounted.current && generation === operationGeneration.current && !operationInFlight.current) applyDiagnosticsResponse(response, generation);
+        if (alive && mounted.current && generation === operationGeneration.current) {
+          applyDiagnosticsResponse(response, generation);
+          if (response.last_operation?.state === "running") pollDiagnosticsStatus(response.last_operation.operation_id, generation);
+        }
       }).catch((error) => {
         if (alive && mounted.current) setDiagnosticsError(error instanceof Error ? error.message : String(error));
       });
     }, 0);
     return () => { alive = false; window.clearTimeout(timer); };
-  }, [applyDiagnosticsResponse]);
+  }, [applyDiagnosticsResponse, pollDiagnosticsStatus]);
 
   const runDiagnostics = useCallback(async (request: DiagnosticsManagementRequest) => {
     if (!mounted.current || operationInFlight.current) return;
     if (request.action !== "configure" && !diagnosticsEnabled) return;
+    clearDiagnosticsPoll();
     const generation = ++operationGeneration.current;
     operationInFlight.current = "mutation";
     setBusy(true);
@@ -338,14 +393,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     try {
       const response = await bridge.diagnosticsSession(request);
       if (!mounted.current || generation !== operationGeneration.current) return;
-      applyDiagnosticsResponse(response);
+      applyDiagnosticsResponse(response, generation);
+      if (response.last_operation?.state === "running") pollDiagnosticsStatus(response.last_operation.operation_id, generation);
     } catch (error) {
       if (mounted.current && generation === operationGeneration.current) setDiagnosticsError(error instanceof Error ? error.message : String(error));
     } finally {
       if (operationInFlight.current === "mutation" && generation === operationGeneration.current) operationInFlight.current = null;
       if (mounted.current && generation === operationGeneration.current) setBusy(false);
     }
-  }, [applyDiagnosticsResponse, diagnosticsEnabled]);
+  }, [applyDiagnosticsResponse, clearDiagnosticsPoll, diagnosticsEnabled, pollDiagnosticsStatus]);
 
   const toggleDiagnostics = () => {
     if (commandBusy) return;
@@ -406,6 +462,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
         return;
       }
       attempts += 1;
+      clearDiagnosticsPoll();
       let retryDelay = 5000;
       const generation = ++operationGeneration.current;
       operationInFlight.current = "poll";
@@ -426,7 +483,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     setPollStopped(false);
     timer = window.setTimeout(() => void poll(), 5000);
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [shouldPoll, pollGeneration]);
+  }, [clearDiagnosticsPoll, onSnapshot, pollGeneration, shouldPoll]);
 
   useEffect(() => {
     let alive = true;

@@ -262,6 +262,7 @@ pub struct SyncDevicesView {
     pub primary_id: Option<String>,
     pub role: String,
     pub service_running: bool,
+    pub service_health: Option<String>,
     pub endpoint: Option<String>,
     pub certificate_pin: Option<String>,
     pub stream_id: Option<String>,
@@ -325,18 +326,25 @@ pub struct McpClientConfigView {
 /// Build the standard HTTP `mcpServers` entry that can be pasted into another
 /// AI client's MCP settings. The endpoint is reachable on this machine's LAN
 /// and exists only while the MCP switch is enabled in this TokenMe process.
+///
+/// The exported bearer is a short-lived, read-only diagnostics credential. It
+/// is intentionally not a sync-control grant: control remains on the pinned
+/// HTTPS diagnostics authority, where it can be separately granted/revoked.
 #[tauri::command]
 pub fn get_mcp_client_config(state: State<'_, crate::diagnostics::DiagnosticsState>) -> Result<McpClientConfigView, String> {
-    let Some(endpoint) = state.local_http_endpoint() else {
+    let Some((endpoint, bearer, _expires_at_ms)) = state.local_http_client_config() else {
         return Ok(McpClientConfigView {
             config_json: String::new(),
             endpoint: None,
             ready: false,
-            reason: Some("请先开启 MCP 诊断服务；开启后这里会生成 HTTP 配置".into()),
+            reason: Some("请先开启 MCP 诊断服务；开启后这里会生成带短期只读凭据的配置".into()),
         });
     };
     let config_json = serde_json::to_string_pretty(&json!({
-        "mcpServers": { "tokenme": { "url": endpoint } }
+        "mcpServers": { "tokenme": {
+            "url": endpoint,
+            "headers": { "Authorization": format!("Bearer {bearer}") }
+        } }
     })).map_err(|error| format!("cannot encode MCP client config: {error}"))?;
     Ok(McpClientConfigView { config_json, endpoint: Some(endpoint), ready: true, reason: None })
 }
@@ -596,6 +604,10 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     diagnostics_host.set_log_path("sync", crate::logging::log_dir().join("diagnostics.log")).map_err(|e| format!("cannot configure diagnostics sync log: {e}"))?;
     diagnostics_host.set_build_summary(Some(format!("TokenMe {} build {}", env!("CARGO_PKG_VERSION"), env!("TOKENME_BUILD_ID")))).map_err(|e| format!("cannot configure diagnostics build summary: {e}"))?;
     diagnostics_host.set_panel_state(Some("sync".into())).map_err(|e| format!("cannot configure diagnostics panel state: {e}"))?;
+    if let Some(app) = diagnostics_app.clone() {
+        diagnostics_host.set_check_runner(move |checks| crate::diagnostics::run_remote_checks(app.clone(), checks))
+            .map_err(|e| format!("cannot configure diagnostics check runner: {e}"))?;
+    }
     let server = usage_device_sync::HttpsSyncServer::bind_with_host(HttpsServerConfig {
         bind_addr,
         certificate_der: certificate_der.clone(),
@@ -1025,6 +1037,9 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         .or_else(|| secondary_config.as_ref().map(|config| config.endpoint.clone()))
         .or_else(|| primary_config.as_ref().and_then(primary_endpoint));
     let certificate_pin = state.certificate_pin.clone().or_else(|| secondary_config.as_ref().map(|config| hex_bytes(&config.certificate_pin)));
+    let service_health = state.service.as_ref().map(|service| service.diagnostics.health().to_string())
+        .or_else(|| state.runtime.as_ref().map(|runtime| if runtime.join.as_ref().is_some_and(JoinHandle::is_finished) { "stopped".into() } else { "running".into() }))
+        .or_else(|| (!state.role.is_empty()).then(|| "stopped".into()));
     let stream_id = secondary_config.as_ref().and_then(|config| config.stream_id.clone());
     let data_epoch = secondary_config.as_ref().and_then(|config| config.data_epoch);
     let last_error = state.last_error.clone().or_else(|| secondary_config.as_ref().and_then(|config| config.last_error.clone()));
@@ -1033,6 +1048,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         primary_id,
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
         service_running: state.service.is_some() || state.runtime.is_some(),
+        service_health,
         endpoint,
         certificate_pin,
         stream_id,

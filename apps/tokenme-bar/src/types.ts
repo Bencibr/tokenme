@@ -418,6 +418,7 @@ export interface SyncDevicesSnapshot {
   primary_id: string | null;
   role: SyncDeviceRole | "unconfigured";
   service_running: boolean;
+  service_health: string | null;
   endpoint: string | null;
   certificate_pin: string | null;
   stream_id: string | null;

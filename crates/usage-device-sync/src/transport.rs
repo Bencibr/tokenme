@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,12 @@ const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
 const STATUS_PATH: &str = "/v1/status";
 const RECOVERY_PATH: &str = "/v1/recovery";
+const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
+
+const HEALTH_READY: u8 = 0;
+const HEALTH_RUNNING: u8 = 1;
+const HEALTH_STOPPING: u8 = 2;
+const HEALTH_STOPPED: u8 = 3;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -229,6 +235,69 @@ pub struct Tls13HttpsTransport {
     next_socket_id: Arc<AtomicU64>,
 }
 
+/// A TCP stream whose every read/write is bounded by one absolute request
+/// deadline. `TcpStream::set_*_timeout` alone is only an idle timeout: a peer
+/// that sends one byte before each idle timeout can otherwise keep a request
+/// alive indefinitely. The cancellation flag is checked before every syscall
+/// so a stopping runtime does not wait for the configured deadline.
+struct DeadlineTcpStream {
+    stream: TcpStream,
+    deadline: Instant,
+    cancel: Arc<AtomicBool>,
+}
+
+impl DeadlineTcpStream {
+    fn new(stream: TcpStream, deadline: Instant, cancel: Arc<AtomicBool>) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        Ok(Self { stream, deadline, cancel })
+    }
+
+    fn arm_read(&self) -> io::Result<()> {
+        if self.cancel.load(AtomicOrdering::Acquire) {
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "transport cancelled"));
+        }
+        if Instant::now() >= self.deadline { return Err(io::Error::new(io::ErrorKind::TimedOut, "transport request deadline elapsed")); }
+        Ok(())
+    }
+
+    fn arm_write(&self) -> io::Result<()> {
+        if self.cancel.load(AtomicOrdering::Acquire) {
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "transport cancelled"));
+        }
+        if Instant::now() >= self.deadline { return Err(io::Error::new(io::ErrorKind::TimedOut, "transport request deadline elapsed")); }
+        Ok(())
+    }
+}
+
+impl Read for DeadlineTcpStream {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        loop {
+            self.arm_read()?;
+            match self.stream.read(bytes) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock && !self.cancel.load(AtomicOrdering::Acquire) && Instant::now() < self.deadline => { thread::sleep(CONNECT_POLL_SLICE.min(self.deadline.saturating_duration_since(Instant::now()))); continue; }
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Write for DeadlineTcpStream {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        loop {
+            self.arm_write()?;
+            match self.stream.write(bytes) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock && !self.cancel.load(AtomicOrdering::Acquire) && Instant::now() < self.deadline => { thread::sleep(CONNECT_POLL_SLICE.min(self.deadline.saturating_duration_since(Instant::now()))); continue; }
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.arm_write()?;
+        Ok(())
+    }
+}
+
 /// Cancellation handle shared with the owner of a client runtime. Shutting
 /// down the cloned TCP sockets is what wakes a blocking rustls read/write.
 #[derive(Clone, Debug)]
@@ -239,8 +308,8 @@ pub struct ClientTransportCancellation {
 
 impl ClientTransportCancellation {
     pub fn cancel(&self) {
+        self.cancel.store(true, AtomicOrdering::Release);
         if let Ok(active) = self.active_sockets.lock() {
-            self.cancel.store(true, AtomicOrdering::Release);
             for stream in active.values() { let _ = stream.shutdown(Shutdown::Both); }
         }
     }
@@ -283,6 +352,27 @@ impl Tls13HttpsTransport {
 
     pub fn cancellation(&self) -> ClientTransportCancellation {
         ClientTransportCancellation { cancel: Arc::clone(&self.cancel), active_sockets: Arc::clone(&self.active_sockets) }
+    }
+
+    /// Checks that the configured endpoint accepts a TCP connection.  This is
+    /// deliberately separate from [`Self::probe_tls`]: a reachable listener
+    /// does not prove that its TLS certificate or pin is correct.
+    pub fn probe_tcp(&self) -> Result<(), TransportError> {
+        self.check_cancelled()?;
+        let parsed = self.config.validate()?;
+        let deadline = Instant::now().checked_add(self.config.connect_timeout).ok_or(TransportError::Timeout)?;
+        let addr = resolve_connect_addr(parsed.host(&self.config.endpoint), parsed.port(), deadline, &self.cancel)?;
+        let stream = connect_tcp_with_deadline(&addr, deadline, &self.cancel)?;
+        drop(stream);
+        self.check_cancelled()
+    }
+
+    /// Performs only the client TCP connection, TLS 1.3 handshake, and leaf
+    /// certificate pin check.  It never sends HTTP bytes or enters any sync
+    /// protocol endpoint.
+    pub fn probe_tls(&self) -> Result<(), TransportError> {
+        let (_stream, _socket) = self.connect()?;
+        Ok(())
     }
 
     pub fn upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
@@ -394,14 +484,15 @@ impl Tls13HttpsTransport {
         }
     }
 
-    fn connect(&self) -> Result<(StreamOwned<ClientConnection, TcpStream>, ClientSocketGuard), TransportError> {
+    fn connect(&self) -> Result<(StreamOwned<ClientConnection, DeadlineTcpStream>, ClientSocketGuard), TransportError> {
         self.check_cancelled()?;
         let parsed = self.config.validate()?;
-        let addr = resolve_connect_addr(parsed.host(&self.config.endpoint), parsed.port())?;
-        let mut tcp = TcpStream::connect_timeout(&addr, self.config.connect_timeout).map_err(TransportError::from)?;
+        let deadline = Instant::now().checked_add(self.config.request_timeout).ok_or(TransportError::Timeout)?;
+        let connect_deadline = deadline.min(Instant::now().checked_add(self.config.connect_timeout).ok_or(TransportError::Timeout)?);
+        let addr = resolve_connect_addr(parsed.host(&self.config.endpoint), parsed.port(), connect_deadline, &self.cancel)?;
+        let tcp = connect_tcp_with_deadline(&addr, connect_deadline, &self.cancel)?;
         let socket = self.register_socket(&tcp)?;
-        tcp.set_read_timeout(Some(self.config.request_timeout)).map_err(TransportError::from)?;
-        tcp.set_write_timeout(Some(self.config.request_timeout)).map_err(TransportError::from)?;
+        let mut tcp = DeadlineTcpStream::new(tcp, deadline, Arc::clone(&self.cancel)).map_err(|error| self.map_io(error))?;
         let client_config = client_config(&self.config)?;
         let server_name = ServerName::try_from(self.config.server_name.clone())
             .map_err(|_| TransportError::Config("server_name is not a valid DNS name".into()))?;
@@ -461,6 +552,14 @@ pub struct HttpsSyncServerHandle {
 }
 
 impl HttpsSyncServerHandle {
+    /// Returns a stable, non-secret service liveness state for unattended
+    /// operators. `ready` means bound but not serving yet; `running` means the
+    /// accept loop is active; `stopping` means active requests are being
+    /// cancelled; and `stopped` means all handlers have been joined.
+    pub fn health(&self) -> &'static str {
+        self.context.health()
+    }
+
     pub fn issue_diagnostics_grant(
         &self,
         debugger_device_id: &str,
@@ -498,6 +597,7 @@ struct ServerContext {
     gate: Arc<ConcurrencyGate>,
     config: HttpsServerConfig,
     cancel: Arc<AtomicBool>,
+    health: AtomicU8,
     active_sockets: Mutex<BTreeMap<u64, TcpStream>>,
     next_socket_id: AtomicU64,
 }
@@ -643,6 +743,7 @@ impl HttpsSyncServer {
             gate: Arc::new(ConcurrencyGate::new(&config)),
             config,
             cancel: Arc::new(AtomicBool::new(false)),
+            health: AtomicU8::new(HEALTH_READY),
             active_sockets: Mutex::new(BTreeMap::new()),
             next_socket_id: AtomicU64::new(1),
         };
@@ -684,6 +785,13 @@ impl HttpsSyncServer {
         HttpsSyncServerHandle { context: Arc::clone(&self.context) }
     }
 
+    /// Returns a stable liveness state without touching the sync store. This
+    /// is safe to call from a status/health observer while the service loop is
+    /// serving requests or joining after cancellation.
+    pub fn health(&self) -> &'static str {
+        self.context.health()
+    }
+
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         self.listener.local_addr().map_err(TransportError::from)
     }
@@ -692,19 +800,26 @@ impl HttpsSyncServer {
     /// lifecycle tests and for a caller-owned user service.
     pub fn run_connections(&self, connections: usize) -> Result<(), TransportError> {
         self.context.cancel.store(false, AtomicOrdering::Release);
-        for _ in 0..connections {
-            let (stream, peer) = self.listener.accept().map_err(TransportError::from)?;
-            let Some(permit) = self.context.gate.try_acquire_connection()? else {
-                let _ = stream.shutdown(Shutdown::Both);
-                continue;
-            };
-            match self.context.handle_connection(stream, peer, permit) {
-                Ok(()) => {}
-                Err(TransportError::State(error)) => return Err(TransportError::State(error)),
-                Err(_) => {}
+        self.context.health.store(HEALTH_RUNNING, AtomicOrdering::Release);
+        let result = (|| {
+            for _ in 0..connections {
+                let (stream, peer) = self.listener.accept().map_err(TransportError::from)?;
+                let Some(permit) = self.context.gate.try_acquire_connection()? else {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                };
+                match self.context.handle_connection(stream, peer, permit) {
+                    Ok(()) => {}
+                    Err(TransportError::State(error)) => return Err(TransportError::State(error)),
+                    Err(_) => {}
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.context.health.store(HEALTH_STOPPING, AtomicOrdering::Release);
+        self.context.cancel_active();
+        self.context.health.store(HEALTH_STOPPED, AtomicOrdering::Release);
+        result
     }
 
     /// Blocking service loop. The caller owns process lifecycle and shutdown.
@@ -718,6 +833,7 @@ impl HttpsSyncServer {
     pub fn run_until(self, stop: &AtomicBool) -> Result<(), TransportError> {
         let HttpsSyncServer { listener, context } = self;
         context.cancel.store(false, AtomicOrdering::Release);
+        context.health.store(HEALTH_RUNNING, AtomicOrdering::Release);
         listener.set_nonblocking(true).map_err(TransportError::from)?;
         let (fatal_tx, fatal_rx) = mpsc::channel();
         let mut handlers: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -725,6 +841,7 @@ impl HttpsSyncServer {
             if let Ok(error) = fatal_rx.try_recv() {
                 context.cancel_active();
                 for handler in handlers { let _ = handler.join(); }
+                context.health.store(HEALTH_STOPPED, AtomicOrdering::Release);
                 return Err(error);
             }
             let mut index = 0;
@@ -747,6 +864,7 @@ impl HttpsSyncServer {
                         Err(error) => {
                             context.cancel_active();
                             for handler in handlers { let _ = handler.join(); }
+                            context.health.store(HEALTH_STOPPED, AtomicOrdering::Release);
                             return Err(error);
                         }
                     };
@@ -766,24 +884,34 @@ impl HttpsSyncServer {
                 Err(error) => {
                     context.cancel_active();
                     for handler in handlers { let _ = handler.join(); }
+                    context.health.store(HEALTH_STOPPED, AtomicOrdering::Release);
                     return Err(TransportError::from(error));
                 }
             }
         }
+        context.health.store(HEALTH_STOPPING, AtomicOrdering::Release);
         context.cancel_active();
         let mut fatal = fatal_rx.try_recv().ok();
         for handler in handlers {
             let _ = handler.join();
         }
         if fatal.is_none() { fatal = fatal_rx.try_recv().ok(); }
-        match fatal {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        context.health.store(HEALTH_STOPPED, AtomicOrdering::Release);
+        match fatal { Some(error) => Err(error), None => Ok(()) }
     }
 }
 
 impl ServerContext {
+    fn health(&self) -> &'static str {
+        match self.health.load(AtomicOrdering::Acquire) {
+            HEALTH_READY => "ready",
+            HEALTH_RUNNING => "running",
+            HEALTH_STOPPING => "stopping",
+            HEALTH_STOPPED => "stopped",
+            _ => "unknown",
+        }
+    }
+
     fn register_socket(&self, stream: &TcpStream) -> Result<ActiveSocketGuard<'_>, TransportError> {
         let id = self.next_socket_id.fetch_add(1, AtomicOrdering::Relaxed);
         let clone = stream.try_clone().map_err(TransportError::from)?;
@@ -1275,9 +1403,48 @@ pub(crate) fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, Transport
     Ok(ParsedEndpoint { host_start: authority_start, host_end: authority_start + host.len(), port })
 }
 
-fn resolve_connect_addr(host: &str, port: u16) -> Result<SocketAddr, TransportError> {
-    let mut addresses = (host, port).to_socket_addrs().map_err(TransportError::from)?;
-    addresses.next().ok_or_else(|| TransportError::Config("endpoint does not resolve".into()))
+fn resolve_connect_addr(host: &str, port: u16, deadline: Instant, cancel: &AtomicBool) -> Result<SocketAddr, TransportError> {
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(address, port));
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port));
+    }
+    // DNS and mDNS resolution is delegated to one bounded helper so a broken
+    // resolver cannot hold an unattended worker past its request deadline.
+    let host = host.to_owned();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = (host.as_str(), port).to_socket_addrs()
+            .map(|addresses| addresses.collect::<Vec<_>>())
+            .map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    });
+    loop {
+        if cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TransportError::Timeout)?;
+        match receiver.recv_timeout(remaining.min(CONNECT_POLL_SLICE)) {
+            Ok(Ok(addresses)) => return addresses.into_iter().next().ok_or_else(|| TransportError::Config("endpoint host has no addresses".into())),
+            Ok(Err(error)) => return Err(TransportError::Config(format!("endpoint host resolution failed: {error}"))),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(TransportError::Config("endpoint host resolution stopped".into())),
+        }
+    }
+}
+
+fn connect_tcp_with_deadline(addr: &SocketAddr, deadline: Instant, cancel: &AtomicBool) -> Result<TcpStream, TransportError> {
+    loop {
+        if cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TransportError::Timeout)?;
+        let attempt_timeout = remaining.min(CONNECT_POLL_SLICE);
+        match TcpStream::connect_timeout(addr, attempt_timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => continue,
+            Err(error) => {
+                return if cancel.load(AtomicOrdering::Acquire) { Err(TransportError::Cancelled) } else { Err(TransportError::from(error)) };
+            }
+        }
+    }
 }
 
 fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant, cancel: &AtomicBool) -> Result<HttpRequestHead, TransportError> {
@@ -1650,6 +1817,21 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn tls_probe_completes_without_sending_an_http_request() {
+        let cert = cert();
+        let store = SyncStore::open_in_memory("primary-1").unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(2));
+        let client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
+        )).unwrap();
+        client.probe_tcp().unwrap();
+        client.probe_tls().unwrap();
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -2040,6 +2222,115 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(config).unwrap();
         assert!(matches!(client.upload(&upload), Err(TransportError::PinMismatch)));
         assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn tls_probe_rejects_a_mismatched_leaf_pin() {
+        let actual = cert();
+        let expected = cert();
+        let store = SyncStore::open_in_memory("primary-1").unwrap();
+        let server = HttpsSyncServer::bind(server_config(&actual), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let mut config = HttpsTransportConfig::pinned_hash(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", hash_bytes(&expected.cert_der),
+        );
+        config.trust_anchors_der.push(actual.cert_der);
+        let client = Tls13HttpsTransport::new(config).unwrap();
+        assert!(matches!(client.probe_tls(), Err(TransportError::PinMismatch)));
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn tls_probe_fails_when_the_listener_is_stopped() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let cert = cert();
+        let client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
+        )).unwrap();
+        assert!(client.probe_tcp().is_err());
+        assert!(client.probe_tls().is_err());
+    }
+
+    #[test]
+    fn server_health_transitions_from_ready_to_running_to_stopped() {
+        let cert = cert();
+        let server = HttpsSyncServer::bind(server_config(&cert), SyncStore::open_in_memory("primary-1").unwrap()).unwrap();
+        let health = server.diagnostics_handle();
+        assert_eq!(health.health(), "ready");
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || server.run_until(&worker_stop));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while health.health() == "ready" && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(health.health(), "running");
+        stop.store(true, AtomicOrdering::Release);
+        assert!(worker.join().unwrap().is_ok());
+        assert_eq!(health.health(), "stopped");
+    }
+
+    #[test]
+    fn slow_trickle_response_is_bounded_by_one_absolute_request_deadline() {
+        let cert = cert();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_cert = cert.cert_der.clone();
+        let server_key = cert.key_der.clone();
+        let server = thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let config = HttpsServerConfig {
+                bind_addr: addr,
+                certificate_der: server_cert,
+                private_key_der: server_key,
+                allow_lan: false,
+                allowed_peer_ips: vec![],
+                max_body_bytes: DEFAULT_BODY_BYTES,
+                max_concurrent: 1,
+                staging_dir: std::env::temp_dir().join(format!("tokenme-sync-trickle-{}", now_ms())),
+                idle_timeout: DEFAULT_IDLE_TIMEOUT,
+                total_timeout: DEFAULT_TOTAL_TIMEOUT,
+                staging_quota_bytes: DEFAULT_STAGING_QUOTA_BYTES,
+            };
+            let mut connection = ServerConnection::new(Arc::new(super::server_config(&config).unwrap())).unwrap();
+            while connection.is_handshaking() {
+                if connection.complete_io(&mut tcp).is_err() { return; }
+            }
+            let mut tls = StreamOwned::new(connection, tcp);
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") && request.len() < MAX_HEADER_BYTES {
+                match tls.read(&mut byte) {
+                    Ok(1) => request.push(byte[0]),
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+            }
+            if !request.ends_with(b"\r\n\r\n") { return; }
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n";
+            if tls.write_all(response).is_err() || tls.flush().is_err() { return; }
+            for byte in b"{\"x\":1234}" {
+                if tls.write_all(&[*byte]).is_err() || tls.flush().is_err() { break; }
+                thread::sleep(Duration::from_millis(45));
+            }
+        });
+        let device = DeviceIdentity::create("slow-trickle", "Linux").unwrap();
+        let request = AuthenticatedStatusRequest::new_at(&device, "primary-1", true, now_ms()).unwrap();
+        let mut config = HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
+        );
+        config.connect_timeout = Duration::from_secs(1);
+        config.request_timeout = Duration::from_millis(150);
+        let mut client = Tls13HttpsTransport::new(config).unwrap();
+        let started = Instant::now();
+        let result = client.status(&request);
+        assert!(matches!(result, Err(TransportError::Timeout)), "result: {result:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "request exceeded bounded test window: {:?}", started.elapsed());
+        server.join().unwrap();
     }
 
     #[test]

@@ -86,6 +86,7 @@ pub struct Shared {
     pub report: Mutex<Option<Report>>,
     pub settings: Mutex<Settings>,
     ingesting: Mutex<()>,
+    startup_error: Mutex<Option<String>>,
     /// The machine scope every publish folds with. Read at publish time (never
     /// cached in the engine), so a switch applies to the very next report even
     /// if it lands while a slow pass is mid-flight.
@@ -98,6 +99,7 @@ impl Shared {
             report: Mutex::new(None),
             settings: Mutex::new(settings),
             ingesting: Mutex::new(()),
+            startup_error: Mutex::new(None),
             scope: Mutex::new(MachineScope::All),
         }
     }
@@ -128,6 +130,16 @@ impl Shared {
 
     pub fn report(&self) -> Option<Report> {
         self.report.lock().ok().and_then(|r| r.clone())
+    }
+
+    pub fn startup_error(&self) -> Option<String> {
+        self.startup_error.lock().ok().and_then(|error| error.clone())
+    }
+
+    fn set_startup_error(&self, error: Option<String>) {
+        if let Ok(mut slot) = self.startup_error.lock() {
+            *slot = error;
+        }
     }
 }
 
@@ -247,11 +259,17 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
 
     // An index that cannot be opened is not a quiet day either: every pass would
     // return without publishing and the webview would sit on "indexing" forever.
+    let shared = app.state::<Shared>();
     let mut index = match Index::open(index_path()) {
-        Ok(index) => Some(index),
+        Ok(index) => {
+            shared.set_startup_error(None);
+            Some(index)
+        }
         Err(e) => {
+            let message = format!("index could not be opened: {e}");
+            shared.set_startup_error(Some(message.clone()));
             crate::logging::error(&format!(
-                "index could not be opened — no data can be published until it is: {e}"
+                "{message} — no data can be published until it is"
             ));
             None
         }
@@ -1086,6 +1104,16 @@ mod tests {
         // A payload nobody can read still has to say that the engine died.
         let opaque: Box<dyn std::any::Any + Send> = Box::new(7u8);
         assert_eq!(panic_text(&*opaque), "panicked: non-string panic payload");
+    }
+
+    #[test]
+    fn startup_error_is_cleared_after_a_successful_index_open() {
+        let shared = Shared::new(Settings::default());
+        assert!(shared.startup_error().is_none());
+        shared.set_startup_error(Some("index could not be opened".into()));
+        assert_eq!(shared.startup_error().as_deref(), Some("index could not be opened"));
+        shared.set_startup_error(None);
+        assert!(shared.startup_error().is_none());
     }
 
     /// The `auto_checkin` exemption is exactly as wide as the claim registry:

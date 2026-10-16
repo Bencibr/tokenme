@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -554,8 +554,9 @@ pub struct DiagnosticsToolDefinition {
 
 /// Host-owned, redacted diagnostics data.  The protocol crate never discovers
 /// arbitrary files or executes arbitrary commands: the embedding host must
-/// explicitly register the two allow-listed log paths and append fixed trace
-/// events/check results.
+/// explicitly register the two allow-listed log paths, append fixed trace
+/// events, and provide the bounded check runner for real listener/TLS/database
+/// and IPC probes.
 #[derive(Clone, Default)]
 pub struct DiagnosticsHost {
     state: Arc<Mutex<DiagnosticsHostState>>,
@@ -568,12 +569,18 @@ pub struct DiagnosticsHost {
 /// accepted asynchronous operation without exposing arbitrary execution.
 pub type DiagnosticsControlHandler = Arc<dyn Fn(&str, Value) -> Result<Value, DiagnosticsError> + Send + Sync>;
 
+/// Host-owned runner for the fixed diagnostics checks.  The protocol layer
+/// supplies only the validated check names; the embedding application owns
+/// the actual listener/TLS/database/IPC probes and returns bounded results.
+pub type DiagnosticsCheckRunner = Arc<dyn Fn(Vec<String>) -> Result<BTreeMap<String, DiagnosticsCheckResult>, DiagnosticsError> + Send + Sync>;
+
 #[derive(Default)]
 struct DiagnosticsHostState {
     logs: BTreeMap<String, PathBuf>,
     trace: VecDeque<DiagnosticsTraceEvent>,
     operations: BTreeMap<String, DiagnosticsOperation>,
     check_overrides: BTreeMap<String, DiagnosticsCheckResult>,
+    check_runner: Option<DiagnosticsCheckRunner>,
     panel_state: Option<String>,
     build: Option<String>,
     control_handler: Option<DiagnosticsControlHandler>,
@@ -633,21 +640,24 @@ impl DiagnosticsHost {
         Ok(())
     }
 
-    pub fn set_check_result(&self, check: &str, result: DiagnosticsCheckResult) -> Result<(), DiagnosticsError> {
-        if !valid_check_name(check) || result.status.len() > 64 || result.detail.as_ref().is_some_and(|detail| detail.len() > MAX_DIAGNOSTICS_STRING_BYTES) {
-            return Err(DiagnosticsError::InvalidParams);
-        }
-        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
-        state.check_overrides.insert(check.into(), result);
-        Ok(())
-    }
-
     pub fn set_panel_state(&self, state_value: Option<String>) -> Result<(), DiagnosticsError> {
         if state_value.as_ref().is_some_and(|value| value.len() > MAX_DIAGNOSTICS_STRING_BYTES) {
             return Err(DiagnosticsError::Limit);
         }
         let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
         state.panel_state = state_value;
+        Ok(())
+    }
+
+    /// Compatibility hook for embedders that only have a cached result. New
+    /// hosts should prefer [`Self::set_check_runner`] so every request runs a
+    /// fresh bounded probe.
+    pub fn set_check_result(&self, check: &str, result: DiagnosticsCheckResult) -> Result<(), DiagnosticsError> {
+        if !valid_check_name(check) || result.status.is_empty() || result.status.len() > 64 || result.detail.as_ref().is_some_and(|detail| detail.len() > MAX_DIAGNOSTICS_STRING_BYTES) {
+            return Err(DiagnosticsError::InvalidParams);
+        }
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        state.check_overrides.insert(check.into(), result);
         Ok(())
     }
 
@@ -669,6 +679,18 @@ impl DiagnosticsHost {
     {
         let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
         state.control_handler = Some(Arc::new(handler));
+        Ok(())
+    }
+
+    /// Register the embedding application's real diagnostics runner.  The
+    /// runner is invoked only after MCP authentication and fixed check-name
+    /// validation; it must not perform arbitrary command or path access.
+    pub fn set_check_runner<F>(&self, runner: F) -> Result<(), DiagnosticsError>
+    where
+        F: Fn(Vec<String>) -> Result<BTreeMap<String, DiagnosticsCheckResult>, DiagnosticsError> + Send + Sync + 'static,
+    {
+        let mut state = self.state.lock().map_err(|_| DiagnosticsError::Internal)?;
+        state.check_runner = Some(Arc::new(runner));
         Ok(())
     }
 
@@ -1335,13 +1357,20 @@ impl DiagnosticsService {
             }
             ToolId::DiagnosticsRunCheck => {
                 if arguments.keys().any(|key| key != "checks") { return Err(DiagnosticsError::InvalidParams); }
-                let checks = arguments.get("checks").and_then(Value::as_array).ok_or(DiagnosticsError::InvalidParams)?;
+                let checks: Vec<String> = match arguments.get("checks") {
+                    Some(value) => value.as_array().ok_or(DiagnosticsError::InvalidParams)?.iter()
+                        .map(|value| value.as_str().ok_or(DiagnosticsError::InvalidParams).map(str::to_owned))
+                        .collect::<Result<_, _>>()?,
+                    None => {
+                        // An empty argument object is the unattended health-check path.
+                        ["listener", "tls", "pin", "database", "ipc"].into_iter().map(str::to_owned).collect()
+                    }
+                };
                 if checks.is_empty() || checks.len() > 16 { return Err(DiagnosticsError::InvalidParams); }
-                let checks = checks.iter().map(|value| value.as_str().ok_or(DiagnosticsError::InvalidParams)).collect::<Result<Vec<_>, _>>()?;
                 let mut names = BTreeSet::new();
                 for check in checks {
-                    if !valid_check_name(check) { return Err(DiagnosticsError::InvalidParams); }
-                    names.insert(check.to_string());
+                    if !valid_check_name(&check) { return Err(DiagnosticsError::InvalidParams); }
+                    names.insert(check);
                 }
                 self.start_check_operation(names.into_iter().collect(), now_ms)
             }
@@ -1433,6 +1462,19 @@ impl DiagnosticsService {
         let operation_id = format!("doper-{}", hex(&random));
         let mut state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
         if state.operations.len() >= MAX_DIAGNOSTICS_OPERATIONS { return Err(DiagnosticsError::Busy); }
+        let runner = state.check_runner.clone().or_else(|| {
+            if state.check_overrides.is_empty() { return None; }
+            let overrides = state.check_overrides.clone();
+            Some(Arc::new(move |checks: Vec<String>| {
+                Ok(checks.into_iter().map(|check| {
+                    let result = overrides.get(&check).cloned().unwrap_or(DiagnosticsCheckResult {
+                        status: "unavailable".into(),
+                        detail: Some("host_check_result_missing".into()),
+                    });
+                    (check, result)
+                }).collect())
+            }) as DiagnosticsCheckRunner)
+        });
         state.operations.insert(operation_id.clone(), DiagnosticsOperation {
             operation_id: operation_id.clone(), status: "queued".into(), checks: checks.clone(),
             started_at_ms: now_ms, completed_at_ms: None, results: None,
@@ -1440,14 +1482,14 @@ impl DiagnosticsService {
         let host_state = Arc::clone(&self.host.state);
         let operation_for_thread = operation_id.clone();
         std::thread::spawn(move || {
-            std::thread::yield_now();
+            let result = execute_check_runner(runner, checks.clone(), DIAGNOSTICS_REQUEST_TIMEOUT);
             let Ok(mut state) = host_state.lock() else { return; };
-            let results = checks.into_iter().map(|check| {
-                let result = state.check_overrides.get(&check).cloned().unwrap_or(DiagnosticsCheckResult { status: "unavailable".into(), detail: Some("host_check_not_configured".into()) });
-                (check, result)
-            }).collect::<BTreeMap<_, _>>();
             if let Some(operation) = state.operations.get_mut(&operation_for_thread) {
-                operation.status = "completed".into();
+                let (status, results) = match result {
+                    Ok(results) => ("completed", results),
+                    Err(error) => ("failed", check_error_results(&checks, error)),
+                };
+                operation.status = status.into();
                 operation.completed_at_ms = Some(diagnostics_now_ms());
                 operation.results = Some(results);
             }
@@ -1460,6 +1502,53 @@ impl DiagnosticsService {
             push_audit(&mut state.audit, event);
         }
     }
+}
+
+fn execute_check_runner(
+    runner: Option<DiagnosticsCheckRunner>,
+    checks: Vec<String>,
+    timeout: Duration,
+) -> Result<BTreeMap<String, DiagnosticsCheckResult>, DiagnosticsError> {
+    let Some(runner) = runner else {
+        return Ok(checks.into_iter().map(|check| (check, DiagnosticsCheckResult {
+            status: "unavailable".into(),
+            detail: Some("host_check_runner_not_configured".into()),
+        })).collect());
+    };
+    let (sender, receiver) = mpsc::channel();
+    let runner_checks = checks.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(runner(runner_checks));
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => normalize_check_results(result?, &checks),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(DiagnosticsError::Timeout),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(DiagnosticsError::Internal),
+    }
+}
+
+fn normalize_check_results(
+    results: BTreeMap<String, DiagnosticsCheckResult>,
+    checks: &[String],
+) -> Result<BTreeMap<String, DiagnosticsCheckResult>, DiagnosticsError> {
+    checks.iter().map(|check| {
+        let result = results.get(check).cloned().unwrap_or(DiagnosticsCheckResult {
+            status: "unavailable".into(),
+            detail: Some("host_check_result_missing".into()),
+        });
+        if !matches!(result.status.as_str(), "ok" | "error" | "unavailable" | "timeout") || result.detail.as_ref().is_some_and(|detail| detail.len() > MAX_DIAGNOSTICS_STRING_BYTES) {
+            return Err(DiagnosticsError::InvalidParams);
+        }
+        Ok((check.clone(), result))
+    }).collect()
+}
+
+fn check_error_results(checks: &[String], error: DiagnosticsError) -> BTreeMap<String, DiagnosticsCheckResult> {
+    let status = if error == DiagnosticsError::Timeout { "timeout" } else { "error" };
+    checks.iter().cloned().map(|check| (check, DiagnosticsCheckResult {
+        status: status.into(),
+        detail: Some(error.code().as_str().into()),
+    })).collect()
 }
 
 fn valid_check_name(value: &str) -> bool {
@@ -1703,7 +1792,6 @@ fn tool_schema(name: &str) -> Value {
         schema["properties"] = serde_json::json!({
             "checks": { "type": "array", "maxItems": 16, "items": { "type": "string", "enum": ["listener", "tls", "pin", "database", "ipc"] } },
         });
-        schema["required"] = serde_json::json!(["checks"]);
     }
     if name == "sync.get_trace" {
         schema["properties"] = serde_json::json!({ "limit": { "type": "integer", "minimum": 1, "maximum": 200 } });
@@ -1830,7 +1918,7 @@ mod tests {
         writeln!(log, "1700000002000 {{\"access_token\":\"json-secret\"}}").unwrap();
         host.set_log_path("panel", log.path()).unwrap();
         host.record_trace(DiagnosticsTraceEvent { at_ms: clock(), event: "sync.connected".into(), outcome: "ok".into(), duration_ms: Some(3) }).unwrap();
-        host.set_check_result("database", DiagnosticsCheckResult { status: "ok".into(), detail: None }).unwrap();
+        host.set_check_runner(|checks| Ok(checks.into_iter().map(|check| (check, DiagnosticsCheckResult { status: "ok".into(), detail: None })).collect())).unwrap();
         let service = DiagnosticsService::new_with_host(store.primary_id(), host).unwrap();
         let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
         let session = service.handle_request(&store, &request(&grant, &identity, None, "initialize", json!({}), "host-init"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap().result.unwrap()["sessionId"].as_str().unwrap().to_string();
@@ -1849,9 +1937,106 @@ mod tests {
         let started = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/call", json!({"name":"diagnostics.run_check","arguments":{"checks":["database","tls"]}}), "host-check"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
         let operation_id = started.result.unwrap()["structuredContent"]["operation_id"].as_str().unwrap().to_string();
         std::thread::sleep(Duration::from_millis(5));
-        let operation = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({"name":"diagnostics.get_operation","arguments":{"operation_id":operation_id}}), "host-operation"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let operation = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/call", json!({"name":"diagnostics.get_operation","arguments":{"operation_id":operation_id}}), "host-operation"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
         let operation = &operation.result.unwrap()["structuredContent"];
         assert!(matches!(operation["status"].as_str(), Some("queued") | Some("completed")));
+
+        let started = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({
+            "name": "diagnostics.run_check", "arguments": {}
+        }), "host-check-all"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let started_result = started.result.unwrap();
+        let checks = started_result["structuredContent"]["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 5);
+    }
+
+    #[test]
+    fn check_runner_propagates_results_errors_and_timeouts() {
+        let runner: DiagnosticsCheckRunner = Arc::new(|checks| {
+            Ok(checks.into_iter().map(|check| (check, DiagnosticsCheckResult {
+                status: "ok".into(),
+                detail: Some("probe_completed".into()),
+            })).collect())
+        });
+        let results = execute_check_runner(Some(runner), vec!["listener".into(), "tls".into()], Duration::from_millis(50)).unwrap();
+        assert_eq!(results["listener"].status, "ok");
+        assert_eq!(results["tls"].detail.as_deref(), Some("probe_completed"));
+
+        let invalid_runner: DiagnosticsCheckRunner = Arc::new(|_| Ok(BTreeMap::from([("listener".into(), DiagnosticsCheckResult {
+            status: "pretend".into(), detail: None,
+        })])));
+        assert_eq!(execute_check_runner(Some(invalid_runner), vec!["listener".into()], Duration::from_millis(50)).unwrap_err(), DiagnosticsError::InvalidParams);
+
+        let error_runner: DiagnosticsCheckRunner = Arc::new(|_| Err(DiagnosticsError::Stopped));
+        let error = execute_check_runner(Some(error_runner), vec!["database".into()], Duration::from_millis(50)).unwrap_err();
+        assert_eq!(error, DiagnosticsError::Stopped);
+        assert_eq!(check_error_results(&["database".into()], error)["database"].status, "error");
+
+        let timeout_runner: DiagnosticsCheckRunner = Arc::new(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(BTreeMap::new())
+        });
+        let timeout = execute_check_runner(Some(timeout_runner), vec!["ipc".into()], Duration::from_millis(1)).unwrap_err();
+        assert_eq!(timeout, DiagnosticsError::Timeout);
+
+        let unavailable = execute_check_runner(None, vec!["pin".into()], Duration::from_millis(1)).unwrap();
+        assert_eq!(unavailable["pin"].status, "unavailable");
+        assert_eq!(unavailable["pin"].detail.as_deref(), Some("host_check_runner_not_configured"));
+    }
+
+    #[test]
+    fn async_check_operation_publishes_final_runner_result() {
+        let (store, identity) = paired_store();
+        let host = DiagnosticsHost::default();
+        host.set_check_runner(|checks| Ok(checks.into_iter().map(|check| (check, DiagnosticsCheckResult {
+            status: "ok".into(),
+            detail: Some("real_runner".into()),
+        })).collect())).unwrap();
+        let service = DiagnosticsService::new_with_host(store.primary_id(), host.clone()).unwrap();
+        let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
+        let init = service.handle_request(&store, &request(&grant, &identity, None, "initialize", json!({}), "runner-init"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let session = init.result.unwrap()["sessionId"].as_str().unwrap().to_string();
+        let started = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({
+            "name": "diagnostics.run_check", "arguments": { "checks": ["listener", "tls"] }
+        }), "runner-check"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let operation_id = started.result.unwrap()["structuredContent"]["operation_id"].as_str().unwrap().to_string();
+
+        for _ in 0..100 {
+            let done = host.state.lock().unwrap().operations.get(&operation_id).is_some_and(|operation| operation.status != "queued");
+            if done { break; }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let operation = host.state.lock().unwrap().operations.get(&operation_id).cloned().unwrap();
+        assert_eq!(operation.status, "completed");
+        assert!(operation.completed_at_ms.is_some());
+        assert_eq!(operation.results.as_ref().unwrap()["listener"].status, "ok");
+        assert_eq!(operation.results.as_ref().unwrap()["tls"].detail.as_deref(), Some("real_runner"));
+    }
+
+    #[test]
+    fn stopped_diagnostics_service_rejects_pending_operation_and_restart_has_fresh_host() {
+        let (store, identity) = paired_store();
+        let host = DiagnosticsHost::default();
+        host.set_check_runner(|_| {
+            std::thread::sleep(Duration::from_millis(25));
+            Ok(BTreeMap::new())
+        }).unwrap();
+        let service = DiagnosticsService::new_with_host(store.primary_id(), host.clone()).unwrap();
+        let grant = service.issue_grant(&store, &identity.device_id, &[DiagnosticsScope::Read], clock(), 10_000).unwrap();
+        let init = service.handle_request(&store, &request(&grant, &identity, None, "initialize", json!({}), "stop-init"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        let session = init.result.unwrap()["sessionId"].as_str().unwrap().to_string();
+        let _started = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/call", json!({
+            "name": "diagnostics.run_check", "arguments": { "checks": ["database"] }
+        }), "stop-check"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
+        service.stop();
+        let stopped = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({
+            "name": "diagnostics.get_operation", "arguments": { "operation_id": "missing" }
+        }), "stop-read"), clock(), Instant::now() + Duration::from_secs(1)).unwrap_err();
+        assert_eq!(stopped, DiagnosticsError::Stopped);
+
+        let fresh_host = DiagnosticsHost::default();
+        assert!(fresh_host.state.lock().unwrap().check_runner.is_none());
+        let fresh = execute_check_runner(None, vec!["database".into()], Duration::from_millis(1)).unwrap();
+        assert_eq!(fresh["database"].status, "unavailable");
     }
 
     #[test]
