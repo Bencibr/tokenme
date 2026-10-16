@@ -847,7 +847,7 @@ export function QuotaStrip({
                     )}
                     <span className="quota-reset num">{resetNode}</span>
                     </div>
-                    {showCycleTokens && cycle && (cycle.observed_tokens > 0 || cycle.estimated_tokens != null) ? (
+                    {showCycleTokens && cycle && (cycle.observed_tokens > 0 || cycle.estimated_tokens != null || !hideUnusedEstimation) ? (
                       <div className="quota-cycle" role="status">
                         <span>{t("quota.cycle.observed", { tokens: formatCycleTokens(cycle.observed_tokens) })}</span>
                         {cycle.estimated_tokens != null ? (
