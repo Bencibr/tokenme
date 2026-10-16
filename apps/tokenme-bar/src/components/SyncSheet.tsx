@@ -515,6 +515,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               {!discovering && !snapshot.discovered_primaries.length ? (
                 <div className="sync-crumb">
                   <span>{t("sync.discovery.none")}</span>
+                  <button type="button" className="sync-back" disabled={commandBusy} onClick={() => void discover()}>{t("sync.discovery.rescan")}</button>
+                  <span>{t("sync.discovery.or")}</span>
                   <button type="button" className="sync-back" onClick={() => setScreen("diagnostics")}>{t("sync.discovery.diag_link")}</button>
                   <span>{t("sync.discovery.diag_tail")}</span>
                 </div>
