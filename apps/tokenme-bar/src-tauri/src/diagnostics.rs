@@ -6,8 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::Read;
-use std::sync::Mutex;
+use std::io::{Read, Write};
+use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -38,6 +40,23 @@ pub const CODE_GRANT_FAILED: &str = "grant_failed";
 const MAX_SESSION_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_PARAMS_BYTES: usize = 32 * 1024;
 const MAX_OPERATION_HISTORY: usize = 64;
+const LOCAL_MCP_PATH: &str = "/mcp";
+const LOCAL_MCP_PORT: u16 = 47822;
+const LOCAL_MCP_MAX_HEADER_BYTES: usize = 64 * 1024;
+const LOCAL_MCP_MAX_BODY_BYTES: usize = 256 * 1024;
+
+fn infer_local_lan_host() -> Result<String, String> {
+    // Connecting a UDP socket only asks the OS which interface it would use;
+    // it does not send a packet.  Prefer IPv4 because the listener below is
+    // deliberately IPv4 and this is the address other LAN clients can paste.
+    let socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(|error| format!("无法读取局域网地址: {error}"))?;
+    socket.connect(("8.8.8.8", 80)).map_err(|error| format!("无法确定局域网地址: {error}"))?;
+    let address = socket.local_addr().map_err(|error| format!("无法读取局域网地址: {error}"))?.ip();
+    match address {
+        IpAddr::V4(address) if !address.is_loopback() && !address.is_unspecified() => Ok(address.to_string()),
+        _ => Err("无法确定可供局域网访问的 IPv4 地址；请先连接 Wi‑Fi 或以太网后再开启 MCP".into()),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DiagnosticsError {
@@ -193,12 +212,59 @@ struct Inner {
     last_operation: Option<DiagnosticsOperationView>,
 }
 
+#[derive(Debug)]
+struct LocalMcpHttpServer {
+    endpoint: String,
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
 #[derive(Debug, Default)]
 pub struct DiagnosticsState {
     inner: Mutex<Inner>,
+    local_http: Mutex<Option<LocalMcpHttpServer>>,
 }
 
 impl DiagnosticsState {
+    pub(crate) fn local_http_endpoint(&self) -> Option<String> {
+        self.local_http.lock().ok().and_then(|server| server.as_ref().map(|server| server.endpoint.clone()))
+    }
+
+    pub(crate) fn start_local_http(&self, app: &AppHandle) -> Result<String, String> {
+        let mut current = self.local_http.lock().map_err(|_| "MCP HTTP 服务状态被占用".to_string())?;
+        if let Some(server) = current.as_ref() {
+            return Ok(server.endpoint.clone());
+        }
+        let host = infer_local_lan_host()?;
+        // Keep the documented port stable when possible.  If another process
+        // owns it, ask the OS for an ephemeral port and advertise that actual
+        // port in the generated MCP configuration.
+        let listener = TcpListener::bind(("0.0.0.0", LOCAL_MCP_PORT))
+            .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))
+            .map_err(|error| format!("无法启动局域网 MCP HTTP 服务: {error}"))?;
+        listener.set_nonblocking(true).map_err(|error| format!("无法配置局域网 MCP HTTP 服务: {error}"))?;
+        let port = listener.local_addr().map_err(|error| format!("无法读取局域网 MCP HTTP 端口: {error}"))?.port();
+        let endpoint = format!("http://{host}:{port}{LOCAL_MCP_PATH}");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let app = app.clone();
+        let join = thread::Builder::new()
+            .name("tokenme-mcp-http".into())
+            .spawn(move || run_local_mcp_http(listener, app, thread_stop))
+            .map_err(|error| format!("无法启动局域网 MCP HTTP 服务线程: {error}"))?;
+        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), stop, join: Some(join) });
+        Ok(endpoint)
+    }
+
+    pub(crate) fn stop_local_http(&self) {
+        let server = self.local_http.lock().ok().and_then(|mut slot| slot.take());
+        let Some(mut server) = server else { return; };
+        server.stop.store(true, Ordering::Release);
+        if let Some(join) = server.join.take() {
+            let _ = join.join();
+        }
+    }
+
     pub fn status(&self) -> DiagnosticsStatus {
         let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         DiagnosticsStatus {
@@ -483,6 +549,173 @@ impl DiagnosticsState {
         serde_json::to_value(operation).map_err(|_| DiagnosticsError::new(CODE_HANDLER_FAILED, "diagnostics operation could not be encoded"))
     }
 }
+
+impl Drop for DiagnosticsState {
+    fn drop(&mut self) {
+        if let Ok(slot) = self.local_http.get_mut() {
+            if let Some(mut server) = slot.take() {
+                server.stop.store(true, Ordering::Release);
+                if let Some(join) = server.join.take() { let _ = join.join(); }
+            }
+        }
+    }
+}
+
+struct LocalHttpRequest {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+    session_id: Option<String>,
+}
+
+fn run_local_mcp_http(listener: TcpListener, app: AppHandle, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Acquire) {
+        match listener.accept() {
+            Ok((mut stream, _peer)) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+                if let Err(error) = handle_local_mcp_http(&mut stream, &app) {
+                    let body = serde_json::to_vec(&json_rpc_error(Value::Null, -32600, &error)).unwrap_or_else(|_| b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}".to_vec());
+                    let _ = write_local_http_response(&mut stream, 400, &body, None);
+                }
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                eprintln!("tokenme mcp http: listener stopped: {error}");
+                break;
+            }
+        }
+    }
+}
+
+fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), String> {
+    let request = read_local_http_request(stream)?;
+    if request.method == "OPTIONS" {
+        return write_local_http_response(stream, 204, &[], None);
+    }
+    if request.method != "POST" || request.path != LOCAL_MCP_PATH {
+        return write_local_http_response(stream, 404, br#"{"error":"MCP endpoint not found"}"#, None);
+    }
+    let value: Value = serde_json::from_slice(&request.body).map_err(|_| "invalid JSON-RPC request".to_string())?;
+    let object = value.as_object().ok_or_else(|| "invalid JSON-RPC request".to_string())?;
+    let id = object.get("id").cloned().unwrap_or(Value::Null);
+    let method = object.get("method").and_then(Value::as_str).ok_or_else(|| "invalid JSON-RPC method".to_string())?;
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(id, -32600, "JSON-RPC version must be 2.0")).unwrap_or_default(), request.session_id.as_deref());
+    }
+    if method != "notifications/initialized" && !matches!(object.get("id"), Some(Value::String(_) | Value::Number(_))) {
+        return write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(Value::Null, -32600, "JSON-RPC request id is required")).unwrap_or_default(), request.session_id.as_deref());
+    }
+    let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+    let state = app.state::<DiagnosticsState>();
+    let mut response_session = request.session_id.clone();
+    let response = match method {
+        "initialize" => {
+            if request.session_id.is_some() {
+                Err("initialize must not include Mcp-Session-Id".to_string())
+            } else {
+                let session = state.create_session_for_panel(
+                    "local-http".into(),
+                    "mcp-http".into(),
+                    vec!["diagnostics.read".into(), "sync.control".into()],
+                    MAX_SESSION_TTL_MS,
+                ).map_err(|error| error.to_string())?;
+                response_session = Some(session.session_id.clone());
+                Ok(json_rpc_result(id.clone(), json!({
+                    "protocolVersion": usage_device_sync::DIAGNOSTICS_PROTOCOL_VERSION,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": { "name": "tokenme-diagnostics", "version": env!("CARGO_PKG_VERSION") },
+                    "sessionId": session.session_id,
+                })))
+            }
+        }
+        "notifications/initialized" => return write_local_http_response(stream, 202, &[], request.session_id.as_deref()),
+        "ping" => Ok(json_rpc_result(id.clone(), json!({}))),
+        "tools/list" => {
+            if request.session_id.is_none() { Err("Mcp-Session-Id is required; initialize first".to_string()) }
+            else { Ok(json_rpc_result(id.clone(), json!({ "tools": usage_device_sync::diagnostics_tool_registry() }))) }
+        }
+        "tools/call" => {
+            let session_id = request.session_id.clone().ok_or_else(|| "Mcp-Session-Id is required; initialize first".to_string())?;
+            let params = params.as_object().ok_or_else(|| "tools/call params must be an object".to_string())?;
+            let tool = params.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).ok_or_else(|| "tools/call requires a tool name".to_string())?;
+            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let request_id = object.get("id").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| format!("mcp-http-{:032x}", rand::rng().random::<u128>()));
+            let tool_request = ToolRequest {
+                session_id,
+                request_id,
+                origin: "mcp-http".into(),
+                target_device: None,
+                tool: tool.into(),
+                params: arguments,
+            };
+            let result = tauri::async_runtime::block_on(call_tool(app.clone(), tool_request)).map_err(|error| error.to_string())?;
+            let text = serde_json::to_string(&result.result).map_err(|_| "MCP tool result could not be encoded".to_string())?;
+            Ok(json_rpc_result(id.clone(), json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": result.result,
+            })))
+        }
+        _ => Err(format!("unsupported MCP method: {method}")),
+    };
+    match response {
+        Ok(response) => write_local_http_response(stream, 200, &serde_json::to_vec(&response).map_err(|_| "MCP response could not be encoded".to_string())?, response_session.as_deref()),
+        Err(error) => write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(id.clone(), -32602, &error)).unwrap_or_default(), response_session.as_deref()),
+    }
+}
+
+fn read_local_http_request(stream: &mut TcpStream) -> Result<LocalHttpRequest, String> {
+    let mut bytes = Vec::with_capacity(4096);
+    let header_end = loop {
+        if bytes.len() > LOCAL_MCP_MAX_HEADER_BYTES { return Err("MCP HTTP headers exceed the size limit".into()); }
+        let mut chunk = [0u8; 4096];
+        let read = stream.read(&mut chunk).map_err(|error| format!("MCP HTTP read failed: {error}"))?;
+        if read == 0 { return Err("MCP HTTP request ended before headers".into()); }
+        bytes.extend_from_slice(&chunk[..read]);
+        if let Some(offset) = bytes.windows(4).position(|window| window == b"\r\n\r\n") { break offset + 4; }
+    };
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut parsed = httparse::Request::new(&mut headers);
+    let status = parsed.parse(&bytes[..header_end]).map_err(|_| "invalid MCP HTTP headers".to_string())?;
+    let httparse::Status::Complete(_) = status else { return Err("incomplete MCP HTTP headers".into()); };
+    let method = parsed.method.ok_or_else(|| "MCP HTTP method is missing".to_string())?.to_string();
+    let path = parsed.path.ok_or_else(|| "MCP HTTP path is missing".to_string())?.to_string();
+    let mut content_length = 0usize;
+    let mut session_id = None;
+    for header in parsed.headers.iter() {
+        if header.name.eq_ignore_ascii_case("content-length") {
+            content_length = std::str::from_utf8(header.value).ok().and_then(|value| value.trim().parse().ok()).ok_or_else(|| "invalid MCP HTTP content length".to_string())?;
+        } else if header.name.eq_ignore_ascii_case("mcp-session-id") {
+            session_id = Some(std::str::from_utf8(header.value).map_err(|_| "invalid MCP session header".to_string())?.trim().to_string());
+        }
+    }
+    if content_length > LOCAL_MCP_MAX_BODY_BYTES { return Err("MCP HTTP body exceeds the size limit".into()); }
+    let mut body = bytes[header_end..].to_vec();
+    if body.len() > content_length { body.truncate(content_length); }
+    while body.len() < content_length {
+        let remaining = content_length - body.len();
+        let mut chunk = vec![0u8; remaining.min(16 * 1024)];
+        let read = stream.read(&mut chunk).map_err(|error| format!("MCP HTTP body read failed: {error}"))?;
+        if read == 0 { return Err("MCP HTTP body ended early".into()); }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    Ok(LocalHttpRequest { method, path, body, session_id })
+}
+
+fn write_local_http_response(stream: &mut TcpStream, status: u16, body: &[u8], session_id: Option<&str>) -> Result<(), String> {
+    let reason = match status { 200 => "OK", 202 => "Accepted", 204 => "No Content", 400 => "Bad Request", 404 => "Not Found", _ => "Error" };
+    let content_type = if body.is_empty() { "text/plain; charset=utf-8" } else { "application/json" };
+    let mut head = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    if let Some(session_id) = session_id { head.push_str(&format!("Mcp-Session-Id: {session_id}\r\n")); }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).map_err(|error| format!("MCP HTTP response failed: {error}"))?;
+    stream.write_all(body).map_err(|error| format!("MCP HTTP response failed: {error}"))?;
+    stream.flush().map_err(|error| format!("MCP HTTP response failed: {error}"))
+}
+
+fn json_rpc_result(id: Value, result: Value) -> Value { json!({ "jsonrpc": "2.0", "id": id, "result": result }) }
+fn json_rpc_error(id: Value, code: i32, message: &str) -> Value { json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }) }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolRequest {
@@ -917,6 +1150,7 @@ fn diagnostics_action_name(request: &DiagnosticsManagementRequest) -> &'static s
 /// failure and offer a retry without losing the audit trail.
 #[tauri::command]
 pub fn diagnostics_session(
+    app: AppHandle,
     request: DiagnosticsManagementRequest,
     state: State<'_, DiagnosticsState>,
     control: State<'_, SyncControl>,
@@ -936,13 +1170,16 @@ pub fn diagnostics_session(
     let outcome = match request {
         DiagnosticsManagementRequest::Configure { enabled } => {
             if enabled {
-                // Enabling diagnostics without a live primary would leave a
-                // misleading "ready" state with no authority to issue grants.
-                if commands::primary_diagnostics_context(&control).is_err() {
-                    Err(primary_unavailable())
-                } else {
-                    state.set_enabled(true);
-                    Ok(None::<DiagnosticsConfig>)
+                // This is the local MCP switch. It belongs to the current
+                // app process, so it must not depend on whether sync happens
+                // to be primary or secondary. The primary-role check applies
+                // only to cross-device grant issuance below.
+                match state.start_local_http(&app) {
+                    Ok(_) => {
+                        state.set_enabled(true);
+                        Ok(None::<DiagnosticsConfig>)
+                    }
+                    Err(_) => Err(DiagnosticsError::new(CODE_HANDLER_FAILED, "local MCP HTTP service could not start")),
                 }
             } else {
                 if let Ok(context) = commands::primary_diagnostics_context(&control) {
@@ -950,6 +1187,7 @@ pub fn diagnostics_session(
                 }
                 state.revoke_all();
                 state.set_enabled(false);
+                state.stop_local_http();
                 Ok(None::<DiagnosticsConfig>)
             }
         }

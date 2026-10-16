@@ -75,6 +75,7 @@ pub fn run() {
             commands::set_show_empty_tools,
             commands::set_report_scope,
             commands::sync_devices,
+            commands::get_mcp_client_config,
             diagnostics::set_diagnostics_enabled,
             diagnostics::get_diagnostics_status,
             diagnostics::revoke_diagnostics_sessions,
@@ -193,6 +194,7 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                 if let Some(state) = app.try_state::<diagnostics::DiagnosticsState>() {
                     state.revoke_all();
+                    state.stop_local_http();
                 }
             }
         })

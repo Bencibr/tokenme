@@ -5,7 +5,7 @@ import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
 import { DEFAULT_PET_PREFERENCES } from "./petCompanion";
 import type { PetNotice, PetPreferences, PetResponse } from "./petCompanion";
-import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot, SyncDevicesSnapshot, SyncManagementRequest, DiagnosticsManagementRequest, DiagnosticsResponse } from "../types";
+import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot, SyncDevicesSnapshot, SyncManagementRequest, DiagnosticsManagementRequest, DiagnosticsResponse, McpClientConfig } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -174,6 +174,18 @@ export const bridge: Bridge = {
         : { enabled: false, sessions: [], retained_operations: 0, last_operation: null, error: { code: "preview_only", message: "Remote diagnostics is available in the TokenMe app." } };
     }
     return invoke<DiagnosticsResponse>("diagnostics_session", { request });
+  },
+
+  async mcpClientConfig(): Promise<McpClientConfig> {
+    if (!inTauri) {
+      return {
+        config_json: "",
+        endpoint: null,
+        ready: false,
+        reason: "MCP HTTP 配置只会在 TokenMe 桌面应用中生成",
+      };
+    }
+    return invoke<McpClientConfig>("get_mcp_client_config");
   },
 
   /**

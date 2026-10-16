@@ -2692,6 +2692,33 @@
   font-size: var(--t-meta);
 }
 
+.sheet-mcp-json {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 132px;
+  max-height: 220px;
+  padding: 8px;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-sm);
+  background: var(--surface-1);
+  color: var(--ink-2);
+  font: var(--t-meta) var(--mono);
+  line-height: 1.45;
+  resize: vertical;
+  white-space: pre;
+  overflow: auto;
+}
+
+.sheet-mcp-json:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.sheet-mcp-config > .sheet-action {
+  justify-self: start;
+}
+
 .seg-wide {
   display: flex;
   width: 100%;
@@ -3422,6 +3449,17 @@
   color: var(--ink-2);
   font-size: var(--t-meta);
   font-weight: 600;
+}
+
+.sync-diagnostics-settings > .sync-diagnostics-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sync-diagnostics-settings > .sync-diagnostics-label .btn-quiet {
+  flex: none;
 }
 
 .sync-diagnostics-scope-grid {

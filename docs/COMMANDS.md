@@ -163,15 +163,31 @@ tokenme import bundle.jsonl.gz --dry-run   # 解析 + 合并 + 对账，然后�
 `sync pair --invite '<完整 tokenme://device-pair 邀请>'` 是从设备的首选入口。它在证书 pin 校验成功后发送配对请求，并把 endpoint、server name、证书、pin、主设备绑定和本地 identity 路径保存到用户数据目录；普通用户不需要填写 stream 或 generation。批准后，`sync run` 在前台运行唯一的 secondary runtime：每轮先摄取本机事件，再按本机 origin 生成稳定快照，在同一 SQLite 事务中分配 generation/payload revision、写 journal 和不可变 outbox，最后通过 pinned TLS 1.3 上传并 ACK。
 
 ```bash
-tokenme sync run       # Ubuntu/Linux 用户级常驻入口；前台运行，可由 systemd --user 监督
+tokenme sync run       # Ubuntu/Linux/Windows 用户级常驻入口；前台运行，可由 systemd --user 监督
 tokenme sync status    # 查看设备、stream/epoch、运行状态、待传量、最后连接和错误
-tokenme sync stop      # 通过用户私有 Unix socket 请求停止，不删除配置或待传 outbox
+tokenme sync stop      # 通过用户私有本地控制通道请求停止，不删除配置或待传 outbox
 ```
 
-`sync stop` 使用用户数据目录下 `device-sync/secondary-runtime.sock`，目录为 `0700`、socket 为 `0600`；它不是 loopback TCP 控制面。运行时异常退出会回收 socket，待传包仍保留，下一次显式 `sync run` 或面板恢复可以继续。当前 macOS/Unix 路径已测试；Windows named pipe ACL 仍未在本机验证。
+`sync stop/status` 使用用户私有本地控制通道：macOS/Linux 是 `device-sync/secondary-runtime.sock`（目录 `0700`、socket `0600`），Windows 是按数据库路径派生的 named pipe，并设置为当前用户 SID 的 DACL 且拒绝远程客户端；两者都不是 loopback TCP 控制面。运行时异常退出会回收控制通道，待传包仍保留，下一次显式 `sync run` 或面板恢复可以继续。Windows 的 named pipe 已通过本机长驻启动、延迟连接、`status`、`stop` 和 CLI 集成测试；跨用户拒绝仍需第二个 Windows 账号实测。
 
 Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请生成、二维码文件保存、从端二维码识别或粘贴邀请/配对、批准/拒绝、暂停/恢复/撤销/解除配对，以及从端后台 runtime 启停。主端停止后可以直接识别新邀请切换为从端；从端停止后可以配置监听地址直接切换为主端。切换会隔离旧 trust、stream、receipt 和待传包，但保留本机用量历史。跨设备监听还需要填写对外地址；面板会拒绝把回环或未指定地址写进邀请。主端启动使用用户私有目录自动保存 identity 与证书；从端配对配置会在 Panel 重启后按 `enabled` 状态恢复，显式停止会持久化为 disabled。`sync run/stop/status` 是 Ubuntu 等无面板机器的同一 runtime 入口。
 主端开启允许局域网后还会发布 `_tokenme-sync._tcp.local.` mDNS 候选；扫描只展示 endpoint、设备 ID 和证书 pin，不广播 invite secret。面板点击候选的“一键配对”会先用 pin 校验的 TLS 请求 5 分钟一次性邀请，再发送签名请求并等待主端批准；扫描或发布遇到本地网络权限、UDP 5353、监听端口错误时会在面板提示并保留二维码/完整邀请回退。停止主端会注销广播，重启只恢复持久化为 enabled 的角色。
+
+## Panel LAN MCP over HTTP
+
+打开 Panel 的“设置 → 高级 → MCP 诊断服务”后，TokenMe 会监听局域网接口并启动标准 MCP HTTP endpoint。面板会自动探测本机局域网 IPv4，并显示可复制的配置，例如：
+
+```json
+{
+  "mcpServers": {
+    "tokenme": {
+      "url": "http://192.168.1.20:<port>/mcp"
+    }
+  }
+}
+```
+
+把这段 JSON 粘贴到同一局域网内另一台电脑上的 Claude、Cursor、Cline 或其他 MCP 客户端即可连接；如果默认端口 `47822` 已被占用，TokenMe 会自动切换到空闲端口，并把实际端口写进配置。关闭开关会停止 endpoint 并撤销 MCP 会话。Windows 防火墙若拦截入站连接，需要允许 TokenMe 使用配置中显示的 TCP 端口。
 
 ## diagnostics-stdio
 
@@ -179,7 +195,7 @@ Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请�
 tokenme --db ~/.local/share/tokenme/index.db diagnostics-stdio
 ```
 
-启动本机远程诊断 MCP 的 newline-delimited JSON-RPC stdio host。命令只从 `--db` 读取已有的 device-sync identity，不摄取日志、不启动监听端口；stdin/stdout 仅用于诊断协议响应，运行错误写入 stderr。每次启动都会创建新的进程级诊断 authority，旧进程签发的 grant 不会跨重启继续有效。没有已初始化的 device-sync 数据库时命令会失败并给出配对/启动提示。
+启动本机诊断 MCP 的 newline-delimited JSON-RPC stdio host。没有 `--diagnostics-config` 时，命令直接接受 Claude/Cursor/Cline 等客户端的标准 MCP JSON-RPC，不要求额外 grant，不摄取日志、不启动监听端口；stdin/stdout 仅用于诊断协议响应，运行错误写入 stderr。数据库没有 device-sync identity 时会使用本机专用的 `local-mcp` store 标识，仍只暴露固定诊断工具。
 
 Panel 导出的诊断 grant 可以作为真正的远端 bridge 配置传入：
 
@@ -189,7 +205,7 @@ tokenme --db ~/.local/share/tokenme/index.db \
   diagnostics-stdio
 ```
 
-该模式从当前 `--db` 的 paired secondary identity 加载 debugger 私钥，逐行为 `initialize`、`tools/list`、`tools/call` 和通知请求签名，并通过证书 DER、SHA-256 pin 和 HTTPS/TLS 1.3 透传到 primary 的 `/diagnostics/mcp`。配置中的 `server_name` 可选；旧版 Panel 配置缺少它时从 HTTPS endpoint 的 host 推导。没有配置文件时命令仍保持本机 fail-closed host，不会自动连接任何远端。
+该模式从当前 `--db` 的 paired secondary identity 加载 debugger 私钥，逐行为 `initialize`、`tools/list`、`tools/call` 和通知请求签名，并通过证书 DER、SHA-256 pin 和 HTTPS/TLS 1.3 透传到 primary 的 `/diagnostics/mcp`。配置中的 `server_name` 可选；旧版 Panel 配置缺少它时从 HTTPS endpoint 的 host 推导。没有配置文件时不会自动连接任何远端。
 
 ## sync upload
 

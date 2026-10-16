@@ -968,6 +968,100 @@ impl DiagnosticsService {
         }
     }
 
+    /// Serve a local stdio MCP client using the standard JSON-RPC wire shape.
+    /// The local process is the access boundary: it is spawned by the user's
+    /// MCP client and never listens on a socket. Remote HTTPS grant/signature
+    /// checks remain in `serve_stdio` and the bridge mode.
+    pub fn serve_local_stdio<R: BufRead, W: Write>(
+        &self,
+        store: &SyncStore,
+        reader: &mut R,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let mut session_id = None;
+        loop {
+            let mut line = Vec::new();
+            let read = reader.read_until(b'\n', &mut line)?;
+            if read == 0 { return Ok(()); }
+            if line.len() > MAX_DIAGNOSTICS_BODY_BYTES {
+                write_stdio_response(writer, DiagnosticsError::Limit.rpc_response(None))?;
+                continue;
+            }
+            if line.last() == Some(&b'\n') { line.pop(); }
+            if line.last() == Some(&b'\r') { line.pop(); }
+            if line.iter().all(u8::is_ascii_whitespace) { continue; }
+            let response = match self.handle_local_json(store, &line, diagnostics_now_ms(), Instant::now() + DIAGNOSTICS_REQUEST_TIMEOUT, &mut session_id) {
+                Ok(Some(response)) => response,
+                Ok(None) => continue,
+                Err(error) => error.rpc_response(json_request_id(&line)),
+            };
+            write_stdio_response(writer, response)?;
+        }
+    }
+
+    fn handle_local_json(
+        &self,
+        store: &SyncStore,
+        body: &[u8],
+        now_ms: i64,
+        deadline: Instant,
+        session_id: &mut Option<String>,
+    ) -> Result<Option<DiagnosticsMcpResponse>, DiagnosticsError> {
+        if body.len() > MAX_DIAGNOSTICS_BODY_BYTES { return Err(DiagnosticsError::Limit); }
+        if Instant::now() >= deadline { return Err(DiagnosticsError::Timeout); }
+        let value: Value = serde_json::from_slice(body).map_err(|_| DiagnosticsError::InvalidRequest)?;
+        let object = value.as_object().ok_or(DiagnosticsError::InvalidRequest)?;
+        let jsonrpc = object.get("jsonrpc").and_then(Value::as_str).ok_or(DiagnosticsError::InvalidRequest)?;
+        let method = object.get("method").and_then(Value::as_str).ok_or(DiagnosticsError::InvalidRequest)?;
+        let id = object.get("id").cloned();
+        if jsonrpc != "2.0" || method.is_empty() || method.len() > MAX_DIAGNOSTICS_STRING_BYTES { return Err(DiagnosticsError::InvalidRequest); }
+        if method != "notifications/initialized" && !valid_jsonrpc_id(id.as_ref()) { return Err(DiagnosticsError::InvalidRequest); }
+        let params = object.get("params").cloned().unwrap_or_else(empty_object);
+        validate_json_limits(&params, 0)?;
+        if canonical_json(&params).len() > MAX_DIAGNOSTICS_PARAMS_BYTES { return Err(DiagnosticsError::Limit); }
+        if Instant::now() >= deadline { return Err(DiagnosticsError::Timeout); }
+        match method {
+            "initialize" => {
+                if session_id.is_some() { return Err(DiagnosticsError::InvalidRequest); }
+                let mut random = [0u8; 16];
+                getrandom::fill(&mut random).map_err(|_| DiagnosticsError::Internal)?;
+                let next = format!("local-{}", hex(&random));
+                *session_id = Some(next.clone());
+                Ok(Some(success_response(id, serde_json::json!({
+                    "protocolVersion": DIAGNOSTICS_PROTOCOL_VERSION,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": { "name": "tokenme-diagnostics", "version": env!("CARGO_PKG_VERSION") },
+                    "sessionId": next,
+                }))))
+            }
+            "notifications/initialized" => Ok(None),
+            "ping" => Ok(Some(success_response(id, empty_object()))),
+            "tools/list" => {
+                if session_id.is_none() { return Err(DiagnosticsError::SessionExpired); }
+                Ok(Some(success_response(id, serde_json::json!({ "tools": diagnostics_tool_registry() }))))
+            }
+            "tools/call" => {
+                if session_id.is_none() { return Err(DiagnosticsError::SessionExpired); }
+                let Some((spec, arguments)) = tool_call_spec(&params)? else { return Err(DiagnosticsError::UnknownTool); };
+                let result = self.call_tool(store, spec, arguments, now_ms, deadline)?;
+                self.record_audit(DiagnosticsAuditEvent {
+                    event: "diagnostics.operation.completed".into(),
+                    request_id: id.as_ref().and_then(Value::as_str).map(str::to_owned),
+                    origin: Some("local-stdio".into()),
+                    scope: Some(spec.scope),
+                    result_code: "ok".into(),
+                    at_ms: now_ms,
+                });
+                let text = serde_json::to_string(&result).map_err(|_| DiagnosticsError::Internal)?;
+                Ok(Some(success_response(id, serde_json::json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": result,
+                }))))
+            }
+            _ => Err(DiagnosticsError::UnknownMethod),
+        }
+    }
+
     pub fn handle_request(
         &self,
         store: &SyncStore,
@@ -1742,6 +1836,28 @@ mod tests {
         assert_eq!(responses.len(), 2);
         assert!(responses[0].get("error").is_some());
         assert_eq!(responses[1]["result"]["serverInfo"]["name"], "tokenme-diagnostics");
+    }
+
+    #[test]
+    fn local_stdio_accepts_standard_mcp_jsonrpc_without_device_grant() {
+        let store = SyncStore::open_in_memory("local-mcp").unwrap();
+        let service = DiagnosticsService::new(store.primary_id()).unwrap();
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#, "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#, "\n",
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"device.get_build","arguments":{}}}"#, "\n",
+        );
+        let mut output = Vec::new();
+        service.serve_local_stdio(&store, &mut Cursor::new(input.as_bytes()), &mut output).unwrap();
+        let responses = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "tokenme-diagnostics");
+        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), TOOL_SPECS.len());
+        assert_eq!(responses[2]["result"]["structuredContent"]["available"], true);
     }
 
     #[test]

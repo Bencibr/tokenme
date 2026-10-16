@@ -85,6 +85,26 @@ fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
     }
 }
 
+fn sync_error_code(error: &str) -> &'static str {
+    if error.contains("non-loopback listen address") { "lan_loopback_bind" }
+    else if error.contains("advertise host") { "lan_missing_advertise_host" }
+    else if error.contains("cannot start sync listener") { "listener_start" }
+    else if error.contains("mDNS") { "mdns" }
+    else if error.contains("certificate") { "certificate" }
+    else { "request_failed" }
+}
+
+fn log_sync_action(action: &str, started: Instant, error: Option<&str>) {
+    if action == "snapshot" || action == "status" {
+        if error.is_none() { return; }
+    }
+    let message = match error {
+        Some(error) => format!("sync: action={action} total_ms={} outcome=error error_code={}", started.elapsed().as_millis(), sync_error_code(error)),
+        None => format!("sync: action={action} total_ms={} outcome=ok", started.elapsed().as_millis()),
+    };
+    if error.is_some() { crate::logging::error(&message); } else { crate::logging::info(&message); }
+}
+
 #[derive(Debug, Clone)]
 pub struct SyncControl {
     state: Arc<Mutex<SyncControlState>>,
@@ -291,6 +311,33 @@ fn sync_dir() -> Result<PathBuf, String> {
 
 fn sync_index_path() -> Result<PathBuf, String> {
     usage_index::Index::default_path().ok_or_else(|| "no platform data directory available".into())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpClientConfigView {
+    pub config_json: String,
+    pub endpoint: Option<String>,
+    pub ready: bool,
+    pub reason: Option<String>,
+}
+
+/// Build the standard HTTP `mcpServers` entry that can be pasted into another
+/// AI client's MCP settings. The endpoint is reachable on this machine's LAN
+/// and exists only while the MCP switch is enabled in this TokenMe process.
+#[tauri::command]
+pub fn get_mcp_client_config(state: State<'_, crate::diagnostics::DiagnosticsState>) -> Result<McpClientConfigView, String> {
+    let Some(endpoint) = state.local_http_endpoint() else {
+        return Ok(McpClientConfigView {
+            config_json: String::new(),
+            endpoint: None,
+            ready: false,
+            reason: Some("请先开启 MCP 诊断服务；开启后这里会生成 HTTP 配置".into()),
+        });
+    };
+    let config_json = serde_json::to_string_pretty(&json!({
+        "mcpServers": { "tokenme": { "url": endpoint } }
+    })).map_err(|error| format!("cannot encode MCP client config: {error}"))?;
+    Ok(McpClientConfigView { config_json, endpoint: Some(endpoint), ready: true, reason: None })
 }
 
 fn current_ms() -> i64 {
@@ -1314,6 +1361,7 @@ pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>
                 let error = Err("mDNS discovery is already running".into());
                 crate::logging::sync_event(action, false, Some("operation_busy"));
                 eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
+                log_sync_action(action, started, error.as_ref().err().map(String::as_str));
                 return error;
             }
             state.discovery_in_flight = true;
@@ -1332,6 +1380,7 @@ pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>
         })();
         crate::logging::sync_event(action, result.is_ok(), result.as_ref().err().map(|_| "handler_failed"));
         eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
+        log_sync_action(action, started, result.as_ref().err().map(String::as_str));
         return result;
     }
     let result = (|| {
@@ -1351,6 +1400,7 @@ pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>
         }
     }
     eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
+    log_sync_action(action, started, result.as_ref().err().map(String::as_str));
     result
 }
 
@@ -1364,9 +1414,11 @@ pub async fn get_report(app: AppHandle, force: bool) -> Result<Report, String> {
             let _ = channel.0.send(Msg::Refresh);
         }
     }
-    app.state::<Shared>()
-        .report()
-        .ok_or_else(|| "indexing".to_string())
+    let shared = app.state::<Shared>();
+    if let Some(error) = shared.startup_error() {
+        return Err(error);
+    }
+    shared.report().ok_or_else(|| "indexing".to_string())
 }
 
 /// The webview's detected UI language (system locale; the `?lang=` override
@@ -1977,7 +2029,7 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
 
 #[cfg(test)]
 mod sync_tests {
-    use super::{advertised_endpoint_host, merge_discovered_primary, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
+    use super::{advertised_endpoint_host, merge_discovered_primary, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
 
@@ -2040,6 +2092,13 @@ mod sync_tests {
         assert_eq!(sync_action_name(None), "snapshot");
         assert_eq!(sync_action_name(Some(&request)), "pair");
         assert_eq!(sync_action_name(Some(&SyncManagementRequest::Discover)), "discover");
+    }
+
+    #[test]
+    fn sync_error_codes_keep_lan_failures_actionable_without_logging_details() {
+        assert_eq!(sync_error_code("LAN/VPN access requires a non-loopback listen address"), "lan_loopback_bind");
+        assert_eq!(sync_error_code("a LAN/VPN listener needs an advertise host such as 192.168.1.20"), "lan_missing_advertise_host");
+        assert_eq!(sync_error_code("cannot start sync listener: address already in use"), "listener_start");
     }
 
     #[test]
