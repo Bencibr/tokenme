@@ -742,12 +742,13 @@ fn token_percent_is_trustworthy(tool: &str) -> bool {
 }
 
 /// Percent meters whose token-like reading is plausible but NOT vendor-verified
-/// (Cline's usage-limits endpoint is third-party-documented; its own clients
-/// never call it). They extrapolate under [`CycleStatus::Unverified`] — shown
+/// (Cline's usage-limits endpoint is third-party-documented and its own
+/// clients never call it; ZCode's percent has never been reconciled against a
+/// full window). They extrapolate under [`CycleStatus::Unverified`] — shown
 /// with a caveat — and only the identity guard is relaxed, because these
 /// stores are single-account so the "unknown" identity is stable.
 fn percent_is_unverified_token_like(tool: &str) -> bool {
-    tool == "cline"
+    matches!(tool, "cline" | "zcode")
 }
 
 /// Claude's weekly Sonnet/Opus rows are separate vendor buckets. Only apply a
@@ -1815,6 +1816,30 @@ mod golden {
         assert_eq!(cycle.models[0].model, "claude-sonnet-4-5");
         assert_eq!(cycle.models[0].tokens, 8_700_000.0);
         assert!(cycle.models[1].tokens > cycle.models[2].tokens, "heaviest first");
+    }
+
+    /// ZCode rides the same unverified tier — its percent has never been
+    /// reconciled, but 70M at 44% is exactly the magnitude a user wants.
+    #[test]
+    fn cycle_usage_estimates_zcode_as_unverified_too() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-zcode-unverified.jsonl"),
+            vec![ev("zcode", now - 10 * 60_000, "cycle", Some("glm"), None, counts(70_000_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'zcode'", []).unwrap();
+        let mut quotas = vec![QuotaView {
+            tool: "zcode".into(), used_percent: 44.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        }];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        let cycle = quotas[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.status, CycleStatus::Unverified);
+        let est = cycle.estimated_tokens.unwrap();
+        assert!((est - 159_090_909.09).abs() < 1.0, "70M at 44% → ≈159M, got {est}");
     }
 
     /// A tool in neither tier keeps the old behavior: the row stays with its
