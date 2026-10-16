@@ -130,7 +130,12 @@ impl Index {
             // verified identity instead of replacing it with `unknown` and
             // losing account-switch isolation while polling is disabled.
             let effective_identity = observed_identity.or(old_identity).unwrap_or("unknown");
-            let account_changed = old.as_ref().is_some_and(|s| observed_identity.is_some_and(|new| s.identity != new));
+            // "unknown" carries no identity, so landing on one is an upgrade
+            // (a probe that started setting ids), never an account switch —
+            // treating it as one would wipe a healthy accumulated cycle.
+            let account_changed = old.as_ref().is_some_and(|s| {
+                s.identity != "unknown" && observed_identity.is_some_and(|new| s.identity != new)
+            });
             // An explicit account change wins over timestamp ordering: a
             // delayed cache entry from the previous account must not repaint
             // the new account's cycle.
@@ -1751,6 +1756,30 @@ mod golden {
         idx.attach_cycle_usage(&mut quotas, now).unwrap();
         assert_eq!(quotas[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
         assert_eq!(quotas[0].cycle.as_ref().unwrap().estimated_tokens, None);
+    }
+
+    /// The mirror of the refusal above: a probe that names its account —
+    /// antigravity now carries the vendor's own bucket id — extrapolates
+    /// once the window is at least 5% spent.
+    #[test]
+    fn cycle_usage_extrapolates_when_the_account_identity_is_known() {
+        let now = now_fixture();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-antigravity-known.jsonl"),
+            vec![ev("antigravity", now - 10 * 60_000, "cycle", Some("gemini"), None, counts(1_000.0))],
+        );
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'antigravity'", []).unwrap();
+        let mut quotas = vec![QuotaView {
+            tool: "antigravity".into(), used_percent: 25.0, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms: now, label: Some("5 小时".into()),
+            id: Some("gemini-5h".into()), origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        }];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        let cycle = quotas[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.status, CycleStatus::Partial);
+        assert_eq!(cycle.estimated_tokens, Some(4_000.0), "1_000 tokens at 25% → 4_000");
     }
 
     /// Cline rides the unverified tier: the estimate fires at 1% with an

@@ -650,6 +650,10 @@ pub(crate) fn samples_from(value: &Value) -> Vec<QuotaSample> {
                     return None;
                 }
                 let window = str_field(bucket, &["window"]).unwrap_or_default();
+                // The vendor's own bucket id ("gemini-weekly") — a stable row
+                // identity, and the account identity the cycle estimator
+                // requires before it will extrapolate a limit.
+                let bucket_id = str_field(bucket, &["bucketId", "id"]);
                 let minutes = WINDOW_MINUTES.iter().find(|(k, _)| *k == window).map(|(_, m)| *m).unwrap_or(0);
                 Some(QuotaSample {
                     used_percent: (1.0 - remaining) * 100.0,
@@ -661,7 +665,7 @@ pub(crate) fn samples_from(value: &Value) -> Vec<QuotaSample> {
                         Some(n) if !n.is_empty() => format!("{} · {}", group_label(&name), short(&n, &window)),
                         _ => format!("{} · {window}", group_label(&name)),
                     }),
-                    id: None,
+                    id: bucket_id,
                 })
             })
             .collect();
