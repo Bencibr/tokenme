@@ -170,6 +170,265 @@ pub fn show(app: &AppHandle, rect: Option<Rect>) {
     show_window(&window, rect.or_else(|| tray::last_rect(app)));
 }
 
+/// A bounded image of TokenMe's own panel.  This deliberately lives beside
+/// the panel window code so diagnostics cannot accidentally capture the
+/// desktop or another process.
+pub(crate) struct PanelScreenshot {
+    pub mime_type: &'static str,
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Capture only the TokenMe panel.  The operating-system implementation is
+/// intentionally explicit: unsupported platforms return an error instead of
+/// claiming that a screenshot was taken.
+pub(crate) fn capture_panel(app: &AppHandle) -> Result<PanelScreenshot, String> {
+    let window = app.get_webview_window(LABEL).ok_or_else(|| "TokenMe panel is unavailable".to_string())?;
+    if !window.is_visible().unwrap_or(false) || is_panel_hidden() {
+        return Err("TokenMe panel is not visible".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return capture_panel_macos(&window);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return capture_panel_windows(&window);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window;
+        Err("panel screenshot is unsupported on Linux".into())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = window;
+        Err("panel screenshot is unsupported on this platform".into())
+    }
+}
+
+/// Send one bounded left click inside TokenMe's own panel. Coordinates are
+/// physical pixels relative to the captured panel image.
+pub(crate) fn click_panel(app: &AppHandle, x: f64, y: f64) -> Result<(), String> {
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return Err("panel click coordinates are invalid".into());
+    }
+    let window = app.get_webview_window(LABEL).ok_or_else(|| "TokenMe panel is unavailable".to_string())?;
+    if !window.is_visible().unwrap_or(false) || is_panel_hidden() {
+        return Err("TokenMe panel is not visible".into());
+    }
+    let size = window.outer_size().map_err(|error| format!("cannot read TokenMe panel bounds: {error}"))?;
+    if x >= f64::from(size.width) || y >= f64::from(size.height) {
+        return Err("panel click is outside TokenMe's panel bounds".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return click_panel_macos(&window, x, y);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return click_panel_windows(&window, x, y);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window;
+        Err("panel click is unsupported on Linux".into())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = window;
+        Err("panel click is unsupported on this platform".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn capture_panel_macos(window: &WebviewWindow) -> Result<PanelScreenshot, String> {
+    use std::fs;
+    use std::process::Command;
+    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::objc::{msg_send, sel, sel_impl};
+
+    let native = window.ns_window().map_err(|error| format!("cannot read TokenMe panel window: {error}"))?;
+    if native.is_null() {
+        return Err("TokenMe panel native window is unavailable".into());
+    }
+    let native: id = native.cast();
+    let window_number: i32 = unsafe { msg_send![native, windowNumber] };
+    if window_number <= 0 {
+        return Err("TokenMe panel window id is unavailable".into());
+    }
+    let directory = std::env::temp_dir().join(format!("tokenme-panel-{}-{}", std::process::id(), now_millis()));
+    fs::create_dir(&directory).map_err(|error| format!("cannot create private screenshot directory: {error}"))?;
+    let _ = fs::set_permissions(&directory, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let path = directory.join("panel.png");
+    let mut command = Command::new("/usr/sbin/screencapture");
+    command
+        .args(["-x", &format!("-l{window_number}"), "-t", "png"])
+        .arg(&path);
+    // The gate asks for the guard beside the spawn: a Windows build would
+    // flash a console for the child otherwise. Dead code on this side of
+    // the cfg, present so the same file builds clean on both.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("panel screenshot command unavailable: {error}"))?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait().map_err(|error| format!("panel screenshot command failed: {error}"))? {
+            Some(status) => break status,
+            None if started.elapsed() >= std::time::Duration::from_secs(2) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&directory);
+                return Err("macOS panel screenshot timed out".into());
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    if !status.success() {
+        let _ = fs::remove_dir_all(&directory);
+        return Err("macOS denied or failed to capture the TokenMe panel".into());
+    }
+    let data = match fs::read(&path) {
+        Ok(data) => data,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&directory);
+            return Err(format!("cannot read panel screenshot: {error}"));
+        }
+    };
+    let _ = fs::remove_dir_all(&directory);
+    let size = window.outer_size().map_err(|error| format!("cannot read TokenMe panel size: {error}"))?;
+    Ok(PanelScreenshot { mime_type: "image/png", data, width: size.width, height: size.height })
+}
+
+#[cfg(target_os = "macos")]
+fn click_panel_macos(window: &WebviewWindow, x: f64, y: f64) -> Result<(), String> {
+    let position = window.outer_position().map_err(|error| format!("cannot read TokenMe panel position: {error}"))?;
+    let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
+    let point = ((f64::from(position.x) + x) / scale, (f64::from(position.y) + y) / scale);
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct CGPoint { x: f64, y: f64 }
+    type Ref = *mut std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateMouseEvent(source: Ref, event_type: u32, point: CGPoint, button: u32) -> Ref;
+        fn CGEventPost(tap: u32, event: Ref);
+        fn CFRelease(value: Ref);
+    }
+    const LEFT: u32 = 0;
+    const MOUSE_DOWN: u32 = 1;
+    const MOUSE_UP: u32 = 2;
+    let point = CGPoint { x: point.0, y: point.1 };
+    unsafe {
+        let down = CGEventCreateMouseEvent(std::ptr::null_mut(), MOUSE_DOWN, point, LEFT);
+        let up = CGEventCreateMouseEvent(std::ptr::null_mut(), MOUSE_UP, point, LEFT);
+        if down.is_null() || up.is_null() {
+            if !down.is_null() { CFRelease(down); }
+            if !up.is_null() { CFRelease(up); }
+            return Err("macOS could not create a panel click event".into());
+        }
+        CGEventPost(0, down);
+        CGEventPost(0, up);
+        CFRelease(down);
+        CFRelease(up);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn capture_panel_windows(window: &WebviewWindow) -> Result<PanelScreenshot, String> {
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+    };
+    use windows_sys::Win32::Storage::Xps::PrintWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::PW_RENDERFULLCONTENT;
+    let hwnd = window.hwnd().map_err(|error| format!("cannot read TokenMe panel window: {error}"))?;
+    let mut rect: RECT = unsafe { zeroed() };
+    if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect) } == 0 {
+        return Err("cannot read TokenMe panel bounds".into());
+    }
+    let width = (rect.right - rect.left).max(1) as u32;
+    let height = (rect.bottom - rect.top).max(1) as u32;
+    let pixels_len = (width as usize).checked_mul(height as usize).and_then(|value| value.checked_mul(4)).ok_or_else(|| "TokenMe panel bounds are too large".to_string())?;
+    if pixels_len > 8 * 1024 * 1024 {
+        return Err("TokenMe panel bounds exceed the screenshot limit".into());
+    }
+    let screen = unsafe { GetDC(hwnd) };
+    if screen.is_null() { return Err("cannot open TokenMe panel surface".into()); }
+    let dc = unsafe { CreateCompatibleDC(screen) };
+    let bitmap = unsafe { CreateCompatibleBitmap(screen, width as i32, height as i32) };
+    if dc.is_null() || bitmap.is_null() {
+        if !dc.is_null() { unsafe { DeleteDC(dc); } }
+        unsafe { ReleaseDC(hwnd, screen); }
+        return Err("cannot allocate TokenMe panel screenshot surface".into());
+    }
+    let old = unsafe { SelectObject(dc, bitmap as _) };
+    let printed = unsafe { PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT) } != 0;
+    let copied = printed || unsafe { BitBlt(dc, 0, 0, width as i32, height as i32, screen, 0, 0, SRCCOPY) } != 0;
+    let mut header: BITMAPINFOHEADER = unsafe { zeroed() };
+    header.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+    header.biWidth = width as i32;
+    header.biHeight = -(height as i32);
+    header.biPlanes = 1;
+    header.biBitCount = 32;
+    header.biCompression = BI_RGB;
+    let mut pixels = vec![0u8; pixels_len];
+    let mut info = BITMAPINFO { bmiHeader: header, bmiColors: [unsafe { zeroed() }; 1] };
+    let read = if copied { unsafe { GetDIBits(dc, bitmap, 0, height, pixels.as_mut_ptr().cast(), &mut info, DIB_RGB_COLORS) } } else { 0 };
+    unsafe {
+        SelectObject(dc, old);
+        DeleteObject(bitmap as _);
+        DeleteDC(dc);
+        ReleaseDC(hwnd, screen);
+    }
+    if read == 0 { return Err("Windows could not capture the TokenMe panel".into()); }
+    let mut data = Vec::with_capacity(54 + pixels.len());
+    data.extend_from_slice(b"BM");
+    data.extend_from_slice(&(54u32 + pixels.len() as u32).to_le_bytes());
+    data.extend_from_slice(&[0; 4]);
+    data.extend_from_slice(&54u32.to_le_bytes());
+    data.extend_from_slice(&(40u32).to_le_bytes());
+    data.extend_from_slice(&(width as i32).to_le_bytes());
+    data.extend_from_slice(&(height as i32).to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&32u16.to_le_bytes());
+    data.extend_from_slice(&[0; 4]);
+    data.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
+    data.extend_from_slice(&[0; 16]);
+    data.extend_from_slice(&pixels);
+    Ok(PanelScreenshot { mime_type: "image/bmp", data, width, height })
+}
+
+#[cfg(target_os = "windows")]
+fn click_panel_windows(window: &WebviewWindow, x: f64, y: f64) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+    let position = window.outer_position().map_err(|error| format!("cannot read TokenMe panel position: {error}"))?;
+    let mut cursor = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut cursor) } == 0 { return Err("cannot read current cursor position".into()); }
+    let sx = i32::try_from(f64::from(position.x) + x).map_err(|_| "panel click coordinate is too large".to_string())?;
+    let sy = i32::try_from(f64::from(position.y) + y).map_err(|_| "panel click coordinate is too large".to_string())?;
+    if unsafe { SetCursorPos(sx, sy) } == 0 { return Err("cannot move cursor to TokenMe panel".into()); }
+    unsafe { mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0); }
+    let _ = unsafe { SetCursorPos(cursor.x, cursor.y) };
+    Ok(())
+}
+
+fn now_millis() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|value| value.as_millis()).unwrap_or(0)
+}
+
 /// Hide the panel through the same state path as click-away dismissal. The
 /// frontend must not call `WebviewWindow::hide` directly: that leaves the
 /// Windows native visibility and `panel_hidden()` disagreeing.
