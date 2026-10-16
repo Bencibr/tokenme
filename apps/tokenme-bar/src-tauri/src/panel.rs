@@ -180,6 +180,37 @@ pub(crate) struct PanelScreenshot {
     pub height: u32,
 }
 
+/// Convert the top-down BGRA buffer returned by GDI into a lossless PNG.  A
+/// BMP leaves orientation and channel order to every MCP consumer; PNG makes
+/// both explicit and keeps text sharp when the remote client scales it.
+fn encode_panel_png(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| usize::try_from(height).ok().and_then(|height| width.checked_mul(height)))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "TokenMe panel bounds are too large".to_string())?;
+    if bgra.len() != expected { return Err("Windows returned an incomplete TokenMe panel frame".into()); }
+    let mut rgba = Vec::with_capacity(expected);
+    for pixel in bgra.chunks_exact(4) {
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+    }
+    let mut data = Vec::new();
+    let mut encoder = png::Encoder::new(&mut data, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|error| format!("cannot encode TokenMe panel screenshot: {error}"))?;
+    writer.write_image_data(&rgba).map_err(|error| format!("cannot encode TokenMe panel screenshot: {error}"))?;
+    drop(writer);
+    Ok(data)
+}
+
+fn panel_png_dimensions(data: &[u8]) -> Result<(u32, u32), String> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(data));
+    let reader = decoder.read_info().map_err(|error| format!("cannot inspect TokenMe panel screenshot: {error}"))?;
+    let info = reader.info();
+    Ok((info.width, info.height))
+}
+
 /// Capture only the TokenMe panel.  The operating-system implementation is
 /// intentionally explicit: unsupported platforms return an error instead of
 /// claiming that a screenshot was taken.
@@ -303,8 +334,11 @@ fn capture_panel_macos(window: &WebviewWindow) -> Result<PanelScreenshot, String
         }
     };
     let _ = fs::remove_dir_all(&directory);
-    let size = window.outer_size().map_err(|error| format!("cannot read TokenMe panel size: {error}"))?;
-    Ok(PanelScreenshot { mime_type: "image/png", data, width: size.width, height: size.height })
+    // `screencapture` returns backing-store pixels. On Retina displays those
+    // are larger than Tauri's logical window size; report the PNG dimensions
+    // so MCP clients do not downsample a sharp frame into a blurry one.
+    let (width, height) = panel_png_dimensions(&data)?;
+    Ok(PanelScreenshot { mime_type: "image/png", data, width, height })
 }
 
 #[cfg(target_os = "macos")]
@@ -392,21 +426,8 @@ fn capture_panel_windows(window: &WebviewWindow) -> Result<PanelScreenshot, Stri
         ReleaseDC(hwnd, screen);
     }
     if read == 0 { return Err("Windows could not capture the TokenMe panel".into()); }
-    let mut data = Vec::with_capacity(54 + pixels.len());
-    data.extend_from_slice(b"BM");
-    data.extend_from_slice(&(54u32 + pixels.len() as u32).to_le_bytes());
-    data.extend_from_slice(&[0; 4]);
-    data.extend_from_slice(&54u32.to_le_bytes());
-    data.extend_from_slice(&(40u32).to_le_bytes());
-    data.extend_from_slice(&(width as i32).to_le_bytes());
-    data.extend_from_slice(&(height as i32).to_le_bytes());
-    data.extend_from_slice(&1u16.to_le_bytes());
-    data.extend_from_slice(&32u16.to_le_bytes());
-    data.extend_from_slice(&[0; 4]);
-    data.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
-    data.extend_from_slice(&[0; 16]);
-    data.extend_from_slice(&pixels);
-    Ok(PanelScreenshot { mime_type: "image/bmp", data, width, height })
+    let data = encode_panel_png(&pixels, width, height)?;
+    Ok(PanelScreenshot { mime_type: "image/png", data, width, height })
 }
 
 #[cfg(target_os = "windows")]
@@ -2052,6 +2073,7 @@ fn apply_windows_round_clip(window: &WebviewWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     const MONITOR: Bounds = Bounds {
         left: 0.0,
@@ -2059,6 +2081,33 @@ mod tests {
         right: 1920.0,
         bottom: 1080.0,
     };
+
+    #[test]
+    fn panel_png_encoder_preserves_top_down_bgra_pixels() {
+        let encoded = encode_panel_png(&[0, 0, 255, 0, 0, 255, 0, 0], 2, 1).unwrap();
+        assert_eq!(&encoded[..8], b"\x89PNG\r\n\x1a\n");
+        let decoder = png::Decoder::new(Cursor::new(encoded));
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        assert_eq!((info.width, info.height), (2, 1));
+        assert_eq!(&pixels[..8], &[255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn panel_png_dimensions_use_encoded_physical_pixels() {
+        let encoded = encode_panel_png(
+            &[
+                0, 0, 255, 0,
+                0, 0, 255, 0,
+                0, 0, 255, 0,
+                0, 0, 255, 0,
+            ],
+            2,
+            2,
+        ).unwrap();
+        assert_eq!(panel_png_dimensions(&encoded).unwrap(), (2, 2));
+    }
 
     #[test]
     fn bottom_taskbar_keeps_the_panel_above_the_work_area() {

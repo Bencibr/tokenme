@@ -48,10 +48,9 @@ pub const MAX_DIAGNOSTICS_LOG_LINES: usize = 200;
 pub const MAX_DIAGNOSTICS_LOG_SEARCH_RESULTS: usize = 100;
 pub const MAX_DIAGNOSTICS_TRACE_RESULTS: usize = 100;
 pub const MAX_DIAGNOSTICS_CHECKS: usize = 5;
-// A 400x660 Windows panel is returned as a bounded 32-bit BMP when the
-// platform cannot provide a PNG encoder without another dependency. The
-// 8 MiB cap covers the physical pixel size of the panel on common 2x DPI
-// displays while keeping the host result bounded.
+// The fixed 400x660 logical panel is returned as a bounded lossless PNG. The
+// 8 MiB cap covers its physical pixel size on common 2x DPI displays while
+// keeping the host result bounded.
 pub const MAX_DIAGNOSTICS_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 // Standard MCP base64 image content expands the bounded image by 4/3. Keep
 // response framing inside one shared transport limit instead of rejecting a

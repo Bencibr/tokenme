@@ -5581,6 +5581,7 @@ dependencies = [
  "mac-usernotifications",
  "mdns-sd",
  "notify-rust",
+ "png 0.18.1",
  "rand",
  "russh",
  "russh-sftp",
