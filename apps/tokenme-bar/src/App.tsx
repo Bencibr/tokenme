@@ -162,8 +162,13 @@ const [page, setPage] = useState<PageKey>(() => {
       setShowCycleTokens(s.show_cycle_tokens);
       // The idle cadence is what the "updates stopped" line measures against.
       setRefreshSecs(s.refresh_secs);
-      if (new URLSearchParams(location.search).get("showempty") === null) {
+      const params = new URLSearchParams(location.search);
+      if (params.get("showempty") === null) {
         setHideUnusedTools(s.hide_unused_tools);
+      }
+      // The ?hideunused pin freezes all three visibility mirrors: the mount
+      // read would otherwise clobber what the pin just set.
+      if (params.get("hideunused") === null) {
         setHideUnusedQuota(s.hide_unused_quota);
         setHideUnusedEstimation(s.hide_unused_estimation);
       }
