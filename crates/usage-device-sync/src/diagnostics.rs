@@ -44,6 +44,10 @@ pub const MAX_DIAGNOSTICS_TRACE_EVENTS: usize = 256;
 pub const MAX_DIAGNOSTICS_OPERATIONS: usize = 64;
 pub const MAX_DIAGNOSTICS_LOG_SCAN_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_DIAGNOSTICS_OUTPUT_BYTES: usize = 64 * 1024;
+pub const MAX_DIAGNOSTICS_LOG_LINES: usize = 200;
+pub const MAX_DIAGNOSTICS_LOG_SEARCH_RESULTS: usize = 100;
+pub const MAX_DIAGNOSTICS_TRACE_RESULTS: usize = 100;
+pub const MAX_DIAGNOSTICS_CHECKS: usize = 5;
 // A 400x660 Windows panel is returned as a bounded 32-bit BMP when the
 // platform cannot provide a PNG encoder without another dependency. The
 // 8 MiB cap covers the physical pixel size of the panel on common 2x DPI
@@ -1348,7 +1352,7 @@ impl DiagnosticsService {
                 self.read_log_tool(&log, Some((query, since_ms)), limit, deadline)
             }
             ToolId::SyncGetTrace => {
-                let limit = parse_limit(arguments, "limit", 100)?;
+                let limit = parse_limit(arguments, "limit", 100, MAX_DIAGNOSTICS_TRACE_RESULTS)?;
                 if arguments.keys().any(|key| key != "limit") { return Err(DiagnosticsError::InvalidParams); }
                 let state = self.host.state.lock().map_err(|_| DiagnosticsError::Internal)?;
                 let truncated = state.trace.len() > limit;
@@ -1366,7 +1370,7 @@ impl DiagnosticsService {
                         ["listener", "tls", "pin", "database", "ipc"].into_iter().map(str::to_owned).collect()
                     }
                 };
-                if checks.is_empty() || checks.len() > 16 { return Err(DiagnosticsError::InvalidParams); }
+                if checks.is_empty() || checks.len() > MAX_DIAGNOSTICS_CHECKS { return Err(DiagnosticsError::InvalidParams); }
                 let mut names = BTreeSet::new();
                 for check in checks {
                     if !valid_check_name(&check) { return Err(DiagnosticsError::InvalidParams); }
@@ -1568,9 +1572,9 @@ fn validate_trace_event(event: &DiagnosticsTraceEvent) -> Result<(), Diagnostics
     Ok(())
 }
 
-fn parse_limit(arguments: &Map<String, Value>, name: &str, default: usize) -> Result<usize, DiagnosticsError> {
+fn parse_limit(arguments: &Map<String, Value>, name: &str, default: usize, maximum: usize) -> Result<usize, DiagnosticsError> {
     let value = arguments.get(name).map(|value| value.as_u64().ok_or(DiagnosticsError::InvalidParams)).transpose()?.map(|value| value as usize).unwrap_or(default);
-    if value == 0 || value > 200 { return Err(DiagnosticsError::InvalidParams); }
+    if value == 0 || value > maximum { return Err(DiagnosticsError::InvalidParams); }
     Ok(value)
 }
 
@@ -1579,7 +1583,7 @@ fn parse_log_args(arguments: &Map<String, Value>, search: bool) -> Result<(Strin
     if arguments.keys().any(|key| !allowed.contains(&key.as_str())) { return Err(DiagnosticsError::InvalidParams); }
     let log = arguments.get("log").and_then(Value::as_str).ok_or(DiagnosticsError::InvalidParams)?;
     if !matches!(log, "panel" | "sync") { return Err(DiagnosticsError::InvalidParams); }
-    let limit = parse_limit(arguments, if search { "limit" } else { "lines" }, if search { 100 } else { 100 })?;
+    let limit = parse_limit(arguments, if search { "limit" } else { "lines" }, 100, if search { MAX_DIAGNOSTICS_LOG_SEARCH_RESULTS } else { MAX_DIAGNOSTICS_LOG_LINES })?;
     Ok((log.into(), limit))
 }
 
@@ -1780,21 +1784,48 @@ fn tool_schema(name: &str) -> Value {
         "properties": {},
     });
     if matches!(name, "logs.tail" | "logs.search") {
-        schema["properties"] = serde_json::json!({
-            "log": { "type": "string", "enum": ["panel", "sync"] },
-            "lines": { "type": "integer", "minimum": 1, "maximum": 200 },
-            "since_ms": { "type": "integer" },
-            "query": { "type": "string", "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
-            "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
-        });
+        if name == "logs.tail" {
+            schema["properties"] = serde_json::json!({
+                "log": { "type": "string", "enum": ["panel", "sync"] },
+                "lines": { "type": "integer", "minimum": 1, "maximum": MAX_DIAGNOSTICS_LOG_LINES },
+            });
+            schema["required"] = serde_json::json!(["log"]);
+        } else {
+            schema["properties"] = serde_json::json!({
+                "log": { "type": "string", "enum": ["panel", "sync"] },
+                "query": { "type": "string", "minLength": 1, "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+                "limit": { "type": "integer", "minimum": 1, "maximum": MAX_DIAGNOSTICS_LOG_SEARCH_RESULTS },
+                "since_ms": { "type": "integer" },
+            });
+            schema["required"] = serde_json::json!(["log", "query"]);
+        }
     }
     if name == "diagnostics.run_check" {
         schema["properties"] = serde_json::json!({
-            "checks": { "type": "array", "maxItems": 16, "items": { "type": "string", "enum": ["listener", "tls", "pin", "database", "ipc"] } },
+            "checks": { "type": "array", "maxItems": MAX_DIAGNOSTICS_CHECKS, "items": { "type": "string", "enum": ["listener", "tls", "pin", "database", "ipc"] } },
         });
     }
     if name == "sync.get_trace" {
-        schema["properties"] = serde_json::json!({ "limit": { "type": "integer", "minimum": 1, "maximum": 200 } });
+        schema["properties"] = serde_json::json!({ "limit": { "type": "integer", "minimum": 1, "maximum": MAX_DIAGNOSTICS_TRACE_RESULTS } });
+    }
+    if name == "sync.start_primary" {
+        schema["properties"] = serde_json::json!({
+            "bind": { "type": "string", "minLength": 1, "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+            "advertise_host": { "type": "string", "minLength": 1, "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+            "allow_lan": { "type": "boolean" },
+        });
+    }
+    if name == "ui.focus_device" || matches!(name, "sync.pause" | "sync.resume" | "sync.revoke_device") {
+        schema["properties"] = serde_json::json!({
+            "device_id": { "type": "string", "minLength": 1, "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+        });
+        schema["required"] = serde_json::json!(["device_id"]);
+    }
+    if matches!(name, "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request") {
+        schema["properties"] = serde_json::json!({
+            "request_id": { "type": "string", "minLength": 1, "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+        });
+        schema["required"] = serde_json::json!(["request_id"]);
     }
     if name == "ui.click_panel" {
         schema["properties"] = serde_json::json!({
@@ -1802,6 +1833,12 @@ fn tool_schema(name: &str) -> Value {
             "y": { "type": "number", "minimum": 0, "maximum": 4096 },
         });
         schema["required"] = serde_json::json!(["x", "y"]);
+    }
+    if name == "diagnostics.get_operation" {
+        schema["properties"] = serde_json::json!({
+            "operation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        });
+        schema["required"] = serde_json::json!(["operation_id"]);
     }
     if name == "sync.pair" {
         schema["properties"] = serde_json::json!({

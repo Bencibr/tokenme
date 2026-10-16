@@ -128,6 +128,7 @@ export function SettingsSheet({
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpError, setMcpError] = useState<string | null>(null);
   const [mcpCopied, setMcpCopied] = useState(false);
+  const [mcpControlCopied, setMcpControlCopied] = useState(false);
 
   useEffect(() => bridge.onUpdateProgress((p) => setProgress(p.percent)), []);
 
@@ -515,8 +516,8 @@ export function SettingsSheet({
     if (!mcpConfig?.control_config_json) return;
     const ok = await copyText(mcpConfig.control_config_json);
     if (ok) {
-      setMcpCopied(true);
-      window.setTimeout(() => setMcpCopied(false), 1600);
+      setMcpControlCopied(true);
+      window.setTimeout(() => setMcpControlCopied(false), 1600);
     }
   };
 
@@ -821,7 +822,7 @@ export function SettingsSheet({
                   />
                   <div className="sheet-actions">
                     <button type="button" className="sheet-action" onClick={() => void copyMcpControlConfig()}>
-                      {mcpCopied ? t("set.mcp.client.copied") : t("set.mcp.control.copy")}
+                      {mcpControlCopied ? t("set.mcp.client.copied") : t("set.mcp.control.copy")}
                     </button>
                     <a className="sheet-action" href={`data:application/json;charset=utf-8,${encodeURIComponent(mcpConfig.control_config_json)}`} download="tokenme-mcp-control.json">
                       {t("set.mcp.control.download")}

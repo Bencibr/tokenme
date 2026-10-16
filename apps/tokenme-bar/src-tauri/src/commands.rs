@@ -682,6 +682,29 @@ fn diagnostics_required_identifier(params: &serde_json::Map<String, Value>, key:
     Ok(value)
 }
 
+fn spawn_diagnostics_panel_action(
+    app: AppHandle,
+    host: DiagnosticsHost,
+    tool: &str,
+    operation_id: String,
+    event: &str,
+    payload: Value,
+) {
+    let tool = tool.to_owned();
+    let event = event.to_owned();
+    tauri::async_runtime::spawn(async move {
+        let result = crate::diagnostics::wait_for_panel_visible(&app).await
+            .map_err(|_| DiagnosticsError::ToolUnavailable)
+            .and_then(|_| app.emit(&event, payload).map_err(|_| DiagnosticsError::Internal));
+        host.complete_control_operation(&operation_id, result.is_ok(), current_ms());
+        let response = match result {
+            Ok(()) => json!({ "tool": tool, "operation_id": operation_id, "ok": true }),
+            Err(error) => json!({ "tool": tool, "operation_id": operation_id, "ok": false, "error": error.to_string() }),
+        };
+        let _ = app.emit("diagnostics-control-result", response);
+    });
+}
+
 pub(crate) fn diagnostics_primary_start_request(value: &Value) -> Result<SyncManagementRequest, DiagnosticsError> {
     let empty = serde_json::Map::new();
     let params = if value.is_null() { &empty } else { value.as_object().ok_or(DiagnosticsError::InvalidParams)? };
@@ -703,6 +726,9 @@ fn dispatch_diagnostics_control(app: AppHandle, host: DiagnosticsHost, tool: &st
     match tool {
         "ui.capture_panel" => {
             if !params.is_empty() { return Err(DiagnosticsError::InvalidParams); }
+            if !crate::diagnostics::panel_is_visible(&app) {
+                return Err(DiagnosticsError::ToolUnavailable);
+            }
             let image = panel::capture_panel(&app).map_err(|_| DiagnosticsError::ToolUnavailable)?;
             if image.data.len() > usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES { return Err(DiagnosticsError::Limit); }
             Ok(json!({
@@ -720,6 +746,10 @@ fn dispatch_diagnostics_control(app: AppHandle, host: DiagnosticsHost, tool: &st
             let x = params.get("x").and_then(Value::as_f64).ok_or(DiagnosticsError::InvalidParams)?;
             let y = params.get("y").and_then(Value::as_f64).ok_or(DiagnosticsError::InvalidParams)?;
             let operation_id = host.begin_control_operation(tool, current_ms())?;
+            if !crate::diagnostics::panel_is_visible(&app) {
+                host.complete_control_operation(&operation_id, false, current_ms());
+                return Err(DiagnosticsError::ToolUnavailable);
+            }
             match panel::click_panel(&app, x, y) {
                 Ok(()) => {
                     host.complete_control_operation(&operation_id, true, current_ms());
@@ -735,11 +765,7 @@ fn dispatch_diagnostics_control(app: AppHandle, host: DiagnosticsHost, tool: &st
             if !params.is_empty() { return Err(DiagnosticsError::InvalidParams); }
             let operation_id = host.begin_control_operation(tool, current_ms())?;
             panel::show(&app, None);
-            if app.emit("sync-open-sheet", ()).is_err() {
-                host.complete_control_operation(&operation_id, false, current_ms());
-                return Err(DiagnosticsError::Internal);
-            }
-            host.complete_control_operation(&operation_id, true, current_ms());
+            spawn_diagnostics_panel_action(app, host, tool, operation_id.clone(), "sync-open-sheet", Value::Null);
             Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
         }
         "ui.focus_device" => {
@@ -747,11 +773,7 @@ fn dispatch_diagnostics_control(app: AppHandle, host: DiagnosticsHost, tool: &st
             let device_id = diagnostics_required_identifier(params, "device_id")?;
             let operation_id = host.begin_control_operation(tool, current_ms())?;
             panel::show(&app, None);
-            if app.emit("sync-focus-device", &device_id).is_err() {
-                host.complete_control_operation(&operation_id, false, current_ms());
-                return Err(DiagnosticsError::Internal);
-            }
-            host.complete_control_operation(&operation_id, true, current_ms());
+            spawn_diagnostics_panel_action(app, host, tool, operation_id.clone(), "sync-focus-device", json!(device_id));
             Ok(json!({ "accepted": true, "tool": tool, "device_id": device_id, "operation_id": operation_id }))
         }
         "sync.pair" => {

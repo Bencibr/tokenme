@@ -13,6 +13,8 @@ use usage_device_sync::{
     DiagnosticsScope, DiagnosticsService, PairingRequest, SyncStore, MAX_DIAGNOSTICS_ARRAY_ITEMS,
     MAX_DIAGNOSTICS_BODY_BYTES, MAX_DIAGNOSTICS_CONCURRENT_REQUESTS, MAX_DIAGNOSTICS_GRANTS,
     MAX_DIAGNOSTICS_JSON_DEPTH, MAX_DIAGNOSTICS_OBJECT_ITEMS, MAX_DIAGNOSTICS_PARAMS_BYTES,
+    MAX_DIAGNOSTICS_CHECKS, MAX_DIAGNOSTICS_LOG_LINES, MAX_DIAGNOSTICS_LOG_SEARCH_RESULTS,
+    MAX_DIAGNOSTICS_TRACE_RESULTS,
 };
 
 fn clock() -> i64 { 1_000_000 }
@@ -147,6 +149,26 @@ fn tool_registry_is_fixed_and_contains_no_execution_surface() {
     let actual = usage_device_sync::diagnostics_tool_registry().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
     assert_eq!(actual, expected);
     assert!(actual.iter().all(|name| !name.contains("shell") && !name.contains("exec") && !name.contains("file")));
+}
+
+#[test]
+fn control_tool_schemas_describe_the_arguments_the_host_accepts() {
+    let tools = usage_device_sync::diagnostics_tool_registry();
+    let schema = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap().input_schema.clone();
+    assert_eq!(schema("sync.start_primary")["properties"]["bind"]["type"], "string");
+    assert_eq!(schema("sync.start_primary")["properties"]["advertise_host"]["type"], "string");
+    assert_eq!(schema("sync.start_primary")["properties"]["allow_lan"]["type"], "boolean");
+    assert_eq!(schema("ui.focus_device")["required"], json!(["device_id"]));
+    assert_eq!(schema("sync.revoke_device")["required"], json!(["device_id"]));
+    assert_eq!(schema("sync.approve_pairing")["required"], json!(["request_id"]));
+    assert_eq!(schema("diagnostics.get_operation")["required"], json!(["operation_id"]));
+    assert_eq!(schema("logs.tail")["required"], json!(["log"]));
+    assert!(schema("logs.tail")["properties"].get("query").is_none());
+    assert_eq!(schema("logs.search")["required"], json!(["log", "query"]));
+    assert_eq!(schema("logs.search")["properties"]["limit"]["maximum"], json!(MAX_DIAGNOSTICS_LOG_SEARCH_RESULTS));
+    assert_eq!(schema("logs.tail")["properties"]["lines"]["maximum"], json!(MAX_DIAGNOSTICS_LOG_LINES));
+    assert_eq!(schema("sync.get_trace")["properties"]["limit"]["maximum"], json!(MAX_DIAGNOSTICS_TRACE_RESULTS));
+    assert_eq!(schema("diagnostics.run_check")["properties"]["checks"]["maxItems"], json!(MAX_DIAGNOSTICS_CHECKS));
 }
 
 #[test]

@@ -11,7 +11,7 @@ use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use rand::RngExt as _;
@@ -431,7 +431,17 @@ impl DiagnosticsState {
             state.grants.clear();
         }
         let status = self.status_after(state);
-        if !enabled { let _ = self.configure_lan_control(false); }
+        if !enabled {
+            // Rotate the in-memory bearer even when a legacy caller only
+            // toggles the state flag. Re-enabling must never revive a token
+            // issued before the disable operation.
+            if let Ok(mut current) = self.local_http.lock() {
+                if let Some(server) = current.as_mut() {
+                    server.read_token = new_local_mcp_token();
+                    server.control = None;
+                }
+            }
+        }
         status
     }
 
@@ -1091,18 +1101,19 @@ async fn dispatch(
         "device.get_build" => current_build(),
         "logs.tail" => {
             let params = object(&request.params)?;
+            if params.keys().any(|key| !matches!(key.as_str(), "log" | "lines")) { return Err(invalid_params()); }
             let log = string(params, "log")?;
-            let lines = number(params, "lines", 50, 1, 200)? as usize;
-            let since_ms = optional_number(params, "since_ms")?;
-            let lines = logging::diagnostic_log_tail(log, lines, since_ms).map_err(|_| handler_error())?;
+            let lines = number(params, "lines", 50, 1, usage_device_sync::MAX_DIAGNOSTICS_LOG_LINES as u64)? as usize;
+            let lines = logging::diagnostic_log_tail(log, lines, None).map_err(|_| handler_error())?;
             Ok(json!({ "log": log, "lines": lines }))
         }
         "logs.search" => {
             let params = object(&request.params)?;
+            if params.keys().any(|key| !matches!(key.as_str(), "log" | "query" | "since_ms" | "limit")) { return Err(invalid_params()); }
             let log = string(params, "log")?;
             let query = string(params, "query")?;
             let since_ms = optional_number(params, "since_ms")?;
-            let limit = number(params, "limit", 50, 1, 100)? as usize;
+            let limit = number(params, "limit", 50, 1, usage_device_sync::MAX_DIAGNOSTICS_LOG_SEARCH_RESULTS as u64)? as usize;
             let lines = logging::diagnostic_log_search(log, query, since_ms, limit).map_err(|_| handler_error())?;
             Ok(json!({ "log": log, "lines": lines }))
         }
@@ -1120,13 +1131,15 @@ async fn dispatch(
         }
         "sync.get_trace" => {
             let params = object_or_empty(&request.params)?;
-            let limit = number(params, "limit", 50, 1, 100)? as usize;
+            if params.keys().any(|key| key != "limit") { return Err(invalid_params()); }
+            let limit = number(params, "limit", 50, 1, usage_device_sync::MAX_DIAGNOSTICS_TRACE_RESULTS as u64)? as usize;
             let lines = logging::diagnostic_log_tail("diagnostics", limit, None).map_err(|_| handler_error())?;
             Ok(json!({ "events": lines }))
         }
         "diagnostics.run_check" => run_checks(app, &request.params).await,
         "diagnostics.get_operation" => {
             let params = object(&request.params)?;
+            if params.keys().any(|key| key != "operation_id") { return Err(invalid_params()); }
             let operation_id = string(params, "operation_id")?;
             diagnostics.operation(operation_id, &session.view.session_id)
         }
@@ -1138,7 +1151,10 @@ async fn dispatch(
         })),
         "ui.capture_panel" => {
             if !object_or_empty(&request.params)?.is_empty() { return Err(invalid_params()); }
-            let image = panel::capture_panel(app).map_err(|_| DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel screenshot is unavailable"))?;
+            if !panel_is_visible(app) {
+                return Err(DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel is not visible; call ui.open_sync_sheet first"));
+            }
+            let image = panel::capture_panel(app).map_err(|_| DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel screenshot is unavailable; check platform capture permission"))?;
             if image.data.len() > usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES { return Err(DiagnosticsError::new(CODE_INVALID_PARAMS, "TokenMe panel screenshot is too large")); }
             Ok(json!({
                 "_mcp_image": {
@@ -1188,12 +1204,14 @@ async fn dispatch(
         "sync.refresh" => control_sync(app, SyncManagementRequest::Status).await,
         "ui.open_sync_sheet" => {
             panel::show(app, None);
+            wait_for_panel_visible(app).await?;
             app.emit("sync-open-sheet", ()).map_err(|_| handler_error())?;
             Ok(json!({ "opened": true }))
         }
         "ui.focus_device" => {
             let device_id = required_identifier(&request.params, "device_id")?;
             panel::show(app, None);
+            wait_for_panel_visible(app).await?;
             app.emit("sync-focus-device", device_id).map_err(|_| handler_error())?;
             Ok(json!({ "opened": true, "device_id": device_id }))
         }
@@ -1202,7 +1220,10 @@ async fn dispatch(
             if params.keys().any(|key| key != "x" && key != "y") { return Err(invalid_params()); }
             let x = params.get("x").and_then(Value::as_f64).ok_or_else(invalid_params)?;
             let y = params.get("y").and_then(Value::as_f64).ok_or_else(invalid_params)?;
-            panel::click_panel(app, x, y).map_err(|_| DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel click is unavailable"))?;
+            if !panel_is_visible(app) {
+                return Err(DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel is not visible; call ui.open_sync_sheet first"));
+            }
+            panel::click_panel(app, x, y).map_err(|_| DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel click is unavailable; check platform input permission"))?;
             Ok(json!({ "accepted": true, "x": x, "y": y, "scope": "tokenme-panel" }))
         }
         _ => Err(DiagnosticsError::new(CODE_UNKNOWN_TOOL, "diagnostics tool is not registered")),
@@ -1368,7 +1389,7 @@ async fn run_checks(app: &AppHandle, params: &Value) -> Result<Value, Diagnostic
         Some(Value::Array(values)) => values.iter().map(|value| value.as_str().ok_or_else(|| invalid_params())).collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err(invalid_params()),
     };
-    if checks.is_empty() || checks.len() > 5 || checks.iter().any(|check| !matches!(*check, "listener" | "tls" | "pin" | "database" | "ipc")) {
+    if checks.is_empty() || checks.len() > usage_device_sync::MAX_DIAGNOSTICS_CHECKS || checks.iter().any(|check| !matches!(*check, "listener" | "tls" | "pin" | "database" | "ipc")) {
         return Err(invalid_params());
     }
     let sync = if checks.iter().any(|check| matches!(*check, "listener" | "tls" | "pin" | "database")) {
@@ -1519,6 +1540,24 @@ fn object_or_empty(value: &Value) -> Result<&serde_json::Map<String, Value>, Dia
 
 static EMPTY_PARAMS: std::sync::OnceLock<serde_json::Map<String, Value>> = std::sync::OnceLock::new();
 
+pub(crate) fn panel_is_visible(app: &AppHandle) -> bool {
+    app.get_webview_window(panel::LABEL).is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && !panel::is_panel_hidden()
+    })
+}
+
+pub(crate) async fn wait_for_panel_visible(app: &AppHandle) -> Result<(), DiagnosticsError> {
+    let deadline = Instant::now() + Duration::from_millis(800);
+    while !panel_is_visible(app) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    if panel_is_visible(app) {
+        Ok(())
+    } else {
+        Err(DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel did not become visible"))
+    }
+}
+
 fn string<'a>(params: &'a serde_json::Map<String, Value>, name: &str) -> Result<&'a str, DiagnosticsError> {
     params.get(name).and_then(Value::as_str).filter(|value| !value.is_empty()).ok_or_else(invalid_params)
 }
@@ -1560,8 +1599,8 @@ fn primary_unavailable() -> DiagnosticsError { DiagnosticsError::new(CODE_PRIMAR
 fn grant_failed() -> DiagnosticsError { DiagnosticsError::new(CODE_GRANT_FAILED, "the primary rejected the diagnostics grant") }
 
 #[tauri::command]
-pub fn set_diagnostics_enabled(enabled: bool, state: State<'_, DiagnosticsState>) -> Result<DiagnosticsStatus, String> {
-    Ok(state.set_enabled(enabled))
+pub fn set_diagnostics_enabled(app: AppHandle, enabled: bool, state: State<'_, DiagnosticsState>) -> Result<DiagnosticsStatus, String> {
+    configure_local_mcp(&app, &state, enabled).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1610,27 +1649,7 @@ pub fn diagnostics_session(
     let operation_id = state.begin_management_operation(action);
     let outcome = match request {
         DiagnosticsManagementRequest::Configure { enabled } => {
-            if enabled {
-                // This is the local MCP switch. It belongs to the current
-                // app process, so it must not depend on whether sync happens
-                // to be primary or secondary. The primary-role check applies
-                // only to cross-device grant issuance below.
-                match state.start_local_http(&app) {
-                    Ok(_) => {
-                        state.set_enabled(true);
-                        Ok(None::<DiagnosticsConfig>)
-                    }
-                    Err(_) => Err(DiagnosticsError::new(CODE_HANDLER_FAILED, "local MCP HTTP service could not start")),
-                }
-            } else {
-                if let Ok(context) = commands::primary_diagnostics_context(&control) {
-                    context.handle.revoke_all_diagnostics();
-                }
-                state.revoke_all();
-                state.set_enabled(false);
-                state.stop_local_http();
-                Ok(None::<DiagnosticsConfig>)
-            }
+            configure_local_mcp(&app, &state, enabled).map(|_| None::<DiagnosticsConfig>)
         }
         DiagnosticsManagementRequest::ConfigureLanControl { enabled } => state.configure_lan_control(enabled).map(|_| None::<DiagnosticsConfig>),
         DiagnosticsManagementRequest::CreateGrant { debugger_device_id, scopes, ttl_ms } => {
@@ -1682,6 +1701,23 @@ pub fn diagnostics_session(
 }
 
 fn now_ms() -> i64 { usage_core::report::now_ms() }
+
+fn configure_local_mcp(app: &AppHandle, state: &DiagnosticsState, enabled: bool) -> Result<DiagnosticsStatus, DiagnosticsError> {
+    if enabled {
+        state.start_local_http(app).map_err(|_| DiagnosticsError::new(CODE_HANDLER_FAILED, "local MCP HTTP service could not start"))?;
+        state.set_enabled(true);
+    } else {
+        if let Some(control) = app.try_state::<SyncControl>() {
+            if let Ok(context) = commands::primary_diagnostics_context(&control) {
+                context.handle.revoke_all_diagnostics();
+            }
+        }
+        state.revoke_all();
+        state.set_enabled(false);
+        state.stop_local_http();
+    }
+    Ok(state.status())
+}
 
 #[cfg(test)]
 mod tests {
@@ -1807,6 +1843,8 @@ mod tests {
         assert!(state.local_http_authorized(Some("Bearer wrong")).is_err());
         state.set_enabled(false);
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))).unwrap_err(), "mcp_disabled");
+        state.set_enabled(true);
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))).unwrap_err(), "bearer_invalid");
     }
 
     #[test]
