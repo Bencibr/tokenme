@@ -114,6 +114,10 @@ fn default_refresh_secs() -> u64 {
 /// points/credit-based, so the computed figure is a live estimate, not a
 /// bill, and tokens/credits read cleaner without it. settings.json keeps the
 /// user's explicit choice when the field is present.
+fn default_hide_unused_tools() -> bool {
+    true
+}
+
 fn default_show_money() -> bool {
     false
 }
@@ -182,12 +186,21 @@ pub struct Settings {
     /// Opt-in passive client-side TTFT collection.
     #[serde(default)]
     pub ttft_enabled: bool,
-    /// Also list tools whose session count for the period is zero on the
-    /// tools page. Default off: a tool that did nothing this window is noise,
-    /// and the page's job is comparing what ran. The tools list still keeps
-    /// detected-but-quiet sources discoverable by turning this on.
+    /// Hide tools whose session count for the period is zero from the tools
+    /// page and the quota list. Default on: a tool that did nothing this
+    /// window is noise, and the pages' job is comparing what ran. The tools
+    /// list still keeps detected-but-quiet sources discoverable by turning
+    /// this off.
+    #[serde(default = "default_hide_unused_tools")]
+    pub hide_unused_tools: bool,
+    /// Hide the quota rows of tools without a session this period from the
+    /// quota list alone (the tools-page twin is `hide_unused_tools`).
     #[serde(default)]
-    pub show_empty_tools: bool,
+    pub hide_unused_quota: bool,
+    /// Rows that cannot produce a cycle estimate (zero sessions, zero local
+    /// tokens) hide their estimation info entirely when this is on.
+    #[serde(default)]
+    pub hide_unused_estimation: bool,
     #[serde(default = "default_bubble_enabled")]
     pub bubble_enabled: bool,
     #[serde(default)]
@@ -249,7 +262,9 @@ impl Default for Settings {
             quota_display_mode: QuotaDisplayMode::default(),
             show_cycle_tokens: false,
             ttft_enabled: false,
-            show_empty_tools: false,
+            hide_unused_tools: true,
+            hide_unused_quota: false,
+            hide_unused_estimation: false,
             bubble_enabled: default_bubble_enabled(),
             bubble_skin: BubbleSkin::default(),
             pet_companion: PetPreferences::default(),
@@ -349,7 +364,7 @@ mod tests {
     fn a_pre_switch_file_keeps_polling_and_both_tiers() {
         let s: Settings = serde_json::from_str(
             r#"{"tray_mode":"tray_tokens","autostart":false,"theme":"light","refresh_secs":30,
-                "show_money":false,"show_empty_tools":false,"bubble_enabled":true,
+                "show_money":false,"hide_unused_tools":true,"hide_unused_quota":false,"hide_unused_estimation":false,"bubble_enabled":true,
                 "host_exit_pause":true,"auto_update_check":true,"budgets":{}}"#,
         )
         .expect("the shipped shape must still parse");

@@ -14,7 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
 use usage_device_sync::{
     hash_bytes, HttpsServerConfig, HttpsSyncServer, HttpsTransportConfig, SyncStore,
-    Tls13HttpsTransport, TransportError,
+    Tls13HttpsTransport, TransportError, MAX_DIAGNOSTICS_IMAGE_BYTES,
+    MAX_DIAGNOSTICS_RESPONSE_BYTES,
 };
 
 struct CertificateFixture {
@@ -76,13 +77,19 @@ fn tls_pin_and_response_limits_are_fail_closed() {
     config.max_response_bytes = 0;
     assert!(matches!(config.validate(), Err(TransportError::Config(message)) if message.contains("max_response_bytes")));
 
-    config.max_response_bytes = 256 * 1024 + 1;
+    config.max_response_bytes = MAX_DIAGNOSTICS_RESPONSE_BYTES + 1;
     assert!(matches!(config.validate(), Err(TransportError::Config(message)) if message.contains("max_response_bytes")));
 
-    config.max_response_bytes = 256 * 1024;
+    config.max_response_bytes = MAX_DIAGNOSTICS_RESPONSE_BYTES;
     config.trust_anchors_der.clear();
     config.pinned_certificate_sha256 = [0; 32];
     assert!(matches!(config.validate(), Err(TransportError::Config(message)) if message.contains("trust anchor")));
+}
+
+#[test]
+fn response_budget_covers_maximum_standard_mcp_image() {
+    let base64_bytes = 4 * ((MAX_DIAGNOSTICS_IMAGE_BYTES + 2) / 3);
+    assert!(MAX_DIAGNOSTICS_RESPONSE_BYTES >= base64_bytes + 4096);
 }
 
 #[test]

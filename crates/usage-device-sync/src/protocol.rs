@@ -1157,6 +1157,13 @@ mod tests {
         restored.verify().unwrap();
     }
 
+    #[test]
+    fn pairing_invites_reject_plain_http_endpoints() {
+        assert!(PairingInvite::new("http://192.168.1.20:47821", &"ab".repeat(32), i64::MAX).is_err());
+        let url = "tokenme://device-pair?invite=inv-1&endpoint=http://192.168.1.20:47821&pin=abababababababababababababababababababababababababababababababab&secret=abababababababababababababababababababababababababababababababab&expires=9223372036854775807";
+        assert!(PairingInvite::parse_url(url).is_err());
+    }
+
     fn row(key: Option<&str>) -> NetworkRow {
         NetworkRow { key: key.map(str::to_string), occurrence_id: None, tool: "codex".into(), ts_ms: 10, session: "s".into(), project: None, model: Some("gpt-5.6-luna".into()), meter: "tokens".into(), source: "local.jsonl".into(), counts: NetworkCounts { in_tok: Some(1.0), cc_tok: Some(2.0), cr_tok: Some(3.0), out_tok: Some(4.0), reason_tok: Some(0.0), credits: Some(0.0) }, calls: vec![NetworkCall { kind: "mcp".into(), name: "tools/list".into() }] }
     }

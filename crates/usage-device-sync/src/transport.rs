@@ -25,7 +25,7 @@ use thiserror::Error;
 use crate::diagnostics::{
     DiagnosticsError, DiagnosticsGrant, DiagnosticsHost, DiagnosticsMcpRequest, DiagnosticsMcpResponse,
     DiagnosticsScope, DiagnosticsService, DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_REQUEST_TIMEOUT,
-    MAX_DIAGNOSTICS_BODY_BYTES,
+    MAX_DIAGNOSTICS_BODY_BYTES, MAX_DIAGNOSTICS_RESPONSE_BYTES,
 };
 use crate::protocol::{
     hash_bytes, verify_private_file, AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest,
@@ -35,7 +35,7 @@ use crate::protocol::{
 use crate::{ImportReceipt, PairingRequestState, SyncError, SyncStore};
 
 const MAX_HEADER_BYTES: usize = 32 * 1024;
-const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_RESPONSE_BYTES: usize = MAX_DIAGNOSTICS_RESPONSE_BYTES;
 const DEFAULT_BODY_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -2088,6 +2088,8 @@ mod tests {
         let cert = cert();
         let mut client = HttpsTransportConfig::pinned("http://127.0.0.1:1", "localhost", cert.cert_der);
         assert!(matches!(client.validate(), Err(TransportError::Config(message)) if message.contains("https://")));
+        client.endpoint = "http://10.0.0.112:47822/mcp".into();
+        assert!(client.validate().is_err(), "the standard HTTP URL must not downgrade the pinned TLS transport");
         client.endpoint = "https://127.0.0.1:1/path".into();
         assert!(client.validate().is_err());
     }

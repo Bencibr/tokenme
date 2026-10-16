@@ -95,12 +95,14 @@ const [page, setPage] = useState<PageKey>(() => {
   const [quotaDisplayMode, setQuotaDisplayMode] = useState<QuotaDisplayMode>("used");
   const [showCycleTokens, setShowCycleTokens] = useState(false);
   const [ttftSnapshot, setTtftSnapshot] = useState<TtftSnapshot>({ revision: 0, enabled: false, claude_receiver: "disabled", claude_config_status: "disabled", samples: [] });
-  // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the zero-session
+  // QA pin, same family as ?lang= / ?theme= / ?page=: freeze the unused-tools
   // switch without touching persistence.
-  const [showEmptyTools, setShowEmptyTools] = useState(() => {
-    const pin = new URLSearchParams(location.search).get("showempty");
+  const [hideUnusedTools, setHideUnusedTools] = useState(() => {
+    const pin = new URLSearchParams(location.search).get("hideunused");
     return pin === "1" || pin === "true";
   });
+  const [hideUnusedQuota, setHideUnusedQuota] = useState(false);
+  const [hideUnusedEstimation, setHideUnusedEstimation] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [refreshSecs, setRefreshSecs] = useState(30);
   // The tick re-renders the "X 秒前" stamps; its granularity follows the
@@ -161,7 +163,9 @@ const [page, setPage] = useState<PageKey>(() => {
       // The idle cadence is what the "updates stopped" line measures against.
       setRefreshSecs(s.refresh_secs);
       if (new URLSearchParams(location.search).get("showempty") === null) {
-        setShowEmptyTools(s.show_empty_tools);
+        setHideUnusedTools(s.hide_unused_tools);
+        setHideUnusedQuota(s.hide_unused_quota);
+        setHideUnusedEstimation(s.hide_unused_estimation);
       }
       quietCheck();
     });
@@ -442,8 +446,8 @@ const [page, setPage] = useState<PageKey>(() => {
               sessions: 0,
               priced: true,
             }));
-    return [...w.breakdown.tools, ...silent].filter((t) => showEmptyTools || t.sessions > 0);
-  }, [report, period, showEmptyTools, scope]);
+    return [...w.breakdown.tools, ...silent].filter((t) => !hideUnusedTools || t.sessions > 0);
+  }, [report, period, hideUnusedTools, scope]);
 
   // The period's active tools (sessions > 0) — the same predicate the tools
   // page filters on. The quota strip hides the rest while the zero-session
@@ -511,7 +515,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "overview" ? (
                 <>
                   <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} hoursPrev={report.hourly_prev} period={period} />
-                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} showCycleTokens={showCycleTokens} usedTools={usedTools} showEmptyTools={showEmptyTools} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} showCycleTokens={showCycleTokens} usedTools={usedTools} hideUnusedTools={hideUnusedTools} hideUnusedQuota={hideUnusedQuota} hideUnusedEstimation={hideUnusedEstimation} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
@@ -553,7 +557,7 @@ const [page, setPage] = useState<PageKey>(() => {
         {settingsOpen ? (
           <SettingsSheet
             onClose={() => setSettingsOpen(false)}
-            onEmptyTools={setShowEmptyTools}
+            onEmptyTools={setHideUnusedTools}
             onRefreshSecs={setRefreshSecs}
             onMoney={setShowMoney}
             onPolling={setQuotaPolling}

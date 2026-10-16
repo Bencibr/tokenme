@@ -9,6 +9,7 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -673,6 +674,36 @@ fn dispatch_diagnostics_control(app: AppHandle, host: DiagnosticsHost, tool: &st
     let params = diagnostics_params_object(&arguments)?;
     if serde_json::to_vec(params).map_err(|_| DiagnosticsError::InvalidParams)?.len() > usage_device_sync::MAX_DIAGNOSTICS_PARAMS_BYTES { return Err(DiagnosticsError::Limit); }
     match tool {
+        "ui.capture_panel" => {
+            if !params.is_empty() { return Err(DiagnosticsError::InvalidParams); }
+            let image = panel::capture_panel(&app).map_err(|_| DiagnosticsError::ToolUnavailable)?;
+            if image.data.len() > usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES { return Err(DiagnosticsError::Limit); }
+            Ok(json!({
+                "_mcp_image": {
+                    "mime_type": image.mime_type,
+                    "data_base64": base64::engine::general_purpose::STANDARD.encode(&image.data),
+                },
+                "width": image.width,
+                "height": image.height,
+                "scope": "tokenme-panel",
+            }))
+        }
+        "ui.click_panel" => {
+            diagnostics_only_keys(params, &["x", "y"])?;
+            let x = params.get("x").and_then(Value::as_f64).ok_or(DiagnosticsError::InvalidParams)?;
+            let y = params.get("y").and_then(Value::as_f64).ok_or(DiagnosticsError::InvalidParams)?;
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            match panel::click_panel(&app, x, y) {
+                Ok(()) => {
+                    host.complete_control_operation(&operation_id, true, current_ms());
+                    Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id, "x": x, "y": y, "scope": "tokenme-panel" }))
+                }
+                Err(_) => {
+                    host.complete_control_operation(&operation_id, false, current_ms());
+                    Err(DiagnosticsError::ToolUnavailable)
+                }
+            }
+        }
         "ui.open_sync_sheet" => {
             if !params.is_empty() { return Err(DiagnosticsError::InvalidParams); }
             let operation_id = host.begin_control_operation(tool, current_ms())?;
@@ -695,6 +726,24 @@ fn dispatch_diagnostics_control(app: AppHandle, host: DiagnosticsHost, tool: &st
             }
             host.complete_control_operation(&operation_id, true, current_ms());
             Ok(json!({ "accepted": true, "tool": tool, "device_id": device_id, "operation_id": operation_id }))
+        }
+        "sync.pair" => {
+            diagnostics_only_keys(params, &["invite", "origin", "display_name", "os"])?;
+            let invite = diagnostics_required_identifier(params, "invite")?;
+            if !invite.starts_with("tokenme://device-pair?") || invite.len() > usage_device_sync::MAX_DIAGNOSTICS_STRING_BYTES {
+                return Err(DiagnosticsError::InvalidParams);
+            }
+            let origin = diagnostics_optional_string(params, "origin")?;
+            let display_name = diagnostics_optional_string(params, "display_name")?;
+            let os = diagnostics_optional_string(params, "os")?;
+            if origin.as_ref().is_some_and(|value| value.len() > usage_device_sync::MAX_DIAGNOSTICS_STRING_BYTES)
+                || display_name.as_ref().is_some_and(|value| value.len() > usage_device_sync::MAX_DIAGNOSTICS_STRING_BYTES)
+                || os.as_ref().is_some_and(|value| value.len() > usage_device_sync::MAX_DIAGNOSTICS_STRING_BYTES) {
+                return Err(DiagnosticsError::Limit);
+            }
+            let operation_id = host.begin_control_operation(tool, current_ms())?;
+            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), SyncManagementRequest::Pair { invite, origin, display_name, os });
+            Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
         }
         "sync.start_primary" => {
             diagnostics_only_keys(params, &["bind", "advertise_host", "allow_lan"])?;
@@ -1534,7 +1583,9 @@ pub struct PanelSettings {
     pub quota_display_mode: QuotaDisplayMode,
     pub show_cycle_tokens: bool,
     pub ttft_enabled: bool,
-    pub show_empty_tools: bool,
+    pub hide_unused_tools: bool,
+    pub hide_unused_quota: bool,
+    pub hide_unused_estimation: bool,
     pub bubble_enabled: bool,
     pub bubble_skin: BubbleSkin,
     pub pet_companion: crate::settings::PetPreferences,
@@ -1633,7 +1684,9 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         quota_display_mode: settings.quota_display_mode,
         show_cycle_tokens: settings.show_cycle_tokens,
         ttft_enabled: settings.ttft_enabled,
-        show_empty_tools: settings.show_empty_tools,
+        hide_unused_tools: settings.hide_unused_tools,
+        hide_unused_quota: settings.hide_unused_quota,
+        hide_unused_estimation: settings.hide_unused_estimation,
         bubble_enabled: settings.bubble_enabled,
         bubble_skin: settings.bubble_skin,
         pet_companion: settings.pet_companion,
@@ -1705,12 +1758,32 @@ pub fn open_log_dir() -> Result<(), String> {
 /// bills again. Same shape as the other panel switches: persist, then let the
 /// webview re-render from its own state.
 #[tauri::command]
-pub async fn set_show_empty_tools(app: AppHandle, on: bool) -> Result<(), String> {
+pub async fn set_hide_unused_tools(app: AppHandle, on: bool) -> Result<(), String> {
     let shared = app.state::<Shared>();
     let Ok(mut settings) = shared.settings.lock() else {
         return Err("settings busy".into());
     };
-    settings.show_empty_tools = on;
+    settings.hide_unused_tools = on;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_hide_unused_quota(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.hide_unused_quota = on;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_hide_unused_estimation(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.hide_unused_estimation = on;
     settings.clone().save().map_err(|e| e.to_string())
 }
 

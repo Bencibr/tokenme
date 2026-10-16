@@ -546,7 +546,9 @@ export interface Bridge {
   runActiveSpeedTest: (provider: ActiveSpeedTest["provider"]) => Promise<ActiveSpeedTest>;
   setTtftEnabled: (on: boolean) => Promise<void>;
   onTtftUpdated: (handler: (snapshot: TtftSnapshot) => void) => () => void;
-  setShowEmptyTools: (on: boolean) => Promise<void>;
+  setHideUnusedTools: (on: boolean) => Promise<void>;
+  setHideUnusedQuota: (on: boolean) => Promise<void>;
+  setHideUnusedEstimation: (on: boolean) => Promise<void>;
   setBubbleEnabled: (on: boolean) => Promise<void>;
   setBubbleSkin: (skin: BubbleSkin) => Promise<void>;
   onBubbleSkin: (handler: (skin: BubbleSkin) => void) => () => void;
@@ -666,7 +668,9 @@ export interface PanelSettings {
   quota_display_mode: QuotaDisplayMode;
   show_cycle_tokens: boolean;
   ttft_enabled: boolean;
-  show_empty_tools: boolean;
+  hide_unused_tools: boolean;
+  hide_unused_quota: boolean;
+  hide_unused_estimation: boolean;
   bubble_enabled: boolean;
   bubble_skin: BubbleSkin;
   pet_companion: import("./lib/petCompanion").PetPreferences;

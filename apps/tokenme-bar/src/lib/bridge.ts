@@ -455,12 +455,28 @@ export const bridge: Bridge = {
     };
   },
 
-  async setShowEmptyTools(on: boolean): Promise<void> {
+  async setHideUnusedTools(on: boolean): Promise<void> {
     if (!inTauri) {
-      browserSettings.show_empty_tools = on;
+      browserSettings.hide_unused_tools = on;
       return;
     }
-    await invoke<void>("set_show_empty_tools", { on });
+    await invoke<void>("set_hide_unused_tools", { on });
+  },
+
+  async setHideUnusedQuota(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.hide_unused_quota = on;
+      return;
+    }
+    await invoke<void>("set_hide_unused_quota", { on });
+  },
+
+  async setHideUnusedEstimation(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.hide_unused_estimation = on;
+      return;
+    }
+    await invoke<void>("set_hide_unused_estimation", { on });
   },
 
   async setBubbleEnabled(on: boolean): Promise<void> {
@@ -594,7 +610,9 @@ const browserSettings: PanelSettings = {
   quota_display_mode: "used",
   show_cycle_tokens: false,
   ttft_enabled: false,
-  show_empty_tools: false,
+  hide_unused_tools: true,
+  hide_unused_quota: false,
+  hide_unused_estimation: false,
   bubble_enabled: true,
   bubble_skin: "waterdrop",
   pet_companion: { ...DEFAULT_PET_PREFERENCES },

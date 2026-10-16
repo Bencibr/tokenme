@@ -651,11 +651,7 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
                 params: arguments,
             };
             let result = tauri::async_runtime::block_on(call_tool(app.clone(), tool_request)).map_err(|error| error.to_string())?;
-            let text = serde_json::to_string(&result.result).map_err(|_| "MCP tool result could not be encoded".to_string())?;
-            Ok(json_rpc_result(id.clone(), json!({
-                "content": [{ "type": "text", "text": text }],
-                "structuredContent": result.result,
-            })))
+            Ok(json_rpc_result(id.clone(), local_mcp_tool_result(result.result)?))
         }
         _ => Err(format!("unsupported MCP method: {method}")),
     };
@@ -663,6 +659,34 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
         Ok(response) => write_local_http_response(stream, 200, &serde_json::to_vec(&response).map_err(|_| "MCP response could not be encoded".to_string())?, response_session.as_deref()),
         Err(error) => write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(id.clone(), -32602, &error)).unwrap_or_default(), response_session.as_deref()),
     }
+}
+
+/// Convert the private host image marker into the standard MCP image result.
+/// Local HTTP and HTTPS MCP must expose the same wire shape.
+fn local_mcp_tool_result(value: Value) -> Result<Value, String> {
+    let Some(marker) = value.get("_mcp_image").and_then(Value::as_object) else {
+        let text = serde_json::to_string(&value).map_err(|_| "MCP tool result could not be encoded".to_string())?;
+        return Ok(json!({ "content": [{ "type": "text", "text": text }], "structuredContent": value }));
+    };
+    let mime_type = marker.get("mime_type").and_then(Value::as_str).ok_or_else(|| "MCP image MIME type is invalid".to_string())?;
+    if !matches!(mime_type, "image/png" | "image/jpeg" | "image/bmp") {
+        return Err("MCP image MIME type is invalid".into());
+    }
+    let encoded = marker.get("data_base64").and_then(Value::as_str).ok_or_else(|| "MCP image data is invalid".to_string())?;
+    let max_encoded = 4 * ((usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES + 2) / 3);
+    if encoded.len() > max_encoded {
+        return Err("MCP image is too large".into());
+    }
+    let data = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "MCP image data is invalid".to_string())?;
+    if data.is_empty() || data.len() > usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES {
+        return Err("MCP image is too large".into());
+    }
+    let mut structured = value;
+    structured.as_object_mut().ok_or_else(|| "MCP tool result is invalid".to_string())?.remove("_mcp_image");
+    Ok(json!({
+        "content": [{ "type": "image", "data": encoded, "mimeType": mime_type }],
+        "structuredContent": structured,
+    }))
 }
 
 fn read_local_http_request(stream: &mut TcpStream) -> Result<LocalHttpRequest, String> {
@@ -754,7 +778,9 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         ("diagnostics.run_check", "Run fixed listener, TLS, database, and IPC checks", "diagnostics.read"),
         ("diagnostics.get_operation", "Read a retained operation result", "diagnostics.read"),
         ("app.get_panel_state", "Return safe panel visibility state", "diagnostics.read"),
+        ("ui.capture_panel", "Capture only the visible TokenMe panel", "diagnostics.read"),
         ("sync.start_primary", "Start the existing primary sync service", "sync.control"),
+        ("sync.pair", "Pair this device from a complete tokenme invite after TLS pin validation", "sync.control"),
         ("sync.stop_primary", "Stop the existing primary sync service", "sync.control"),
         ("sync.discover", "Run one existing local discovery action", "sync.control"),
         ("sync.approve_pairing", "Approve one existing pairing request", "sync.control"),
@@ -766,6 +792,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         ("sync.refresh", "Refresh existing sync status", "sync.control"),
         ("ui.open_sync_sheet", "Open the existing sync sheet", "sync.control"),
         ("ui.focus_device", "Focus a device in the existing sync sheet", "sync.control"),
+        ("ui.click_panel", "Click one bounded coordinate inside the TokenMe panel", "sync.control"),
     ]
     .into_iter()
     .map(|(name, description, scope)| ToolDefinition { name, description, scope })
@@ -774,7 +801,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 
 fn tool_scope(tool: &str) -> Result<Scope, DiagnosticsError> {
     if tool_definitions().iter().any(|definition| definition.name == tool) {
-        if tool.starts_with("sync.") && !matches!(tool, "sync.get_status" | "sync.get_requests" | "sync.get_trace") {
+        if (tool.starts_with("sync.") && !matches!(tool, "sync.get_status" | "sync.get_requests" | "sync.get_trace")) || tool == "ui.click_panel" {
             return Ok(Scope::Control);
         }
         return Ok(Scope::Read);
@@ -879,12 +906,35 @@ async fn dispatch(
             "current_page_known": false,
             "background_tasks": [],
         })),
+        "ui.capture_panel" => {
+            if !object_or_empty(&request.params)?.is_empty() { return Err(invalid_params()); }
+            let image = panel::capture_panel(app).map_err(|_| DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel screenshot is unavailable"))?;
+            if image.data.len() > usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES { return Err(DiagnosticsError::new(CODE_INVALID_PARAMS, "TokenMe panel screenshot is too large")); }
+            Ok(json!({
+                "_mcp_image": {
+                    "mime_type": image.mime_type,
+                    "data_base64": base64::engine::general_purpose::STANDARD.encode(&image.data),
+                },
+                "width": image.width,
+                "height": image.height,
+                "scope": "tokenme-panel",
+            }))
+        }
         "sync.start_primary" => {
             let params = object_or_empty(&request.params)?;
             let bind = optional_string(params, "bind")?;
             let advertise_host = optional_string(params, "advertise_host")?;
             let allow_lan = optional_bool(params, "allow_lan")?.unwrap_or(false);
             control_sync(app, SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan }).await
+        }
+        "sync.pair" => {
+            let params = object(&request.params)?;
+            if params.keys().any(|key| !matches!(key.as_str(), "invite" | "origin" | "display_name" | "os")) { return Err(invalid_params()); }
+            let invite = string(params, "invite")?;
+            if !invite.starts_with("tokenme://device-pair?") || invite.len() > usage_device_sync::MAX_DIAGNOSTICS_STRING_BYTES {
+                return Err(invalid_params());
+            }
+            control_sync(app, SyncManagementRequest::Pair { invite: invite.to_owned(), origin: optional_string(params, "origin")?, display_name: optional_string(params, "display_name")?, os: optional_string(params, "os")? }).await
         }
         "sync.stop_primary" => {
             let status = sync_status(app).await?;
@@ -920,6 +970,14 @@ async fn dispatch(
             panel::show(app, None);
             app.emit("sync-focus-device", device_id).map_err(|_| handler_error())?;
             Ok(json!({ "opened": true, "device_id": device_id }))
+        }
+        "ui.click_panel" => {
+            let params = object(&request.params)?;
+            if params.keys().any(|key| key != "x" && key != "y") { return Err(invalid_params()); }
+            let x = params.get("x").and_then(Value::as_f64).ok_or_else(invalid_params)?;
+            let y = params.get("y").and_then(Value::as_f64).ok_or_else(invalid_params)?;
+            panel::click_panel(app, x, y).map_err(|_| DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel click is unavailable"))?;
+            Ok(json!({ "accepted": true, "x": x, "y": y, "scope": "tokenme-panel" }))
         }
         _ => Err(DiagnosticsError::new(CODE_UNKNOWN_TOOL, "diagnostics tool is not registered")),
     }
@@ -1003,7 +1061,7 @@ async fn run_checks(app: &AppHandle, params: &Value) -> Result<Value, Diagnostic
     };
     let results = checks.into_iter().map(|check| {
         let (ok, detail) = match check {
-            "listener" => (sync.as_ref().is_some_and(|status| !status.service_running || status.role == "primary" || status.role == "secondary"), "listener state readable"),
+            "listener" => (sync.as_ref().is_some_and(|status| status.service_running && matches!(status.role.as_str(), "primary" | "secondary")), "listener state reports a running sync service"),
             "tls" => (sync.is_some(), "TLS state readable"),
             "pin" => (sync.as_ref().is_some_and(|status| status.certificate_pin.as_ref().is_none_or(|pin| pin.len() == 64 && pin.bytes().all(|byte| byte.is_ascii_hexdigit()))), "certificate pin shape valid"),
             "database" => (sync.is_some(), "sync database readable"),
@@ -1302,7 +1360,7 @@ mod tests {
     #[test]
     fn tool_catalog_has_no_execution_or_path_surface() {
         let names = tool_definitions().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        assert!(!names.iter().any(|name| name.contains("shell") || name.contains("file") || name.contains("click")));
+        assert!(!names.iter().any(|name| name.contains("shell") || name.contains("file")));
     }
 
     #[test]
@@ -1332,5 +1390,19 @@ mod tests {
         assert!(!json.contains("password"));
         state.revoke_session(&session.session_id).unwrap();
         assert!(state.snapshot().sessions.is_empty());
+    }
+
+    #[test]
+    fn local_mcp_image_marker_becomes_standard_image_content() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"image-bytes");
+        let result = local_mcp_tool_result(json!({
+            "_mcp_image": { "mime_type": "image/png", "data_base64": encoded },
+            "width": 2,
+            "height": 3,
+        })).unwrap();
+        assert_eq!(result["content"][0]["type"], "image");
+        assert_eq!(result["content"][0]["mimeType"], "image/png");
+        assert_eq!(result["structuredContent"]["width"], 2);
+        assert!(result["structuredContent"].get("_mcp_image").is_none());
     }
 }

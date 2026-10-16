@@ -244,7 +244,9 @@ export function QuotaStrip({
   displayMode = "used",
   showCycleTokens = false,
   usedTools,
-  showEmptyTools = false,
+  hideUnusedTools = true,
+  hideUnusedQuota = false,
+  hideUnusedEstimation = false,
 }: {
   quotas: QuotaView[];
   now: number;
@@ -263,7 +265,9 @@ export function QuotaStrip({
    *  the zero-session switch is off, tools outside this set are not in use —
    *  their rows leave the strip instead of lingering as frozen answers. */
   usedTools?: Set<string>;
-  showEmptyTools?: boolean;
+  hideUnusedTools?: boolean;
+  hideUnusedQuota?: boolean;
+  hideUnusedEstimation?: boolean;
 }) {
   // The check-in marker rows are state, not data (CHECKIN_STATE_IDS): every
   // count and row on screen reads this filtered list; the badge and button
@@ -447,7 +451,7 @@ export function QuotaStrip({
   // 一行都报出 0 tokens 的本机周期——百分比再高也是厂商口径没对齐的故
   // 事，0 tokens 的行占着位置只显得乱。任何一行给不出周期数据（积分行、
   // 无窗口的预算行）都让整个工具保留：拿不到证据不等于零。
-  const filtering = usedTools != null && !showEmptyTools;
+  const filtering = usedTools != null && (hideUnusedTools || hideUnusedQuota);
   const kept = new Set<string>();
   for (const [tool, rows] of byTool) {
     if (!filtering) {
@@ -867,7 +871,7 @@ export function QuotaStrip({
                         {cycle.previous_tokens != null && cycle.previous_tokens > 0 ? (
                           <span>{t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })}</span>
                         ) : null}
-                        {cycle.estimated_tokens == null ? <em>{cycleStatus}</em> : null}
+                        {cycle.estimated_tokens == null && !hideUnusedEstimation ? <em>{cycleStatus}</em> : null}
                         {cycle.models && cycle.models.length > 0 && cycle.estimated_tokens != null ? (
                           <button
                             type="button"

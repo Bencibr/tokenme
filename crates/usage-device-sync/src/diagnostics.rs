@@ -44,6 +44,16 @@ pub const MAX_DIAGNOSTICS_TRACE_EVENTS: usize = 256;
 pub const MAX_DIAGNOSTICS_OPERATIONS: usize = 64;
 pub const MAX_DIAGNOSTICS_LOG_SCAN_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_DIAGNOSTICS_OUTPUT_BYTES: usize = 64 * 1024;
+// A 400x660 Windows panel is returned as a bounded 32-bit BMP when the
+// platform cannot provide a PNG encoder without another dependency. The
+// 8 MiB cap covers the physical pixel size of the panel on common 2x DPI
+// displays while keeping the host result bounded.
+pub const MAX_DIAGNOSTICS_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+// Standard MCP base64 image content expands the bounded image by 4/3. Keep
+// response framing inside one shared transport limit instead of rejecting a
+// valid maximum-size Windows capture after it has been encoded.
+pub const MAX_DIAGNOSTICS_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+const MAX_DIAGNOSTICS_IMAGE_BASE64_BYTES: usize = 4 * ((MAX_DIAGNOSTICS_IMAGE_BYTES + 2) / 3);
 
 const GRANT_DOMAIN: &[u8] = b"tokenme-diagnostics/grant/v1";
 const REQUEST_DOMAIN: &[u8] = b"tokenme-diagnostics/request/v1";
@@ -666,7 +676,7 @@ impl DiagnosticsHost {
     /// operation is visible through `diagnostics.get_operation` so an MCP
     /// client can observe completion after the host schedules the action.
     pub fn begin_control_operation(&self, action: &str, started_at_ms: i64) -> Result<String, DiagnosticsError> {
-        if !matches!(action, "sync.start_primary" | "sync.stop_primary" | "sync.discover" | "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request" | "sync.pause" | "sync.resume" | "sync.revoke_device" | "sync.refresh" | "ui.open_sync_sheet" | "ui.focus_device") {
+        if !matches!(action, "sync.start_primary" | "sync.stop_primary" | "sync.discover" | "sync.pair" | "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request" | "sync.pause" | "sync.resume" | "sync.revoke_device" | "sync.refresh" | "ui.open_sync_sheet" | "ui.focus_device" | "ui.click_panel") {
             return Err(DiagnosticsError::UnknownTool);
         }
         let mut random = [0u8; 16];
@@ -731,7 +741,9 @@ const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { id: ToolId::DiagnosticsRunCheck, name: "diagnostics.run_check", scope: DiagnosticsScope::Read, description: "Run fixed diagnostics checks asynchronously." },
     ToolSpec { id: ToolId::DiagnosticsGetOperation, name: "diagnostics.get_operation", scope: DiagnosticsScope::Read, description: "Read a bounded diagnostics operation result." },
     ToolSpec { id: ToolId::AppGetPanelState, name: "app.get_panel_state", scope: DiagnosticsScope::Read, description: "Return the host panel state." },
+    ToolSpec { id: ToolId::Other, name: "ui.capture_panel", scope: DiagnosticsScope::Read, description: "Capture only the visible TokenMe panel as a bounded image." },
     ToolSpec { id: ToolId::Other, name: "sync.start_primary", scope: DiagnosticsScope::SyncControl, description: "Start the primary service through the host state machine." },
+    ToolSpec { id: ToolId::Other, name: "sync.pair", scope: DiagnosticsScope::SyncControl, description: "Pair this device from a complete tokenme invite after TLS pin validation." },
     ToolSpec { id: ToolId::Other, name: "sync.stop_primary", scope: DiagnosticsScope::SyncControl, description: "Stop the primary service and revoke diagnostics sessions." },
     ToolSpec { id: ToolId::Other, name: "sync.discover", scope: DiagnosticsScope::SyncControl, description: "Start one bounded LAN discovery operation." },
     ToolSpec { id: ToolId::Other, name: "sync.approve_pairing", scope: DiagnosticsScope::SyncControl, description: "Approve one pairing request through the host handler." },
@@ -743,6 +755,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { id: ToolId::Other, name: "sync.refresh", scope: DiagnosticsScope::SyncControl, description: "Refresh synchronization state through the host handler." },
     ToolSpec { id: ToolId::Other, name: "ui.open_sync_sheet", scope: DiagnosticsScope::SyncControl, description: "Request the semantic sync-sheet UI intent through the host handler." },
     ToolSpec { id: ToolId::Other, name: "ui.focus_device", scope: DiagnosticsScope::SyncControl, description: "Request the semantic device-focus UI intent through the host handler." },
+    ToolSpec { id: ToolId::Other, name: "ui.click_panel", scope: DiagnosticsScope::SyncControl, description: "Click one bounded coordinate inside the TokenMe panel through the host handler." },
 ];
 
 pub fn diagnostics_tool_registry() -> Vec<DiagnosticsToolDefinition> {
@@ -1126,13 +1139,10 @@ impl DiagnosticsService {
                     result_code: "ok".into(),
                     at_ms: now_ms,
                 });
-                let text = serde_json::to_string(&value).map_err(|_| DiagnosticsError::Internal)?;
+                let result = mcp_tool_result(value)?;
                 Ok(Some(success_response(
                     id,
-                    serde_json::json!({
-                        "content": [{ "type": "text", "text": text }],
-                        "structuredContent": value,
-                    }),
+                    result,
                 )))
             }
             _ => Err(DiagnosticsError::UnknownMethod),
@@ -1542,6 +1552,35 @@ fn write_stdio_response<W: Write>(writer: &mut W, response: DiagnosticsMcpRespon
     writer.flush()
 }
 
+/// Convert the host's bounded image marker into standard MCP image content.
+/// The marker is private to the host callback and is removed from
+/// `structuredContent`, so callers receive one image without a second copy of
+/// its base64 payload.
+fn mcp_tool_result(value: Value) -> Result<Value, DiagnosticsError> {
+    let Some(marker) = value.get("_mcp_image").and_then(Value::as_object) else {
+        let text = serde_json::to_string(&value).map_err(|_| DiagnosticsError::Internal)?;
+        return Ok(serde_json::json!({ "content": [{ "type": "text", "text": text }], "structuredContent": value }));
+    };
+    let mime_type = marker.get("mime_type").and_then(Value::as_str).ok_or(DiagnosticsError::InvalidParams)?.to_owned();
+    if !matches!(mime_type.as_str(), "image/png" | "image/jpeg" | "image/bmp") {
+        return Err(DiagnosticsError::InvalidParams);
+    }
+    let encoded = marker.get("data_base64").and_then(Value::as_str).ok_or(DiagnosticsError::InvalidParams)?.to_owned();
+    if encoded.len() > MAX_DIAGNOSTICS_IMAGE_BASE64_BYTES {
+        return Err(DiagnosticsError::Limit);
+    }
+    let data = base64::engine::general_purpose::STANDARD.decode(&encoded).map_err(|_| DiagnosticsError::InvalidParams)?;
+    if data.is_empty() || data.len() > MAX_DIAGNOSTICS_IMAGE_BYTES {
+        return Err(DiagnosticsError::Limit);
+    }
+    let mut structured = value;
+    structured.as_object_mut().ok_or(DiagnosticsError::InvalidParams)?.remove("_mcp_image");
+    Ok(serde_json::json!({
+        "content": [{ "type": "image", "data": encoded, "mimeType": mime_type }],
+        "structuredContent": structured,
+    }))
+}
+
 impl DiagnosticsState {
     fn prune(&mut self, now_ms: i64) {
         self.replay.retain(|_, expiry| *expiry > now_ms);
@@ -1668,6 +1707,22 @@ fn tool_schema(name: &str) -> Value {
     }
     if name == "sync.get_trace" {
         schema["properties"] = serde_json::json!({ "limit": { "type": "integer", "minimum": 1, "maximum": 200 } });
+    }
+    if name == "ui.click_panel" {
+        schema["properties"] = serde_json::json!({
+            "x": { "type": "number", "minimum": 0, "maximum": 4096 },
+            "y": { "type": "number", "minimum": 0, "maximum": 4096 },
+        });
+        schema["required"] = serde_json::json!(["x", "y"]);
+    }
+    if name == "sync.pair" {
+        schema["properties"] = serde_json::json!({
+            "invite": { "type": "string", "pattern": "^tokenme://device-pair\\?", "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+            "origin": { "type": "string", "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+            "display_name": { "type": "string", "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+            "os": { "type": "string", "maxLength": MAX_DIAGNOSTICS_STRING_BYTES },
+        });
+        schema["required"] = serde_json::json!(["invite"]);
     }
     schema
 }
@@ -1871,7 +1926,7 @@ mod tests {
         assert_eq!(listed.result.as_ref().unwrap()["tools"].as_array().unwrap().len(), TOOL_SPECS.len());
         let status = service.handle_request(&store, &request(&grant, &identity, Some(session.clone()), "tools/call", json!({"name":"device.get_status"}), "r-call"), clock(), Instant::now() + Duration::from_secs(1)).unwrap().unwrap();
         assert_eq!(status.result.as_ref().unwrap()["structuredContent"]["primary_id"], "primary-diagnostics");
-        assert!(diagnostics_tool_registry().iter().all(|tool| !tool.name.contains("shell") && !tool.name.contains("screenshot")));
+        assert!(diagnostics_tool_registry().iter().all(|tool| !tool.name.contains("shell")));
         let invalid = service.handle_request(&store, &request(&grant, &identity, Some(session), "tools/call", json!({"name":"device.get_status", "extra":true}), "r-extra"), clock(), Instant::now() + Duration::from_secs(1)).unwrap_err();
         assert_eq!(invalid, DiagnosticsError::InvalidParams);
     }
@@ -1948,5 +2003,26 @@ mod tests {
         let expired_deadline = Instant::now() - Duration::from_millis(1);
         let timeout_request = request(&grant, &identity, None, "initialize", json!({}), "timeout");
         assert_eq!(service.handle_request(&store, &timeout_request, clock(), expired_deadline).unwrap_err(), DiagnosticsError::Timeout);
+    }
+
+    #[test]
+    fn image_tool_result_emits_standard_bounded_mcp_content() {
+        let payload = base64::engine::general_purpose::STANDARD.encode([0u8; 8]);
+        let result = mcp_tool_result(json!({
+            "_mcp_image": { "mime_type": "image/png", "data_base64": payload.clone() },
+            "width": 2,
+            "height": 1,
+            "scope": "tokenme-panel",
+        })).unwrap();
+        assert_eq!(result["content"][0]["type"], "image");
+        assert_eq!(result["content"][0]["mimeType"], "image/png");
+        assert_eq!(result["structuredContent"]["scope"], "tokenme-panel");
+        assert!(result["structuredContent"].get("_mcp_image").is_none());
+        assert!(mcp_tool_result(json!({
+            "_mcp_image": { "mime_type": "text/plain", "data_base64": payload },
+        })).is_err());
+        assert!(matches!(mcp_tool_result(json!({
+            "_mcp_image": { "mime_type": "image/png", "data_base64": "A".repeat(MAX_DIAGNOSTICS_IMAGE_BASE64_BYTES + 1) },
+        })), Err(DiagnosticsError::Limit)));
     }
 }

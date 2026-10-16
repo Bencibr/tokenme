@@ -252,6 +252,16 @@ export function SettingsSheet({
     }
   };
 
+  const setHideUnusedEstimation = async (on: boolean) => {
+    if (!settings) return;
+    try {
+      await bridge.setHideUnusedEstimation(on);
+      setSettings((s) => s ? { ...s, hide_unused_estimation: on } : s);
+    } catch {
+      setSettings((s) => s ? { ...s, hide_unused_estimation: !on } : s);
+    }
+  };
+
   const setTtft = async (on: boolean) => {
     if (ttftBusy || settings?.ttft_enabled === on) return;
     setTtftBusy(true);
@@ -266,10 +276,15 @@ export function SettingsSheet({
     }
   };
 
-  const setShowEmptyTools = (on: boolean) => {
-    patch((s) => ({ ...s, show_empty_tools: on }));
+  const setHideUnusedQuota = (on: boolean) => {
+    patch((s) => ({ ...s, hide_unused_quota: on }));
+    void bridge.setHideUnusedQuota(on);
+  };
+
+  const setHideUnusedTools = (on: boolean) => {
+    patch((s) => ({ ...s, hide_unused_tools: on }));
     onEmptyTools(on);
-    void bridge.setShowEmptyTools(on);
+    void bridge.setHideUnusedTools(on);
   };
 
   const setBubble = (on: boolean) => {
@@ -619,7 +634,8 @@ export function SettingsSheet({
             </div>
             {quotaModeError ? <p className="sheet-hint" role="alert">{t("set.quota.failed")}</p> : null}
             {switchRow(t("set.money"), t("set.money.hint"), settings.show_money, setMoney)}
-            {switchRow(t("set.showempty"), t("set.showempty.hint"), settings.show_empty_tools, setShowEmptyTools)}
+            {switchRow(t("set.hideunused.tools"), t("set.hideunused.tools.hint"), settings.hide_unused_tools, setHideUnusedTools)}
+            {switchRow(t("set.quota.hideunused"), t("set.quota.hideunused.hint"), settings.hide_unused_quota, setHideUnusedQuota)}
             {isWindows || isMac ? (
               <>
                 {switchRow(t("set.bubble"), t("set.bubble.hint"), settings.bubble_enabled, setBubble)}
@@ -746,6 +762,7 @@ export function SettingsSheet({
             {mcpError && mcpEnabled && mcpConfig?.config_json ? <p className="sheet-hint" role="alert">{mcpError}</p> : null}
             {switchRow(t("set.polling"), t("set.polling.hint"), settings.quota_polling, setQuotaPolling)}
             {switchRow(t("set.cycle.tokens"), t("set.cycle.tokens.hint"), settings.show_cycle_tokens, setCycleTokens)}
+            {switchRow(t("set.cycle.estimation.hide"), t("set.cycle.estimation.hide.hint"), settings.hide_unused_estimation, setHideUnusedEstimation)}
             {switchRow(t("set.ttft"), t("set.ttft.hint"), settings.ttft_enabled, (on) => void setTtft(on), ttftBusy)}
             {ttftError ? <p className="sheet-hint" role="alert">{t("set.ttft.failed")}</p> : null}
             {/* Master off ⇒ no claim can fire at all, so the guarantee would be
