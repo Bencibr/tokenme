@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DiagnosticsConfig, DiagnosticsManagementRequest, DiagnosticsResponse, DiagnosticsScope, DiagnosticsSessionView, DiscoveredPrimaryView, SyncDevicesSnapshot, SyncManagementRequest } from "../types";
+import type { DiagnosticsConfig, DiagnosticsManagementRequest, DiagnosticsResponse, DiagnosticsScope, DiagnosticsSessionView, DiscoveredPrimaryView, McpClientConfig, SyncDevicesSnapshot, SyncManagementRequest } from "../types";
 import { bridge } from "../lib/bridge";
 import { t } from "../lib/i18n";
 import { IconBack, IconCheck, IconClose, IconMonitorDown, IconRadioTower, IconWarn } from "./Icons";
@@ -79,6 +79,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [diagnosticsSessions, setDiagnosticsSessions] = useState<DiagnosticsSessionView[]>([]);
   const [diagnosticsConfig, setDiagnosticsConfig] = useState<DiagnosticsConfig | null>(null);
   const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
+  const [localCred, setLocalCred] = useState<McpClientConfig | null>(null);
+  const [localCopied, setLocalCopied] = useState(false);
   const diagnosticsConfigRef = useRef<DiagnosticsConfig | null>(null);
   // The create flow chains configure → create_grant; a state read here would
   // still be the stale closure from before configure answered, so guard on a ref.
@@ -368,6 +370,34 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     if (ok) { setDiagnosticsCopied(true); window.setTimeout(() => setDiagnosticsCopied(false), 1600); }
   };
 
+  // Local debug clients (本机的 Claude) consume the MCP connection config, not
+  // a signed grant: enable the diagnostics server, then hand over its config.
+  const createLocalFlow = async () => {
+    if (!diagnosticsEnabledRef.current) await runDiagnostics({ action: "configure", enabled: true });
+    if (!mounted.current) return;
+    try {
+      const cfg = await bridge.mcpClientConfig();
+      if (!mounted.current) return;
+      if (!cfg.ready) { setDiagnosticsError(cfg.reason ?? t("sync.diagnostics.invalid_config")); return; }
+      setLocalCred(cfg);
+      setDiagnosticsError(null);
+    } catch (e) {
+      if (mounted.current) setDiagnosticsError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const revokeLocalFlow = () => {
+    setLocalCred(null);
+    setLocalCopied(false);
+    void runDiagnostics({ action: "configure", enabled: false });
+  };
+
+  const copyLocalFlow = async () => {
+    if (!localCred) return;
+    const ok = await copyText(localCred.config_json);
+    if (ok) { setLocalCopied(true); window.setTimeout(() => setLocalCopied(false), 1600); }
+  };
+
   const toggleDiagnosticsScope = (scope: DiagnosticsScope) => {
     if (diagnosticsScopes.includes(scope)) {
       setDiagnosticsScopes((current) => current.filter((value) => value !== scope));
@@ -602,9 +632,22 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   ))}
                 </>
               ) : (
-                <div className="sync-btnrow">
-                  <button type="button" className="btn-accent" disabled={commandBusy || diagnosticsEnabled} onClick={() => void runDiagnostics({ action: "configure", enabled: true })}>{diagnosticsEnabled ? t("sync.diagnostics.local_on") : t("sync.diagnostics.enable_local")}</button>
-                </div>
+                <>
+                  <div className="sync-btnrow">
+                    <button type="button" className="btn-accent" disabled={commandBusy} onClick={() => void createLocalFlow()}>{t("sync.diagnostics.create_short")}</button>
+                  </div>
+                  {localCred ? (
+                    <div className="sync-credbox">
+                      <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.generated")}</span></div>
+                      <input className="sync-input" readOnly value={localCred.endpoint ?? ""} aria-label={t("sync.diagnostics.generated")} onFocus={(event) => event.currentTarget.select()} />
+                      {localCred.expires_at_ms ? <div className="sheet-hint">{timeLeft(localCred.expires_at_ms)}</div> : null}
+                      <div className="sync-btnrow">
+                        <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void copyLocalFlow()}>{localCopied ? t("sync.diagnostics.copied") : t("sync.diagnostics.copy_code")}</button>
+                        <button type="button" className="btn-quiet" disabled={commandBusy} onClick={revokeLocalFlow}>{t("sync.diagnostics.revoke_local")}</button>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
               )}
             </>
           ) : null}

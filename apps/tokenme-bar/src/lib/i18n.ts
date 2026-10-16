@@ -140,8 +140,7 @@ const zh = {
   "sync.diagnostics.copy_code": "复制凭据",
   "sync.diagnostics.copied": "已复制",
   "sync.diagnostics.invalid_config": "至少选择一个授权范围，并选择已配对的从设备。",
-  "sync.diagnostics.enable_local": "开启本机诊断",
-  "sync.diagnostics.local_on": "本机诊断已开启",
+  "sync.diagnostics.revoke_local": "吊销本机凭据",
   "sync.diagnostics.sessions": "活跃会话（到期自动失效）",
   "sync.diagnostics.revoke_session": "吊销",
 
@@ -829,8 +828,7 @@ const en: Record<StrKey, string> = {
   "sync.diagnostics.copy_code": "Copy credential",
   "sync.diagnostics.copied": "Copied",
   "sync.diagnostics.invalid_config": "Select at least one scope and choose a paired secondary.",
-  "sync.diagnostics.enable_local": "Enable local diagnostics",
-  "sync.diagnostics.local_on": "Local diagnostics enabled",
+  "sync.diagnostics.revoke_local": "Revoke local credential",
   "sync.diagnostics.sessions": "Active sessions (expire automatically)",
   "sync.diagnostics.revoke_session": "Revoke",
 

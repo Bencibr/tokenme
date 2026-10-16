@@ -66,6 +66,7 @@ declare global {
      *  DOM runs against the preview build; never consulted inside the app. */
     __TOKENME_SYNC_STUB__?: (request: SyncManagementRequest | null, current: SyncDevicesSnapshot) => SyncDevicesSnapshot | Promise<SyncDevicesSnapshot>;
     __TOKENME_DIAG_STUB__?: (request: DiagnosticsManagementRequest, current: DiagnosticsSnapshot) => DiagnosticsResponse | Promise<DiagnosticsResponse>;
+    __TOKENME_MCP_STUB__?: () => McpClientConfig | Promise<McpClientConfig>;
   }
 }
 let real: Report | null | undefined;
@@ -195,6 +196,8 @@ export const bridge: Bridge = {
 
   async mcpClientConfig(): Promise<McpClientConfig> {
     if (!inTauri) {
+      const stub = window.__TOKENME_MCP_STUB__;
+      if (stub) return await stub();
       return {
         config_json: "",
         endpoint: null,
