@@ -768,10 +768,6 @@ export function SettingsSheet({
                   <div className="sheet-label">{t("set.mcp.client.config")}</div>
                   <div className="sheet-hint">{t("set.mcp.client.config.hint")}</div>
                 </div>
-                <span className="sheet-status">{mcpControlEnabled ? t("set.mcp.control.enabled") : t("set.mcp.control.disabled.short")}</span>
-                <button type="button" className="sheet-action" disabled={mcpBusy} onClick={() => void refreshMcp()}>
-                  {mcpBusy ? t("set.busy") : t("set.mcp.check")}
-                </button>
               </div>
               {mcpEnabled && mcpConfig?.config_json ? (
                 <div className="sheet-mcp-config" aria-label={t("set.mcp.client.config")}>
