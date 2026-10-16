@@ -168,7 +168,7 @@ impl Index {
                         // data-proven: the reconciliation itself vouches for the meter
                         "confirmed" if state.meter.is_some() => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
                         // hand-verified seed: the older, stricter terms
-                        "confirmed" if state.identity != "unknown" && state.last_used_percent >= 5.0 => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
+                        "confirmed" if state.identity != "unknown" && state.last_used_percent >= 1.0 => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
                         // assumed: the caveat rides along, the gates stay lenient
                         "unverified" => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
                         _ => None,
@@ -261,7 +261,7 @@ impl Index {
                     // data-proven: the reconciliation itself vouches for the meter
                     "confirmed" if meter.is_some() => q.used_percent >= 0.1,
                     // hand-verified seed: the older, stricter terms
-                    "confirmed" => identity != "unknown" && q.used_percent >= 5.0,
+                    "confirmed" => identity != "unknown" && q.used_percent >= 1.0,
                     // assumed: the caveat rides along, the gates stay lenient
                     "unverified" => q.used_percent >= 0.1,
                     _ => false,
