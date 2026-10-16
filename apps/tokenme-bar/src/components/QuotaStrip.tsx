@@ -271,9 +271,6 @@ export function QuotaStrip({
   const live = quotas
     .filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now)
     .filter((q) => !CHECKIN_STATE_IDS.includes(q.id ?? ""));
-  // 零会话开关关着时，本期没有会话的工具整块隐藏：开关读作“没在用的别占位”。
-  // 会话集合来自报告的当期窗口，与工具页同一口径。
-  const visible = usedTools && !showEmptyTools ? live.filter((q) => usedTools.has(q.tool)) : live;
   // Trae CN / Qoder 的每日签到：状态按工具各管各的——busy/claimed/msg 都是
   // 以工具 id 为键，点 Trae 的按钮不能把 Qoder 的按钮带成"签到中"，更不能把
   // 另一个工具误标成已签。状态与点击都在这里，而不是配额分组之后——那一段
@@ -440,6 +437,29 @@ export function QuotaStrip({
       </Section>
     );
   }
+  const byTool = new Map<string, QuotaView[]>();
+  for (const q of live) {
+    const rows = byTool.get(q.tool) ?? [];
+    rows.push(q);
+    byTool.set(q.tool, rows);
+  }
+  // “没在用”的两层判断，只在零会话开关关着时生效：本期没有会话，或者每
+  // 一行都报出 0 tokens 的本机周期——百分比再高也是厂商口径没对齐的故
+  // 事，0 tokens 的行占着位置只显得乱。任何一行给不出周期数据（积分行、
+  // 无窗口的预算行）都让整个工具保留：拿不到证据不等于零。
+  const filtering = usedTools != null && !showEmptyTools;
+  const kept = new Set<string>();
+  for (const [tool, rows] of byTool) {
+    if (!filtering) {
+      kept.add(tool);
+      continue;
+    }
+    if (!rows.some((r) => usedTools.has(r.tool))) continue;
+    const allZero = rows.length > 0 && rows.every((r) => r.cycle != null && r.cycle.observed_tokens === 0);
+    if (allZero) continue;
+    kept.add(tool);
+  }
+  const visible = live.filter((q) => kept.has(q.tool));
   if (visible.length === 0) {
     // pending 为假且为空 = 真没有配额，而不是让配额区块无声消失。
     return null;
@@ -453,13 +473,6 @@ export function QuotaStrip({
     notify !== null && notify !== "granted" && notify !== "unknown" && dismissedFor !== notify && vendorLive
       ? notify
       : null;
-
-  const byTool = new Map<string, QuotaView[]>();
-  for (const q of visible) {
-    const rows = byTool.get(q.tool) ?? [];
-    rows.push(q);
-    byTool.set(q.tool, rows);
-  }
   const groups = ordered([...byTool.keys()], order.tools, (t) => t).map((tool) => ({
     tool,
     rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
