@@ -445,6 +445,16 @@ const [page, setPage] = useState<PageKey>(() => {
     return [...w.breakdown.tools, ...silent].filter((t) => showEmptyTools || t.sessions > 0);
   }, [report, period, showEmptyTools, scope]);
 
+  // The period's active tools (sessions > 0) — the same predicate the tools
+  // page filters on. The quota strip hides the rest while the zero-session
+  // switch is off: tools without sessions here are the "not in use" set.
+  // Hooks rule: above the boot screen's early return.
+  const usedTools = useMemo(() => {
+    if (!report) return new Set<string>();
+    const w = report[period];
+    return new Set(w.breakdown.tools.filter((t) => t.sessions > 0).map((t) => t.key));
+  }, [report, period]);
+
   // The scope menu's "manual import" tags: everything not server-backed. With
   // no servers configured the set stays empty and the menu shows no tags.
   // Hooks rule: above the boot screen's early return, like `tools`.
@@ -501,7 +511,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "overview" ? (
                 <>
                   <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} hoursPrev={report.hourly_prev} period={period} />
-                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} showCycleTokens={showCycleTokens} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} showCycleTokens={showCycleTokens} usedTools={usedTools} showEmptyTools={showEmptyTools} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}

@@ -241,6 +241,8 @@ export function QuotaStrip({
   polling = true,
   displayMode = "used",
   showCycleTokens = false,
+  usedTools,
+  showEmptyTools = false,
 }: {
   quotas: QuotaView[];
   now: number;
@@ -255,6 +257,11 @@ export function QuotaStrip({
   polling?: boolean;
   displayMode?: QuotaDisplayMode;
   showCycleTokens?: boolean;
+  /** Tools with a session this period (the tools page's own predicate). When
+   *  the zero-session switch is off, tools outside this set are not in use —
+   *  their rows leave the strip instead of lingering as frozen answers. */
+  usedTools?: Set<string>;
+  showEmptyTools?: boolean;
 }) {
   // The check-in marker rows are state, not data (CHECKIN_STATE_IDS): every
   // count and row on screen reads this filtered list; the badge and button
@@ -262,6 +269,9 @@ export function QuotaStrip({
   const live = quotas
     .filter((q) => q.resets_at_ms === 0 || q.resets_at_ms > now)
     .filter((q) => !CHECKIN_STATE_IDS.includes(q.id ?? ""));
+  // 零会话开关关着时，本期没有会话的工具整块隐藏：开关读作“没在用的别占位”。
+  // 会话集合来自报告的当期窗口，与工具页同一口径。
+  const visible = usedTools && !showEmptyTools ? live.filter((q) => usedTools.has(q.tool)) : live;
   // Trae CN / Qoder 的每日签到：状态按工具各管各的——busy/claimed/msg 都是
   // 以工具 id 为键，点 Trae 的按钮不能把 Qoder 的按钮带成"签到中"，更不能把
   // 另一个工具误标成已签。状态与点击都在这里，而不是配额分组之后——那一段
@@ -428,7 +438,7 @@ export function QuotaStrip({
       </Section>
     );
   }
-  if (live.length === 0) {
+  if (visible.length === 0) {
     // pending 为假且为空 = 真没有配额，而不是让配额区块无声消失。
     return null;
   }
@@ -436,14 +446,14 @@ export function QuotaStrip({
   // The guide only speaks to a vendor-window audience — budget rows are this
   // app's own caps, no OS banner is involved — and only while the OS would not
   // deliver one at all.
-  const vendorLive = live.some((q) => (q.origin ?? "probe") !== "budget");
+  const vendorLive = visible.some((q) => (q.origin ?? "probe") !== "budget");
   const guide =
     notify !== null && notify !== "granted" && notify !== "unknown" && dismissedFor !== notify && vendorLive
       ? notify
       : null;
 
   const byTool = new Map<string, QuotaView[]>();
-  for (const q of live) {
+  for (const q of visible) {
     const rows = byTool.get(q.tool) ?? [];
     rows.push(q);
     byTool.set(q.tool, rows);
@@ -557,7 +567,7 @@ export function QuotaStrip({
   return (
     <Section
       label={`${t("quota.section")} · ${remaining ? t("quota.mode.remaining") : t("quota.mode.used")}`}
-      meta={scoped ? t("quota.meta.local") : t("quota.meta", { w: live.length, g: groups.length })}
+      meta={scoped ? t("quota.meta.local") : t("quota.meta", { w: visible.length, g: groups.length })}
       trail={
         <span className="quota-legend" aria-hidden="true">
           <span><i data-stage="low" />{t("quota.legend.low")}</span>
@@ -566,9 +576,9 @@ export function QuotaStrip({
         </span>
       }
     >
-      {!polling && live.length ? (
+      {!polling && visible.length ? (
         <p className="quota-stopped" role="status">
-          {t("quota.stopped", { age: freshness(live.reduce((m, q) => Math.max(m, q.sampled_at_ms), 0), now) })}
+          {t("quota.stopped", { age: freshness(visible.reduce((m, q) => Math.max(m, q.sampled_at_ms), 0), now) })}
         </p>
       ) : null}
       {guide ? (
