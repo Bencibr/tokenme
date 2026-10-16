@@ -445,23 +445,20 @@ export function QuotaStrip({
     rows.push(q);
     byTool.set(q.tool, rows);
   }
-  // “没在用”的两层判断，只在零会话开关关着时生效：本期没有会话，或者每
-  // 一行都报出 0 tokens 的本机周期——百分比再高也是厂商口径没对齐的故
-  // 事，0 tokens 的行占着位置只显得乱。任何一行给不出周期数据（积分行、
-  // 无窗口的预算行）都让整个工具保留：拿不到证据不等于零。
+  // “没在用”的判断，各自独立：
+  // · 隐藏未使用配额（含工具页同名开关的会话口径）：本期没有会话 → 整块隐藏；
+  // · 隐藏未使用 Token 估算：0 tokens 的行整行隐藏，全部行为 0 的工具
+  //   随之消失。任何一行给不出周期数据（积分行、无窗口的预算行）都保留：
+  //   拿不到证据不等于零。
+  const rowVisible = (q: QuotaView) => !hideUnusedEstimation || !(q.cycle != null && q.cycle.observed_tokens === 0);
   const filtering = usedTools != null && hideUnusedQuota;
   const kept = new Set<string>();
   for (const [tool, rows] of byTool) {
-    if (!filtering) {
-      kept.add(tool);
-      continue;
-    }
-    if (!rows.some((r) => usedTools.has(r.tool))) continue;
-    const allZero = rows.length > 0 && rows.every((r) => r.cycle != null && r.cycle.observed_tokens === 0);
-    if (allZero) continue;
+    if (filtering && !rows.some((r) => usedTools.has(r.tool))) continue;
+    if (!rows.some((r) => rowVisible(r))) continue;
     kept.add(tool);
   }
-  const visible = live.filter((q) => kept.has(q.tool));
+  const visible = live.filter((q) => kept.has(q.tool) && rowVisible(q));
   if (visible.length === 0) {
     // pending 为假且为空 = 真没有配额，而不是让配额区块无声消失。
     return null;
@@ -479,7 +476,7 @@ export function QuotaStrip({
   // would render the very blocks the not-in-use judgement just removed.
   const groups = ordered([...kept], order.tools, (t) => t).map((tool) => ({
     tool,
-    rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
+    rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey).filter((r) => rowVisible(r)),
   }));
   // The strip rides the bottom of the overview page, so its last two rows flip
   // the click tip above the row — a below-tip there would leave the panel
