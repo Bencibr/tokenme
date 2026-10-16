@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DiagnosticsConfig, DiagnosticsManagementRequest, DiagnosticsOperationView, DiagnosticsResponse, DiagnosticsScope, DiagnosticsSessionView, SyncDevicesSnapshot, SyncManagementRequest } from "../types";
 import QRCode from "qrcode";
+import type { DiagnosticsConfig, DiagnosticsManagementRequest, DiagnosticsOperationView, DiagnosticsResponse, DiagnosticsScope, DiagnosticsSessionView, SyncDevicesSnapshot, SyncManagementRequest } from "../types";
 import { bridge } from "../lib/bridge";
 import { t } from "../lib/i18n";
 import { IconClose, IconWarn } from "./Icons";
@@ -94,8 +94,6 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const operationGeneration = useRef(0);
   const operationInFlight = useRef<"initial" | "mutation" | "refresh" | "discover" | "poll" | null>(null);
   const mounted = useRef(false);
-  const [origin] = useState("secondary");
-  const [displayName] = useState("");
 
   const clearAutomaticDiscovery = useCallback(() => {
     if (automaticDiscoveryTimer.current !== undefined) {
@@ -531,7 +529,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   <div><strong>{snapshot.discovered_primaries.length ? `${snapshot.discovered_primaries.length} ${t("sync.discovery.scan")}` : t("sync.discovery.scan")}</strong><span>{t("sync.discovery.hint")}</span></div>
                   <button type="button" className="btn-quiet" disabled={commandBusy || discovering} onClick={() => void discover()}>{discovering ? t("sync.refreshing") : t("sync.refresh")}</button>
                 </div>
-                {snapshot.discovered_primaries.length ? <div className="sync-device-list">{snapshot.discovered_primaries.map((primary) => <article className="sync-device-card" key={primary.primary_id}><div className="sync-device-head"><strong>{primary.display_name}</strong><span className={primary.identity_conflict ? "sync-device-status is-error" : "sync-device-status"}>{primary.identity_conflict ? t("sync.discovery.conflict") : t("sync.discovery.trust")}</span></div><div className="sync-device-meta"><code>{primary.endpoint}</code><span>sha256:{primary.certificate_pin}</span></div><div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy || primary.identity_conflict} onClick={() => void run({ action: "pair_discovered", primary_id: primary.primary_id, endpoint: primary.endpoint, certificate_pin: primary.certificate_pin, origin, display_name: displayName.trim() || null, os: null })}>{t("sync.discovery.pair")}</button><button type="button" className="btn-quiet" disabled={commandBusy || primary.identity_conflict} onClick={() => void copyText(primary.endpoint).then(setCopied)}>{copied ? t("sync.copied") : t("sync.discovery.copy_endpoint")}</button></div></article>)}</div> : <div className="sync-empty-card"><strong>{t("sync.discovery.empty")}</strong><span>{t("sync.discovery.empty_hint")}</span></div>}
+                {snapshot.discovered_primaries.length ? <div className="sync-device-list">{snapshot.discovered_primaries.map((primary) => <article className="sync-device-card" key={primary.primary_id}><div className="sync-device-head"><strong>{primary.display_name}</strong><span className={primary.identity_conflict ? "sync-device-status is-error" : "sync-device-status"}>{primary.identity_conflict ? t("sync.discovery.conflict") : t("sync.discovery.trust")}</span></div><div className="sync-device-meta"><code>{primary.endpoint}</code><span>sha256:{primary.certificate_pin}</span></div><div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy || primary.identity_conflict} onClick={() => void run({ action: "pair_discovered", primary_id: primary.primary_id, endpoint: primary.endpoint, certificate_pin: primary.certificate_pin, origin, display_name: null, os: null })}>{t("sync.discovery.pair")}</button><button type="button" className="btn-quiet" disabled={commandBusy || primary.identity_conflict} onClick={() => void copyText(primary.endpoint).then(setCopied)}>{copied ? t("sync.copied") : t("sync.discovery.copy_endpoint")}</button></div></article>)}</div> : <div className="sync-empty-card"><strong>{t("sync.discovery.empty")}</strong><span>{t("sync.discovery.empty_hint")}</span></div>}
               </div> : null}
             </div>
           ) : (
