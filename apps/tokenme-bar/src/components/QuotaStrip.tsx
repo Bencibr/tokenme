@@ -79,6 +79,24 @@ function shortenTierHead(head: string): string {
   return head.trim().replace(/\s*\((?:monthly|annual|annually|yearly|weekly)\s*\)$/i, "").trim();
 }
 
+/** The window word a cycle line quotes ("5 小时"/"周") — a labelled row's tail
+ *  after the tier separator, else the bare label (Codex names its window
+ *  directly). */
+function cycleWindow(label: string | null | undefined): string {
+  if (!label) return "";
+  return label.includes(" · ") ? label.slice(label.indexOf(" · ") + 3) : label;
+}
+
+/** Header-scale estimates: billions once the figure leaves the M range —
+ *  "3.54B" reads, "3536M" does not. */
+function formatLimitTokens(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
+  if (value >= 100_000_000) return `${(value / 1_000_000).toFixed(0)}M`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  return Math.round(value).toLocaleString();
+}
+
 function formatCycleTokens(value: number): string {
   if (!Number.isFinite(value)) return "0";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 2)}M`;
@@ -801,23 +819,30 @@ export function QuotaStrip({
                       <div className="quota-cycle" role="status">
                         <span>{t("quota.cycle.observed", { tokens: formatCycleTokens(cycle.observed_tokens) })}</span>
                         {cycle.estimated_tokens != null ? (
-                          <span>{t("quota.cycle.estimated", { tokens: formatCycleTokens(cycle.estimated_tokens) })}</span>
+                          <span className="quota-cycle-est">
+                            {t("quota.cycle.estimated", {
+                              window: cycleWindow(q.label),
+                              tokens: formatLimitTokens(cycle.estimated_tokens),
+                            })}
+                          </span>
                         ) : null}
                         {cycle.previous_tokens != null && cycle.previous_tokens > 0 ? (
                           <span>{t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })}</span>
                         ) : null}
-                        <em>{cycleStatus}</em>
+                        {cycle.estimated_tokens == null ? <em>{cycleStatus}</em> : null}
                         {cycle.models && cycle.models.length > 0 && cycle.estimated_tokens != null ? (
                           <button
                             type="button"
                             className="quota-cycbtn"
                             aria-expanded={modelsOpenKey === rowKey(q)}
+                            aria-label={t("quota.cycle.models")}
+                            title={t("quota.cycle.models")}
                             onClick={() => {
                               setModelsOpenKey(modelsOpenKey === rowKey(q) ? null : rowKey(q));
                               setModelTipKey(null);
                             }}
                           >
-                            {modelsOpenKey === rowKey(q) ? "▾" : "▸"} {t("quota.cycle.models")}
+                            {modelsOpenKey === rowKey(q) ? "▾" : "☰"}
                           </button>
                         ) : null}
                       </div>
@@ -831,8 +856,11 @@ export function QuotaStrip({
                           return (
                             <div className="quota-models" role="group" aria-label={t("quota.cycle.models")}>
                               <div className="quota-models-head">
-                                <span>{t("quota.cycle.limit", { tokens: formatCycleTokens(est) })}</span>
-                                <span className="num">{t("quota.cycle.left", { tokens: formatCycleTokens(left) })}</span>
+                                <span>
+                                  {t("quota.cycle.limit", { window: cycleWindow(q.label) })}{" "}
+                                  <b className="quota-models-big">≈ {formatLimitTokens(est)}</b>
+                                </span>
+                                <span className="num">{t("quota.cycle.left", { tokens: formatLimitTokens(left) })}</span>
                               </div>
                               <div className="quota-models-mix" aria-hidden="true">
                                 {cycle.models.map((m, i) => (

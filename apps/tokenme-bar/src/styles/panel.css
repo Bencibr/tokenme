@@ -1217,6 +1217,10 @@
 
 /* The per-model breakdown under a cycle line: one single-line row per model,
    same geometry as the quota rows above (bar / percent / used). */
+.quota-cycle-est {
+  color: var(--accent-ink);
+}
+
 .quota-cycbtn {
   margin-left: auto;
   border: 0;
@@ -1224,6 +1228,8 @@
   padding: 0;
   color: var(--ink-3);
   font: inherit;
+  font-size: 11px;
+  line-height: 1;
   cursor: pointer;
 }
 
@@ -1243,14 +1249,32 @@
 .quota-models-head {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 5px 8px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--hair-2);
   border-radius: 8px 8px 0 0;
   color: var(--ink-3);
-  font-size: 10px;
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+}
+
+.quota-models-big {
+  color: var(--ink-2);
+  font-weight: 500;
+  font-size: 11.5px;
+}
+
+/* The bar is 64px wide; an absolutely-positioned tip shrinks to its host
+   unless the width is taken explicitly — and it must grow leftward, not
+   off the panel's right edge. */
+.quota-mbar .rank-tip {
+  left: auto;
+  right: 0;
+  width: max-content;
+  max-width: none;
+  white-space: nowrap;
 }
 
 .quota-models-mix {
@@ -1366,6 +1390,7 @@
   padding: 6px 8px 7px;
   border-top: 1px solid var(--hair-2);
   color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface-solid));
   font-size: 10px;
   line-height: 1.4;
 }
