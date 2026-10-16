@@ -1203,6 +1203,7 @@
 .quota-cycle {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 4px 8px;
   padding: 1px 0 2px 26px;
   color: var(--ink-3);
@@ -1222,13 +1223,15 @@
 }
 
 .quota-cycbtn {
+  display: inline-flex;
+  align-items: center;
   margin-left: auto;
   border: 0;
   background: transparent;
   padding: 0;
   color: var(--ink-3);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
   cursor: pointer;
 }
@@ -1266,15 +1269,20 @@
   font-size: 11.5px;
 }
 
-/* The bar is 64px wide; an absolutely-positioned tip shrinks to its host
-   unless the width is taken explicitly — and it must grow leftward, not
-   off the panel's right edge. */
-.quota-mbar .rank-tip {
-  left: auto;
-  right: 0;
-  width: max-content;
+.quota-mwrap {
+  position: relative;
+}
+
+/* Both tips anchor to the row wrapper and span the list's width: a tip
+   hanging off the 64px bar shrinks to its host and wraps into a sliver,
+   and one sized to its text overflows the panel's edges. */
+.quota-mwrap .rank-tip {
+  left: 8px;
+  right: 8px;
+  width: auto;
   max-width: none;
-  white-space: nowrap;
+  top: calc(100% + 4px);
+  white-space: normal;
 }
 
 .quota-models-mix {

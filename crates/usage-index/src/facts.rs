@@ -101,7 +101,7 @@ impl Index {
     pub fn attach_cycle_usage(&self, quotas: &mut [QuotaView], now_ms: i64) -> Result<()> {
         let mut seen = std::collections::HashSet::new();
         for q in quotas {
-            if q.origin == usage_core::QuotaOrigin::Budget || !matches!(q.window_minutes, 300 | 10_080) {
+            if q.origin == usage_core::QuotaOrigin::Budget || !matches!(q.window_minutes, 300 | 10_080 | 43_200) {
                 continue;
             }
             if !seen.insert((q.tool.clone(), q.window_minutes, q.resets_at_ms, cycle_bucket_key(q))) {

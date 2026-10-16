@@ -295,6 +295,17 @@ export function QuotaStrip({
   // bar) shows the floating tip. Keys are rowKey-scoped, tips row+model.
   const [modelsOpenKey, setModelsOpenKey] = useState<string | null>(null);
   const [modelTipKey, setModelTipKey] = useState<string | null>(null);
+  // A tip is a transient peek: a press anywhere outside its anchor dismisses
+  // it, which is the click-equivalent of losing focus.
+  useEffect(() => {
+    if (modelTipKey === null) return;
+    const close = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest(".quota-mbar, .quota-mname, .rank-tip")) setModelTipKey(null);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [modelTipKey]);
   const dragRef = useRef<Drag | null>(null);
   // The authoritative order: pointer moves arrive faster than renders, so the
   // drag handlers swap through the ref and never through stale state.
@@ -882,47 +893,52 @@ export function QuotaStrip({
                                   ? t("quota.model.share-dom", { p: Math.round(share * 100) })
                                   : t("quota.model.share", { p: Math.round(share * 100) });
                                 return (
-                                  <div className="quota-mrow" key={m.model}>
-                                    <button
-                                      type="button"
-                                      className="quota-mname"
-                                      aria-expanded={modelTipKey === nameK}
-                                      title={m.model}
-                                      onClick={() => setModelTipKey(modelTipKey === nameK ? null : nameK)}
-                                    >
-                                      <i className="quota-mdot" style={{ background: MODEL_HUES[i % MODEL_HUES.length] }} aria-hidden="true" />
-                                      <span className="quota-mtext">{m.model}</span>
-                                    </button>
-                                    <span
-                                      className="quota-mbar"
-                                      role="button"
-                                      tabIndex={0}
-                                      aria-label={t("quota.model.share", { p: Math.round(share * 100) })}
-                                      onClick={() => setModelTipKey(modelTipKey === barK ? null : barK)}
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter" || e.key === " ") {
-                                          e.preventDefault();
-                                          setModelTipKey(modelTipKey === barK ? null : barK);
-                                        }
-                                      }}
-                                    >
-                                      <i data-stage={stage} style={{ width: `${shown}%` }} />
-                                      {modelTipKey === barK ? (
-                                        <span className={`rank-tip${flipTips.has(rowK) ? " up" : ""}`}>
-                                          {t("quota.model.tip", {
-                                            used: formatCycleTokens(m.tokens),
-                                            left: formatCycleTokens(Math.max(0, quota - m.tokens)),
-                                            quota: formatCycleTokens(quota),
-                                            share: shareText,
-                                          })}
-                                        </span>
-                                      ) : null}
-                                    </span>
-                                    <span className="quota-mpct num" data-stage={stage}>
-                                      {shown}
-                                      <em>%</em>
-                                    </span>
-                                    <span className="quota-mused num">{formatCycleTokens(m.tokens)}</span>
+                                  <div className="quota-mwrap" key={m.model}>
+                                    <div className="quota-mrow">
+                                      <button
+                                        type="button"
+                                        className="quota-mname"
+                                        aria-expanded={modelTipKey === nameK}
+                                        title={m.model}
+                                        onClick={() => setModelTipKey(modelTipKey === nameK ? null : nameK)}
+                                      >
+                                        <i className="quota-mdot" style={{ background: MODEL_HUES[i % MODEL_HUES.length] }} aria-hidden="true" />
+                                        <span className="quota-mtext">{m.model}</span>
+                                      </button>
+                                      <span
+                                        className="quota-mbar"
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-label={t("quota.model.share", { p: Math.round(share * 100) })}
+                                        onClick={() => setModelTipKey(modelTipKey === barK ? null : barK)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter" || e.key === " ") {
+                                            e.preventDefault();
+                                            setModelTipKey(modelTipKey === barK ? null : barK);
+                                          }
+                                        }}
+                                      >
+                                        <i data-stage={stage} style={{ width: `${shown}%` }} />
+                                      </span>
+                                      <span className="quota-mpct num" data-stage={stage}>
+                                        {shown}
+                                        <em>%</em>
+                                      </span>
+                                      <span className="quota-mused num">{formatCycleTokens(m.tokens)}</span>
+                                    </div>
+                                    {modelTipKey === nameK ? (
+                                      <span className={`rank-tip${flipTips.has(rowK) ? " up" : ""}`}>{m.model}</span>
+                                    ) : null}
+                                    {modelTipKey === barK ? (
+                                      <span className={`rank-tip${flipTips.has(rowK) ? " up" : ""}`}>
+                                        {t("quota.model.tip", {
+                                          used: formatCycleTokens(m.tokens),
+                                          left: formatCycleTokens(Math.max(0, quota - m.tokens)),
+                                          quota: formatCycleTokens(quota),
+                                          share: shareText,
+                                        })}
+                                      </span>
+                                    ) : null}
                                   </div>
                                 );
                               })}
