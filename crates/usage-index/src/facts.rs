@@ -41,6 +41,16 @@ struct CycleState {
     /// samples must never move a cycle backwards or trigger a reset.
     #[serde(default)]
     last_sampled_at_ms: i64,
+    /// (observed_tokens, used_percent) turns inside the open window, thinned
+    /// to moves of ≥2 percentage points. The window-end reconciliation reads
+    /// the ends of this series.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    samples: Vec<[f64; 2]>,
+    /// How this window's percent meter reconciled against local tokens at the
+    /// last completed window: "confirmed" | "unverified" | "incompatible".
+    /// Absent = no data yet; the per-tool seed lists answer instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    meter: Option<String>,
 }
 
 const RESET_JITTER_TOLERANCE_MS: i64 = 60_000;
@@ -150,28 +160,30 @@ impl Index {
                 let state = old.as_ref().expect("stale_sample implies prior state");
                 let trusted = token_percent_is_trustworthy(&q.tool);
                 let unverified = !trusted && percent_is_unverified_token_like(&q.tool);
-                let estimated_tokens = if state.observed_tokens > 0.0
-                    && state.last_used_percent >= if trusted { 5.0 } else { 0.1 }
-                    && (trusted || unverified)
-                    && !(trusted && state.identity == "unknown")
-                    && state.period_end_ms > state.last_sampled_at_ms
-                {
-                    Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0))
+                let effective = state.meter.clone().unwrap_or_else(|| {
+                    if trusted { "confirmed".to_string() } else if unverified { "unverified".to_string() } else { "unknown".to_string() }
+                });
+                let estimated_tokens = if state.observed_tokens > 0.0 && state.period_end_ms > state.last_sampled_at_ms {
+                    match effective.as_str() {
+                        // data-proven: the reconciliation itself vouches for the meter
+                        "confirmed" if state.meter.is_some() => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
+                        // hand-verified seed: the older, stricter terms
+                        "confirmed" if state.identity != "unknown" && state.last_used_percent >= 5.0 => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
+                        // assumed: the caveat rides along, the gates stay lenient
+                        "unverified" => Some(state.observed_tokens * 100.0 / state.last_used_percent.clamp(0.1, 100.0)),
+                        _ => None,
+                    }
                 } else {
                     None
                 };
-                let status = if unverified {
-                    CycleStatus::Unverified
-                } else if !trusted {
-                    CycleStatus::Unavailable
-                } else if state.complete {
-                    CycleStatus::Complete
-                } else if state.period_end_ms > state.last_sampled_at_ms {
-                    CycleStatus::Partial
-                } else {
-                    CycleStatus::Collecting
+                let status = match effective.as_str() {
+                    "unverified" => CycleStatus::Unverified,
+                    "incompatible" | "unknown" => CycleStatus::Unavailable,
+                    _ if state.complete => CycleStatus::Complete,
+                    _ if state.period_end_ms > state.last_sampled_at_ms => CycleStatus::Partial,
+                    _ => CycleStatus::Collecting,
                 };
-                let models = if trusted || unverified {
+                let models = if matches!(effective.as_str(), "confirmed" | "unverified") {
                     self.sum_tokens_by_model(&q.tool, state.period_start_ms, observed_until, model_family_hint(q.label.as_deref()))?
                     .into_iter()
                     .map(|(model, tokens)| CycleModelUsage { model, tokens })
@@ -210,31 +222,60 @@ impl Index {
                 complete = true;
             }
             let trusted = token_percent_is_trustworthy(&q.tool);
-            let unverified = !trusted && percent_is_unverified_token_like(&q.tool);
-            // The unverified tier (Cline) relaxes two guards on purpose: the
-            // single-account store keeps the "unknown" identity stable, and the
-            // whole point is the early-window magnitude the >=5% gate refuses.
-            let estimated_tokens = if known_boundary
-                && !account_changed
-                && (trusted || unverified)
-                && !(trusted && identity == "unknown")
-                && observed_tokens > 0.0
-                && q.used_percent >= if trusted { 5.0 } else { 0.1 }
-            {
-                Some(observed_tokens * 100.0 / q.used_percent.clamp(0.1, 100.0))
+            let unverified_seed = !trusted && percent_is_unverified_token_like(&q.tool);
+            // The meter verdict comes from data when a completed window has
+            // reconciled; otherwise the per-tool seed lists answer. A new
+            // account re-enters at its seed.
+            let classified = if reset_seen || usage_reset {
+                old.as_ref().and_then(|s| classify_samples(&s.samples, s.meter.as_deref()))
             } else {
                 None
             };
-            let status = if unverified {
-                CycleStatus::Unverified
-            } else if !trusted {
-                CycleStatus::Unavailable
-            } else if complete {
-                CycleStatus::Complete
-            } else if q.resets_at_ms > observed_until {
-                CycleStatus::Partial
+            let meter = if account_changed {
+                None
             } else {
-                CycleStatus::Collecting
+                classified.or_else(|| old.as_ref().and_then(|s| s.meter.clone()))
+            };
+            let effective = meter.clone().unwrap_or_else(|| {
+                if trusted { "confirmed".to_string() } else if unverified_seed { "unverified".to_string() } else { "unknown".to_string() }
+            });
+            // Sample collection for the open window: every ≥2pp move of the
+            // percent leaves one (tokens, percent) turn, capped to keep the
+            // early low-percent anchor.
+            let mut samples = if account_changed || reset_seen || usage_reset {
+                Vec::new()
+            } else {
+                old.as_ref().map(|s| s.samples.clone()).unwrap_or_default()
+            };
+            if q.used_percent >= 1.0 {
+                let turned = samples.last().map(|last| (last[1] - q.used_percent).abs() >= 2.0).unwrap_or(true);
+                if turned {
+                    if samples.len() >= 16 {
+                        samples.remove(1);
+                    }
+                    samples.push([observed_tokens, q.used_percent]);
+                }
+            }
+            let estimated_tokens = if known_boundary && !account_changed && observed_tokens > 0.0 {
+                let allowed = match effective.as_str() {
+                    // data-proven: the reconciliation itself vouches for the meter
+                    "confirmed" if meter.is_some() => q.used_percent >= 0.1,
+                    // hand-verified seed: the older, stricter terms
+                    "confirmed" => identity != "unknown" && q.used_percent >= 5.0,
+                    // assumed: the caveat rides along, the gates stay lenient
+                    "unverified" => q.used_percent >= 0.1,
+                    _ => false,
+                };
+                allowed.then(|| observed_tokens * 100.0 / q.used_percent.clamp(0.1, 100.0))
+            } else {
+                None
+            };
+            let status = match effective.as_str() {
+                "unverified" => CycleStatus::Unverified,
+                "incompatible" | "unknown" => CycleStatus::Unavailable,
+                _ if complete => CycleStatus::Complete,
+                _ if q.resets_at_ms > observed_until => CycleStatus::Partial,
+                _ => CycleStatus::Collecting,
             };
             let state = CycleState {
                 identity: effective_identity.to_string(),
@@ -245,6 +286,8 @@ impl Index {
                 complete,
                 last_used_percent: q.used_percent,
                 last_sampled_at_ms: observed_until,
+                samples,
+                meter: meter.clone(),
             };
             self.conn
                 .execute(
@@ -252,7 +295,7 @@ impl Index {
                     params![key, serde_json::to_string(&state).map_err(|e| usage_core::Error::Sqlite(e.to_string()))?],
                 )
                 .map_err(sql_err)?;
-            let models = if trusted || unverified {
+            let models = if matches!(effective.as_str(), "confirmed" | "unverified") {
                 self.sum_tokens_by_model(&q.tool, start, observed_until, model_family_hint(q.label.as_deref()))?
                 .into_iter()
                 .map(|(model, tokens)| CycleModelUsage { model, tokens })
@@ -749,6 +792,34 @@ fn token_percent_is_trustworthy(tool: &str) -> bool {
 /// stores are single-account so the "unknown" identity is stable.
 fn percent_is_unverified_token_like(tool: &str) -> bool {
     matches!(tool, "cline" | "zcode")
+}
+
+/// The window-end reconciliation: with ≥15 percentage points of travel, a
+/// token-like meter produces matching token÷percent estimates at both ends
+/// (≤1.5× apart → "confirmed"); diverging ≥3× means the percent counts
+/// something else ("incompatible"); in between or without enough travel, the
+/// previous verdict sticks. This is what makes the tiers self-adjusting —
+/// seeds are opinions, completed windows are evidence.
+fn classify_samples(samples: &[[f64; 2]], previous: Option<&str>) -> Option<String> {
+    let first = samples.first()?;
+    let last = samples.last()?;
+    if last[1] - first[1] < 15.0 {
+        return previous.map(str::to_string);
+    }
+    let estimate = |sample: &[f64; 2]| sample[0] * 100.0 / sample[1].max(0.1);
+    let a = estimate(first);
+    let b = estimate(last);
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    if lo <= 0.0 {
+        return previous.map(str::to_string);
+    }
+    if hi <= lo * 1.5 {
+        Some("confirmed".to_string())
+    } else if hi >= lo * 3.0 {
+        Some("incompatible".into())
+    } else {
+        previous.map(str::to_string)
+    }
 }
 
 /// Claude's weekly Sonnet/Opus rows are separate vendor buckets. Only apply a
@@ -1864,6 +1935,79 @@ mod golden {
         assert_eq!(cycle.status, CycleStatus::Unavailable);
         assert_eq!(cycle.estimated_tokens, None);
         assert!(cycle.models.is_empty());
+    }
+
+    /// The adaptive tier in action: two in-window turns whose token÷percent
+    /// estimates agree (2M@25% and 8M@100% both say 8M) confirm the meter at
+    /// the reset — the next window estimates as confirmed, no longer as
+    /// unverified, without any hardcoded list saying so.
+    #[test]
+    fn the_meter_reconciles_across_a_completed_window() {
+        let now = now_fixture();
+        let mut idx = Index::open_in_memory().unwrap();
+        let first = Mock::new(
+            PathBuf::from("/fixture/cycle-reconcile-1.jsonl"),
+            vec![ev("cline", now - 5 * 60_000, "cycle", Some("glm"), None, counts(2_000_000.0))],
+        );
+        idx.ingest_adapter(&first, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'cline'", []).unwrap();
+        let quota = |used: f64, sampled: i64, resets: i64| QuotaView {
+            tool: "cline".into(), used_percent: used, window_minutes: 300,
+            resets_at_ms: resets, sampled_at_ms: sampled, label: Some("5 小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        idx.attach_cycle_usage(&mut vec![quota(25.0, now, now + 290 * 60_000)], now).unwrap();
+        let second = Mock::new(
+            PathBuf::from("/fixture/cycle-reconcile-2.jsonl"),
+            vec![ev("cline", now - 2 * 60_000, "cycle2", Some("glm"), None, counts(6_000_000.0))],
+        );
+        idx.ingest_adapter(&second, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'cline'", []).unwrap();
+        idx.attach_cycle_usage(&mut vec![quota(100.0, now + 60 * 60_000, now + 290 * 60_000)], now + 60 * 60_000).unwrap();
+        let third = Mock::new(
+            PathBuf::from("/fixture/cycle-reconcile-3.jsonl"),
+            vec![ev("cline", now + 290 * 60_000, "cycle3", Some("glm"), None, counts(500_000.0))],
+        );
+        idx.ingest_adapter(&third, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'cline'", []).unwrap();
+        let mut fourth = vec![quota(10.0, now + 295 * 60_000, now + 585 * 60_000)];
+        idx.attach_cycle_usage(&mut fourth, now + 295 * 60_000).unwrap();
+        let cycle = fourth[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.status, CycleStatus::Partial, "promoted out of unverified");
+        assert_eq!(cycle.estimated_tokens, Some(5_000_000.0), "0.5M at 10% → 5M, on the confirmed meter");
+        let raw = idx.conn().query_row(
+            "SELECT value FROM meta WHERE key LIKE 'cycle:%cline%' AND value LIKE '%confirmed%' LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        ).unwrap();
+        assert!(raw.contains("\"confirmed\""));
+    }
+
+    /// The rejection arm: 14M at 1% says 1.4B; the same 14M at 99% says
+    /// 14.1M — 100× apart. The reset marks the meter incompatible and the
+    /// estimates stop; the warning marker takes over in the panel.
+    #[test]
+    fn the_meter_rejects_a_percent_that_does_not_track_tokens() {
+        let now = now_fixture();
+        let mut idx = Index::open_in_memory().unwrap();
+        let first = Mock::new(
+            PathBuf::from("/fixture/cycle-reject-1.jsonl"),
+            vec![ev("cline", now - 5 * 60_000, "cycle", Some("glm"), None, counts(14_000_000.0))],
+        );
+        idx.ingest_adapter(&first, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'cline'", []).unwrap();
+        let quota = |used: f64, sampled: i64, resets: i64| QuotaView {
+            tool: "cline".into(), used_percent: used, window_minutes: 300,
+            resets_at_ms: resets, sampled_at_ms: sampled, label: Some("5 小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        idx.attach_cycle_usage(&mut vec![quota(1.0, now, now + 290 * 60_000)], now).unwrap();
+        idx.attach_cycle_usage(&mut vec![quota(99.0, now + 60 * 60_000, now + 290 * 60_000)], now + 60 * 60_000).unwrap();
+        let mut last = vec![quota(2.0, now + 295 * 60_000, now + 585 * 60_000)];
+        idx.attach_cycle_usage(&mut last, now + 295 * 60_000).unwrap();
+        let cycle = last[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.status, CycleStatus::Unavailable, "incompatible meters answer nothing");
+        assert_eq!(cycle.estimated_tokens, None);
     }
 
     #[test]
