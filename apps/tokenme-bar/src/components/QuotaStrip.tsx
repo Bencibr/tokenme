@@ -99,6 +99,8 @@ function formatLimitTokens(value: number): string {
 
 function formatCycleTokens(value: number): string {
   if (!Number.isFinite(value)) return "0";
+  // 1000M carries into 1B: past a gigabyte the M figures stop reading.
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 2)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}K`;
   return Math.round(value).toLocaleString();
