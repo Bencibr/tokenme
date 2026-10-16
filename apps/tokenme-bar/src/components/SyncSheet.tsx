@@ -54,7 +54,7 @@ type PendingConfirmation = {
 };
 
 type DiagnosticsTtl = "15m" | "1h" | "session";
-type DiagnosticsAction = "configure" | "create_grant" | "revoke_all" | "revoke_grant";
+type DiagnosticsAction = "configure" | "configure_lan_control" | "create_grant" | "revoke_all" | "revoke_grant";
 
 const DIAGNOSTICS_SCOPES: DiagnosticsScope[] = ["diagnostics.read", "sync.control"];
 const DIAGNOSTICS_TTLS: DiagnosticsTtl[] = ["15m", "1h", "session"];
@@ -69,6 +69,7 @@ export function diagnosticsPollDelayMs(attempt: number): number {
 function diagnosticsActionLabel(action: DiagnosticsAction): string {
   switch (action) {
     case "configure": return t("sync.diagnostics.operation.configure");
+    case "configure_lan_control": return t("sync.diagnostics.operation.configure_lan_control");
     case "create_grant": return t("sync.diagnostics.operation.create_session");
     case "revoke_all": return t("sync.diagnostics.operation.revoke_all");
     case "revoke_grant": return t("sync.diagnostics.operation.revoke_session");

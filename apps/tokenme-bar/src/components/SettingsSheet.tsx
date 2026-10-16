@@ -497,6 +497,7 @@ export function SettingsSheet({
   // device can issue a remote grant; it must not disable the local switch on
   // a secondary device.
   const mcpEnabled = mcpStatus?.enabled === true;
+  const mcpControlEnabled = mcpStatus?.lan_control_enabled === true;
   const mcpHint = !mcpSync
     ? t("set.mcp.loading")
     : t("set.mcp.local.hint");
@@ -507,6 +508,33 @@ export function SettingsSheet({
     if (ok) {
       setMcpCopied(true);
       window.setTimeout(() => setMcpCopied(false), 1600);
+    }
+  };
+
+  const copyMcpControlConfig = async () => {
+    if (!mcpConfig?.control_config_json) return;
+    const ok = await copyText(mcpConfig.control_config_json);
+    if (ok) {
+      setMcpCopied(true);
+      window.setTimeout(() => setMcpCopied(false), 1600);
+    }
+  };
+
+  const setMcpControlEnabled = async (enabled: boolean) => {
+    if (mcpBusy || !mcpEnabled) return;
+    setMcpBusy(true);
+    setMcpError(null);
+    try {
+      const response = await bridge.diagnosticsSession({ action: "configure_lan_control", enabled });
+      setMcpStatus(response);
+      const config = await bridge.mcpClientConfig();
+      setMcpConfig(config);
+      if (response.error) setMcpError(response.error.message);
+      else if (config.reason && enabled) setMcpError(config.reason);
+    } catch (error) {
+      setMcpError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMcpBusy(false);
     }
   };
 
@@ -736,6 +764,13 @@ export function SettingsSheet({
               (on) => void setMcpEnabled(on),
               mcpBusy,
             )}
+            {switchRow(
+              t("set.mcp.control"),
+              mcpEnabled ? t("set.mcp.control.hint") : t("set.mcp.control.disabled"),
+              mcpControlEnabled,
+              (on) => void setMcpControlEnabled(on),
+              mcpBusy || !mcpEnabled,
+            )}
             <div className="sheet-block sheet-mcp-block">
               <div className="sheet-row sheet-mcp-heading">
                 <div>
@@ -758,12 +793,44 @@ export function SettingsSheet({
                   <button type="button" className="sheet-action" onClick={() => void copyMcpConfig()}>
                     {mcpCopied ? t("set.mcp.client.copied") : t("set.mcp.client.copy")}
                   </button>
+                  {mcpConfig.expires_at_ms ? <p className="sheet-hint">{t("set.mcp.client.expires", { time: new Date(mcpConfig.expires_at_ms).toLocaleString() })}</p> : null}
                   {mcpConfig.reason ? <p className="sheet-hint" role="alert">{mcpConfig.reason}</p> : null}
                 </div>
               ) : (
                 <p className="sheet-hint" role={mcpError ? "alert" : undefined}>
                   {mcpError ?? t("set.mcp.client.unavailable")}
                 </p>
+              )}
+            </div>
+            <div className="sheet-block sheet-mcp-block">
+              <div className="sheet-row sheet-mcp-heading">
+                <div>
+                  <div className="sheet-label">{t("set.mcp.control.config")}</div>
+                  <div className="sheet-hint">{t("set.mcp.control.config.hint")}</div>
+                </div>
+                <span className="sheet-status">{mcpControlEnabled ? t("set.mcp.control.enabled") : t("set.mcp.control.disabled.short")}</span>
+              </div>
+              {mcpControlEnabled && mcpConfig?.control_config_json ? (
+                <div className="sheet-mcp-config" aria-label={t("set.mcp.control.config")}>
+                  <textarea
+                    className="sheet-mcp-json"
+                    readOnly
+                    value={mcpConfig.control_config_json}
+                    aria-label={t("set.mcp.control.config")}
+                    onFocus={(event) => event.currentTarget.select()}
+                  />
+                  <div className="sheet-actions">
+                    <button type="button" className="sheet-action" onClick={() => void copyMcpControlConfig()}>
+                      {mcpCopied ? t("set.mcp.client.copied") : t("set.mcp.control.copy")}
+                    </button>
+                    <a className="sheet-action" href={`data:application/json;charset=utf-8,${encodeURIComponent(mcpConfig.control_config_json)}`} download="tokenme-mcp-control.json">
+                      {t("set.mcp.control.download")}
+                    </a>
+                  </div>
+                  {mcpConfig.control_expires_at_ms ? <p className="sheet-hint">{t("set.mcp.control.expires", { time: new Date(mcpConfig.control_expires_at_ms).toLocaleString() })}</p> : null}
+                </div>
+              ) : (
+                <p className="sheet-hint">{mcpControlEnabled ? t("set.mcp.control.unavailable") : t("set.mcp.control.off")}</p>
               )}
             </div>
             {mcpError && mcpEnabled && mcpConfig?.config_json ? <p className="sheet-hint" role="alert">{mcpError}</p> : null}

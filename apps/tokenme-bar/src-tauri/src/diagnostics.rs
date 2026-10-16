@@ -144,6 +144,8 @@ pub struct DiagnosticsSnapshot {
     pub enabled: bool,
     pub sessions: Vec<SessionView>,
     pub retained_operations: usize,
+    pub lan_control_enabled: bool,
+    pub lan_control_expires_at_ms: Option<i64>,
     pub last_operation: Option<DiagnosticsOperationView>,
 }
 
@@ -191,6 +193,7 @@ pub struct DiagnosticsErrorView {
 pub enum DiagnosticsManagementRequest {
     Status,
     Configure { enabled: bool },
+    ConfigureLanControl { enabled: bool },
     CreateGrant { debugger_device_id: String, scopes: Vec<String>, ttl_ms: i64 },
     RevokeGrant { grant_id: String },
     RevokeAll,
@@ -235,8 +238,24 @@ struct LocalMcpHttpServer {
     endpoint: String,
     read_token: String,
     expires_at_ms: i64,
+    control: Option<LocalMcpControl>,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct LocalMcpControl {
+    token: String,
+    expires_at_ms: i64,
+}
+
+impl Scope {
+    fn local_origin(self) -> &'static str {
+        match self { Self::Read => "mcp-http", Self::Control => "mcp-http-control" }
+    }
+    fn local_scopes(self) -> Vec<String> {
+        match self { Self::Read => vec!["diagnostics.read".into()], Self::Control => vec!["diagnostics.read".into(), "sync.control".into()] }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -261,16 +280,63 @@ impl DiagnosticsState {
         })
     }
 
-    fn local_http_authorized(&self, authorization: Option<&str>) -> Result<(), &'static str> {
+    pub(crate) fn local_http_control_config(&self) -> Option<(String, String, i64)> {
+        if !self.status().enabled { return None; }
+        let current = self.local_http.lock().ok()?;
+        let server = current.as_ref()?;
+        let control = server.control.as_ref().filter(|control| now_ms() < control.expires_at_ms)?;
+        Some((server.endpoint.clone(), control.token.clone(), control.expires_at_ms))
+    }
+
+    fn configure_lan_control(&self, enabled: bool) -> Result<(), DiagnosticsError> {
+        if enabled && !self.status().enabled { return Err(DiagnosticsError::new(CODE_DIAGNOSTICS_DISABLED, "enable MCP before LAN control")); }
+        {
+            let mut current = self.local_http.lock().map_err(|_| handler_error())?;
+            if let Some(server) = current.as_mut() {
+                if enabled && now_ms() >= server.expires_at_ms {
+                    server.read_token = new_local_mcp_token();
+                    server.expires_at_ms = now_ms().saturating_add(LOCAL_MCP_TOKEN_TTL_MS);
+                }
+                server.control = if enabled { Some(LocalMcpControl { token: new_local_mcp_token(), expires_at_ms: now_ms().saturating_add(LOCAL_MCP_TOKEN_TTL_MS) }) } else { None };
+            } else if enabled { return Err(DiagnosticsError::new(CODE_DIAGNOSTICS_DISABLED, "enable MCP before LAN control")); }
+        }
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        for session in state.sessions.values_mut().filter(|session| session.view.origin == Scope::Control.local_origin()) {
+            session.revoked = Some(CODE_SESSION_REVOKED);
+        }
+        Ok(())
+    }
+
+    fn local_http_authorized(&self, authorization: Option<&str>) -> Result<Scope, &'static str> {
         if !self.status().enabled { return Err("mcp_disabled") }
         let Some(authorization) = authorization else { return Err("bearer_missing") };
         let Some(token) = authorization.strip_prefix("Bearer ") else { return Err("bearer_invalid") };
         if token.len() > LOCAL_MCP_MAX_AUTH_BYTES { return Err("bearer_invalid") }
         let server = self.local_http.lock().map_err(|_| "mcp_state_busy")?;
         let Some(server) = server.as_ref() else { return Err("mcp_disabled") };
-        if now_ms() >= server.expires_at_ms { return Err("bearer_expired") }
+        if let Some(control) = server.control.as_ref() {
+            if constant_time_equal(token.as_bytes(), control.token.as_bytes()) {
+                return if now_ms() < control.expires_at_ms { Ok(Scope::Control) } else { Err("bearer_expired") };
+            }
+        }
         if !constant_time_equal(token.as_bytes(), server.read_token.as_bytes()) { return Err("bearer_invalid") }
-        Ok(())
+        if now_ms() >= server.expires_at_ms { return Err("bearer_expired") }
+        Ok(Scope::Read)
+    }
+
+    fn local_http_session_ttl(&self, scope: Scope) -> i64 {
+        let current = self.local_http.lock().unwrap_or_else(|error| error.into_inner());
+        let expiry = current.as_ref().and_then(|server| match scope {
+            Scope::Read => Some(server.expires_at_ms),
+            Scope::Control => server.control.as_ref().map(|control| control.expires_at_ms),
+        }).unwrap_or(0);
+        expiry.saturating_sub(now_ms()).max(0)
+    }
+
+    fn local_http_session_active(&self, session_id: &str, scope: Scope) -> bool {
+        let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.enabled && state.sessions.get(session_id).is_some_and(|session| session.revoked.is_none()
+            && now_ms() < session.view.expires_at_ms && session.view.origin == scope.local_origin())
     }
 
     pub(crate) fn start_local_http(&self, app: &AppHandle) -> Result<String, String> {
@@ -284,7 +350,9 @@ impl DiagnosticsState {
             // An expired token must never be revived by toggling the switch.
             // Stop and join the old listener before minting the replacement.
             server.stop.store(true, Ordering::Release);
+            drop(current);
             if let Some(join) = server.join { let _ = join.join(); }
+            return self.start_local_http(app);
         }
         let host = infer_local_lan_host()?;
         // Keep the documented port stable when possible.  If another process
@@ -305,7 +373,7 @@ impl DiagnosticsState {
             .name("tokenme-mcp-http".into())
             .spawn(move || run_local_mcp_http(listener, app, thread_stop))
             .map_err(|error| format!("无法启动局域网 MCP HTTP 服务线程: {error}"))?;
-        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms, stop, join: Some(join) });
+        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms, control: None, stop, join: Some(join) });
         Ok(endpoint)
     }
 
@@ -337,7 +405,13 @@ impl DiagnosticsState {
             }
         }
         state.grants.retain(|_, grant| now < grant.view.expires_at_ms);
+        let control_expiry = {
+            let current = self.local_http.lock().unwrap_or_else(|error| error.into_inner());
+            current.as_ref().and_then(|server| server.control.as_ref()).filter(|control| state.enabled && now < control.expires_at_ms).map(|control| control.expires_at_ms)
+        };
         DiagnosticsSnapshot {
+            lan_control_enabled: control_expiry.is_some(),
+            lan_control_expires_at_ms: control_expiry,
             enabled: state.enabled,
             sessions: state.sessions.values().filter(|session| session.revoked.is_none()).map(|session| session.view.clone())
                 .chain(state.grants.values().map(|grant| grant.view.clone()))
@@ -356,7 +430,9 @@ impl DiagnosticsState {
             }
             state.grants.clear();
         }
-        self.status_after(state)
+        let status = self.status_after(state);
+        if !enabled { let _ = self.configure_lan_control(false); }
+        status
     }
 
     fn status_after(&self, state: std::sync::MutexGuard<'_, Inner>) -> DiagnosticsStatus {
@@ -470,6 +546,10 @@ impl DiagnosticsState {
         if !state.enabled {
             return Err(DiagnosticsError::new(CODE_DIAGNOSTICS_DISABLED, "remote diagnostics is disabled"));
         }
+        state.sessions.retain(|_, session| session.revoked.is_none() && now < session.view.expires_at_ms);
+        if state.sessions.len() >= MAX_OPERATION_HISTORY {
+            return Err(DiagnosticsError::new(CODE_HANDLER_FAILED, "diagnostics session capacity reached"));
+        }
         if state.sessions.contains_key(&request.session_id) {
             return Err(DiagnosticsError::new(CODE_INVALID_PARAMS, "session already exists"));
         }
@@ -553,10 +633,6 @@ impl DiagnosticsState {
         Ok(session.clone())
     }
 
-    fn is_active(&self, session_id: &str) -> bool {
-        let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        state.enabled && state.sessions.get(session_id).is_some_and(|session| session.revoked.is_none() && now_ms() < session.view.expires_at_ms)
-    }
 
     fn begin_operation(&self, session: &Session) -> String {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
@@ -679,18 +755,21 @@ fn run_local_mcp_http(listener: TcpListener, app: AppHandle, stop: Arc<AtomicBoo
 fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), String> {
     let request = read_local_http_request(stream)?;
     if request.method == "OPTIONS" {
-        audit_local_http("options", None, "ok", None);
+        audit_local_http(None, "options", None, "ok", None);
         return write_local_http_response(stream, 204, &[], None);
     }
     if request.method != "POST" || request.path != LOCAL_MCP_PATH {
-        audit_local_http("http", None, "denied", Some("endpoint_not_found"));
+        audit_local_http(None, "http", None, "denied", Some("endpoint_not_found"));
         return write_local_http_response(stream, 404, br#"{"error":"MCP endpoint not found"}"#, None);
     }
     let state = app.state::<DiagnosticsState>();
-    if let Err(error_code) = state.local_http_authorized(request.authorization.as_deref()) {
-        audit_local_http("http", None, "denied", Some(error_code));
-        return write_local_http_response(stream, 401, br#"{"error":"MCP bearer authorization required"}"#, None);
-    }
+    let access = match state.local_http_authorized(request.authorization.as_deref()) {
+        Ok(access) => access,
+        Err(error_code) => {
+            audit_local_http(None, "http", None, "denied", Some(error_code));
+            return write_local_http_response(stream, 401, br#"{"error":"MCP bearer authorization required"}"#, None);
+        }
+    };
     let value: Value = serde_json::from_slice(&request.body).map_err(|_| "invalid JSON-RPC request".to_string())?;
     let object = value.as_object().ok_or_else(|| "invalid JSON-RPC request".to_string())?;
     let id = object.get("id").cloned().unwrap_or(Value::Null);
@@ -711,9 +790,9 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
             } else {
                 let session = state.create_session_for_panel(
                     "local-http".into(),
-                    "mcp-http".into(),
-                    vec!["diagnostics.read".into()],
-                    LOCAL_MCP_TOKEN_TTL_MS,
+                    access.local_origin().into(),
+                    access.local_scopes(),
+                    state.local_http_session_ttl(access),
                 ).map_err(|error| error.to_string())?;
                 response_session = Some(session.session_id.clone());
                 Ok(json_rpc_result(id.clone(), json!({
@@ -725,23 +804,23 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
             }
         }
         "notifications/initialized" => {
-            if request.session_id.as_deref().is_some_and(|session_id| state.is_active(session_id)) {
-                audit_local_http(method, audit_id.as_deref(), "ok", None);
+            if request.session_id.as_deref().is_some_and(|session_id| state.local_http_session_active(session_id, access)) {
+                audit_local_http(Some(access), method, audit_id.as_deref(), "ok", None);
                 return write_local_http_response(stream, 202, &[], request.session_id.as_deref());
             }
-            audit_local_http(method, audit_id.as_deref(), "denied", Some(CODE_SESSION_NOT_FOUND));
+            audit_local_http(Some(access), method, audit_id.as_deref(), "denied", Some(CODE_SESSION_NOT_FOUND));
             return write_local_http_response(stream, 401, br#"{"error":"Mcp-Session-Id is required; initialize first"}"#, None);
         }
         "ping" => {
-            if !request.session_id.as_deref().is_some_and(|session_id| state.is_active(session_id)) {
+            if !request.session_id.as_deref().is_some_and(|session_id| state.local_http_session_active(session_id, access)) {
                 Err("Mcp-Session-Id is required; initialize first".to_string())
             } else {
                 Ok(json_rpc_result(id.clone(), json!({})))
             }
         }
         "tools/list" => {
-            if !request.session_id.as_deref().is_some_and(|session_id| state.is_active(session_id)) { Err("Mcp-Session-Id is required; initialize first".to_string()) }
-            else { Ok(json_rpc_result(id.clone(), json!({ "tools": local_read_only_tool_registry() }))) }
+            if !request.session_id.as_deref().is_some_and(|session_id| state.local_http_session_active(session_id, access)) { Err("Mcp-Session-Id is required; initialize first".to_string()) }
+            else { Ok(json_rpc_result(id.clone(), json!({ "tools": local_tool_registry(access) }))) }
         }
         "tools/call" => {
             let session_id = request.session_id.clone().ok_or_else(|| "Mcp-Session-Id is required; initialize first".to_string())?;
@@ -752,7 +831,7 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
             let tool_request = ToolRequest {
                 session_id,
                 request_id,
-                origin: "mcp-http".into(),
+                origin: access.local_origin().into(),
                 target_device: None,
                 tool: tool.into(),
                 params: arguments,
@@ -764,11 +843,11 @@ fn handle_local_mcp_http(stream: &mut TcpStream, app: &AppHandle) -> Result<(), 
     };
     match response {
         Ok(response) => {
-            audit_local_http(method, audit_id.as_deref(), "ok", None);
+            audit_local_http(Some(access), method, audit_id.as_deref(), "ok", None);
             write_local_http_response(stream, 200, &serde_json::to_vec(&response).map_err(|_| "MCP response could not be encoded".to_string())?, response_session.as_deref())
         }
         Err(error) => {
-            audit_local_http(method, audit_id.as_deref(), "error", Some("mcp_request_failed"));
+            audit_local_http(Some(access), method, audit_id.as_deref(), "error", Some("mcp_request_failed"));
             write_local_http_response(stream, 200, &serde_json::to_vec(&json_rpc_error(id.clone(), -32602, &error)).unwrap_or_default(), response_session.as_deref())
         }
     }
@@ -782,19 +861,19 @@ fn json_rpc_id_string(id: &Value) -> Option<String> {
     }
 }
 
-fn local_read_only_tool_registry() -> Vec<usage_device_sync::DiagnosticsToolDefinition> {
+fn local_tool_registry(access: Scope) -> Vec<usage_device_sync::DiagnosticsToolDefinition> {
     usage_device_sync::diagnostics_tool_registry()
         .into_iter()
-        .filter(|tool| tool_scope(&tool.name).is_ok_and(|scope| scope == Scope::Read))
+        .filter(|tool| tool_scope(&tool.name).is_ok_and(|scope| access == Scope::Control || scope == Scope::Read))
         .collect()
 }
 
-fn audit_local_http(action: &str, request_id: Option<&str>, outcome: &str, error_code: Option<&str>) {
+fn audit_local_http(access: Option<Scope>, action: &str, request_id: Option<&str>, outcome: &str, error_code: Option<&str>) {
     logging::diagnostic_event(
         "diagnostics.operation.completed",
         Some(outcome),
-        Some("diagnostics.read"),
-        Some("mcp-http"),
+        access.map(Scope::name),
+        access.map(Scope::local_origin),
         request_id,
         error_code,
         None,
@@ -947,13 +1026,17 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 }
 
 fn tool_scope(tool: &str) -> Result<Scope, DiagnosticsError> {
-    if tool_definitions().iter().any(|definition| definition.name == tool) {
-        if (tool.starts_with("sync.") && !matches!(tool, "sync.get_status" | "sync.get_requests" | "sync.get_trace")) || tool == "ui.click_panel" {
-            return Ok(Scope::Control);
-        }
-        return Ok(Scope::Read);
+    let definition = tool_definitions().into_iter().find(|definition| definition.name == tool)
+        .ok_or_else(|| DiagnosticsError::new(CODE_UNKNOWN_TOOL, "diagnostics tool is not registered"))?;
+    tool_definition_scope(definition.scope)
+}
+
+fn tool_definition_scope(scope: &str) -> Result<Scope, DiagnosticsError> {
+    match scope {
+        "diagnostics.read" => Ok(Scope::Read),
+        "sync.control" => Ok(Scope::Control),
+        _ => Err(DiagnosticsError::new(CODE_UNKNOWN_TOOL, "diagnostics tool scope is not registered")),
     }
-    Err(DiagnosticsError::new(CODE_UNKNOWN_TOOL, "diagnostics tool is not registered"))
 }
 
 /// Protocol adapters call this function after their transport and grant
@@ -1068,11 +1151,7 @@ async fn dispatch(
             }))
         }
         "sync.start_primary" => {
-            let params = object_or_empty(&request.params)?;
-            let bind = optional_string(params, "bind")?;
-            let advertise_host = optional_string(params, "advertise_host")?;
-            let allow_lan = optional_bool(params, "allow_lan")?.unwrap_or(false);
-            control_sync(app, SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan }).await
+            control_sync(app, primary_start_request(&request.params)?).await
         }
         "sync.pair" => {
             let params = object(&request.params)?;
@@ -1243,6 +1322,10 @@ fn sync_probe_results(status: &SyncDevicesView, database: Result<(), String>) ->
     let listener = transport.probe_tcp().map_err(|error| format!("TCP listener probe failed: {error}"));
     let tls = transport.probe_tls().map_err(|error| format!("TLS 1.3 probe failed: {error}"));
     SyncProbeResults { listener, tls, database }
+}
+
+fn primary_start_request(params: &Value) -> Result<SyncManagementRequest, DiagnosticsError> {
+    commands::diagnostics_primary_start_request(params).map_err(|_| invalid_params())
 }
 
 async fn control_sync(app: &AppHandle, request: SyncManagementRequest) -> Result<Value, DiagnosticsError> {
@@ -1496,6 +1579,7 @@ fn diagnostics_action_name(request: &DiagnosticsManagementRequest) -> &'static s
     match request {
         DiagnosticsManagementRequest::Status => "status",
         DiagnosticsManagementRequest::Configure { .. } => "configure",
+        DiagnosticsManagementRequest::ConfigureLanControl { .. } => "configure_lan_control",
         DiagnosticsManagementRequest::CreateGrant { .. } => "create_grant",
         DiagnosticsManagementRequest::RevokeGrant { .. } => "revoke_grant",
         DiagnosticsManagementRequest::RevokeAll => "revoke_all",
@@ -1548,6 +1632,7 @@ pub fn diagnostics_session(
                 Ok(None::<DiagnosticsConfig>)
             }
         }
+        DiagnosticsManagementRequest::ConfigureLanControl { enabled } => state.configure_lan_control(enabled).map(|_| None::<DiagnosticsConfig>),
         DiagnosticsManagementRequest::CreateGrant { debugger_device_id, scopes, ttl_ms } => {
             if ttl_ms <= 0 || ttl_ms > usage_device_sync::MAX_DIAGNOSTICS_GRANT_TTL_MS {
                 Err(DiagnosticsError::new(CODE_SESSION_EXPIRED, "session lifetime is invalid"))
@@ -1584,12 +1669,9 @@ pub fn diagnostics_session(
             })
         }
         DiagnosticsManagementRequest::RevokeAll => {
-            let context = commands::primary_diagnostics_context(&control).map_err(|_| primary_unavailable());
-            context.map(|context| {
-                context.handle.revoke_all_diagnostics();
-                state.revoke_all();
-                None::<DiagnosticsConfig>
-            })
+            if let Ok(context) = commands::primary_diagnostics_context(&control) { context.handle.revoke_all_diagnostics(); }
+            state.revoke_all();
+            Ok(None::<DiagnosticsConfig>)
         }
         DiagnosticsManagementRequest::Status => unreachable!(),
     };
@@ -1717,6 +1799,7 @@ mod tests {
             read_token: token.clone(),
             expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS,
             stop: Arc::new(AtomicBool::new(false)),
+            control: None,
             join: None,
         });
         assert!(state.local_http_authorized(Some(&format!("Bearer {token}"))).is_ok());
@@ -1737,17 +1820,112 @@ mod tests {
             read_token: token.clone(),
             expires_at_ms: now_ms() - 1,
             stop: Arc::new(AtomicBool::new(false)),
+            control: None,
             join: None,
         });
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))).unwrap_err(), "bearer_expired");
     }
 
     #[test]
+    fn unknown_tool_definition_scope_is_denied() {
+        assert_eq!(tool_definition_scope("diagnostics.read"), Ok(Scope::Read));
+        assert_eq!(tool_definition_scope("sync.control"), Ok(Scope::Control));
+        assert_eq!(tool_definition_scope("sync.admin").unwrap_err().code, CODE_UNKNOWN_TOOL);
+        assert_eq!(tool_definition_scope("").unwrap_err().code, CODE_UNKNOWN_TOOL);
+    }
+
+    #[test]
     fn local_mcp_tool_list_is_read_only() {
-        let tools = local_read_only_tool_registry();
+        let tools = local_tool_registry(Scope::Read);
         assert!(!tools.is_empty());
         assert!(tools.iter().all(|tool| tool_scope(&tool.name) == Ok(Scope::Read)));
         assert!(!tools.iter().any(|tool| tool.name == "sync.start_primary" || tool.name == "ui.click_panel"));
+    }
+
+    fn lan_state() -> DiagnosticsState {
+        let state = state();
+        *state.local_http.lock().unwrap() = Some(LocalMcpHttpServer {
+            endpoint: "http://192.0.2.1:47822/mcp".into(), read_token: new_local_mcp_token(),
+            expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS, control: None,
+            stop: Arc::new(AtomicBool::new(false)), join: None,
+        });
+        state
+    }
+
+    #[test]
+    fn lan_control_is_explicit_independent_and_cannot_borrow_sessions() {
+        let state = lan_state();
+        let read = state.local_http_client_config().unwrap().1;
+        assert!(state.local_http_control_config().is_none());
+        assert!(!state.snapshot().lan_control_enabled);
+        state.configure_lan_control(true).unwrap();
+        let (_, token, expiry) = state.local_http_control_config().unwrap();
+        assert_ne!(token, read);
+        assert!(expiry <= now_ms() + LOCAL_MCP_TOKEN_TTL_MS);
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {read}"))), Ok(Scope::Read));
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Ok(Scope::Control));
+        let read_session = state.create_session_for_panel("local-http".into(), Scope::Read.local_origin().into(), Scope::Read.local_scopes(), 1_000).unwrap();
+        let control_session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
+        assert!(!state.local_http_session_active(&control_session.session_id, Scope::Read));
+        assert!(!state.local_http_session_active(&read_session.session_id, Scope::Control));
+        let request = ToolRequest { session_id: read_session.session_id, request_id: "bootstrap-1".into(), origin: Scope::Read.local_origin().into(), target_device: None, tool: "sync.start_primary".into(), params: json!({}) };
+        assert_eq!(state.authorize(&request, tool_scope(&request.tool).unwrap()).unwrap_err().code, CODE_SCOPE_DENIED);
+        let mut request = ToolRequest { session_id: control_session.session_id, origin: Scope::Control.local_origin().into(), ..request };
+        assert!(state.authorize(&request, tool_scope(&request.tool).unwrap()).is_ok());
+        request.origin = Scope::Read.local_origin().into();
+        assert_eq!(state.authorize(&request, Scope::Control).unwrap_err().code, CODE_ORIGIN_MISMATCH);
+        assert!(local_tool_registry(Scope::Control).iter().any(|tool| tool.name == "sync.start_primary"));
+        assert_eq!(tool_scope("ui.open_sync_sheet"), Ok(Scope::Control));
+    }
+
+    #[test]
+    fn lan_control_expiry_disable_and_reenable_revoke_old_tokens_and_sessions() {
+        let state = lan_state();
+        state.configure_lan_control(true).unwrap();
+        let token = state.local_http_control_config().unwrap().1;
+        let session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
+        state.local_http.lock().unwrap().as_mut().unwrap().control.as_mut().unwrap().expires_at_ms = now_ms() - 1;
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_expired"));
+        assert!(!state.snapshot().lan_control_enabled);
+        assert_eq!(state.local_http_session_ttl(Scope::Control), 0);
+        state.configure_lan_control(true).unwrap();
+        let replacement = state.local_http_control_config().unwrap().1;
+        assert_ne!(token, replacement);
+        assert!(!state.local_http_session_active(&session.session_id, Scope::Control));
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_invalid"));
+        state.configure_lan_control(false).unwrap();
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {replacement}"))), Err("bearer_invalid"));
+        state.configure_lan_control(true).unwrap();
+        state.set_enabled(false);
+        assert!(state.local_http_control_config().is_none());
+        state.set_enabled(true);
+        assert!(state.local_http_control_config().is_none());
+        let disabled = DiagnosticsState::default();
+        assert_eq!(disabled.configure_lan_control(true).unwrap_err().code, CODE_DIAGNOSTICS_DISABLED);
+    }
+
+    #[test]
+    fn lan_bootstrap_survives_runtime_session_revocation_and_dispatches_start_parameters() {
+        let state = lan_state();
+        state.configure_lan_control(true).unwrap();
+        let token = state.local_http_control_config().unwrap().1;
+        let session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
+        // Stopping the primary revokes runtime sessions; the independent bootstrap stays usable.
+        state.revoke_all();
+        assert!(!state.local_http_session_active(&session.session_id, Scope::Control));
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Ok(Scope::Control));
+        let restarted = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
+        let request = ToolRequest { session_id: restarted.session_id, request_id: "restart-1".into(), origin: Scope::Control.local_origin().into(), target_device: None, tool: "sync.start_primary".into(), params: json!({"bind":"0.0.0.0:47821", "advertise_host":"192.0.2.1", "allow_lan":true}) };
+        assert!(state.authorize(&request, tool_scope(&request.tool).unwrap()).is_ok());
+        assert!(matches!(primary_start_request(&request.params).unwrap(), SyncManagementRequest::StartPrimary { bind: Some(bind), advertise_host: Some(host), allow_lan: true } if bind == "0.0.0.0:47821" && host == "192.0.2.1"));
+        assert!(matches!(primary_start_request(&json!({})).unwrap(), SyncManagementRequest::StartPrimary { allow_lan: true, .. }));
+        assert!(matches!(primary_start_request(&json!({"bind":"127.0.0.1:47821"})).unwrap(), SyncManagementRequest::StartPrimary { allow_lan: false, .. }));
+        assert!(matches!(primary_start_request(&json!({"allow_lan":false})).unwrap(), SyncManagementRequest::StartPrimary { allow_lan: false, .. }));
+        assert!(matches!(primary_start_request(&json!({"bind":"127.0.0.1:47821", "allow_lan":true})).unwrap(), SyncManagementRequest::StartPrimary { allow_lan: true, .. }));
+        assert!(primary_start_request(&json!({"allow_lan":"true"})).is_err());
+        assert!(primary_start_request(&json!({"unknown":true})).is_err());
+        state.configure_lan_control(false).unwrap();
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_invalid"));
     }
 
     #[test]

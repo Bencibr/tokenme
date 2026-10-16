@@ -170,8 +170,8 @@ export const bridge: Bridge = {
   async diagnosticsSession(request: DiagnosticsManagementRequest): Promise<DiagnosticsResponse> {
     if (!inTauri) {
       return request.action === "status"
-        ? { enabled: false, sessions: [], retained_operations: 0, last_operation: null }
-        : { enabled: false, sessions: [], retained_operations: 0, last_operation: null, error: { code: "preview_only", message: "Remote diagnostics is available in the TokenMe app." } };
+        ? { enabled: false, lan_control_enabled: false, lan_control_expires_at_ms: null, sessions: [], retained_operations: 0, last_operation: null }
+        : { enabled: false, lan_control_enabled: false, lan_control_expires_at_ms: null, sessions: [], retained_operations: 0, last_operation: null, error: { code: "preview_only", message: "Remote diagnostics is available in the TokenMe app." } };
     }
     return invoke<DiagnosticsResponse>("diagnostics_session", { request });
   },
@@ -180,9 +180,12 @@ export const bridge: Bridge = {
     if (!inTauri) {
       return {
         config_json: "",
+        control_config_json: null,
         endpoint: null,
         ready: false,
         reason: "MCP HTTP 配置只会在 TokenMe 桌面应用中生成",
+        expires_at_ms: null,
+        control_expires_at_ms: null,
       };
     }
     return invoke<McpClientConfig>("get_mcp_client_config");

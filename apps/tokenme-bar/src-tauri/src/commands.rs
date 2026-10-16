@@ -321,32 +321,36 @@ pub struct McpClientConfigView {
     pub endpoint: Option<String>,
     pub ready: bool,
     pub reason: Option<String>,
+    pub expires_at_ms: Option<i64>,
+    pub control_config_json: Option<String>,
+    pub control_expires_at_ms: Option<i64>,
 }
 
 /// Build the standard HTTP `mcpServers` entry that can be pasted into another
 /// AI client's MCP settings. The endpoint is reachable on this machine's LAN
 /// and exists only while the MCP switch is enabled in this TokenMe process.
 ///
-/// The exported bearer is a short-lived, read-only diagnostics credential. It
-/// is intentionally not a sync-control grant: control remains on the pinned
-/// HTTPS diagnostics authority, where it can be separately granted/revoked.
+/// Reading and explicit LAN control use independent short-lived credentials.
+/// Control is absent until enabled locally and is never persisted.
 #[tauri::command]
 pub fn get_mcp_client_config(state: State<'_, crate::diagnostics::DiagnosticsState>) -> Result<McpClientConfigView, String> {
-    let Some((endpoint, bearer, _expires_at_ms)) = state.local_http_client_config() else {
+    let read = state.local_http_client_config();
+    let control = state.local_http_control_config();
+    let Some(endpoint) = read.as_ref().or(control.as_ref()).map(|(endpoint, _, _)| endpoint.clone()) else {
         return Ok(McpClientConfigView {
-            config_json: String::new(),
-            endpoint: None,
-            ready: false,
-            reason: Some("请先开启 MCP 诊断服务；开启后这里会生成带短期只读凭据的配置".into()),
+            config_json: String::new(), endpoint: None, ready: false,
+            reason: Some("请先开启 MCP 诊断服务；凭据过期后关闭再开启可生成新配置".into()),
+            expires_at_ms: None, control_config_json: None, control_expires_at_ms: None,
         });
     };
-    let config_json = serde_json::to_string_pretty(&json!({
-        "mcpServers": { "tokenme": {
-            "url": endpoint,
-            "headers": { "Authorization": format!("Bearer {bearer}") }
-        } }
-    })).map_err(|error| format!("cannot encode MCP client config: {error}"))?;
-    Ok(McpClientConfigView { config_json, endpoint: Some(endpoint), ready: true, reason: None })
+    let encode = |(endpoint, bearer, _): &(String, String, i64)| serde_json::to_string_pretty(&json!({
+        "mcpServers": { "tokenme": { "url": endpoint, "headers": { "Authorization": format!("Bearer {bearer}") } } }
+    })).map_err(|error| format!("cannot encode MCP client config: {error}"));
+    let config_json = read.as_ref().map(&encode).transpose()?.unwrap_or_default();
+    let control_config_json = control.as_ref().map(&encode).transpose()?;
+    Ok(McpClientConfigView { config_json, endpoint: Some(endpoint), ready: true,
+        reason: if read.is_none() { Some("只读凭据已过期；远程控制凭据在其独立有效期内仍可使用".into()) } else { None },
+        expires_at_ms: read.map(|(_, _, expiry)| expiry), control_config_json, control_expires_at_ms: control.map(|(_, _, expiry)| expiry) })
 }
 
 fn current_ms() -> i64 {
@@ -678,6 +682,17 @@ fn diagnostics_required_identifier(params: &serde_json::Map<String, Value>, key:
     Ok(value)
 }
 
+pub(crate) fn diagnostics_primary_start_request(value: &Value) -> Result<SyncManagementRequest, DiagnosticsError> {
+    let empty = serde_json::Map::new();
+    let params = if value.is_null() { &empty } else { value.as_object().ok_or(DiagnosticsError::InvalidParams)? };
+    diagnostics_only_keys(params, &["bind", "advertise_host", "allow_lan"])?;
+    let bind = diagnostics_optional_string(params, "bind")?;
+    let advertise_host = diagnostics_optional_string(params, "advertise_host")?;
+    let address = bind.as_deref().unwrap_or(DEFAULT_PRIMARY_BIND).parse::<std::net::SocketAddr>().map_err(|_| DiagnosticsError::InvalidParams)?;
+    let allow_lan = params.get("allow_lan").map(|value| value.as_bool().ok_or(DiagnosticsError::InvalidParams)).transpose()?.unwrap_or(!address.ip().is_loopback());
+    Ok(SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan })
+}
+
 fn diagnostics_only_keys(params: &serde_json::Map<String, Value>, allowed: &[&str]) -> Result<(), DiagnosticsError> {
     if params.keys().all(|key| allowed.iter().any(|allowed| key == allowed)) { Ok(()) } else { Err(DiagnosticsError::InvalidParams) }
 }
@@ -758,12 +773,9 @@ fn dispatch_diagnostics_control(app: AppHandle, host: DiagnosticsHost, tool: &st
             Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
         }
         "sync.start_primary" => {
-            diagnostics_only_keys(params, &["bind", "advertise_host", "allow_lan"])?;
-            let bind = diagnostics_optional_string(params, "bind")?;
-            let advertise_host = diagnostics_optional_string(params, "advertise_host")?;
-            let allow_lan = params.get("allow_lan").map(|value| value.as_bool().ok_or(DiagnosticsError::InvalidParams)).transpose()?.unwrap_or(false);
+            let request = diagnostics_primary_start_request(&Value::Object(params.clone()))?;
             let operation_id = host.begin_control_operation(tool, current_ms())?;
-            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan });
+            spawn_diagnostics_sync_action(app, host, tool, operation_id.clone(), request);
             Ok(json!({ "accepted": true, "tool": tool, "operation_id": operation_id }))
         }
         "sync.stop_primary" => {
