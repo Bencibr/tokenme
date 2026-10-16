@@ -238,15 +238,11 @@ struct LocalMcpHttpServer {
     endpoint: String,
     read_token: String,
     expires_at_ms: i64,
-    control: Option<LocalMcpControl>,
+    /// One credential, one switch: on, this credential IS the LAN control
+    /// auth; off, the very same credential is read-only.
+    control_enabled: bool,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
-}
-
-#[derive(Debug)]
-struct LocalMcpControl {
-    token: String,
-    expires_at_ms: i64,
 }
 
 impl Scope {
@@ -280,14 +276,6 @@ impl DiagnosticsState {
         })
     }
 
-    pub(crate) fn local_http_control_config(&self) -> Option<(String, String, i64)> {
-        if !self.status().enabled { return None; }
-        let current = self.local_http.lock().ok()?;
-        let server = current.as_ref()?;
-        let control = server.control.as_ref().filter(|control| now_ms() < control.expires_at_ms)?;
-        Some((server.endpoint.clone(), control.token.clone(), control.expires_at_ms))
-    }
-
     fn configure_lan_control(&self, enabled: bool) -> Result<(), DiagnosticsError> {
         if enabled && !self.status().enabled { return Err(DiagnosticsError::new(CODE_DIAGNOSTICS_DISABLED, "enable MCP before LAN control")); }
         {
@@ -297,11 +285,13 @@ impl DiagnosticsState {
                     server.read_token = new_local_mcp_token();
                     server.expires_at_ms = now_ms().saturating_add(LOCAL_MCP_TOKEN_TTL_MS);
                 }
-                server.control = if enabled { Some(LocalMcpControl { token: new_local_mcp_token(), expires_at_ms: now_ms().saturating_add(LOCAL_MCP_TOKEN_TTL_MS) }) } else { None };
+                server.control_enabled = enabled;
             } else if enabled { return Err(DiagnosticsError::new(CODE_DIAGNOSTICS_DISABLED, "enable MCP before LAN control")); }
         }
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        for session in state.sessions.values_mut().filter(|session| session.view.origin == Scope::Control.local_origin()) {
+        // A mode flip invalidates handshakes: read sessions must not silently
+        // grow control powers, and control sessions must not keep them.
+        for session in state.sessions.values_mut().filter(|session| session.view.origin.starts_with("mcp-http")) {
             session.revoked = Some(CODE_SESSION_REVOKED);
         }
         Ok(())
@@ -314,21 +304,16 @@ impl DiagnosticsState {
         if token.len() > LOCAL_MCP_MAX_AUTH_BYTES { return Err("bearer_invalid") }
         let server = self.local_http.lock().map_err(|_| "mcp_state_busy")?;
         let Some(server) = server.as_ref() else { return Err("mcp_disabled") };
-        if let Some(control) = server.control.as_ref() {
-            if constant_time_equal(token.as_bytes(), control.token.as_bytes()) {
-                return if now_ms() < control.expires_at_ms { Ok(Scope::Control) } else { Err("bearer_expired") };
-            }
-        }
         if !constant_time_equal(token.as_bytes(), server.read_token.as_bytes()) { return Err("bearer_invalid") }
         if now_ms() >= server.expires_at_ms { return Err("bearer_expired") }
-        Ok(Scope::Read)
+        Ok(if server.control_enabled { Scope::Control } else { Scope::Read })
     }
 
     fn local_http_session_ttl(&self, scope: Scope) -> i64 {
         let current = self.local_http.lock().unwrap_or_else(|error| error.into_inner());
         let expiry = current.as_ref().and_then(|server| match scope {
             Scope::Read => Some(server.expires_at_ms),
-            Scope::Control => server.control.as_ref().map(|control| control.expires_at_ms),
+            Scope::Control => Some(server.expires_at_ms),
         }).unwrap_or(0);
         expiry.saturating_sub(now_ms()).max(0)
     }
@@ -373,7 +358,7 @@ impl DiagnosticsState {
             .name("tokenme-mcp-http".into())
             .spawn(move || run_local_mcp_http(listener, app, thread_stop))
             .map_err(|error| format!("无法启动局域网 MCP HTTP 服务线程: {error}"))?;
-        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms, control: None, stop, join: Some(join) });
+        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms, control_enabled: false, stop, join: Some(join) });
         Ok(endpoint)
     }
 
@@ -405,13 +390,16 @@ impl DiagnosticsState {
             }
         }
         state.grants.retain(|_, grant| now < grant.view.expires_at_ms);
-        let control_expiry = {
+        let (lan_control_enabled, lan_control_expires_at_ms) = {
             let current = self.local_http.lock().unwrap_or_else(|error| error.into_inner());
-            current.as_ref().and_then(|server| server.control.as_ref()).filter(|control| state.enabled && now < control.expires_at_ms).map(|control| control.expires_at_ms)
+            current.as_ref().map_or((false, None), |server| {
+                let live = state.enabled && now < server.expires_at_ms;
+                (live && server.control_enabled, live.then_some(server.expires_at_ms))
+            })
         };
         DiagnosticsSnapshot {
-            lan_control_enabled: control_expiry.is_some(),
-            lan_control_expires_at_ms: control_expiry,
+            lan_control_enabled,
+            lan_control_expires_at_ms,
             enabled: state.enabled,
             sessions: state.sessions.values().filter(|session| session.revoked.is_none()).map(|session| session.view.clone())
                 .chain(state.grants.values().map(|grant| grant.view.clone()))
@@ -438,7 +426,7 @@ impl DiagnosticsState {
             if let Ok(mut current) = self.local_http.lock() {
                 if let Some(server) = current.as_mut() {
                     server.read_token = new_local_mcp_token();
-                    server.control = None;
+                    server.control_enabled = false;
                 }
             }
         }
@@ -1835,7 +1823,7 @@ mod tests {
             read_token: token.clone(),
             expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS,
             stop: Arc::new(AtomicBool::new(false)),
-            control: None,
+            control_enabled: false,
             join: None,
         });
         assert!(state.local_http_authorized(Some(&format!("Bearer {token}"))).is_ok());
@@ -1858,7 +1846,7 @@ mod tests {
             read_token: token.clone(),
             expires_at_ms: now_ms() - 1,
             stop: Arc::new(AtomicBool::new(false)),
-            control: None,
+            control_enabled: false,
             join: None,
         });
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))).unwrap_err(), "bearer_expired");
@@ -1884,23 +1872,22 @@ mod tests {
         let state = state();
         *state.local_http.lock().unwrap() = Some(LocalMcpHttpServer {
             endpoint: "http://192.0.2.1:47822/mcp".into(), read_token: new_local_mcp_token(),
-            expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS, control: None,
+            expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS, control_enabled: false,
             stop: Arc::new(AtomicBool::new(false)), join: None,
         });
         state
     }
 
     #[test]
-    fn lan_control_is_explicit_independent_and_cannot_borrow_sessions() {
+    fn lan_control_switch_upgrades_the_single_credential_in_place() {
         let state = lan_state();
-        let read = state.local_http_client_config().unwrap().1;
-        assert!(state.local_http_control_config().is_none());
+        let (_, token, expiry) = state.local_http_client_config().unwrap();
         assert!(!state.snapshot().lan_control_enabled);
-        state.configure_lan_control(true).unwrap();
-        let (_, token, expiry) = state.local_http_control_config().unwrap();
-        assert_ne!(token, read);
         assert!(expiry <= now_ms() + LOCAL_MCP_TOKEN_TTL_MS);
-        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {read}"))), Ok(Scope::Read));
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Ok(Scope::Read));
+        state.configure_lan_control(true).unwrap();
+        // 同一个 token：模式切换不换票，权限随开关移动
+        assert_eq!(state.local_http_client_config().unwrap().1, token);
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Ok(Scope::Control));
         let read_session = state.create_session_for_panel("local-http".into(), Scope::Read.local_origin().into(), Scope::Read.local_scopes(), 1_000).unwrap();
         let control_session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
@@ -1917,27 +1904,50 @@ mod tests {
     }
 
     #[test]
-    fn lan_control_expiry_disable_and_reenable_revoke_old_tokens_and_sessions() {
+    fn lan_control_expiry_disable_and_reenable_revoke_sessions() {
         let state = lan_state();
         state.configure_lan_control(true).unwrap();
-        let token = state.local_http_control_config().unwrap().1;
+        let token = state.local_http_client_config().unwrap().1;
         let session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
-        state.local_http.lock().unwrap().as_mut().unwrap().control.as_mut().unwrap().expires_at_ms = now_ms() - 1;
+        state.local_http.lock().unwrap().as_mut().unwrap().expires_at_ms = now_ms() - 1;
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_expired"));
         assert!(!state.snapshot().lan_control_enabled);
         assert_eq!(state.local_http_session_ttl(Scope::Control), 0);
         state.configure_lan_control(true).unwrap();
-        let replacement = state.local_http_control_config().unwrap().1;
+        let replacement = state.local_http_client_config().unwrap().1;
+        assert_ne!(token, replacement);
+        assert!(!state.local_http_session_active(&session.session_id, Scope::Control));
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {replacement}"))), Ok(Scope::Control));
+        state.configure_lan_control(false).unwrap();
+        // off = read-only: 同一个 token 降级继续可用，不换票
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {replacement}"))), Ok(Scope::Read));
+        state.set_enabled(false);
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {replacement}"))), Err("mcp_disabled"));
+        let disabled = DiagnosticsState::default();
+        assert_eq!(disabled.configure_lan_control(true).unwrap_err().code, CODE_DIAGNOSTICS_DISABLED);
+    }
+
+    #[test]
+    fn lan_control_expiry_disable_and_reenable_revoke_old_tokens_and_sessions() {
+        let state = lan_state();
+        state.configure_lan_control(true).unwrap();
+        let token = state.local_http_client_config().unwrap().1;
+        let session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
+        state.local_http.lock().unwrap().as_mut().unwrap().expires_at_ms = now_ms() - 1;
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_expired"));
+        assert!(!state.snapshot().lan_control_enabled);
+        assert_eq!(state.local_http_session_ttl(Scope::Control), 0);
+        state.configure_lan_control(true).unwrap();
+        let replacement = state.local_http_client_config().unwrap().1;
         assert_ne!(token, replacement);
         assert!(!state.local_http_session_active(&session.session_id, Scope::Control));
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_invalid"));
         state.configure_lan_control(false).unwrap();
-        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {replacement}"))), Err("bearer_invalid"));
-        state.configure_lan_control(true).unwrap();
+        // off = read-only: 同一个 token 降级继续可用，不换票
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {replacement}"))), Ok(Scope::Read));
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_invalid"), "the expired token stays dead");
         state.set_enabled(false);
-        assert!(state.local_http_control_config().is_none());
-        state.set_enabled(true);
-        assert!(state.local_http_control_config().is_none());
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {replacement}"))), Err("mcp_disabled"));
         let disabled = DiagnosticsState::default();
         assert_eq!(disabled.configure_lan_control(true).unwrap_err().code, CODE_DIAGNOSTICS_DISABLED);
     }
@@ -1946,7 +1956,7 @@ mod tests {
     fn lan_bootstrap_survives_runtime_session_revocation_and_dispatches_start_parameters() {
         let state = lan_state();
         state.configure_lan_control(true).unwrap();
-        let token = state.local_http_control_config().unwrap().1;
+        let token = state.local_http_client_config().unwrap().1;
         let session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
         // Stopping the primary revokes runtime sessions; the independent bootstrap stays usable.
         state.revoke_all();
@@ -1963,7 +1973,8 @@ mod tests {
         assert!(primary_start_request(&json!({"allow_lan":"true"})).is_err());
         assert!(primary_start_request(&json!({"unknown":true})).is_err());
         state.configure_lan_control(false).unwrap();
-        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_invalid"));
+        // off = read-only: 同一个 token 降级继续可用，不换票
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Ok(Scope::Read));
     }
 
     #[test]

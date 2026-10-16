@@ -180,12 +180,11 @@ export const bridge: Bridge = {
     if (!inTauri) {
       return {
         config_json: "",
-        control_config_json: null,
         endpoint: null,
         ready: false,
         reason: "MCP HTTP 配置只会在 TokenMe 桌面应用中生成",
         expires_at_ms: null,
-        control_expires_at_ms: null,
+        control: false,
       };
     }
     return invoke<McpClientConfig>("get_mcp_client_config");

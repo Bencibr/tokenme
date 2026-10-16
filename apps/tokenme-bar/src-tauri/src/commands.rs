@@ -322,35 +322,35 @@ pub struct McpClientConfigView {
     pub ready: bool,
     pub reason: Option<String>,
     pub expires_at_ms: Option<i64>,
-    pub control_config_json: Option<String>,
-    pub control_expires_at_ms: Option<i64>,
+    /// Whether the single credential currently carries control powers.
+    pub control: bool,
 }
 
 /// Build the standard HTTP `mcpServers` entry that can be pasted into another
 /// AI client's MCP settings. The endpoint is reachable on this machine's LAN
 /// and exists only while the MCP switch is enabled in this TokenMe process.
 ///
-/// Reading and explicit LAN control use independent short-lived credentials.
-/// Control is absent until enabled locally and is never persisted.
+/// One credential for the LAN MCP server. The 允许局域网 MCP 控制 switch
+/// decides what that credential is worth: full control when on, read-only
+/// when off. Same token, same config either way — only the scope moves.
 #[tauri::command]
 pub fn get_mcp_client_config(state: State<'_, crate::diagnostics::DiagnosticsState>) -> Result<McpClientConfigView, String> {
-    let read = state.local_http_client_config();
-    let control = state.local_http_control_config();
-    let Some(endpoint) = read.as_ref().or(control.as_ref()).map(|(endpoint, _, _)| endpoint.clone()) else {
+    let config = state.local_http_client_config();
+    let control = state.snapshot().lan_control_enabled;
+    let Some((endpoint, bearer, expiry)) = config else {
         return Ok(McpClientConfigView {
             config_json: String::new(), endpoint: None, ready: false,
             reason: Some("请先开启 MCP 诊断服务；凭据过期后关闭再开启可生成新配置".into()),
-            expires_at_ms: None, control_config_json: None, control_expires_at_ms: None,
+            expires_at_ms: None, control,
         });
     };
-    let encode = |(endpoint, bearer, _): &(String, String, i64)| serde_json::to_string_pretty(&json!({
+    let config_json = serde_json::to_string_pretty(&json!({
         "mcpServers": { "tokenme": { "url": endpoint, "headers": { "Authorization": format!("Bearer {bearer}") } } }
-    })).map_err(|error| format!("cannot encode MCP client config: {error}"));
-    let config_json = read.as_ref().map(&encode).transpose()?.unwrap_or_default();
-    let control_config_json = control.as_ref().map(&encode).transpose()?;
-    Ok(McpClientConfigView { config_json, endpoint: Some(endpoint), ready: true,
-        reason: if read.is_none() { Some("只读凭据已过期；远程控制凭据在其独立有效期内仍可使用".into()) } else { None },
-        expires_at_ms: read.map(|(_, _, expiry)| expiry), control_config_json, control_expires_at_ms: control.map(|(_, _, expiry)| expiry) })
+    })).map_err(|error| format!("cannot encode MCP client config: {error}"))?;
+    Ok(McpClientConfigView {
+        config_json, endpoint: Some(endpoint), ready: true, reason: None,
+        expires_at_ms: Some(expiry), control,
+    })
 }
 
 fn current_ms() -> i64 {
