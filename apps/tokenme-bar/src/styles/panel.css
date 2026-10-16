@@ -1200,6 +1200,42 @@
   max-width: 100%;
 }
 
+/* 设备同步：角色卡（右列：状态 + 红色停止并断开） */
+.rolecard {
+  border: 1px solid var(--hair-2);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface-solid);
+}
+.role-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.role-badge {
+  flex: none; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 500;
+  background: rgba(13, 143, 116, 0.12); color: var(--accent-ink);
+}
+.role-name { font-weight: 500; }
+.role-state { font-size: 11px; color: var(--ink-3); }
+.role-right { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; margin-right: 3px; }
+.meta { font-size: 11px; color: var(--ink-3); margin-top: 5px; }
+.stopbtn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 0 3px 9px;
+  border: 0; border-radius: 6px; background: transparent;
+  color: #c25b4e; font-size: 11px; cursor: pointer;
+}
+.stopbtn:hover { background: rgba(194, 91, 78, 0.1); }
+.stopicon { width: 9px; height: 9px; border-radius: 2px; flex: none; background: #c25b4e; }
+.explain { font-size: 11.5px; color: var(--ink-3); margin: 2px 0 10px; line-height: 1.5; }
+.scopes { display: flex; gap: 6px; margin: 4px 0 10px; }
+.scopes button {
+  border: 1px solid var(--hair-2); background: transparent;
+  color: var(--ink-3); border-radius: 6px; font-size: 11px;
+  padding: 4px 9px; cursor: pointer;
+}
+.scopes button[aria-pressed="true"] {
+  background: rgba(13, 143, 116, 0.12); border-color: var(--accent-ink);
+  color: var(--accent-ink);
+}
 .quota-cycle {
   position: relative;
   display: flex;
