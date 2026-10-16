@@ -869,7 +869,7 @@ export function QuotaStrip({
                         {cycle.previous_tokens != null && cycle.previous_tokens > 0 ? (
                           <span>{t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })}</span>
                         ) : null}
-                        {cycle.estimated_tokens == null ? (
+                        {cycle.estimated_tokens == null && !hideUnusedEstimation ? (
                           cycle.status === "unavailable" ? (
                             <>
                               <button
@@ -889,7 +889,7 @@ export function QuotaStrip({
                               ) : null}
                             </>
                           ) : (
-                            !hideUnusedEstimation ? <em>{cycleStatus}</em> : null
+                            <em>{cycleStatus}</em>
                           )
                         ) : null}
                         {cycle.models && cycle.models.length > 0 && cycle.estimated_tokens != null ? (
