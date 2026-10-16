@@ -515,7 +515,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "overview" ? (
                 <>
                   <Heatmap cells={report.heatmap} today={localDate(report.generated_at_ms)} hours={report.hourly} hoursPrev={report.hourly_prev} period={period} />
-                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} showCycleTokens={showCycleTokens} usedTools={usedTools} hideUnusedTools={hideUnusedTools} hideUnusedQuota={hideUnusedQuota} hideUnusedEstimation={hideUnusedEstimation} />
+                  <QuotaStrip quotas={report.quotas} now={now} pending={report.quotas_pending} scoped={scope.kind !== "all"} polling={quotaPolling} displayMode={quotaDisplayMode} showCycleTokens={showCycleTokens} usedTools={usedTools} hideUnusedQuota={hideUnusedQuota} hideUnusedEstimation={hideUnusedEstimation} />
                 </>
               ) : null}
               {page === "tools" ? <ToolsSection tools={tools} /> : null}

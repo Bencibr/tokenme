@@ -244,7 +244,6 @@ export function QuotaStrip({
   displayMode = "used",
   showCycleTokens = false,
   usedTools,
-  hideUnusedTools = true,
   hideUnusedQuota = false,
   hideUnusedEstimation = false,
 }: {
@@ -265,7 +264,6 @@ export function QuotaStrip({
    *  the zero-session switch is off, tools outside this set are not in use —
    *  their rows leave the strip instead of lingering as frozen answers. */
   usedTools?: Set<string>;
-  hideUnusedTools?: boolean;
   hideUnusedQuota?: boolean;
   hideUnusedEstimation?: boolean;
 }) {
@@ -451,7 +449,7 @@ export function QuotaStrip({
   // 一行都报出 0 tokens 的本机周期——百分比再高也是厂商口径没对齐的故
   // 事，0 tokens 的行占着位置只显得乱。任何一行给不出周期数据（积分行、
   // 无窗口的预算行）都让整个工具保留：拿不到证据不等于零。
-  const filtering = usedTools != null && (hideUnusedTools || hideUnusedQuota);
+  const filtering = usedTools != null && hideUnusedQuota;
   const kept = new Set<string>();
   for (const [tool, rows] of byTool) {
     if (!filtering) {
