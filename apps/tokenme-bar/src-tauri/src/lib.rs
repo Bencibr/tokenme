@@ -101,6 +101,7 @@ pub fn run() {
             commands::set_tool_polling,
             commands::probe_tools,
             commands::set_notify_tiers,
+            commands::set_plan_expiry_notify_days,
             commands::set_tool_muted,
             commands::set_bubble_enabled,
             commands::set_bubble_skin,

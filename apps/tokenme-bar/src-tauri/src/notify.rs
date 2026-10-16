@@ -1,5 +1,5 @@
-//! Threshold banners for vendor quota windows: a native notification when a
-//! window crosses 80 % used, and one when it is used up.
+//! Threshold banners for vendor quota windows, plus one native notification
+//! when a package enters the user's selected expiry lead-time window.
 //!
 //! Edge-triggered by design. Every window carries an entry in
 //! `<data dir>/notify-state.json`; a banner only goes out when an observation
@@ -46,9 +46,9 @@ use usage_core::report::{QuotaOrigin, QuotaView};
 use crate::lang::Lang;
 use crate::settings::{NotifyTier, Settings};
 
-/// What the user's settings say about one crossing: which lines may post, and
-/// which tools stay quiet. Built once per report from [`Settings`] so the tier
-/// machine never reads global state itself.
+/// What the user's settings say about one crossing: which quota lines and
+/// package-expiry reminders may post, and which tools stay quiet. Built once per
+/// report from [`Settings`] so the tier machine never reads global state itself.
 ///
 /// A crossing that may not post still advances the window's recorded tier: the
 /// delivery policy is not the tier machine's business, and un-muting a tool (or
@@ -58,11 +58,16 @@ use crate::settings::{NotifyTier, Settings};
 pub struct Gate {
     tiers: NotifyTier,
     muted: Vec<String>,
+    plan_expiry_notify_days: Option<u8>,
 }
 
 impl From<&Settings> for Gate {
     fn from(s: &Settings) -> Self {
-        Self { tiers: s.notify_tiers, muted: s.notify_muted.clone() }
+        Self {
+            tiers: s.notify_tiers,
+            muted: s.notify_muted.clone(),
+            plan_expiry_notify_days: s.plan_expiry_notify_days,
+        }
     }
 }
 
@@ -70,6 +75,10 @@ impl Gate {
     fn allows(&self, tool: &str, tier: u8) -> bool {
         !self.muted.iter().any(|m| m == tool)
             && self.tiers.min_tier().is_some_and(|floor| tier >= floor)
+    }
+
+    fn allows_expiry(&self, tool: &str) -> bool {
+        self.plan_expiry_notify_days.is_some() && !self.muted.iter().any(|m| m == tool)
     }
 }
 
@@ -129,6 +138,9 @@ struct Entry {
     last_fired_ms: i64,
     #[serde(default)]
     last_seen_ms: i64,
+    /// Whether the selected lead-time reminder already posted for this expiry.
+    #[serde(default)]
+    expiry_notified: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -170,6 +182,18 @@ fn key_of(q: &QuotaView) -> String {
     format!("{}|{}|{}", q.tool, identity, q.window_minutes)
 }
 
+/// Existing quota providers use a zero-length window with a positive reset for
+/// a package/credit expiry. Cola's zero-length plan row is different: its
+/// timestamp is the daily quota reset, so it must not become an expiry alert.
+fn is_package_expiry(q: &QuotaView) -> bool {
+    q.window_minutes == 0 && q.resets_at_ms > 0 && q.tool != "cola"
+}
+
+fn expiry_due(resets_at_ms: i64, now: i64, days: Option<u8>) -> bool {
+    let Some(days) = days else { return false };
+    resets_at_ms > now && resets_at_ms - now <= i64::from(days) * 86_400_000
+}
+
 /// What one observation decides: the entry to store, the tier to announce (if
 /// any), and whether the store must hit the disk. For an announcement the
 /// entry's tier deliberately stays where it was — the caller advances it only
@@ -197,6 +221,7 @@ fn fresh_baseline(tier: u8, resets_at_ms: i64, now: i64) -> Decision {
             resets_at_ms,
             last_fired_ms: 0,
             last_seen_ms: now,
+            ..Entry::default()
         },
         fire,
         persist: true,
@@ -279,6 +304,18 @@ fn copy_for(
             Lang::Zh => format!("已用 {used}%（剩余 {left}%）"),
             Lang::En => format!("{used}% used · {left}% left"),
         }
+    };
+    (title, body)
+}
+
+fn copy_for_expiry(display: &str, label: Option<&str>, days: u8, lang: Lang) -> (String, String) {
+    let title = match label {
+        Some(l) if !l.is_empty() => format!("{display} · {}", localize_label(l, lang)),
+        _ => display.to_string(),
+    };
+    let body = match lang {
+        Lang::Zh => format!("套餐将在 {days} 天后到期"),
+        Lang::En => format!("Package expires in {days} {}", if days == 1 { "day" } else { "days" }),
     };
     (title, body)
 }
@@ -390,8 +427,9 @@ pub fn init(app: &tauri::AppHandle) {
     let _ = APP.set(app.clone());
 }
 
-/// Offer a fresh report's quota views to the tier machine. Budget views (caps
-/// the user set in tokenme, not vendor quota) are not this feature's business.
+/// Offer a fresh report's quota views to the notification worker. Budget views
+/// (caps the user set in tokenme, not vendor quota) are not this feature's
+/// business; vendor package expiry rows are handled alongside quota tiers.
 pub fn observe(quotas: &[QuotaView], displays: &HashMap<String, String>, lang: Lang, gate: Gate) {
     let relevant: Vec<QuotaView> = quotas
         .iter()
@@ -645,6 +683,35 @@ impl Worker {
             } else if decision.persist {
                 dirty = true;
             }
+            if is_package_expiry(q)
+                && !entry.expiry_notified
+                && expiry_due(q.resets_at_ms, now, gate.plan_expiry_notify_days)
+            {
+                if !gate.allows_expiry(&q.tool) {
+                    // Quiet, not forgotten: changing the setting later does not
+                    // replay a reminder that was already due while disabled.
+                    entry.expiry_notified = true;
+                    dirty = true;
+                    if self.noted_once.insert(format!("{key}:expiry-muted")) {
+                        crate::logging::info(&format!(
+                            "notify: 按设置静默 [{key}] package expiry / kept quiet by settings"
+                        ));
+                    }
+                } else if let Some(days) = gate.plan_expiry_notify_days {
+                    if self.attempt_due(&format!("{key}:expiry")) {
+                        let display = displays.get(&q.tool).map(String::as_str).unwrap_or(&q.tool);
+                        let (title, body) = copy_for_expiry(display, q.label.as_deref(), days, lang);
+                        match self.deliver(&format!("{key}:expiry"), &title, &body) {
+                            Ok(()) => {
+                                entry.expiry_notified = true;
+                                dirty = true;
+                                crate::logging::info(&format!("notify: posted [{key}] {title} — {body}"));
+                            }
+                            Err(e) => self.note_failure(&format!("{key}:expiry"), e),
+                        }
+                    }
+                }
+            }
             self.state.entries.insert(key, entry);
         }
         if dirty {
@@ -657,8 +724,8 @@ impl Worker {
         let title = "TokenMe".to_string();
         let body = lang
             .str(
-                "通知已就绪 — 额度到 80% 和 100% 时会在此提醒",
-                "Notifications are ready — you'll be alerted at 80% and 100%",
+                "通知已就绪 — 额度越线或套餐临近到期时会在此提醒",
+                "Notifications are ready — quota crossings and package expiry reminders will appear here",
             )
             .to_string();
         match self.deliver("__test__", &title, &body) {
@@ -911,6 +978,38 @@ mod tests {
     }
 
     #[test]
+    fn expiry_alerts_fire_only_inside_the_selected_lead_time() {
+        assert!(!expiry_due(NOW + 5 * 86_400_000 + 1, NOW, Some(5)));
+        assert!(expiry_due(NOW + 5 * 86_400_000, NOW, Some(5)));
+        assert!(expiry_due(NOW + 86_400_000, NOW, Some(5)));
+        assert!(!expiry_due(NOW, NOW, Some(5)), "an already expired package is not a before-expiry reminder");
+        assert!(!expiry_due(NOW + 86_400_000, NOW, None));
+    }
+
+    #[test]
+    fn a_new_expiry_instance_rearms_the_package_reminder() {
+        let previous = Entry {
+            resets_at_ms: RESET,
+            expiry_notified: true,
+            ..Entry::default()
+        };
+        let next = plan(Some(&previous), 0, RESET + RENEW_SLACK_MS + 1, NOW, 0.0);
+        assert!(!next.entry.expiry_notified, "a renewed package gets its own reminder");
+    }
+
+    #[test]
+    fn only_zero_length_package_rows_are_expiry_candidates() {
+        let mut pack = view("workbuddy", 12.0, NOW + 86_400_000, Some("Bonus Pack"), Some("pack"));
+        pack.window_minutes = 0;
+        assert!(is_package_expiry(&pack));
+        pack.tool = "cola".into();
+        assert!(!is_package_expiry(&pack), "Cola's zero-length row is a daily reset, not package expiry");
+        pack.tool = "workbuddy".into();
+        pack.window_minutes = 300;
+        assert!(!is_package_expiry(&pack));
+    }
+
+    #[test]
     fn the_window_key_prefers_the_stable_id_and_normalises_labels() {
         // An id outranks a label even when both are present.
         let with_id = view("qoder", 81.0, RESET, Some("5 小时"), Some("qw-5h"));
@@ -954,7 +1053,7 @@ mod tests {
         let settled = Entry { tier: 2, last_fired_ms: NOW, ..first.entry.clone() };
         assert_eq!(plan(Some(&settled), 2, RESET, NOW + 120_000, 100.0).fire, None);
         // A renewal met at 100 % is the same contract: announced, or retried.
-        let old = Entry { tier: 1, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW };
+        let old = Entry { tier: 1, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW, ..Entry::default() };
         let renewed = plan(Some(&old), 2, RESET + RENEW_SLACK_MS + 1, NOW, 100.0);
         assert_eq!(renewed.fire, Some(2));
         assert_eq!(renewed.entry.tier, 0, "fresh instance, announcement pending");
@@ -962,7 +1061,7 @@ mod tests {
 
     #[test]
     fn crossing_a_line_announces_it_and_only_advances_on_that_post() {
-        let prev = Entry { tier: 0, resets_at_ms: RESET, last_fired_ms: 0, last_seen_ms: NOW };
+        let prev = Entry { tier: 0, resets_at_ms: RESET, last_fired_ms: 0, last_seen_ms: NOW, ..Entry::default() };
         let d = plan(Some(&prev), 1, RESET, NOW, 85.0);
         assert_eq!(d.fire, Some(1));
         assert_eq!(d.entry.tier, 0, "the tier advances in the caller, after the post");
@@ -985,6 +1084,7 @@ mod tests {
             resets_at_ms: RESET,
             last_fired_ms: NOW - EXHAUSTED_REFIRE_COOLDOWN_MS - 1,
             last_seen_ms: NOW,
+            ..Entry::default()
         };
         let d = plan(Some(&down), 0, RESET, NOW, 0.0);
         assert_eq!(d.fire, None, "falling back never announces");
@@ -997,7 +1097,7 @@ mod tests {
 
     #[test]
     fn reset_jitter_is_not_a_renewal_but_a_jump_is() {
-        let prev = Entry { tier: 1, resets_at_ms: RESET, last_fired_ms: 0, last_seen_ms: NOW };
+        let prev = Entry { tier: 1, resets_at_ms: RESET, last_fired_ms: 0, last_seen_ms: NOW, ..Entry::default() };
         // Seconds of wobble between samples: same instance, same tier, quiet.
         let d = plan(Some(&prev), 1, RESET + 60_000, NOW, 85.0);
         assert_eq!(d.fire, None);
@@ -1014,7 +1114,7 @@ mod tests {
         assert_eq!(d.entry.tier, 0, "pending like a first sight — the post settles it");
         // A window that never advertises a reset cannot renew by reset; the
         // drop re-arm covers its top-ups instead.
-        let no_reset = Entry { tier: 2, resets_at_ms: 0, last_fired_ms: NOW - 1, last_seen_ms: NOW };
+        let no_reset = Entry { tier: 2, resets_at_ms: 0, last_fired_ms: NOW - 1, last_seen_ms: NOW, ..Entry::default() };
         let d = plan(Some(&no_reset), 0, 0, NOW, 0.0);
         assert_eq!(d.fire, None);
         assert_eq!(d.entry.tier, 0);
@@ -1028,7 +1128,7 @@ mod tests {
     /// only then may the next climb announce again.
     #[test]
     fn a_spent_window_ignores_sub_line_wobble() {
-        let spent = Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW };
+        let spent = Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW, ..Entry::default() };
         // 99.8 while spent: wobble, not a top-up — the window stays spent.
         let wobble = plan(Some(&spent), 1, RESET, NOW + 1_000, 99.8);
         assert_eq!(wobble.fire, None, "the same spent window must not re-fire");
@@ -1056,7 +1156,7 @@ mod tests {
     /// re-arm and the clock reads the real post.
     #[test]
     fn a_recently_fired_window_stays_quiet_through_a_rearm_and_climb() {
-        let spent = Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW };
+        let spent = Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW, ..Entry::default() };
         let topped = plan(Some(&spent), 0, RESET, NOW + 60_000, 0.0);
         assert_eq!(topped.entry.tier, 0, "the re-arm itself is real and persists");
         let climbed = plan(Some(&topped.entry), 2, RESET, NOW + 120_000, 100.0);
@@ -1084,6 +1184,15 @@ mod tests {
         // An empty label is the same as no label.
         let (title, _) = copy_for("Qoder", Some(""), 81.0, 1, Lang::Zh);
         assert_eq!(title, "Qoder");
+    }
+
+    #[test]
+    fn expiry_copy_names_the_selected_lead_time() {
+        let (title, body) = copy_for_expiry("WorkBuddy", Some("Bonus Pack"), 3, Lang::Zh);
+        assert_eq!(title, "WorkBuddy · Bonus Pack");
+        assert_eq!(body, "套餐将在 3 天后到期");
+        let (_, body) = copy_for_expiry("WorkBuddy", None, 1, Lang::En);
+        assert_eq!(body, "Package expires in 1 day");
     }
 
     /// The title's engine-authored label follows the banner language: the
@@ -1125,7 +1234,7 @@ mod tests {
     #[test]
     fn state_survives_json_and_older_shapes() {
         let mut state = NotifyState::default();
-        state.entries.insert("qoder|qw-5h|300".into(), Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW });
+        state.entries.insert("qoder|qw-5h|300".into(), Entry { tier: 2, resets_at_ms: RESET, last_fired_ms: NOW, last_seen_ms: NOW, ..Entry::default() });
         let back: NotifyState = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(state, back, "the file is the only route across a restart");
         // A hand-written or older payload with missing fields reads as quiet.
@@ -1138,8 +1247,8 @@ mod tests {
     #[test]
     fn stale_entries_are_pruned_at_load() {
         let mut state = NotifyState::default();
-        state.entries.insert("fresh".into(), Entry { tier: 1, resets_at_ms: 0, last_fired_ms: 0, last_seen_ms: NOW - 1_000 });
-        state.entries.insert("stale".into(), Entry { tier: 2, resets_at_ms: 0, last_fired_ms: 0, last_seen_ms: NOW - STATE_RETENTION_MS - 1 });
+        state.entries.insert("fresh".into(), Entry { tier: 1, resets_at_ms: 0, last_fired_ms: 0, last_seen_ms: NOW - 1_000, ..Entry::default() });
+        state.entries.insert("stale".into(), Entry { tier: 2, resets_at_ms: 0, last_fired_ms: 0, last_seen_ms: NOW - STATE_RETENTION_MS - 1, ..Entry::default() });
         prune_at(&mut state, NOW);
         assert!(state.entries.contains_key("fresh"));
         assert!(!state.entries.contains_key("stale"), "a window gone for a month is gone");
@@ -1177,6 +1286,7 @@ mod tests {
         let mut s = Settings::default();
         let g = Gate::from(&s);
         assert!(g.allows("codex", 1) && g.allows("codex", 2));
+        assert!(g.allows_expiry("codex"));
         assert!(!g.allows("codex", 0), "a window below the warning line never posts");
 
         s.notify_tiers = NotifyTier::Exhausted;
@@ -1192,5 +1302,11 @@ mod tests {
 
         s.notify_tiers = NotifyTier::Off;
         assert!(!Gate::from(&s).allows("codex", 2), "off is off for everyone");
+
+        s.plan_expiry_notify_days = None;
+        assert!(!Gate::from(&s).allows_expiry("codex"));
+        s.plan_expiry_notify_days = Some(1);
+        s.notify_muted = vec!["codex".into()];
+        assert!(!Gate::from(&s).allows_expiry("codex"));
     }
 }

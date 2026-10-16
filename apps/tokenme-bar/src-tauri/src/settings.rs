@@ -105,6 +105,21 @@ fn default_auto_update_check() -> bool {
     true
 }
 
+fn default_plan_expiry_notify_days() -> Option<u8> {
+    Some(3)
+}
+
+fn deserialize_plan_expiry_notify_days<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let days = Option::<u8>::deserialize(deserializer)?;
+    Ok(match days {
+        Some(days) if !matches!(days, 1 | 3 | 5) => default_plan_expiry_notify_days(),
+        other => other,
+    })
+}
+
 /// The engine's fallback poll cadence when the file watcher is quiet.
 fn default_refresh_secs() -> u64 {
     30
@@ -239,6 +254,10 @@ pub struct Settings {
     /// Tools that never post a banner, whatever their windows do.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub notify_muted: Vec<String>,
+    /// Notify once when an expiring package enters this many-days-before range.
+    /// `None` disables package-expiry reminders.
+    #[serde(default = "default_plan_expiry_notify_days", deserialize_with = "deserialize_plan_expiry_notify_days")]
+    pub plan_expiry_notify_days: Option<u8>,
     /// Check GitHub's latest.json on boot and offer the update when a newer
     /// release exists. A check is one anonymous GET — nothing is downloaded and
     /// no install runs unless the user clicks the offer in the settings sheet.
@@ -274,6 +293,7 @@ impl Default for Settings {
             quota_probes_off: Vec::new(),
             notify_tiers: NotifyTier::default(),
             notify_muted: Vec::new(),
+            plan_expiry_notify_days: default_plan_expiry_notify_days(),
             auto_update_check: default_auto_update_check(),
             budgets: BTreeMap::new(),
             quota_tools: Vec::new(),
@@ -372,6 +392,7 @@ mod tests {
         assert!(s.quota_probes_off.is_empty());
         assert_eq!(s.notify_tiers, NotifyTier::Both);
         assert!(s.notify_muted.is_empty());
+        assert_eq!(s.plan_expiry_notify_days, Some(3));
         assert!(!s.auto_checkin, "the guarantee is opt-in, never implied by an old file");
     }
 
@@ -385,11 +406,20 @@ mod tests {
     }
 
     #[test]
+    fn plan_expiry_reminder_accepts_only_supported_lead_times() {
+        for (json, want) in [("null", None), ("1", Some(1)), ("3", Some(3)), ("5", Some(5)), ("2", Some(3))] {
+            let s: Settings = serde_json::from_str(&format!(r#"{{"plan_expiry_notify_days":{json}}}"#)).unwrap();
+            assert_eq!(s.plan_expiry_notify_days, want, "{json}");
+        }
+    }
+
+    #[test]
     fn empty_lists_stay_out_of_the_file() {
         let json = serde_json::to_string(&Settings::default()).unwrap();
         assert!(!json.contains("quota_probes_off"), "{json}");
         assert!(!json.contains("notify_muted"), "{json}");
-        // The two switches that change behaviour are always written, so a
+        assert!(json.contains("\"plan_expiry_notify_days\":3"), "{json}");
+        // Behaviour switches are always written, so a
         // hand-edited file cannot leave them ambiguous.
         assert!(json.contains("\"quota_polling\":true"), "{json}");
     }

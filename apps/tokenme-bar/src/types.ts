@@ -583,6 +583,7 @@ export interface Bridge {
   /** The registry's own list, with what this machine has answered. */
   probeTools: () => Promise<ProbeTool[]>;
   setNotifyTiers: (tiers: NotifyTierKey) => Promise<void>;
+  setPlanExpiryNotifyDays: (days: number | null) => Promise<void>;
   setToolMuted: (tool: string, on: boolean) => Promise<void>;
   setAutoUpdateCheck: (on: boolean) => Promise<void>;
   checkUpdate: () => Promise<UpdateStatus>;
@@ -694,6 +695,8 @@ export interface PanelSettings {
   notify_tiers: NotifyTierKey;
   /** Tools whose windows never post a banner. */
   notify_muted: string[];
+  /** One reminder lead time for expiring vendor packages, or null to disable. */
+  plan_expiry_notify_days: number | null;
   auto_update_check: boolean;
   version: string;
   /** The build number the panel logs at startup — the same digits a support

@@ -1645,6 +1645,7 @@ pub struct PanelSettings {
     pub quota_probes_off: Vec<String>,
     pub notify_tiers: NotifyTier,
     pub notify_muted: Vec<String>,
+    pub plan_expiry_notify_days: Option<u8>,
     pub auto_update_check: bool,
     pub version: String,
     /// The same number `main.rs` logs at startup ("build N starting"), so the
@@ -1746,6 +1747,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         quota_probes_off: settings.quota_probes_off.clone(),
         notify_tiers: settings.notify_tiers,
         notify_muted: settings.notify_muted.clone(),
+        plan_expiry_notify_days: settings.plan_expiry_notify_days,
         auto_update_check: settings.auto_update_check,
         version: env!("CARGO_PKG_VERSION").to_string(),
         build: env!("TOKENME_BUILD_ID"),
@@ -1917,6 +1919,22 @@ pub async fn set_notify_tiers(app: AppHandle, tiers: NotifyTier) -> Result<(), S
         return Err("settings busy".into());
     };
     settings.notify_tiers = tiers;
+    settings.clone().save().map_err(|e| e.to_string())
+}
+
+/// Which lead time should announce an expiring vendor package. The UI only
+/// offers these values; reject hand-written settings that would make the
+/// reminder fire at an arbitrary interval.
+#[tauri::command]
+pub async fn set_plan_expiry_notify_days(app: AppHandle, days: Option<u8>) -> Result<(), String> {
+    if days.is_some_and(|n| !matches!(n, 1 | 3 | 5)) {
+        return Err("plan expiry reminder must be 1, 3, 5, or disabled".into());
+    }
+    let shared = app.state::<Shared>();
+    let Ok(mut settings) = shared.settings.lock() else {
+        return Err("settings busy".into());
+    };
+    settings.plan_expiry_notify_days = days;
     settings.clone().save().map_err(|e| e.to_string())
 }
 

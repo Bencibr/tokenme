@@ -26,6 +26,13 @@ const TIERS: { key: NotifyTierKey; label: () => string }[] = [
   { key: "off", label: () => t("set.tiers.off") },
 ];
 
+const PLAN_EXPIRY_DAYS: { value: string; label: () => string }[] = [
+  { value: "", label: () => t("set.plan-expiry.off") },
+  { value: "5", label: () => t("set.plan-expiry.days", { n: 5 }) },
+  { value: "3", label: () => t("set.plan-expiry.days", { n: 3 }) },
+  { value: "1", label: () => t("set.plan-expiry.days", { n: 1 }) },
+];
+
 const QUOTA_MODES: { key: QuotaDisplayMode; label: () => string }[] = [
   { key: "used", label: () => t("quota.mode.used") },
   { key: "remaining", label: () => t("quota.mode.remaining") },
@@ -363,6 +370,12 @@ export function SettingsSheet({
   const setTiers = (tiers: NotifyTierKey) => {
     patch((s) => ({ ...s, notify_tiers: tiers }));
     void bridge.setNotifyTiers(tiers);
+  };
+
+  const setPlanExpiryNotifyDays = (value: string) => {
+    const days = value ? Number(value) : null;
+    patch((s) => ({ ...s, plan_expiry_notify_days: days }));
+    void bridge.setPlanExpiryNotifyDays(days);
   };
 
   const isMuted = (id: string) => (settings?.notify_muted ?? []).includes(id);
@@ -742,6 +755,20 @@ export function SettingsSheet({
                   </button>
                 ))}
               </div>
+            </div>
+            <div className="sheet-row">
+              <div>
+                <label className="sheet-label" htmlFor="plan-expiry-notify">{t("set.plan-expiry")}</label>
+                <div className="sheet-hint">{t("set.plan-expiry.hint")}</div>
+              </div>
+              <select
+                id="plan-expiry-notify"
+                className="sheet-select"
+                value={settings.plan_expiry_notify_days == null ? "" : String(settings.plan_expiry_notify_days)}
+                onChange={(event) => setPlanExpiryNotifyDays(event.target.value)}
+              >
+                {PLAN_EXPIRY_DAYS.map((option) => <option key={option.value || "off"} value={option.value}>{option.label()}</option>)}
+              </select>
             </div>
             {navRow("mute", t("set.muted"), t("set.muted.hint"), mutedCount ? t("set.muted.count", { n: mutedCount }) : t("set.none"))}
           </>

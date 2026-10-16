@@ -385,6 +385,14 @@ export const bridge: Bridge = {
     await invoke<void>("set_notify_tiers", { tiers });
   },
 
+  async setPlanExpiryNotifyDays(days: number | null): Promise<void> {
+    if (!inTauri) {
+      browserSettings.plan_expiry_notify_days = days;
+      return;
+    }
+    await invoke<void>("set_plan_expiry_notify_days", { days });
+  },
+
   async setToolMuted(tool: string, on: boolean): Promise<void> {
     if (!inTauri) {
       const muted = new Set(browserSettings.notify_muted);
@@ -624,6 +632,7 @@ const browserSettings: PanelSettings = {
   quota_probes_off: [],
   notify_tiers: "both",
   notify_muted: [],
+  plan_expiry_notify_days: 3,
   auto_update_check: true,
   version: "dev",
   build: "dev",
