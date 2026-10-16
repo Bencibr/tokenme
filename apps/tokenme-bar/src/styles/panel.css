@@ -1222,6 +1222,7 @@
   padding: 3px 0 3px 9px;
   border: 0; border-radius: 6px; background: transparent;
   color: #c25b4e; font-size: 11px; cursor: pointer;
+  white-space: nowrap;
 }
 .stopbtn:hover { background: rgba(194, 91, 78, 0.1); }
 .stopicon { width: 9px; height: 9px; border-radius: 2px; flex: none; background: #c25b4e; }

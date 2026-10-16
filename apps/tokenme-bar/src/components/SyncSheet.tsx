@@ -384,7 +384,9 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const primaryDevices = connectedDevices.filter((device) => device.role === "primary");
   const secondaryDevices = connectedDevices.filter((device) => device.role === "secondary");
 
-  const effectiveScreen: Screen = snapshot.role === "unconfigured" && screen === "overview" ? "setup" : screen;
+  // The overview is a running state: a stopped or unconfigured role lands on
+  // role selection, so a dead overview never shows (原型：停止即回选择).
+  const effectiveScreen: Screen = screen === "overview" && (snapshot.role === "unconfigured" || !snapshot.service_running) ? "setup" : screen;
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {
@@ -520,7 +522,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                     </div>
                   </div>
                   <div className="role-right">
-                    <span className="role-state">{snapshot.service_running ? t("sync.state.running") : t("sync.state.stopped")}</span>
+                    <span className="role-state">{t("sync.state.running")}</span>
                     <button type="button" className="stopbtn" disabled={commandBusy} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>
