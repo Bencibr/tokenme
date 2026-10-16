@@ -3632,10 +3632,15 @@
 }
 
 /* 设备同步 · 向导屏与总览行卡（原型 device-ui-redesign 定稿） */
-/* 设备同步 sheet 表头按高保真稿放大一档 */
+/* 设备同步 sheet 表头按高保真稿放大一档；标题与正文同一条左竖线 */
 .sheet-srv .sec-label {
   font-size: 15px;
   letter-spacing: 0.02em;
+}
+
+.sheet-srv .sheet-hd {
+  padding-left: 22px;
+  padding-right: 22px;
 }
 
 .sheet-srv .sheet-close svg {
@@ -3645,6 +3650,11 @@
 
 .sheet-srv .sheet-body {
   padding: 4px 22px 18px;
+}
+
+/* 返回箭头的触控内距会把它顶出标题竖线，抵消掉 */
+.sheet-srv .sync-crumb .sync-back:first-child {
+  margin-left: -2px;
 }
 
 .sync-ask {
