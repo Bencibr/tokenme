@@ -473,7 +473,9 @@ export function QuotaStrip({
     notify !== null && notify !== "granted" && notify !== "unknown" && dismissedFor !== notify && vendorLive
       ? notify
       : null;
-  const groups = ordered([...byTool.keys()], order.tools, (t) => t).map((tool) => ({
+  // Groups render the KEPT tools only — building them from byTool's keys
+  // would render the very blocks the not-in-use judgement just removed.
+  const groups = ordered([...kept], order.tools, (t) => t).map((tool) => ({
     tool,
     rows: ordered(byTool.get(tool) ?? [], order.rows, rowKey),
   }));
