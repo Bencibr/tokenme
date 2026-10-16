@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, AtomicI64, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -192,7 +192,7 @@ pub struct DiagnosticsErrorView {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum DiagnosticsManagementRequest {
     Status,
-    Configure { enabled: bool },
+    Configure { enabled: bool, ttl_ms: Option<i64> },
     ConfigureLanControl { enabled: bool },
     CreateGrant { debugger_device_id: String, scopes: Vec<String>, ttl_ms: i64 },
     RevokeGrant { grant_id: String },
@@ -238,6 +238,9 @@ struct LocalMcpHttpServer {
     endpoint: String,
     read_token: String,
     expires_at_ms: i64,
+    /// The lifetime this token was minted with; a Configure carrying a
+    /// different ttl must re-mint — the old listener keeps the old clock.
+    ttl_ms: i64,
     /// One credential, one switch: on, this credential IS the LAN control
     /// auth; off, the very same credential is read-only.
     control_enabled: bool,
@@ -258,9 +261,34 @@ impl Scope {
 pub struct DiagnosticsState {
     inner: Mutex<Inner>,
     local_http: Mutex<Option<LocalMcpHttpServer>>,
+    /// Requested local-credential lifetime; 0 reads as the 15-minute default,
+    /// clamped to 5..60 minutes on use.
+    local_token_ttl_ms: AtomicI64,
 }
 
+const LOCAL_TOKEN_TTL_MIN_MS: i64 = 5 * 60 * 1000;
+const LOCAL_TOKEN_TTL_MAX_MS: i64 = 60 * 60 * 1000;
+
 impl DiagnosticsState {
+    fn local_token_ttl(&self) -> i64 {
+        let stored = self.local_token_ttl_ms.load(Ordering::Relaxed);
+        if stored == 0 { LOCAL_MCP_TOKEN_TTL_MS } else { stored.clamp(LOCAL_TOKEN_TTL_MIN_MS, LOCAL_TOKEN_TTL_MAX_MS) }
+    }
+
+    fn set_local_token_ttl(&self, ttl_ms: Option<i64>) {
+        if let Some(ttl) = ttl_ms {
+            self.local_token_ttl_ms.store(ttl.clamp(LOCAL_TOKEN_TTL_MIN_MS, LOCAL_TOKEN_TTL_MAX_MS), Ordering::Relaxed);
+        }
+    }
+
+    /// True when a live listener was minted with a lifetime different from the
+    /// one now requested; the caller stops it so the next start re-mints.
+    fn local_http_ttl_changed(&self) -> bool {
+        self.local_http.lock().ok()
+            .and_then(|server| server.as_ref().map(|server| now_ms() < server.expires_at_ms && server.ttl_ms != self.local_token_ttl()))
+            .unwrap_or(false)
+    }
+
     pub(crate) fn local_http_endpoint(&self) -> Option<String> {
         if !self.status().enabled { return None; }
         self.local_http.lock().ok().and_then(|server| {
@@ -283,7 +311,8 @@ impl DiagnosticsState {
             if let Some(server) = current.as_mut() {
                 if enabled && now_ms() >= server.expires_at_ms {
                     server.read_token = new_local_mcp_token();
-                    server.expires_at_ms = now_ms().saturating_add(LOCAL_MCP_TOKEN_TTL_MS);
+                    server.ttl_ms = self.local_token_ttl();
+                    server.expires_at_ms = now_ms().saturating_add(server.ttl_ms);
                 }
                 server.control_enabled = enabled;
             } else if enabled { return Err(DiagnosticsError::new(CODE_DIAGNOSTICS_DISABLED, "enable MCP before LAN control")); }
@@ -350,7 +379,8 @@ impl DiagnosticsState {
         let port = listener.local_addr().map_err(|error| format!("无法读取局域网 MCP HTTP 端口: {error}"))?.port();
         let endpoint = format!("http://{host}:{port}{LOCAL_MCP_PATH}");
         let read_token = new_local_mcp_token();
-        let expires_at_ms = now_ms().saturating_add(LOCAL_MCP_TOKEN_TTL_MS);
+        let ttl_ms = self.local_token_ttl();
+        let expires_at_ms = now_ms().saturating_add(ttl_ms);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let app = app.clone();
@@ -358,7 +388,7 @@ impl DiagnosticsState {
             .name("tokenme-mcp-http".into())
             .spawn(move || run_local_mcp_http(listener, app, thread_stop))
             .map_err(|error| format!("无法启动局域网 MCP HTTP 服务线程: {error}"))?;
-        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms, control_enabled: false, stop, join: Some(join) });
+        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms, ttl_ms, control_enabled: false, stop, join: Some(join) });
         Ok(endpoint)
     }
 
@@ -1588,7 +1618,7 @@ fn grant_failed() -> DiagnosticsError { DiagnosticsError::new(CODE_GRANT_FAILED,
 
 #[tauri::command]
 pub fn set_diagnostics_enabled(app: AppHandle, enabled: bool, state: State<'_, DiagnosticsState>) -> Result<DiagnosticsStatus, String> {
-    configure_local_mcp(&app, &state, enabled).map_err(|error| error.to_string())
+    configure_local_mcp(&app, &state, enabled, None).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1636,8 +1666,8 @@ pub fn diagnostics_session(
     }
     let operation_id = state.begin_management_operation(action);
     let outcome = match request {
-        DiagnosticsManagementRequest::Configure { enabled } => {
-            configure_local_mcp(&app, &state, enabled).map(|_| None::<DiagnosticsConfig>)
+        DiagnosticsManagementRequest::Configure { enabled, ttl_ms } => {
+            configure_local_mcp(&app, &state, enabled, ttl_ms).map(|_| None::<DiagnosticsConfig>)
         }
         DiagnosticsManagementRequest::ConfigureLanControl { enabled } => state.configure_lan_control(enabled).map(|_| None::<DiagnosticsConfig>),
         DiagnosticsManagementRequest::CreateGrant { debugger_device_id, scopes, ttl_ms } => {
@@ -1690,8 +1720,13 @@ pub fn diagnostics_session(
 
 fn now_ms() -> i64 { usage_core::report::now_ms() }
 
-fn configure_local_mcp(app: &AppHandle, state: &DiagnosticsState, enabled: bool) -> Result<DiagnosticsStatus, DiagnosticsError> {
+fn configure_local_mcp(app: &AppHandle, state: &DiagnosticsState, enabled: bool, ttl_ms: Option<i64>) -> Result<DiagnosticsStatus, DiagnosticsError> {
     if enabled {
+        state.set_local_token_ttl(ttl_ms);
+        if state.local_http_ttl_changed() {
+            // A lifetime change re-mints: the old listener keeps the old clock.
+            state.stop_local_http();
+        }
         state.start_local_http(app).map_err(|_| DiagnosticsError::new(CODE_HANDLER_FAILED, "local MCP HTTP service could not start"))?;
         state.set_enabled(true);
     } else {
@@ -1822,6 +1857,7 @@ mod tests {
             endpoint: "http://192.0.2.1:47822/mcp".into(),
             read_token: token.clone(),
             expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS,
+            ttl_ms: LOCAL_MCP_TOKEN_TTL_MS,
             stop: Arc::new(AtomicBool::new(false)),
             control_enabled: false,
             join: None,
@@ -1845,6 +1881,7 @@ mod tests {
             endpoint: "http://192.0.2.1:47822/mcp".into(),
             read_token: token.clone(),
             expires_at_ms: now_ms() - 1,
+            ttl_ms: LOCAL_MCP_TOKEN_TTL_MS,
             stop: Arc::new(AtomicBool::new(false)),
             control_enabled: false,
             join: None,
@@ -1872,7 +1909,7 @@ mod tests {
         let state = state();
         *state.local_http.lock().unwrap() = Some(LocalMcpHttpServer {
             endpoint: "http://192.0.2.1:47822/mcp".into(), read_token: new_local_mcp_token(),
-            expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS, control_enabled: false,
+            expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS, ttl_ms: LOCAL_MCP_TOKEN_TTL_MS, control_enabled: false,
             stop: Arc::new(AtomicBool::new(false)), join: None,
         });
         state

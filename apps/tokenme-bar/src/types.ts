@@ -368,7 +368,7 @@ export interface McpClientConfig {
 
 export type DiagnosticsManagementRequest =
   | { action: "status" }
-  | { action: "configure"; enabled: boolean }
+  | { action: "configure"; enabled: boolean; ttl_ms?: number }
   | { action: "configure_lan_control"; enabled: boolean }
   | { action: "create_grant"; debugger_device_id: string; scopes: DiagnosticsScope[]; ttl_ms: number }
   | { action: "revoke_grant"; grant_id: string }

@@ -79,6 +79,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [diagnosticsSessions, setDiagnosticsSessions] = useState<DiagnosticsSessionView[]>([]);
   const [diagnosticsConfig, setDiagnosticsConfig] = useState<DiagnosticsConfig | null>(null);
   const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
+  const [lanControl, setLanControl] = useState(false);
   const [localCred, setLocalCred] = useState<McpClientConfig | null>(null);
   const [localCopied, setLocalCopied] = useState(false);
   const diagnosticsConfigRef = useRef<DiagnosticsConfig | null>(null);
@@ -266,6 +267,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     if (generation !== undefined && generation !== operationGeneration.current) return;
     diagnosticsEnabledRef.current = response.enabled;
     setDiagnosticsEnabled(response.enabled);
+    setLanControl(response.lan_control_enabled);
     setDiagnosticsSessions(response.sessions);
     setDiagnosticsError(response.error?.message ?? null);
     if (response.config) {
@@ -371,10 +373,18 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   };
 
   // Local debug clients (本机的 Claude) consume the MCP connection config, not
-  // a signed grant: enable the diagnostics server, then hand over its config.
+  // a signed grant: enable the diagnostics server with the chosen lifetime,
+  // apply the scope choice as LAN-control powers, then hand over the config.
   const createLocalFlow = async () => {
-    if (!diagnosticsEnabledRef.current) await runDiagnostics({ action: "configure", enabled: true });
+    if (!diagnosticsScopes.length) { setDiagnosticsError(t("sync.diagnostics.invalid_config")); return; }
+    const ttl_ms = diagnosticsTtl === "5m" ? 5 * 60 * 1000 : diagnosticsTtl === "15m" ? 15 * 60 * 1000 : 60 * 60 * 1000;
+    await runDiagnostics({ action: "configure", enabled: true, ttl_ms });
     if (!mounted.current) return;
+    const control = diagnosticsScopes.includes("sync.control");
+    if (control !== lanControl) {
+      await runDiagnostics({ action: "configure_lan_control", enabled: control });
+      if (!mounted.current) return;
+    }
     try {
       const cfg = await bridge.mcpClientConfig();
       if (!mounted.current) return;
@@ -595,16 +605,16 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                 <b>{t("sync.diagnostics.title")}</b>
               </div>
               <p className="explain">{t("sync.diagnostics.explain")}</p>
+              <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.ttl")}</span></div>
+              <div className="seg seg-wide" role="radiogroup" aria-label={t("sync.diagnostics.ttl")}>
+                {DIAGNOSTICS_TTLS.map((ttl) => <button type="button" className="seg-btn" key={ttl} role="radio" aria-checked={diagnosticsTtl === ttl} onClick={() => setDiagnosticsTtl(ttl)}>{ttl === "5m" ? t("sync.diagnostics.ttl.5m") : ttl === "15m" ? t("sync.diagnostics.ttl.15m") : t("sync.diagnostics.ttl.60m")}</button>)}
+              </div>
+              <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.scope")}</span></div>
+              <div className="scopes" role="group" aria-label={t("sync.diagnostics.scope")}>
+                {DIAGNOSTICS_SCOPES.map((scope) => <button type="button" key={scope} aria-pressed={diagnosticsScopes.includes(scope)} onClick={() => toggleDiagnosticsScope(scope)}>{scope === "diagnostics.read" ? t("sync.diagnostics.scope.read") : t("sync.diagnostics.scope.control")}</button>)}
+              </div>
               {grantTargets.length ? (
                 <>
-                  <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.ttl")}</span></div>
-                  <div className="seg seg-wide" role="radiogroup" aria-label={t("sync.diagnostics.ttl")}>
-                    {DIAGNOSTICS_TTLS.map((ttl) => <button type="button" className="seg-btn" key={ttl} role="radio" aria-checked={diagnosticsTtl === ttl} onClick={() => setDiagnosticsTtl(ttl)}>{ttl === "5m" ? t("sync.diagnostics.ttl.5m") : ttl === "15m" ? t("sync.diagnostics.ttl.15m") : t("sync.diagnostics.ttl.60m")}</button>)}
-                  </div>
-                  <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.scope")}</span></div>
-                  <div className="scopes" role="group" aria-label={t("sync.diagnostics.scope")}>
-                    {DIAGNOSTICS_SCOPES.map((scope) => <button type="button" key={scope} aria-pressed={diagnosticsScopes.includes(scope)} onClick={() => toggleDiagnosticsScope(scope)}>{scope === "diagnostics.read" ? t("sync.diagnostics.scope.read") : t("sync.diagnostics.scope.control")}</button>)}
-                  </div>
                   <label className="sync-field"><span>{t("sync.diagnostics.target")}</span><select className="sync-input" value={diagnosticsTarget} onChange={(event) => setDiagnosticsTarget(event.target.value)} aria-label={t("sync.diagnostics.target")}>
                     <option value="">{t("sync.diagnostics.target.choose")}</option>
                     {grantTargets.map((device) => <option key={device.device_id} value={device.device_id}>{device.display_name}</option>)}
