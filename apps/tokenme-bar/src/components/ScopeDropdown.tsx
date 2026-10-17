@@ -12,9 +12,6 @@ const SLOTS = ["var(--cat-2)", "var(--cat-4)", "var(--cat-7)", "var(--cat-8)", "
 /** The line the header badge draws: an import older than this reads amber. */
 const STALE_MS = 24 * 3_600_000;
 
-/** No server feature in use: nothing to contrast, so no manual-import tags. */
-const NO_ORIGINS: Set<string> = new Set();
-
 function share(part: number, whole: number): string {
   return whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : "0%";
 }
@@ -55,9 +52,8 @@ interface Props {
   /** Open state lives in App so Escape closes menu → sheet → panel in order. */
   open: boolean;
   onOpen: (open: boolean) => void;
-  /** Origins backed by a configured server. Origins outside a non-empty set
-   *  arrived by a manual export/import and are tagged; an empty set shows no
-   *  tags at all. */
+  /** Origins backed by a configured server; other non-device origins are
+   *  historical/manual imports, even when no server is configured. */
   serverOrigins?: Set<string>;
 }
 
@@ -73,7 +69,7 @@ export function ScopeDropdown({
   now,
   open,
   onOpen,
-  serverOrigins = NO_ORIGINS,
+  serverOrigins,
 }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -223,7 +219,7 @@ export function ScopeDropdown({
 
           {rows.map((r) => {
             const checked = r.local ? scope.kind === "local" : scope.kind === "origin" && scope.name === r.origin;
-            const manual = !r.local && serverOrigins.size > 0 && !serverOrigins.has(r.origin);
+            const manual = serverOrigins !== undefined && !r.local && !r.device && !serverOrigins.has(r.origin);
             const deviceStatus = r.device ? deviceStatusLabel(r.device.status) : null;
             const deviceSync = r.device?.status === "paired"
               ? (r.device.snapshot_complete ? t("scope.device.synced") : t("scope.device.syncing"))

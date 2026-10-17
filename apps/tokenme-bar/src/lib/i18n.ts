@@ -176,9 +176,9 @@ const zh = {
   /* 远程服务器（拉取式采集） ---------------------------------------------- */
   "srv.title": "远程服务器",
   "srv.title.count": "远程服务器 · {n} 台",
-  "srv.empty.big": "还没有远程服务器",
+  "srv.empty.big": "还没有配置远程服务器",
   "srv.empty.hint":
-    "从 Linux 服务器自动拉取用量：填地址、选认证、点完成。\n工具会替你配好免密登录，之后按间隔自动采集；\n服务器上不安装任何常驻服务。",
+    "列表里的历史导入数据（如 mbp）不等于已配置服务器。\n从 Linux 服务器自动拉取用量：填地址、选认证、点完成；\n工具会替你配好免密登录，之后按间隔自动采集，服务器上不安装常驻服务。",
   "srv.add": "添加服务器",
   "srv.foot.note": "密码只用于一次性安装密钥，不会保存；也可以继续用 install-linux.sh --push 的手工方式。",
   "srv.meta.syncing": "同步中…（连接 → 导出 → 拉取 → 合并）",
@@ -875,9 +875,9 @@ const en: Record<StrKey, string> = {
 
   "srv.title": "Remote servers",
   "srv.title.count": "Remote servers · {n}",
-  "srv.empty.big": "No remote servers yet",
+  "srv.empty.big": "No remote servers configured",
   "srv.empty.hint":
-    "Connect to a Linux server over SSH and TokenMe will install a small collector, schedule exports, and pull usage data for you.\nThe collector runs on a user-level timer; no TokenMe account or always-on service is required.",
+    "Historical imports such as mbp are data sources, not configured servers.\nConnect to a Linux server over SSH and TokenMe will install a small collector, schedule exports, and pull usage data for you.\nThe collector runs on a user-level timer; no always-on service is required.",
   "srv.add": "Add server",
   "srv.foot.note": "The password only installs the key once and is never saved; the manual install-linux.sh --push route keeps working too.",
   "srv.meta.syncing": "Syncing… (connect → export → pull → merge)",
