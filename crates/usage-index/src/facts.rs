@@ -46,6 +46,11 @@ struct CycleState {
     /// the ends of this series.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     samples: Vec<[f64; 2]>,
+    /// Observation wall-clock for each `samples` turn, same order and length.
+    /// Feeds the burn-rate ETA; absent on states written before it existed, in
+    /// which case the ETA simply waits for fresh turns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sample_times: Vec<i64>,
     /// How this window's percent meter reconciled against local tokens at the
     /// last completed window: "confirmed" | "unverified" | "incompatible".
     /// Absent = no data yet; the per-tool seed lists answer instead.
@@ -61,6 +66,43 @@ const RESET_JITTER_TOLERANCE_MS: i64 = 60_000;
 fn estimate_cycle_tokens(observed_tokens: f64, used_percent: f64) -> Option<f64> {
     (observed_tokens.is_finite() && observed_tokens > 0.0 && used_percent.is_finite() && used_percent >= 0.1)
         .then(|| observed_tokens * 100.0 / used_percent.clamp(0.1, 100.0))
+}
+
+/// The burn-rate projection: at the recent tokens-per-millisecond pace, how
+/// long until this window's implied total is reached. The pace is the median
+/// of the last few sample pairs (Δtokens/Δtime — quantized percent steps and
+/// indexing bursts average out); a negative or frozen pace (stale sample,
+/// foreign meter) answers nothing. The result is clamped to one minute..one
+/// week: below that it is noise, above that it is a fantasy. States written
+/// before sample timestamps existed stay silent until fresh turns arrive.
+fn burn_eta(samples: &[[f64; 2]], times: &[i64], used_percent: f64, observed_tokens: f64) -> Option<i64> {
+    if samples.len() < 3 || times.len() != samples.len() || used_percent >= 99.5 {
+        return None;
+    }
+    let tail = samples.len().saturating_sub(5).max(1);
+    let mut rates: Vec<f64> = samples[tail..]
+        .windows(2)
+        .zip(times[tail..].windows(2))
+        .filter_map(|(pair, time)| {
+            let dt = (time[1] - time[0]) as f64;
+            let travel = pair[1][1] - pair[0][1];
+            (dt > 0.0 && travel >= 1.0).then(|| (pair[1][0] - pair[0][0]) / dt).filter(|rate| rate.is_finite() && *rate > 0.0)
+        })
+        .collect();
+    if rates.len() < 2 {
+        return None;
+    }
+    rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pace = if rates.len() % 2 == 0 { (rates[rates.len() / 2 - 1] + rates[rates.len() / 2]) / 2.0 } else { rates[rates.len() / 2] };
+    if !(pace.is_finite() && pace > 0.0) {
+        return None;
+    }
+    let implied_total = observed_tokens * 100.0 / used_percent.max(0.1);
+    let remaining = implied_total - observed_tokens;
+    if !(remaining.is_finite() && remaining > 0.0) {
+        return None;
+    }
+    Some((remaining / pace).clamp(60_000.0, 7.0 * 24.0 * 3_600_000.0) as i64)
 }
 
 fn cycle_state_key(q: &QuotaView) -> String {
@@ -208,6 +250,7 @@ impl Index {
                     period_start_ms: state.period_start_ms,
                     period_end_ms: state.period_end_ms,
                     models,
+                    eta_to_full_ms: burn_eta(&state.samples, &state.sample_times, state.last_used_percent, state.observed_tokens),
                 });
                 continue;
             }
@@ -244,15 +287,25 @@ impl Index {
             } else {
                 old.as_ref().map(|s| s.samples.clone()).unwrap_or_default()
             };
+            let mut sample_times = if account_changed || reset_seen || usage_reset {
+                Vec::new()
+            } else {
+                old.as_ref().map(|s| s.sample_times.clone()).unwrap_or_default()
+            };
             if q.used_percent >= 1.0 {
                 let turned = samples.last().map(|last| (last[1] - q.used_percent).abs() >= 2.0).unwrap_or(true);
                 if turned {
                     if samples.len() >= 16 {
                         samples.remove(1);
+                        if !sample_times.is_empty() {
+                            sample_times.remove(1);
+                        }
                     }
                     samples.push([observed_tokens, q.used_percent]);
+                    sample_times.push(observed_until);
                 }
             }
+            let eta_to_full_ms = burn_eta(&samples, &sample_times, q.used_percent, observed_tokens);
             let classified = if reset_seen || usage_reset {
                 old.as_ref().and_then(|s| classify_samples(&s.samples, s.meter.as_deref()))
             } else {
@@ -306,6 +359,7 @@ impl Index {
                 last_used_percent: q.used_percent,
                 last_sampled_at_ms: observed_until,
                 samples,
+                sample_times,
                 meter: meter.clone(),
             };
             self.conn
@@ -331,6 +385,7 @@ impl Index {
                 period_start_ms: start,
                 period_end_ms: end,
                 models,
+                eta_to_full_ms,
             });
         }
         Ok(())
@@ -2096,6 +2151,20 @@ mod golden {
     fn an_incoherent_meter_is_not_rescued_by_slopes() {
         let samples: Vec<[f64; 2]> = vec![[1.0e6, 10.0], [3.0e6, 30.0], [9.0e6, 50.0], [27.0e6, 70.0], [81.0e6, 90.0]];
         assert_eq!(classify_samples(&samples, None).as_deref(), Some("incompatible"));
+    }
+
+    /// The burn-rate projection: a steady 10M tokens per 20 minutes against an
+    /// implied ~308M total leaves ~228M to burn → ~7.6 h. A frozen pace (the
+    /// foreign-meter signature) and a timestamp-less state both stay silent.
+    #[test]
+    fn burn_eta_projects_the_median_pace_or_stays_silent() {
+        let samples = vec![[50.0e6, 20.0], [60.0e6, 22.0], [70.0e6, 24.0], [80.0e6, 26.0]];
+        let times = vec![0, 1_200_000, 2_400_000, 3_600_000];
+        let eta = burn_eta(&samples, &times, 26.0, 80.0e6).unwrap();
+        assert!((eta as f64) > 26.0e6 && (eta as f64) < 29.0e6, "{eta}");
+        let frozen = vec![[50.0e6, 20.0], [50.0e6, 22.0], [50.0e6, 24.0], [50.0e6, 26.0]];
+        assert_eq!(burn_eta(&frozen, &times, 26.0, 50.0e6), None);
+        assert_eq!(burn_eta(&samples, &[], 26.0, 80.0e6), None);
     }
 
     /// The Cline 5h row that shipped live self-healing: one fluke window left

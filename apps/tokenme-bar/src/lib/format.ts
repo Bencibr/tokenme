@@ -217,6 +217,18 @@ export function clockStamp(ms: number, nowMs: number): string {
  *  columns and a growing value eats its own pad, never a neighbour's position
  *  ("15d" against "4h" keeps `d` and `h` on one line regardless of digit count).
  *  A bare string only for the non-grid answer (`until.soon`). */
+/** Burn-rate ETA as a compact duration — "2h 40m", "45m" — the same rhythm
+ *  and unit glyphs as [`until`], so the two read as siblings on a quota row. */
+export function etaDuration(ms: number): string {
+  const totalMin = Math.max(1, Math.round(ms / 60_000));
+  const days = Math.floor(totalMin / 1440);
+  const hours = Math.floor((totalMin % 1440) / 60);
+  const min = totalMin % 60;
+  if (days > 0) return `${days}d ${String(hours).padStart(2, "0")}h`;
+  if (hours > 0) return `${hours}h ${String(min).padStart(2, "0")}m`;
+  return `${min}m`;
+}
+
 export function until(resetsAtMs: number, nowMs: number): string | [string, string][] {
   const diff = resetsAtMs - nowMs;
   if (diff <= 0) return t("until.soon");
