@@ -55,6 +55,7 @@ const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
 const STATUS_PATH: &str = "/v1/status";
 const RECOVERY_PATH: &str = "/v1/recovery";
+const DISCONNECT_PATH: &str = "/v1/disconnect";
 const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
 
 const HEALTH_READY: u8 = 0;
@@ -418,6 +419,19 @@ impl Tls13HttpsTransport {
             return Err(TransportError::Protocol("recovery response does not match request identity".into()));
         }
         Ok(receipt)
+    }
+
+    pub fn disconnect(&mut self, request: &AuthenticatedStatusRequest) -> Result<(), TransportError> {
+        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode disconnect request: {e}")))?;
+        let response = self.request(DISCONNECT_PATH, body)?;
+        if response.status != 200 {
+            let message = serde_json::from_slice::<WireError>(&response.body)
+                .ok()
+                .map(|error| error.message)
+                .unwrap_or_else(|| "disconnect request rejected".into());
+            return Err(TransportError::HttpStatus { status: response.status, message });
+        }
+        Ok(())
     }
 
     /// Sends one authenticated MCP JSON-RPC request over the same TLS 1.3 and
@@ -1277,6 +1291,9 @@ fn dispatch_request(store: &mut SyncStore, request: &HttpRequest) -> (u16, Vec<u
         (RECOVERY_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid recovery request: {e}")))
             .and_then(|recovery| store.recover_stream(&recovery, now_ms()).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))),
+        (DISCONNECT_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
+            .map_err(|e| SyncError::Protocol(format!("invalid disconnect request: {e}")))
+            .and_then(|disconnect| store.disconnect_device(&disconnect, now_ms()).and_then(|_| serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string())))),
         _ => Err(SyncError::NotFound("HTTP path".into())),
     };
     match result {
@@ -1461,7 +1478,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST is supported".into()));
     }
     let known_path = match path {
-        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | RECOVERY_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
@@ -2346,6 +2363,24 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let state = client.send_pairing_request(&request).unwrap();
         assert_eq!(state.status, "pending");
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn loopback_tls13_disconnect_revokes_the_authenticated_device() {
+        let cert = cert();
+        let device = DeviceIdentity::create("disconnect-loopback", "Linux").unwrap();
+        let (store, _upload) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(2));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
+        )).unwrap();
+        let request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
+        client.disconnect(&request).unwrap();
+        let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
+        assert_eq!(client.status(&status_request).unwrap().status, "revoked");
         assert!(handle.join().unwrap().is_ok());
     }
 

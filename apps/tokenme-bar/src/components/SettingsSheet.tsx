@@ -765,19 +765,26 @@ export function SettingsSheet({
                 ))}
               </div>
             </div>
-            <div className="sheet-row">
-              <div>
-                <label className="sheet-label" htmlFor="plan-expiry-notify">{t("set.plan-expiry")}</label>
-                <div className="sheet-hint">{t("set.plan-expiry.hint")}</div>
+            <div className="sheet-block">
+              <div className="sheet-label">{t("set.plan-expiry")}</div>
+              <div className="sheet-hint">{t("set.plan-expiry.hint")}</div>
+              <div className="seg seg-wide" role="radiogroup" aria-label={t("set.plan-expiry")}>
+                {PLAN_EXPIRY_DAYS.map((option) => {
+                  const current = settings.plan_expiry_notify_days == null ? "" : String(settings.plan_expiry_notify_days);
+                  return (
+                    <button
+                      key={option.value || "off"}
+                      type="button"
+                      role="radio"
+                      className="seg-btn"
+                      aria-checked={current === option.value}
+                      onClick={() => setPlanExpiryNotifyDays(option.value)}
+                    >
+                      {option.label()}
+                    </button>
+                  );
+                })}
               </div>
-              <select
-                id="plan-expiry-notify"
-                className="sheet-select"
-                value={settings.plan_expiry_notify_days == null ? "" : String(settings.plan_expiry_notify_days)}
-                onChange={(event) => setPlanExpiryNotifyDays(event.target.value)}
-              >
-                {PLAN_EXPIRY_DAYS.map((option) => <option key={option.value || "off"} value={option.value}>{option.label()}</option>)}
-              </select>
             </div>
             {navRow("mute", t("set.muted"), t("set.muted.hint"), mutedCount ? t("set.muted.count", { n: mutedCount }) : t("set.none"))}
           </>
@@ -817,7 +824,11 @@ export function SettingsSheet({
                   <button type="button" className="sheet-action" onClick={() => void copyMcpConfig()}>
                     {mcpCopied ? t("set.mcp.client.copied") : t("set.mcp.client.copy")}
                   </button>
-                  {mcpConfig.expires_at_ms ? <p className="sheet-hint">{t("set.mcp.client.expires", { time: new Date(mcpConfig.expires_at_ms).toLocaleString() })}</p> : null}
+                  <p className="sheet-hint">
+                    {mcpConfig.expires_at_ms
+                      ? t("set.mcp.client.expires", { time: new Date(mcpConfig.expires_at_ms).toLocaleString() })
+                      : t("set.mcp.client.persistent")}
+                  </p>
                   {mcpConfig.reason ? <p className="sheet-hint" role="alert">{mcpConfig.reason}</p> : null}
                 </div>
               ) : (

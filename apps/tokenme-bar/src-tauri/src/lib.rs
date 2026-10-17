@@ -141,6 +141,7 @@ pub fn run() {
             usage_quota::set_checkin_log(std::sync::Arc::new(|msg| crate::logging::checkin(msg)));
 
             let handle = app.handle().clone();
+            diagnostics::DiagnosticsState::restore_on_launch(&handle);
             let ttft_dir = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join("tokenme").join("ttft.json");
             let ttft_state = ttft::TtftState::new(handle.clone(), ttft_dir, handle.state::<engine::Shared>().settings().ttft_enabled);

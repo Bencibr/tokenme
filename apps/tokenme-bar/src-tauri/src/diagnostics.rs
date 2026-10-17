@@ -5,11 +5,11 @@
 //! the fixed protocol tool names into existing Tauri handlers.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
-use std::path::Path;
-use std::sync::{atomic::{AtomicBool, AtomicI64, Ordering}, Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,58 @@ const LOCAL_MCP_TOKEN_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const LOCAL_MCP_MAX_AUTH_BYTES: usize = 256;
 const LOCAL_MCP_MAX_CONNECTIONS: usize = 4;
 const LOCAL_MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCAL_MCP_STATE_FILE: &str = "mcp.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedLocalMcp {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bearer: Option<String>,
+    control_enabled: bool,
+}
+
+impl Default for PersistedLocalMcp {
+    fn default() -> Self { Self { enabled: false, bearer: None, control_enabled: false } }
+}
+
+fn local_mcp_state_path() -> Option<PathBuf> {
+    crate::settings::Settings::path().and_then(|path| path.parent().map(|parent| parent.join(LOCAL_MCP_STATE_FILE)))
+}
+
+fn valid_local_mcp_token(token: &str) -> bool {
+    token.starts_with("tm_") && (40..=LOCAL_MCP_MAX_AUTH_BYTES).contains(&token.len()) && !token.chars().any(char::is_control)
+}
+
+fn parse_persisted_local_mcp(raw: &str) -> PersistedLocalMcp {
+    let Ok(mut config) = serde_json::from_str::<PersistedLocalMcp>(raw) else { return PersistedLocalMcp::default(); };
+    if !config.enabled {
+        config.bearer = None;
+        config.control_enabled = false;
+    } else if config.bearer.as_deref().is_some_and(|token| !valid_local_mcp_token(token)) {
+        config.bearer = None;
+    }
+    config
+}
+
+fn load_persisted_local_mcp() -> PersistedLocalMcp {
+    let Some(path) = local_mcp_state_path() else { return PersistedLocalMcp::default(); };
+    fs::read_to_string(path).map(|raw| parse_persisted_local_mcp(&raw)).unwrap_or_default()
+}
+
+fn save_persisted_local_mcp(config: &PersistedLocalMcp) -> Result<(), String> {
+    let path = local_mcp_state_path().ok_or_else(|| "no platform config dir".to_string())?;
+    let parent = path.parent().ok_or_else(|| "MCP config path has no parent".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())?;
+    }
+    fs::rename(temporary, path).map_err(|error| error.to_string())
+}
 
 fn infer_local_lan_host() -> Result<String, String> {
     // Connecting a UDP socket only asks the OS which interface it would use;
@@ -240,10 +292,9 @@ struct Inner {
 struct LocalMcpHttpServer {
     endpoint: String,
     read_token: String,
-    expires_at_ms: i64,
-    /// The lifetime this token was minted with; a Configure carrying a
-    /// different ttl must re-mint — the old listener keeps the old clock.
-    ttl_ms: i64,
+    /// A local MCP Bearer is valid for as long as the user keeps MCP enabled.
+    /// Manual disable revokes it and the next enable mints a new one.
+    expires_at_ms: Option<i64>,
     /// One credential, one switch: on, this credential IS the LAN control
     /// auth; off, the very same credential is read-only.
     control_enabled: bool,
@@ -264,47 +315,45 @@ impl Scope {
 pub struct DiagnosticsState {
     inner: Mutex<Inner>,
     local_http: Mutex<Option<LocalMcpHttpServer>>,
-    /// Kept for management-request compatibility; local MCP credentials always
-    /// use the fixed seven-day lifetime below.
-    local_token_ttl_ms: AtomicI64,
+    persisted: Mutex<PersistedLocalMcp>,
 }
 
-const LOCAL_TOKEN_TTL_MIN_MS: i64 = LOCAL_MCP_TOKEN_TTL_MS;
-const LOCAL_TOKEN_TTL_MAX_MS: i64 = LOCAL_MCP_TOKEN_TTL_MS;
-
 impl DiagnosticsState {
-    fn local_token_ttl(&self) -> i64 {
-        let stored = self.local_token_ttl_ms.load(Ordering::Relaxed);
-        if stored == 0 { LOCAL_MCP_TOKEN_TTL_MS } else { stored.clamp(LOCAL_TOKEN_TTL_MIN_MS, LOCAL_TOKEN_TTL_MAX_MS) }
+    fn restore_persisted(&self, config: PersistedLocalMcp) {
+        *self.persisted.lock().unwrap_or_else(|error| error.into_inner()) = config;
     }
 
-    fn set_local_token_ttl(&self, ttl_ms: Option<i64>) {
-        if let Some(ttl) = ttl_ms {
-            // The old API accepted a requested TTL; normalize it so no caller
-            // can mint a shorter-lived MCP Bearer.
-            self.local_token_ttl_ms.store(ttl.clamp(LOCAL_TOKEN_TTL_MIN_MS, LOCAL_TOKEN_TTL_MAX_MS), Ordering::Relaxed);
-        }
+    fn persisted_bearer(&self) -> Option<String> {
+        self.persisted.lock().ok().and_then(|config| config.bearer.clone()).filter(|token| valid_local_mcp_token(token))
     }
 
-    /// True when a live listener was minted with a lifetime different from the
-    /// one now requested; the caller stops it so the next start re-mints.
-    fn local_http_ttl_changed(&self) -> bool {
-        self.local_http.lock().ok()
-            .and_then(|server| server.as_ref().map(|server| now_ms() < server.expires_at_ms && server.ttl_ms != self.local_token_ttl()))
-            .unwrap_or(false)
+    fn persist_current(&self, enabled: bool) -> Result<(), String> {
+        let (bearer, control_enabled) = if enabled {
+            let current = self.local_http.lock().map_err(|_| "MCP 服务状态被占用".to_string())?;
+            (current.as_ref().map(|server| server.read_token.clone()), current.as_ref().is_some_and(|server| server.control_enabled))
+        } else {
+            (None, false)
+        };
+        let config = PersistedLocalMcp { enabled, bearer, control_enabled };
+        *self.persisted.lock().map_err(|_| "MCP 持久化状态被占用".to_string())? = config.clone();
+        save_persisted_local_mcp(&config)
+    }
+
+    fn clear_persisted(&self) {
+        *self.persisted.lock().unwrap_or_else(|error| error.into_inner()) = PersistedLocalMcp::default();
     }
 
     pub(crate) fn local_http_endpoint(&self) -> Option<String> {
         if !self.status().enabled { return None; }
         self.local_http.lock().ok().and_then(|server| {
-            server.as_ref().filter(|server| now_ms() < server.expires_at_ms).map(|server| server.endpoint.clone())
+            server.as_ref().filter(|server| server.expires_at_ms.map_or(true, |expires| now_ms() < expires)).map(|server| server.endpoint.clone())
         })
     }
 
-    pub(crate) fn local_http_client_config(&self) -> Option<(String, String, i64)> {
+    pub(crate) fn local_http_client_config(&self) -> Option<(String, String, Option<i64>)> {
         if !self.status().enabled { return None; }
         self.local_http.lock().ok().and_then(|server| {
-            server.as_ref().filter(|server| now_ms() < server.expires_at_ms)
+            server.as_ref().filter(|server| server.expires_at_ms.map_or(true, |expires| now_ms() < expires))
                 .map(|server| (server.endpoint.clone(), server.read_token.clone(), server.expires_at_ms))
         })
     }
@@ -314,10 +363,9 @@ impl DiagnosticsState {
         {
             let mut current = self.local_http.lock().map_err(|_| handler_error())?;
             if let Some(server) = current.as_mut() {
-                if enabled && now_ms() >= server.expires_at_ms {
+                if enabled && server.expires_at_ms.is_some_and(|expires| now_ms() >= expires) {
                     server.read_token = new_local_mcp_token();
-                    server.ttl_ms = self.local_token_ttl();
-                    server.expires_at_ms = now_ms().saturating_add(server.ttl_ms);
+                    server.expires_at_ms = None;
                 }
                 server.control_enabled = enabled;
             } else if enabled { return Err(DiagnosticsError::new(CODE_DIAGNOSTICS_DISABLED, "enable MCP before LAN control")); }
@@ -339,16 +387,13 @@ impl DiagnosticsState {
         let server = self.local_http.lock().map_err(|_| "mcp_state_busy")?;
         let Some(server) = server.as_ref() else { return Err("mcp_disabled") };
         if !constant_time_equal(token.as_bytes(), server.read_token.as_bytes()) { return Err("bearer_invalid") }
-        if now_ms() >= server.expires_at_ms { return Err("bearer_expired") }
+        if server.expires_at_ms.is_some_and(|expires| now_ms() >= expires) { return Err("bearer_expired") }
         Ok(if server.control_enabled { Scope::Control } else { Scope::Read })
     }
 
-    fn local_http_session_ttl(&self, scope: Scope) -> i64 {
+    fn local_http_session_ttl(&self, _scope: Scope) -> i64 {
         let current = self.local_http.lock().unwrap_or_else(|error| error.into_inner());
-        let expiry = current.as_ref().and_then(|server| match scope {
-            Scope::Read => Some(server.expires_at_ms),
-            Scope::Control => Some(server.expires_at_ms),
-        }).unwrap_or(0);
+        let expiry = current.as_ref().map(|server| server.expires_at_ms.unwrap_or(i64::MAX)).unwrap_or(0);
         expiry.saturating_sub(now_ms()).max(0)
     }
 
@@ -361,7 +406,7 @@ impl DiagnosticsState {
     pub(crate) fn start_local_http(&self, app: &AppHandle) -> Result<String, String> {
         let mut current = self.local_http.lock().map_err(|_| "MCP HTTP 服务状态被占用".to_string())?;
         if let Some(server) = current.take() {
-            if now_ms() < server.expires_at_ms {
+            if server.expires_at_ms.map_or(true, |expires| now_ms() < expires) {
                 let endpoint = server.endpoint.clone();
                 *current = Some(server);
                 return Ok(endpoint);
@@ -383,9 +428,7 @@ impl DiagnosticsState {
         listener.set_nonblocking(true).map_err(|error| format!("无法配置局域网 MCP HTTP 服务: {error}"))?;
         let port = listener.local_addr().map_err(|error| format!("无法读取局域网 MCP HTTP 端口: {error}"))?.port();
         let endpoint = format!("http://{host}:{port}{LOCAL_MCP_PATH}");
-        let read_token = new_local_mcp_token();
-        let ttl_ms = self.local_token_ttl();
-        let expires_at_ms = now_ms().saturating_add(ttl_ms);
+        let read_token = self.persisted_bearer().unwrap_or_else(new_local_mcp_token);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let app = app.clone();
@@ -393,7 +436,7 @@ impl DiagnosticsState {
             .name("tokenme-mcp-http".into())
             .spawn(move || run_local_mcp_http(listener, app, thread_stop))
             .map_err(|error| format!("无法启动局域网 MCP HTTP 服务线程: {error}"))?;
-        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms, ttl_ms, control_enabled: false, stop, join: Some(join) });
+        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms: None, control_enabled: false, stop, join: Some(join) });
         Ok(endpoint)
     }
 
@@ -403,6 +446,34 @@ impl DiagnosticsState {
         server.stop.store(true, Ordering::Release);
         if let Some(join) = server.join.take() {
             let _ = join.join();
+        }
+    }
+
+    fn ensure_local_http(&self, app: &AppHandle) -> Result<bool, String> {
+        if !self.status().enabled { return Ok(false); }
+        let running = self.local_http_endpoint().is_some();
+        if running { return Ok(false); }
+        self.start_local_http(app).map(|_| true)
+    }
+
+    pub(crate) fn restore_on_launch(app: &AppHandle) {
+        let persisted = load_persisted_local_mcp();
+        if !persisted.enabled { return; }
+        let state = app.state::<DiagnosticsState>();
+        let control_enabled = persisted.control_enabled;
+        state.restore_persisted(persisted);
+        state.set_enabled(true);
+        if let Err(error) = state.ensure_local_http(app) {
+            logging::error(&format!("diagnostics: persistent MCP restore failed: {error}"));
+            return;
+        }
+        if control_enabled {
+            if let Err(error) = state.configure_lan_control(true) {
+                logging::error(&format!("diagnostics: persistent LAN control restore failed: {error}"));
+            }
+        }
+        if let Err(error) = state.persist_current(true) {
+            logging::error(&format!("diagnostics: persistent MCP state update failed: {error}"));
         }
     }
 
@@ -428,8 +499,8 @@ impl DiagnosticsState {
         let (lan_control_enabled, lan_control_expires_at_ms) = {
             let current = self.local_http.lock().unwrap_or_else(|error| error.into_inner());
             current.as_ref().map_or((false, None), |server| {
-                let live = state.enabled && now < server.expires_at_ms;
-                (live && server.control_enabled, live.then_some(server.expires_at_ms))
+                let live = state.enabled && server.expires_at_ms.map_or(true, |expires| now < expires);
+                (live && server.control_enabled, if live { server.expires_at_ms } else { None })
             })
         };
         DiagnosticsSnapshot {
@@ -561,6 +632,7 @@ impl DiagnosticsState {
 
     pub(crate) fn create_session(&self, request: SessionRequest) -> Result<SessionView, DiagnosticsError> {
         let now = now_ms();
+        let persistent_local_mcp = request.origin.starts_with("mcp-http");
         if !valid_identifier(&request.session_id)
             || !valid_identifier(&request.target_device)
             || !valid_identifier(&request.origin)
@@ -570,7 +642,7 @@ impl DiagnosticsState {
         if request.issued_at_ms > now.saturating_add(30_000)
             || request.expires_at_ms <= now
             || request.expires_at_ms <= request.issued_at_ms
-            || request.expires_at_ms.saturating_sub(request.issued_at_ms) > MAX_SESSION_TTL_MS
+            || (!persistent_local_mcp && request.expires_at_ms.saturating_sub(request.issued_at_ms) > MAX_SESSION_TTL_MS)
         {
             return Err(DiagnosticsError::new(CODE_SESSION_EXPIRED, "session lifetime is invalid"));
         }
@@ -1662,6 +1734,17 @@ pub fn diagnostics_session(
 ) -> Result<DiagnosticsResponse, String> {
     let action = diagnostics_action_name(&request);
     if matches!(request, DiagnosticsManagementRequest::Status) {
+        if state.status().enabled {
+            match state.ensure_local_http(&app) {
+                Err(error) => logging::error(&format!("diagnostics: MCP recovery failed: {error}")),
+                Ok(true) => {
+                    if let Err(error) = state.persist_current(true) {
+                        logging::error(&format!("diagnostics: MCP recovery state update failed: {error}"));
+                    }
+                }
+                Ok(false) => {}
+            }
+        }
         // Grants are held by the in-process HTTPS authority.  If the primary
         // service was stopped or crashed, its authority is gone; discard the
         // panel mirror before returning status so expired credentials cannot
@@ -1676,7 +1759,11 @@ pub fn diagnostics_session(
         DiagnosticsManagementRequest::Configure { enabled, ttl_ms } => {
             configure_local_mcp(&app, &state, enabled, ttl_ms).map(|_| None::<DiagnosticsConfig>)
         }
-        DiagnosticsManagementRequest::ConfigureLanControl { enabled } => state.configure_lan_control(enabled).map(|_| None::<DiagnosticsConfig>),
+        DiagnosticsManagementRequest::ConfigureLanControl { enabled } => {
+            state.configure_lan_control(enabled)
+                .and_then(|_| state.persist_current(true).map_err(|_| handler_error()))
+                .map(|_| None::<DiagnosticsConfig>)
+        },
         DiagnosticsManagementRequest::CreateGrant { debugger_device_id, scopes, ttl_ms } => {
             if ttl_ms <= 0 || ttl_ms > usage_device_sync::MAX_DIAGNOSTICS_GRANT_TTL_MS {
                 Err(DiagnosticsError::new(CODE_SESSION_EXPIRED, "session lifetime is invalid"))
@@ -1729,13 +1816,10 @@ fn now_ms() -> i64 { usage_core::report::now_ms() }
 
 fn configure_local_mcp(app: &AppHandle, state: &DiagnosticsState, enabled: bool, ttl_ms: Option<i64>) -> Result<DiagnosticsStatus, DiagnosticsError> {
     if enabled {
-        state.set_local_token_ttl(ttl_ms);
-        if state.local_http_ttl_changed() {
-            // A lifetime change re-mints: the old listener keeps the old clock.
-            state.stop_local_http();
-        }
+        let _ = ttl_ms;
         state.start_local_http(app).map_err(|_| DiagnosticsError::new(CODE_HANDLER_FAILED, "local MCP HTTP service could not start"))?;
         state.set_enabled(true);
+        state.persist_current(true).map_err(|_| DiagnosticsError::new(CODE_HANDLER_FAILED, "local MCP configuration could not be persisted"))?;
     } else {
         if let Some(control) = app.try_state::<SyncControl>() {
             if let Ok(context) = commands::primary_diagnostics_context(&control) {
@@ -1745,6 +1829,8 @@ fn configure_local_mcp(app: &AppHandle, state: &DiagnosticsState, enabled: bool,
         state.revoke_all();
         state.set_enabled(false);
         state.stop_local_http();
+        state.clear_persisted();
+        state.persist_current(false).map_err(|_| DiagnosticsError::new(CODE_HANDLER_FAILED, "local MCP configuration could not be persisted"))?;
     }
     Ok(state.status())
 }
@@ -1864,8 +1950,7 @@ mod tests {
         *state.local_http.lock().unwrap() = Some(LocalMcpHttpServer {
             endpoint: "http://192.0.2.1:47822/mcp".into(),
             read_token: token.clone(),
-            expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS,
-            ttl_ms: LOCAL_MCP_TOKEN_TTL_MS,
+            expires_at_ms: None,
             stop: Arc::new(AtomicBool::new(false)),
             control_enabled: false,
             join: None,
@@ -1880,6 +1965,24 @@ mod tests {
     }
 
     #[test]
+    fn persisted_mcp_state_keeps_the_bearer_only_while_enabled() {
+        let token = new_local_mcp_token();
+        let on = parse_persisted_local_mcp(&serde_json::json!({
+            "enabled": true, "bearer": token, "control_enabled": true,
+        }).to_string());
+        assert!(on.enabled);
+        assert!(on.control_enabled);
+        assert!(on.bearer.as_deref().is_some_and(valid_local_mcp_token));
+
+        let off = parse_persisted_local_mcp(&serde_json::json!({
+            "enabled": false, "bearer": "tm_stale", "control_enabled": true,
+        }).to_string());
+        assert!(!off.enabled);
+        assert!(off.bearer.is_none());
+        assert!(!off.control_enabled);
+    }
+
+    #[test]
     fn local_mcp_bearer_expires_and_constant_time_compare_does_not_accept_prefixes() {
         assert!(constant_time_equal(b"same-token", b"same-token"));
         assert!(!constant_time_equal(b"same-token", b"same-token-extra"));
@@ -1888,8 +1991,7 @@ mod tests {
         *state.local_http.lock().unwrap() = Some(LocalMcpHttpServer {
             endpoint: "http://192.0.2.1:47822/mcp".into(),
             read_token: token.clone(),
-            expires_at_ms: now_ms() - 1,
-            ttl_ms: LOCAL_MCP_TOKEN_TTL_MS,
+            expires_at_ms: Some(now_ms() - 1),
             stop: Arc::new(AtomicBool::new(false)),
             control_enabled: false,
             join: None,
@@ -1898,13 +2000,14 @@ mod tests {
     }
 
     #[test]
-    fn local_mcp_bearer_lifetime_is_fixed_at_seven_days() {
-        let state = state();
-        assert_eq!(state.local_token_ttl(), 7 * 24 * 60 * 60 * 1000);
-        state.set_local_token_ttl(Some(1));
-        assert_eq!(state.local_token_ttl(), 7 * 24 * 60 * 60 * 1000);
-        state.set_local_token_ttl(Some(i64::MAX));
-        assert_eq!(state.local_token_ttl(), 7 * 24 * 60 * 60 * 1000);
+    fn local_mcp_bearer_lifetime_is_controlled_by_the_switch() {
+        let state = lan_state();
+        let (endpoint, token, expiry) = state.local_http_client_config().unwrap();
+        assert!(endpoint.starts_with("http://"));
+        assert_eq!(expiry, None);
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Ok(Scope::Read));
+        state.set_enabled(false);
+        assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("mcp_disabled"));
     }
 
     #[test]
@@ -1937,7 +2040,7 @@ mod tests {
         let state = state();
         *state.local_http.lock().unwrap() = Some(LocalMcpHttpServer {
             endpoint: "http://192.0.2.1:47822/mcp".into(), read_token: new_local_mcp_token(),
-            expires_at_ms: now_ms() + LOCAL_MCP_TOKEN_TTL_MS, ttl_ms: LOCAL_MCP_TOKEN_TTL_MS, control_enabled: false,
+            expires_at_ms: None, control_enabled: false,
             stop: Arc::new(AtomicBool::new(false)), join: None,
         });
         state
@@ -1948,7 +2051,7 @@ mod tests {
         let state = lan_state();
         let (_, token, expiry) = state.local_http_client_config().unwrap();
         assert!(!state.snapshot().lan_control_enabled);
-        assert!(expiry <= now_ms() + LOCAL_MCP_TOKEN_TTL_MS);
+        assert_eq!(expiry, None);
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Ok(Scope::Read));
         state.configure_lan_control(true).unwrap();
         // 同一个 token：模式切换不换票，权限随开关移动
@@ -1974,7 +2077,7 @@ mod tests {
         state.configure_lan_control(true).unwrap();
         let token = state.local_http_client_config().unwrap().1;
         let session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
-        state.local_http.lock().unwrap().as_mut().unwrap().expires_at_ms = now_ms() - 1;
+        state.local_http.lock().unwrap().as_mut().unwrap().expires_at_ms = Some(now_ms() - 1);
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_expired"));
         assert!(!state.snapshot().lan_control_enabled);
         assert_eq!(state.local_http_session_ttl(Scope::Control), 0);
@@ -1998,7 +2101,7 @@ mod tests {
         state.configure_lan_control(true).unwrap();
         let token = state.local_http_client_config().unwrap().1;
         let session = state.create_session_for_panel("local-http".into(), Scope::Control.local_origin().into(), Scope::Control.local_scopes(), 1_000).unwrap();
-        state.local_http.lock().unwrap().as_mut().unwrap().expires_at_ms = now_ms() - 1;
+        state.local_http.lock().unwrap().as_mut().unwrap().expires_at_ms = Some(now_ms() - 1);
         assert_eq!(state.local_http_authorized(Some(&format!("Bearer {token}"))), Err("bearer_expired"));
         assert!(!state.snapshot().lan_control_enabled);
         assert_eq!(state.local_http_session_ttl(Scope::Control), 0);

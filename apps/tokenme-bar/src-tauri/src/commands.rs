@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use usage_core::pricing::PricingOptions;
 use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
-use usage_device_sync::{hash_bytes, ClientTransportCancellation, DeviceIdentity, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, DiagnosticsError, DiagnosticsHost, HttpsServerConfig, PairingInvite, PairingInviteDetails, PairingRequest, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SyncError, SyncRuntime, SyncRuntimeConfig, SyncStore, TransportError, Tls13HttpsTransport, HttpsTransportConfig};
+use usage_device_sync::{hash_bytes, AuthenticatedStatusRequest, ClientTransportCancellation, DeviceIdentity, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, DiagnosticsError, DiagnosticsHost, HttpsServerConfig, PairingInvite, PairingInviteDetails, PairingRequest, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SyncError, SyncRuntime, SyncRuntimeConfig, SyncStore, TransportError, Tls13HttpsTransport, HttpsTransportConfig};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
@@ -365,7 +365,7 @@ pub fn get_mcp_client_config(state: State<'_, crate::diagnostics::DiagnosticsSta
     let Some((endpoint, bearer, expiry)) = config else {
         return Ok(McpClientConfigView {
             config_json: String::new(), endpoint: None, ready: false,
-            reason: Some("请先开启 MCP 诊断服务；凭据过期后关闭再开启可生成新配置".into()),
+            reason: Some("请先开启 MCP 诊断服务；MCP 保持开启时配置长期有效，手动关闭后重新开启会生成新凭据".into()),
             expires_at_ms: None, control,
         });
     };
@@ -374,7 +374,7 @@ pub fn get_mcp_client_config(state: State<'_, crate::diagnostics::DiagnosticsSta
     })).map_err(|error| format!("cannot encode MCP client config: {error}"))?;
     Ok(McpClientConfigView {
         config_json, endpoint: Some(endpoint), ready: true, reason: None,
-        expires_at_ms: Some(expiry), control,
+        expires_at_ms: expiry, control,
     })
 }
 
@@ -440,6 +440,28 @@ fn clear_secondary_binding(index_path: &std::path::Path, config: &SecondarySyncC
         let _ = std::fs::remove_file(&config.identity_path);
     }
     Ok(())
+}
+
+fn request_secondary_disconnect(config: &SecondarySyncConfig) -> Result<(), String> {
+    let identity = DeviceIdentity::load_or_create(config.identity_path.clone(), config.origin.clone(), config.origin.clone())
+        .map_err(|error| format!("cannot load secondary identity: {error}"))?;
+    if identity.device_id != config.device_id || identity.origin != config.origin {
+        return Err("secondary identity does not match the paired device configuration".into());
+    }
+    let request = AuthenticatedStatusRequest::new_at(&identity, config.primary_id.clone(), false, current_ms())
+        .map_err(|error| format!("cannot create disconnect request: {error}"))?;
+    let mut transport = secondary_transport(config)?;
+    transport.disconnect(&request).map_err(|error| format!("cannot notify primary about disconnect: {error}"))
+}
+
+fn clear_secondary_state(state: &mut SyncControlState) {
+    state.role.clear();
+    state.primary_id = None;
+    state.endpoint = None;
+    state.certificate_pin = None;
+    state.last_error = None;
+    state.discovery_error = None;
+    state.phase = SyncPhase::Idle;
 }
 
 fn pending_pairing_path() -> Result<PathBuf, String> {
@@ -1104,8 +1126,31 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         state.discovery_error = Some(error);
     }
     let index_path = sync_index_path()?;
-    let secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| format!("cannot read secondary sync configuration: {error}"))?;
+    let mut secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| format!("cannot read secondary sync configuration: {error}"))?;
     let primary_config = SyncStore::read_primary_config(&index_path).map_err(|error| format!("cannot read primary sync configuration: {error}"))?;
+    if let Some(config) = secondary_config.clone() {
+        let pending_disconnect = SyncStore::open(&index_path, config.primary_id.clone())
+            .map_err(|error| format!("cannot open secondary sync state: {error}"))?
+            .secondary_disconnect_requested()
+            .map_err(|error| format!("cannot read pending secondary disconnect: {error}"))?;
+        if pending_disconnect {
+            stop_service(state);
+            match request_secondary_disconnect(&config) {
+                Ok(()) => {
+                    clear_secondary_binding(&index_path, &config)?;
+                    clear_secondary_state(state);
+                    secondary_config = None;
+                }
+                Err(error) => {
+                    if let Ok(mut store) = SyncStore::open(&index_path, config.primary_id.clone()) {
+                        let _ = store.set_secondary_last_error(Some(&error), current_ms());
+                    }
+                    state.last_error = Some(error);
+                    state.phase = SyncPhase::Error;
+                }
+            }
+        }
+    }
     let pending_pairing = if secondary_config.is_none() { read_pending_pairing()? } else { None };
     let restore_secondary = secondary_config.is_some()
         && (state.role.is_empty() || (state.role == "secondary" && state.runtime.is_none()));
@@ -1167,7 +1212,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     }
     if state.runtime.is_some() {
         state.last_error = secondary_config.as_ref().and_then(|config| config.last_error.clone());
-    } else if state.role == "secondary" && secondary_config.as_ref().is_some_and(|config| !config.enabled) {
+    } else if state.role == "secondary" && state.last_error.is_none() && secondary_config.as_ref().is_some_and(|config| !config.enabled) {
         state.phase = SyncPhase::Offline;
     }
     let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
@@ -1440,7 +1485,7 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             if state.runtime.is_some() || state.role == "secondary" || (state.role.is_empty() && secondary_config.is_some()) {
                 if let Some(config) = secondary_config {
                     let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
-                    store.set_secondary_enabled(false, current_ms()).map_err(|error| error.to_string())?;
+                    store.request_secondary_disconnect(current_ms()).map_err(|error| error.to_string())?;
                 }
             } else if let Some(config) = primary_config {
                 if state.role.is_empty() {
@@ -1486,19 +1531,17 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             let config = SyncStore::read_secondary_config(&index_path).map_err(|e| e.to_string())?;
             if let Some(config) = config {
                 stop_service(state);
-                clear_secondary_binding(&index_path, &config)?;
+                SyncStore::open(&index_path, config.primary_id.clone()).map_err(|error| error.to_string())?
+                    .request_secondary_disconnect(current_ms()).map_err(|error| error.to_string())?;
             } else if read_pending_pairing()?.is_some() {
                 clear_pending_pairing()?;
                 state.pending_pairing_attempted = true;
             } else {
                 return Err("this device is not paired".into());
             }
-            state.role.clear();
-            state.primary_id = None;
-            state.endpoint = None;
-            state.certificate_pin = None;
-            state.last_error = None;
-            state.discovery_error = None;
+            if SyncStore::read_secondary_config(&index_path).map_err(|error| error.to_string())?.is_none() {
+                clear_secondary_state(state);
+            }
             Ok(())
         },
         SyncManagementRequest::CreateInvite { expires_at_ms } => {
