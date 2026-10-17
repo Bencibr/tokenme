@@ -1158,6 +1158,13 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
             }
         }
     }
+    // A previous secondary transport failure can outlive an explicit unpair
+    // or a role switch in the in-memory control state. Do not attach that old
+    // error to a genuinely unconfigured snapshot; the setup page should start
+    // clean and let the next pairing attempt report its own result.
+    if state.role.is_empty() && secondary_config.is_none() && primary_config.is_none() && read_pending_pairing()?.is_none() {
+        state.last_error = None;
+    }
     if state.runtime.is_some() {
         state.last_error = secondary_config.as_ref().and_then(|config| config.last_error.clone());
     } else if state.role == "secondary" && secondary_config.as_ref().is_some_and(|config| !config.enabled) {

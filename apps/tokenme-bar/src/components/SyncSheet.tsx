@@ -61,6 +61,15 @@ function timeLeft(ms: number): string {
   return t("sync.rel.left_hour", { n: Math.floor(minutes / 60) });
 }
 
+function isSecondaryAuthorizationError(value: string | null | undefined): boolean {
+  return value?.includes("HTTP status 401: device is not authorized") === true;
+}
+
+function presentSyncError(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return isSecondaryAuthorizationError(value) ? t("sync.error.secondary_unauthorized") : value;
+}
+
 export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDevicesSnapshot; onSnapshot: (next: SyncDevicesSnapshot) => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -175,15 +184,26 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       if (!alive || operationInFlight.current) return;
       const generation = ++operationGeneration.current;
       operationInFlight.current = "initial";
-      void bridge.syncDevices().then((next) => {
-        if (!alive || generation !== operationGeneration.current) return;
-        onSnapshot(next);
-      }).catch((e) => {
-        if (alive && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
-      }).finally(() => {
-        if (operationInFlight.current === "initial" && generation === operationGeneration.current) operationInFlight.current = null;
-        if (alive && generation === operationGeneration.current) setInitializing(false);
-      });
+      const read = async (attempt: number): Promise<void> => {
+        try {
+          const next = await bridge.syncDevices();
+          if (!alive || generation !== operationGeneration.current) return;
+          onSnapshot(next);
+          // The engine may still be creating/migrating the index when the
+          // WebView asks for its first status. Give persisted sync state a
+          // short bounded window to appear before showing role setup.
+          if (next.role === "unconfigured" && !next.pairing_pending && attempt < 8) {
+            await new Promise<void>((resolve) => { window.setTimeout(resolve, 250); });
+            if (alive && generation === operationGeneration.current) return read(attempt + 1);
+          }
+        } catch (e) {
+          if (alive && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
+        } finally {
+          if (operationInFlight.current === "initial" && generation === operationGeneration.current) operationInFlight.current = null;
+          if (alive && generation === operationGeneration.current) setInitializing(false);
+        }
+      };
+      void read(0);
     }, 0);
     return () => { alive = false; window.clearTimeout(statusTimer); };
   }, [onSnapshot]);
@@ -218,6 +238,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       manualDiscoveryRequested.current = false;
       setPickedRole(null);
       setConfirmTarget(null);
+      setError(null);
       setScreen((current) => (current === "diagnostics" ? current : "setup"));
     } else if (snapshot.role !== "unconfigured" && was === "unconfigured" && pickedRole === null) {
       setScreen((current) => (current === "setup" ? "overview" : current));
@@ -225,8 +246,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   }, [pickedRole, snapshot.role]);
 
   const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
-  const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id;
-  const shouldPoll = snapshot.pairing_pending || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
+  const awaitingSecondaryApproval = snapshot.role === "secondary" && !snapshot.stream_id
+    && (snapshot.service_running || isSecondaryAuthorizationError(snapshot.last_error));
+  const shouldPoll = snapshot.pairing_pending
+    || (snapshot.service_running && hasPendingRequest)
+    || awaitingSecondaryApproval;
   const commandBusy = busy || initializing || discovering;
 
   // Silent status polling keeps the overview live while a pairing decision or
@@ -430,6 +454,14 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // A persisted role stays visible while the transport is recovering; only an
   // explicit stop returns to role selection.
   const effectiveScreen: Screen = screen === "overview" && (snapshot.role === "unconfigured" || snapshot.operation_state === "offline") ? "setup" : screen;
+  const rawSyncError = error ?? snapshot.last_error;
+  const shownError = presentSyncError(rawSyncError);
+  // A stale secondary 401 explains why the previous overview could not sync;
+  // once the user is back at role setup it must not sit above a new pairing
+  // choice or make the old connection look like a fresh failure.
+  const showSyncError = shownError && !(effectiveScreen === "setup" && isSecondaryAuthorizationError(rawSyncError))
+    ? shownError
+    : null;
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {
@@ -487,7 +519,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
           </div>
         </div>
         <div className="sheet-body sync-body">
-          {error || snapshot.last_error ? <div className="sheet-notice" role="alert"><IconWarn size={12} />{error ?? snapshot.last_error}</div> : null}
+          {showSyncError ? <div className="sheet-notice" role="alert"><IconWarn size={12} />{showSyncError}</div> : null}
           {snapshot.discovery_error ? <div className="sheet-notice" role="status"><IconWarn size={12} />{t("sync.discovery.permission_error", { message: snapshot.discovery_error })}</div> : null}
           {diagnosticsError ? <div className="sheet-notice" role="alert"><IconWarn size={12} />{diagnosticsError}</div> : null}
           {pendingConfirm ? <div className="sync-confirm" role="alertdialog" aria-live="assertive" aria-label={t("sync.confirm.title")}>
@@ -495,7 +527,14 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             <div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy} onClick={() => { const { request } = pendingConfirm; setPendingConfirm(null); void run(request); }}>{t("sync.confirm.accept")}</button><button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setPendingConfirm(null)}>{t("sync.confirm.cancel")}</button></div>
           </div> : null}
 
-          {effectiveScreen === "setup" ? (
+          {initializing && snapshot.role === "unconfigured" ? (
+            <div className="sync-scan" role="status">
+              <div className="sync-dualring" aria-hidden="true"><i /><i /></div>
+              <div>{t("sync.restore.loading")}</div>
+            </div>
+          ) : null}
+
+          {!initializing && effectiveScreen === "setup" ? (
             <>
               {snapshot.pairing_pending ? (
                 <>
