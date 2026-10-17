@@ -31,6 +31,13 @@ pub const LOG_ROW_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
 /// freshness backstop, the log row its fallback, not a substitute.
 pub const LOG_SAMPLE_MAX_AGE_MS: i64 = 60 * 60 * 1000;
 
+/// How long past its `resets_at_ms` a quota row still rides onto the panel.
+/// Rolling pools (GLM's 5 小时) re-derive their boundary every probe; a publish
+/// that lands between the boundary rolling over and the next sample would
+/// otherwise flicker the row off for one cycle. Five minutes covers several
+/// poll cadences and still drops a probe that died at a boundary.
+pub const QUOTA_RESET_GRACE_MS: i64 = 5 * 60 * 1000;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
     pub counts: TokenCounts,
@@ -814,14 +821,22 @@ fn merge_quotas<'a>(
     // no-reset branch must stay above the windowed one, or the day horizon is
     // silently shadowed (E22 in the golden fixture is the canary for exactly
     // that regression).
+    //
+    // Rolling pools (GLM's 5 小时) re-derive their boundary every sample, and it
+    // lands in the future by seconds — a publish that lands after the boundary
+    // but before the next probe would flicker the row off for one cycle. A short
+    // reset grace rides the last known answer across that gap; the next sample
+    // re-anchors the boundary and the row returns to normal. Bounded, so a probe
+    // that died at a boundary still disappears within minutes.
+    let reset_grace = now_ms - QUOTA_RESET_GRACE_MS;
     let mut quotas: Vec<QuotaView> = quotas
         .into_values()
         .filter(|q| match (q.resets_at_ms, q.origin) {
             (0, QuotaOrigin::Log) => q.sampled_at_ms + LOG_ROW_LIFETIME_MS > now_ms,
             (_, QuotaOrigin::Log) => {
-                q.sampled_at_ms + LOG_SAMPLE_MAX_AGE_MS > now_ms && q.resets_at_ms >= now_ms
+                q.sampled_at_ms + LOG_SAMPLE_MAX_AGE_MS > now_ms && q.resets_at_ms >= reset_grace
             }
-            _ => q.resets_at_ms == 0 || q.resets_at_ms >= now_ms,
+            _ => q.resets_at_ms == 0 || q.resets_at_ms >= reset_grace,
         })
         .collect();
     // Budgets are measured on the same local boundaries the windows above use, so
