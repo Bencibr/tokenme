@@ -765,19 +765,26 @@ export function SettingsSheet({
                 ))}
               </div>
             </div>
-            <div className="sheet-row">
-              <div>
-                <label className="sheet-label" htmlFor="plan-expiry-notify">{t("set.plan-expiry")}</label>
-                <div className="sheet-hint">{t("set.plan-expiry.hint")}</div>
+            <div className="sheet-block">
+              <div className="sheet-label">{t("set.plan-expiry")}</div>
+              <div className="sheet-hint">{t("set.plan-expiry.hint")}</div>
+              <div className="seg seg-wide" role="radiogroup" aria-label={t("set.plan-expiry")}>
+                {PLAN_EXPIRY_DAYS.map((option) => {
+                  const current = settings.plan_expiry_notify_days == null ? "" : String(settings.plan_expiry_notify_days);
+                  return (
+                    <button
+                      key={option.value || "off"}
+                      type="button"
+                      role="radio"
+                      className="seg-btn"
+                      aria-checked={current === option.value}
+                      onClick={() => setPlanExpiryNotifyDays(option.value)}
+                    >
+                      {option.label()}
+                    </button>
+                  );
+                })}
               </div>
-              <select
-                id="plan-expiry-notify"
-                className="sheet-select"
-                value={settings.plan_expiry_notify_days == null ? "" : String(settings.plan_expiry_notify_days)}
-                onChange={(event) => setPlanExpiryNotifyDays(event.target.value)}
-              >
-                {PLAN_EXPIRY_DAYS.map((option) => <option key={option.value || "off"} value={option.value}>{option.label()}</option>)}
-              </select>
             </div>
             {navRow("mute", t("set.muted"), t("set.muted.hint"), mutedCount ? t("set.muted.count", { n: mutedCount }) : t("set.none"))}
           </>
