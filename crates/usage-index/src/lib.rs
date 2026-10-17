@@ -1978,9 +1978,14 @@ impl Index {
 
     /// Event totals per tool, currently in the index.
     pub fn per_tool_counts(&self) -> Result<BTreeMap<String, u64>> {
+        // The rollup carries each group's event count (`n`) maintained in the
+        // same transaction as the inserts (sync merge and purge-repair both
+        // keep it aligned), so per-tool totals fold ~2k rollup rows instead of
+        // GROUP BY-ing ~500k events on every ingest pass — the sampled
+        // hotspot of the whole panel loop.
         let mut stmt = self
             .conn
-            .prepare("SELECT tool, count(*) FROM event GROUP BY tool ORDER BY tool")
+            .prepare("SELECT tool, sum(n) FROM event_rollup GROUP BY tool ORDER BY tool")
             .map_err(sql_err)?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
