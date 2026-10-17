@@ -535,7 +535,7 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
         .ok_or_else(|| "pair this device before starting secondary sync".to_string())?;
     if !config.enabled { return Err("secondary sync is disabled; pair this device or press Start again".into()); }
     let identity = DeviceIdentity::load_or_create(
-        config.identity_path.clone(), config.origin.clone(), "TokenMe secondary",
+        config.identity_path.clone(), config.origin.clone(), config.origin.clone(),
     ).map_err(|error| format!("cannot load secondary identity: {error}"))?;
     if identity.device_id != config.device_id || identity.origin != config.origin {
         return Err("secondary identity does not match the paired device configuration".into());
@@ -1171,7 +1171,13 @@ fn pair_secondary_with_details(
     let switching_from_primary = state.role == "primary";
     let directory = sync_dir()?;
     let identity_path = directory.join("secondary-identity.json");
-    let identity = DeviceIdentity::load_or_create(identity_path.clone(), origin.unwrap_or_else(|| "secondary".into()), display_name.unwrap_or_else(|| "TokenMe secondary".into())).map_err(|e| e.to_string())?;
+    // `secondary` is the transport role, not the device name. Use the local
+    // hostname for the persisted data origin and the human-readable label.
+    let local_name = usage_index::hostname();
+    let identity = DeviceIdentity::load_or_create(
+        identity_path.clone(), origin.unwrap_or_else(|| local_name.clone()),
+        display_name.unwrap_or(local_name),
+    ).map_err(|e| e.to_string())?;
     let request = PairingRequest::new(&details.invite, &identity, os.unwrap_or_else(|| std::env::consts::OS.into())).map_err(|e| e.to_string())?;
     let server_name = details.server_name.unwrap_or_else(|| "localhost".into());
     let pending = PendingPairing {

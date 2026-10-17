@@ -442,13 +442,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const pairConfirmed = () => {
     if (!confirmTarget) return;
-    void run({ action: "pair_discovered", primary_id: confirmTarget.primary_id, endpoint: confirmTarget.endpoint, certificate_pin: confirmTarget.certificate_pin, origin: "secondary", display_name: null, os: null }, () => setScreen("done"));
+    void run({ action: "pair_discovered", primary_id: confirmTarget.primary_id, endpoint: confirmTarget.endpoint, certificate_pin: confirmTarget.certificate_pin, origin: null, display_name: null, os: null }, () => setScreen("done"));
   };
 
   const pairWithInvite = () => {
     const invite = manualInvite.trim();
     if (!invite) return;
-    void run({ action: "pair", invite, origin: "secondary", display_name: null, os: null }, () => {
+    void run({ action: "pair", invite, origin: null, display_name: null, os: null }, () => {
       setManualInvite("");
       setScreen("done");
     });
