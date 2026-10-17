@@ -212,4 +212,53 @@ mod tests {
         assert!(!store.update_secondary_endpoint(&config.device_id, &next.endpoint, "https://127.0.0.1:47826", 6).unwrap());
         assert!(store.secondary_config().unwrap().is_none());
     }
+
+    #[test]
+    fn revocation_is_checked_before_retrying_an_immutable_pending_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let (identity, mut config, key) = fixture(dir.path());
+        let mut primary = SyncStore::open_in_memory("primary-1").unwrap();
+        let now = usage_core::report::now_ms();
+        let request_id = request(&mut primary, &identity, now);
+        primary.approve_pairing(&request_id, now).unwrap();
+        let stream = primary.open_stream_for_registered(&identity.device_id, now).unwrap();
+        primary.revoke_device(&identity.device_id, now).unwrap();
+        let _server = serve(primary, &mut config, key, dir.path());
+        config.stream_id = Some(stream.stream_id.clone());
+        config.data_epoch = Some(stream.data_epoch);
+        config.expected_generation = Some(1);
+        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
+        secondary.save_secondary_config(&config, now).unwrap();
+        let package = NetworkPackage::from_rows(&config.origin, usage_index::INDEX_SCHEMA_VERSION, 0, 100, &[], now).unwrap();
+        secondary.enqueue_outbox_auto(&identity.device_id, &identity.origin, &stream.stream_id, stream.data_epoch,
+            package.manifest_bytes, package.gzip_bytes, &identity.signing_key, &[], now).unwrap();
+        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(&config.endpoint, &config.server_name, config.certificate_der.clone())).unwrap();
+        let mut runtime = crate::SyncRuntime::new_secondary(secondary, transport, crate::SyncRuntimeConfig::new("revoked-test").unwrap(), identity);
+        assert!(matches!(runtime.run_once_with_clock(|| now), Err(crate::SyncError::Revoked(_))));
+        assert!(!runtime.store().secondary_config().unwrap().unwrap().enabled);
+        assert_eq!(runtime.store().outbox_summary().unwrap().pending, 1, "a terminal auth error retains unacknowledged bytes");
+    }
+
+    #[test]
+    fn switching_a_stopped_primary_is_atomic_even_when_the_new_binding_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (identity, mut config, _) = fixture(dir.path());
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        store.save_primary_config(&crate::PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(), advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: false,
+        }, 1).unwrap();
+        let request_id = request(&mut store, &identity, 2);
+        store.approve_pairing(&request_id, 3).unwrap();
+        config.primary_id = "primary-2".into();
+        store.index().conn().execute_batch("CREATE TRIGGER fail_secondary BEFORE INSERT ON device_sync_secondary_config BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+        assert!(store.transition_to_secondary(&config, 4).is_err());
+        assert_eq!(store.primary_id(), "primary-1");
+        assert!(store.primary_config().unwrap().is_some());
+        assert_eq!(store.device(&identity.device_id).unwrap().unwrap().status, DeviceStatus::Paired);
+        store.index().conn().execute_batch("DROP TRIGGER fail_secondary").unwrap();
+        store.transition_to_secondary(&config, 5).unwrap();
+        assert_eq!(store.primary_id(), "primary-2");
+        assert!(store.primary_config().unwrap().is_none());
+        assert_eq!(store.secondary_config().unwrap().unwrap().primary_id, "primary-2");
+    }
 }

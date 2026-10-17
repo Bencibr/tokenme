@@ -652,11 +652,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                     <div className="meta">
                       {isPrimary
                         ? <>{snapshot.endpoint ? <span className="num">{snapshot.endpoint}</span> : null}{snapshot.endpoint ? " · " : null}{t("sync.ov.awaiting")}</>
-                        : <>{t("sync.ov.meta_sec", { n: primaryDevices.length })}{snapshot.last_connected_at_ms ? <> · {t("sync.last_sync", { time: relTime(snapshot.last_connected_at_ms) })}</> : null}</>}
+                        : <>{t("sync.ov.meta_sec", { n: snapshot.primary_id ? 1 : primaryDevices.length })}{snapshot.endpoint ? <> · <span className="num">{snapshot.endpoint}</span></> : null}{snapshot.last_connected_at_ms ? <> · {t("sync.last_sync", { time: relTime(snapshot.last_connected_at_ms) })}</> : null}</>}
                     </div>
                   </div>
                   <div className="role-right">
-                    <span className="role-state">{snapshot.service_running ? t("sync.state.running") : t("sync.state.recovering")}</span>
+                    <span className="role-state">{!snapshot.service_running ? t("sync.state.stopped") : awaitingSecondaryApproval ? t("sync.device.pending") : snapshot.last_error?.includes("primary paused this device") ? t("sync.device.paused") : snapshot.last_error ? t("sync.state.recovering") : t("sync.state.running")}</span>
                     <button type="button" className="stopbtn" disabled={stopBusy} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>

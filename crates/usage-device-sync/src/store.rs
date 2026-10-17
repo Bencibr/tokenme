@@ -531,40 +531,7 @@ impl SyncStore {
         let new_primary_id = new_primary_id.into();
         validate_identifier("primary_id", &new_primary_id)?;
         if new_primary_id == self.primary_id { return Ok(()); }
-        self.index.with_network_transaction(|tx| {
-            for table in [
-                "device_registry", "device_stream", "device_receipt", "device_package_marker",
-                "device_package_tombstone", "device_highwater", "device_sync_conflict",
-                "device_sync_outbox", "device_sync_snapshot_cursor", "device_sync_journal",
-                "device_sync_outbox_sequence", "device_sync_scheduler_lease", "device_sync_recovery",
-                "device_sync_secondary_config", "device_sync_primary_config", "device_pairing_invite",
-                "device_pairing_request",
-            ] {
-                tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
-            }
-            // Keep the retained local dirty journal's byte accounting valid
-            // after the old role's outbox is isolated.
-            let dirty_json_bytes: i64 = tx.query_row(
-                "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty",
-                [], |row| row.get(0),
-            ).map_err(sql_err)?;
-            tx.execute(
-                "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![dirty_json_bytes.to_string()],
-            ).map_err(sql_err)?;
-            tx.execute(
-                "INSERT INTO device_sync_meta(key, value) VALUES('primary_id', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![new_primary_id],
-            ).map_err(sql_err)?;
-            tx.execute(
-                "INSERT INTO meta(key, value) VALUES('device_sync_last_role_switch_at_ms', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![now_ms.to_string()],
-            ).map_err(sql_err)?;
-            Ok::<_, SyncError>(())
-        })?;
+        self.index.with_network_transaction(|tx| rotate_primary_id_tx(tx, &new_primary_id, now_ms))?;
         self.primary_id = new_primary_id;
         Ok(())
     }
@@ -786,32 +753,22 @@ impl SyncStore {
 
     pub fn save_secondary_config(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
         config.validate(&self.primary_id)?;
-        let config = config.clone();
+        self.index.with_network_transaction(|tx| save_secondary_config_tx(tx, config, now_ms))
+    }
+
+    /// Commit the new role and its connection together. Invalid configuration
+    /// or a failed SQLite write leaves the stopped primary and its trust intact.
+    pub fn transition_to_secondary(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
+        config.validate(&config.primary_id)?;
+        let rotate = self.primary_id != config.primary_id;
         self.index.with_network_transaction(|tx| {
-            tx.execute(
-                "INSERT OR REPLACE INTO device_sync_secondary_config(
-                    config_key, primary_id, device_id, origin, endpoint, server_name,
-                    certificate_der, certificate_pin, identity_path, stream_id, data_epoch,
-                    expected_generation, enabled, capture_enabled, last_error, last_manifest_hash, last_gzip_hash,
-                    last_connected_at_ms, last_ack_generation, last_ack_receipt_hash, updated_at_ms
-                 ) VALUES('secondary', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-                params![
-                    config.primary_id, config.device_id, config.origin, config.endpoint,
-                    config.server_name, config.certificate_der, config.certificate_pin.as_slice(),
-                    config.identity_path.to_string_lossy().as_ref(), config.stream_id,
-                    config.data_epoch.map(|value| value as i64), config.expected_generation.map(|value| value as i64),
-                    if config.enabled { 1_i64 } else { 0_i64 }, if config.capture_enabled { 1_i64 } else { 0_i64 }, config.last_error,
-                    config.last_manifest_hash.map(|value| value.to_vec()), config.last_gzip_hash.map(|value| value.to_vec()),
-                    config.last_connected_at_ms, config.last_ack_generation.map(|value| value as i64),
-                    config.last_ack_receipt_hash.map(|value| value.to_vec()), now_ms,
-                ],
-            ).map_err(sql_err)?;
-            tx.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES('device_sync_initial_coverage_lo', ?1)",
-                params![now_ms.saturating_sub(30_i64.saturating_mul(86_400_000)) .to_string()],
-            ).map_err(sql_err)?;
+            if rotate { rotate_primary_id_tx(tx, &config.primary_id, now_ms)?; }
+            save_secondary_config_tx(tx, config, now_ms)?;
+            tx.execute("DELETE FROM device_sync_primary_config", []).map_err(sql_err)?;
             Ok::<_, SyncError>(())
-        })
+        })?;
+        self.primary_id = config.primary_id.clone();
+        Ok(())
     }
 
     pub fn set_secondary_enabled(&mut self, enabled: bool, now_ms: i64) -> SyncResult<()> {
@@ -911,6 +868,16 @@ impl SyncStore {
         let key = format!("{DISCONNECT_NOTICE_PREFIX}{device_id}");
         self.index.with_network_transaction(|tx| {
             let Some(error) = error else {
+                // The pinned primary confirmed revocation. Retain audit
+                // metadata, but release retired payload bytes: the local
+                // usage index remains the source for the next full snapshot.
+                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)", params![key], |row| row.get(0)).map_err(sql_err)?;
+                if !exists { return Ok(()); }
+                let retired: i64 = tx.query_row("SELECT count(*) FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired'", params![device_id], |row| row.get(0)).map_err(sql_err)?;
+                tx.execute("DELETE FROM device_sync_journal WHERE device_id = ?1 AND outbox_id IN (SELECT id FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired')", params![device_id]).map_err(sql_err)?;
+                tx.execute("DELETE FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired'", params![device_id]).map_err(sql_err)?;
+                let audit = serde_json::json!({ "completed_at_ms": now_ms, "retired_packages": retired }).to_string();
+                tx.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![format!("device_sync_disconnect_done:{device_id}"), audit]).map_err(sql_err)?;
                 tx.execute("DELETE FROM meta WHERE key = ?1", params![key]).map_err(sql_err)?;
                 return Ok(());
             };
@@ -2131,6 +2098,67 @@ fn adjust_dirty_json_bytes_tx(tx: &Transaction<'_>, delta: i64) -> SyncResult<()
         params![next.to_string()],
     ).map_err(sql_err)?;
     Ok(())
+}
+
+fn rotate_primary_id_tx(tx: &Transaction<'_>, new_primary_id: &str, now_ms: i64) -> SyncResult<()> {
+    for table in [
+        "device_registry", "device_stream", "device_receipt", "device_package_marker",
+        "device_package_tombstone", "device_highwater", "device_sync_conflict",
+        "device_sync_outbox", "device_sync_snapshot_cursor", "device_sync_journal",
+        "device_sync_outbox_sequence", "device_sync_scheduler_lease", "device_sync_recovery",
+        "device_sync_secondary_config", "device_sync_primary_config", "device_pairing_invite",
+        "device_pairing_request",
+    ] {
+        tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
+    }
+    // Keep the retained local dirty journal's byte accounting valid
+    // after the old role's outbox is isolated.
+    let dirty_json_bytes: i64 = tx.query_row(
+        "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![dirty_json_bytes.to_string()],
+    ).map_err(sql_err)?;
+    tx.execute(
+        "INSERT INTO device_sync_meta(key, value) VALUES('primary_id', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![new_primary_id],
+    ).map_err(sql_err)?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES('device_sync_last_role_switch_at_ms', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![now_ms.to_string()],
+    ).map_err(sql_err)?;
+    Ok::<_, SyncError>(())
+}
+
+fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO device_sync_secondary_config(
+            config_key, primary_id, device_id, origin, endpoint, server_name,
+            certificate_der, certificate_pin, identity_path, stream_id, data_epoch,
+            expected_generation, enabled, capture_enabled, last_error, last_manifest_hash, last_gzip_hash,
+            last_connected_at_ms, last_ack_generation, last_ack_receipt_hash, updated_at_ms
+         ) VALUES('secondary', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        params![
+            config.primary_id, config.device_id, config.origin, config.endpoint,
+            config.server_name, config.certificate_der, config.certificate_pin.as_slice(),
+            config.identity_path.to_string_lossy().as_ref(), config.stream_id,
+            config.data_epoch.map(|value| value as i64), config.expected_generation.map(|value| value as i64),
+            if config.enabled { 1_i64 } else { 0_i64 }, if config.capture_enabled { 1_i64 } else { 0_i64 }, config.last_error,
+            config.last_manifest_hash.map(|value| value.to_vec()), config.last_gzip_hash.map(|value| value.to_vec()),
+            config.last_connected_at_ms, config.last_ack_generation.map(|value| value as i64),
+            config.last_ack_receipt_hash.map(|value| value.to_vec()), now_ms,
+        ],
+    ).map_err(sql_err)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO meta(key, value) VALUES('device_sync_initial_coverage_lo', ?1)",
+        params![now_ms.saturating_sub(30_i64.saturating_mul(86_400_000)) .to_string()],
+    ).map_err(sql_err)?;
+    Ok::<_, SyncError>(())
 }
 
 fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {

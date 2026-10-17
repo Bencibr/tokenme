@@ -119,10 +119,7 @@ impl SyncRuntime {
             self.run_owned_once(None, &mut now_ms)
         })();
         if let Err(error) = &result {
-            if self.secondary_identity.is_some() {
-                let message = error.to_string();
-                let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
-            }
+            self.remember_secondary_error(error, now_ms());
         }
         let _ = self.store.release_scheduler_lease(&self.config.owner);
         result
@@ -177,15 +174,7 @@ impl SyncRuntime {
             let pass = match pass {
                 Ok(pass) => pass,
                 Err(error) => {
-                    if self.secondary_identity.is_some() {
-                        let message = error.to_string();
-                        let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
-                        if matches!(error, SyncError::Revoked(_) | SyncError::ReconcileRequired | SyncError::EpochStale | SyncError::Security(_))
-                            || matches!(&error, SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired")
-                        {
-                            let _ = self.store.set_secondary_enabled(false, now_ms());
-                        }
-                    }
+                    self.remember_secondary_error(&error, now_ms());
                     let _ = self.store.release_scheduler_lease(&self.config.owner);
                     return Err(error);
                 }
@@ -198,7 +187,8 @@ impl SyncRuntime {
             total.in_flight = pass.in_flight;
             total.bytes = pass.bytes;
             let pass_had_error = pass.last_error.is_some();
-            consecutive_errors = if pass_had_error { consecutive_errors.saturating_add(1) } else { 0 };
+            let waiting_for_primary = pass.last_error.as_deref().is_some_and(|message| message.contains("awaiting approval") || message.contains("primary paused this device"));
+            consecutive_errors = if pass_had_error && !waiting_for_primary { consecutive_errors.saturating_add(1) } else { 0 };
             let pass_had_no_claim_with_pending = pass.claimed == 0 && pass.pending > 0;
             total.last_error = pass.last_error;
             let renew_now = now_ms();
@@ -284,13 +274,11 @@ impl SyncRuntime {
         // ACK.  This is the backpressure valve that lets the sender drain a
         // bounded outbox instead of filling it during one preparation loop.
         let summary = self.store.outbox_summary()?;
-        if summary.pending > 0 || summary.in_flight > 0 {
-            return Ok(false);
-        }
+        let has_pending = summary.pending > 0 || summary.in_flight > 0;
         let had_stream = config.stream_id.is_some();
         let local_has_history = if had_stream { true } else { self.store.secondary_has_history(&config)? };
         let mut catchup_complete = true;
-        if had_stream {
+        if had_stream && !has_pending {
             let snapshot_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, snapshot_now, self.config.lease_ttl_ms)? {
                 return Err(SyncError::Security("sync scheduler lease was lost before snapshot".into()));
@@ -330,7 +318,7 @@ impl SyncRuntime {
             return Err(SyncError::Security("sync scheduler lease was lost before stream update".into()));
         }
         self.store.update_secondary_stream(&receipt, stream_now)?;
-        if !had_stream {
+        if !had_stream && !has_pending {
             let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
             let snapshot_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, snapshot_now, self.config.lease_ttl_ms)? {
@@ -339,7 +327,18 @@ impl SyncRuntime {
             catchup_complete = self.enqueue_local_snapshot(&config, &identity, snapshot_now)?;
         }
         self.store.set_secondary_last_error(None, now_ms())?;
-        Ok(catchup_complete)
+        Ok(catchup_complete && !has_pending)
+    }
+
+    fn remember_secondary_error(&mut self, error: &SyncError, now_ms: i64) {
+        if self.secondary_identity.is_none() { return; }
+        let message = error.to_string();
+        let _ = self.store.set_secondary_last_error(Some(&message), now_ms);
+        if matches!(error, SyncError::Revoked(_) | SyncError::ReconcileRequired | SyncError::EpochStale | SyncError::Security(_))
+            || matches!(error, SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired")
+        {
+            let _ = self.store.set_secondary_enabled(false, now_ms);
+        }
     }
 
     fn enqueue_local_snapshot(&mut self, config: &crate::SecondarySyncConfig, identity: &DeviceIdentity, now_ms: i64) -> SyncResult<bool> {

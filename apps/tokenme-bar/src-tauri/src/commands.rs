@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use usage_core::pricing::PricingOptions;
 use usage_core::{origin_ok, MachineScope, PricingMap, PricingMeta, Report};
-use usage_device_sync::{hash_bytes, AuthenticatedStatusRequest, ClientTransportCancellation, DeviceIdentity, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, DiagnosticsError, DiagnosticsHost, HttpsServerConfig, PairingInvite, PairingInviteDetails, PairingRequest, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SyncError, SyncRuntime, SyncRuntimeConfig, SyncStore, TransportError, Tls13HttpsTransport, HttpsTransportConfig};
+use usage_device_sync::{hash_bytes, ClientTransportCancellation, DeviceIdentity, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, DiagnosticsError, DiagnosticsHost, HttpsServerConfig, PairingInvite, PairingInviteDetails, PairingRequest, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SyncError, SyncRuntime, SyncRuntimeConfig, SyncStore, TransportError, Tls13HttpsTransport, HttpsTransportConfig};
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
@@ -1333,18 +1333,6 @@ pub fn restore_sync_on_launch(app: &tauri::AppHandle) {
     }
 }
 
-fn clear_persisted_primary_after_secondary_commit(index_path: &std::path::Path) -> Result<(), String> {
-    let Some(config) = SyncStore::read_primary_config(index_path).map_err(|error| error.to_string())? else {
-        return Ok(());
-    };
-    let mut store = SyncStore::open(index_path, config.primary_id).map_err(|error| error.to_string())?;
-    let now = current_ms();
-    if config.enabled {
-        store.set_primary_enabled(false, now).map_err(|error| error.to_string())?;
-    }
-    store.clear_primary_config(now).map_err(|error| error.to_string())
-}
-
 fn rearm_pending_pairing_retry(state: &mut SyncControlState) {
     state.pending_pairing_attempted = false;
 }
@@ -1412,7 +1400,6 @@ fn pair_secondary_with_details(
     let primary_id = details.primary_id.clone().ok_or_else(|| "pairing response did not include the primary id".to_string())?;
     let certificate_pin = parse_pin(&details.invite.certificate_pin)?;
     if hash_bytes(&certificate_der) != certificate_pin { return Err("pairing certificate does not match its advertised pin".into()); }
-    let switching_from_primary = state.role == "primary";
     let directory = sync_dir()?;
     // Serialize an old revoke against a new pairing to the same primary. A
     // delayed notification must never revoke a freshly approved connection.
@@ -1462,23 +1449,10 @@ fn pair_secondary_with_details(
         last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
         last_ack_generation: None, last_ack_receipt_hash: None,
     };
-    if switching_from_primary {
-        // Persist the new secondary binding first.  The old primary row is
-        // removed only after this write succeeds, so TLS/persistence errors
-        // leave the stopped primary role recoverable and retryable.
-        let mut store = SyncStore::open(index_path, primary_id.clone()).map_err(|e| e.to_string())?;
-        store.save_secondary_config(&config, current_ms()).map_err(|e| e.to_string())?;
-        drop(store);
-        clear_persisted_primary_after_secondary_commit(index_path)?;
-    } else {
-        let current_primary_id = snapshot.primary_id.clone().or_else(|| state.primary_id.clone());
-        let mut store = if let Some(current_primary_id) = current_primary_id {
-            let mut store = SyncStore::open(index_path, current_primary_id.clone()).map_err(|e| e.to_string())?;
-            if current_primary_id != primary_id { store.rotate_primary_id(primary_id.clone(), current_ms()).map_err(|e| e.to_string())?; }
-            store
-        } else { SyncStore::open(index_path, primary_id.clone()).map_err(|e| e.to_string())? };
-        store.save_secondary_config(&config, current_ms()).map_err(|e| e.to_string())?;
-    }
+    let current_primary_id = snapshot.primary_id.clone().or_else(|| state.primary_id.clone()).unwrap_or_else(|| primary_id.clone());
+    let mut store = SyncStore::open(index_path, current_primary_id).map_err(|error| error.to_string())?;
+    store.transition_to_secondary(&config, current_ms()).map_err(|error| error.to_string())?;
+    drop(store);
     clear_pending_pairing()?;
     state.role = "secondary".into();
     state.primary_id = Some(primary_id.clone());
@@ -1514,7 +1488,8 @@ fn resume_pending_pairing(state: &mut SyncControlState, index_path: &std::path::
         }
         Err(error) => return Err(error),
     };
-    let mut store = SyncStore::open(index_path, pending.primary_id.clone()).map_err(|error| error.to_string())?;
+    let bound = SyncStore::read_status(index_path).map_err(|error| error.to_string())?.primary_id.unwrap_or_else(|| pending.primary_id.clone());
+    let mut store = SyncStore::open(index_path, bound).map_err(|error| error.to_string())?;
     let config = SecondarySyncConfig {
         primary_id: pending.primary_id.clone(), device_id: identity.device_id.clone(), origin: identity.origin.clone(),
         endpoint: pending.endpoint.clone(), server_name: pending.server_name.clone(),
@@ -1524,11 +1499,8 @@ fn resume_pending_pairing(state: &mut SyncControlState, index_path: &std::path::
         last_gzip_hash: None, last_connected_at_ms: None, last_ack_generation: None,
         last_ack_receipt_hash: None,
     };
-    store.save_secondary_config(&config, current_ms()).map_err(|error| error.to_string())?;
+    store.transition_to_secondary(&config, current_ms()).map_err(|error| error.to_string())?;
     drop(store);
-    if SyncStore::read_primary_config(index_path).map_err(|error| error.to_string())?.is_some() {
-        clear_persisted_primary_after_secondary_commit(index_path)?;
-    }
     clear_pending_pairing()?;
     state.role = "secondary".into();
     state.primary_id = Some(pending.primary_id);
@@ -2450,6 +2422,23 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
 
 #[cfg(test)]
 mod sync_tests {
+    #[test]
+    fn stop_latches_before_a_pairing_transport_is_installed() {
+        let interrupt = super::SyncInterrupt::default();
+        interrupt.stop();
+        let transport = usage_device_sync::Tls13HttpsTransport::new(usage_device_sync::HttpsTransportConfig::pinned(
+            "https://127.0.0.1:1", "localhost", vec![1, 2, 3],
+        )).unwrap();
+        interrupt.install(&transport);
+        assert!(matches!(transport.probe_tcp(), Err(usage_device_sync::TransportError::Cancelled)));
+    }
+
+    #[test]
+    fn stop_interrupt_is_shared_with_the_locked_management_state() {
+        let control = super::SyncControl::default();
+        assert!(std::sync::Arc::ptr_eq(&control.interrupt, &control.state.lock().unwrap().interrupt));
+    }
+
     use super::{advertised_endpoint_host, merge_discovered_primary, pairing_invite_needs_renewal, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
