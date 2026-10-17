@@ -380,6 +380,7 @@ export type SyncManagementRequest =
   | { action: "status" }
   | { action: "discover" }
   | { action: "start_primary"; bind?: string | null; advertise_host?: string | null; allow_lan: boolean }
+  | { action: "set_primary_data_sharing"; enabled: boolean }
   | { action: "start_secondary" }
   | { action: "stop" }
   | { action: "switch_to_secondary" }
@@ -435,6 +436,7 @@ export interface SyncDevicesSnapshot {
   certificate_pin: string | null;
   stream_id: string | null;
   data_epoch: number | null;
+  allow_secondary_read: boolean;
   pending: number;
   in_flight: number;
   pending_bytes: number;

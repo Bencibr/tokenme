@@ -1247,6 +1247,14 @@
 }
 .stopbtn:hover { background: rgba(194, 91, 78, 0.1); }
 .stopicon { width: 9px; height: 9px; border-radius: 2px; flex: none; background: #c25b4e; }
+.sync-share-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; margin: 0 0 8px; border: 1px solid var(--hair-2);
+  border-radius: 10px; background: var(--surface-solid);
+}
+.sync-share-row div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sync-share-row strong { font-size: 12px; font-weight: 500; }
+.sync-share-row span { color: var(--ink-3); font-size: 11px; line-height: 1.45; }
 .explain { font-size: 11.5px; color: var(--ink-3); margin: 2px 0 10px; line-height: 1.5; }
 .scopes { display: flex; gap: 6px; margin: 4px 0 10px; }
 .scopes button {

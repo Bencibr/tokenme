@@ -2156,6 +2156,7 @@ mod tests {
             certificate_pin: Some("a".repeat(64)),
             stream_id: None,
             data_epoch: None,
+            allow_secondary_read: false,
             pending: 0,
             in_flight: 0,
             pending_bytes: 0,

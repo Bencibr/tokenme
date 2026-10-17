@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use usage_core::{CallKind, Meter, UsageEvent};
+use usage_core::{origin_of, CallKind, Meter, UsageEvent};
 use usage_index::Index;
 
 use crate::{
@@ -303,6 +303,7 @@ impl SyncRuntime {
             other => return Err(SyncError::Protocol(format!("primary returned unknown device status {other:?}"))),
         }
         validate_secondary_status(&config, &status, local_has_history)?;
+        let allow_secondary_read = status.allow_secondary_read;
         let receipt = match (status.active_stream_id, status.expected_generation) {
             (Some(stream_id), Some(expected_generation)) => StreamOpenReceipt {
                 primary_id: status.primary_id,
@@ -319,6 +320,14 @@ impl SyncRuntime {
             return Err(SyncError::Security("sync scheduler lease was lost before stream update".into()));
         }
         self.store.update_secondary_stream(&receipt, stream_now)?;
+        if allow_secondary_read {
+            let package = self.transport.pull(&request).map_err(map_secondary_pull_error)?;
+            let pull_now = now_ms();
+            if !self.store.renew_scheduler_lease(&self.config.owner, pull_now, self.config.lease_ttl_ms)? {
+                return Err(SyncError::Security("sync scheduler lease was lost before primary read merge".into()));
+            }
+            self.store.import_primary_package(&package, pull_now)?;
+        }
         if !had_stream && !has_pending {
             let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
             let snapshot_now = now_ms();
@@ -468,6 +477,13 @@ fn map_secondary_status_error(error: TransportError) -> SyncError {
     }
 }
 
+fn map_secondary_pull_error(error: TransportError) -> SyncError {
+    match error {
+        TransportError::HttpStatus { status: 409, message } if message.contains("data sharing is disabled") => SyncError::Conflict(message),
+        error => SyncError::Protocol(format!("primary data request failed: {error}")),
+    }
+}
+
 /// Export the complete local-origin projection used by the secondary runtime.
 /// A full projection keeps keyless multiplicity deterministic across rebuilds;
 /// remote `linux:` rows are excluded so a primary never receives a re-export.
@@ -543,6 +559,37 @@ fn network_row(event: UsageEvent, occurrence_id: Option<String>) -> SyncResult<N
         },
         calls,
     })
+}
+
+/// Builds the primary's merged view for one requesting secondary.  Rows that
+/// originated on that secondary are omitted because they are already present
+/// in its local index; this keeps the reverse flow from duplicating its own
+/// data while still returning the primary's local rows and other devices'
+/// merged rows.
+pub(crate) fn export_primary_index_snapshot(
+    index: &Index, excluded_origin: &str, days: i64, now_ms: i64,
+) -> SyncResult<NetworkPackage> {
+    if days <= 0 || days > 3650 { return Err(SyncError::Invalid("snapshot days must be in 1..=3650".into())); }
+    let day_ms = 86_400_000_i64;
+    let coverage_hi_ms = now_ms.div_euclid(day_ms).saturating_add(1).saturating_mul(day_ms);
+    let coverage_lo_ms = index.sync_initial_coverage_lo(now_ms, days).map_err(SyncError::from)?;
+    let events = index.all_events().map_err(SyncError::from)?;
+    let occurrence_ids = index.sync_occurrence_ids(&events).map_err(SyncError::from)?;
+    let mut rows_by_identity = BTreeMap::<String, NetworkRow>::new();
+    for (event, occurrence_id) in events.into_iter().zip(occurrence_ids) {
+        if event.ts_ms < coverage_lo_ms || event.ts_ms >= coverage_hi_ms || origin_of(&event.source) == excluded_origin {
+            continue;
+        }
+        let row = network_row(event, occurrence_id)?;
+        rows_by_identity.insert(row.identity_material()?.to_string(), row);
+    }
+    let mut rows = rows_by_identity.into_values().collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.identity_material().unwrap_or("").cmp(right.identity_material().unwrap_or("")));
+    let generated_at_ms = rows.iter().map(|row| row.ts_ms).max().unwrap_or(now_ms);
+    NetworkPackage::from_rows_with_snapshot_complete_allow_remote(
+        "primary", usage_index::INDEX_SCHEMA_VERSION, coverage_lo_ms, coverage_hi_ms,
+        &rows, generated_at_ms, true,
+    )
 }
 
 fn current_time_ms() -> i64 {
@@ -741,7 +788,7 @@ mod tests {
             data_epoch: 1, active_stream_id: Some("stream-1".into()), expected_generation: Some(3), last_generation: generation,
             highwater_generation: generation, highwater_receipt_hash: receipt_hash,
             checkpoint_generation: Some(2), checkpoint_receipt_hash: Some([7; 32]),
-            coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: 0,
+            coverage_lo_ms: None, coverage_hi_ms: None, allow_secondary_read: false, observed_at_ms: 0,
         };
         assert!(matches!(validate_secondary_status(&config, &status(Some(1), Some([7; 32])), true), Err(SyncError::ReconcileRequired)));
         assert!(matches!(validate_secondary_status(&config, &status(Some(2), Some([8; 32])), true), Err(SyncError::ReconcileRequired)));
@@ -764,7 +811,7 @@ mod tests {
             primary_id: "primary-1".into(), device_id: "device-1".into(), origin: "origin-1".into(), request_nonce: [0; 16], status: "paired".into(),
             data_epoch: 1, active_stream_id: Some("primary-stream".into()), expected_generation: Some(1), last_generation: None,
             highwater_generation: None, highwater_receipt_hash: None, checkpoint_generation: None, checkpoint_receipt_hash: None,
-            coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: 0,
+            coverage_lo_ms: None, coverage_hi_ms: None, allow_secondary_read: false, observed_at_ms: 0,
         };
         assert!(validate_secondary_status(&config, &status, false).is_ok());
         assert!(matches!(validate_secondary_status(&config, &status, true), Err(SyncError::ReconcileRequired)));

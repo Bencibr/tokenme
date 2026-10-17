@@ -28,7 +28,7 @@ use crate::diagnostics::{
     MAX_DIAGNOSTICS_BODY_BYTES, MAX_DIAGNOSTICS_RESPONSE_BYTES,
 };
 use crate::protocol::{
-    hash_bytes, verify_private_file, AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest,
+    hash_bytes, verify_private_file, AuthenticatedStatus, AuthenticatedStatusRequest, NetworkPackage, PairingInvite, PairingRequest,
     SignedUpload, StreamOpenReceipt, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES,
     MAX_STRING_BYTES,
 };
@@ -50,7 +50,10 @@ const DISCOVERY_INVITE_TTL_MS: i64 = 5 * 60 * 1000;
 const MAX_TRACKED_PAIRING_IPS: usize = 1024;
 const UPLOAD_MAGIC: &[u8; 8] = b"TMSYNC01";
 const UPLOAD_WIRE_VERSION: u8 = 1;
+const PULL_MAGIC: &[u8; 8] = b"TMSYNC02";
+const PULL_WIRE_VERSION: u8 = 1;
 const UPLOAD_PATH: &str = "/v1/upload";
+const PULL_PATH: &str = "/v1/pull";
 const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
 const STATUS_PATH: &str = "/v1/status";
@@ -410,6 +413,21 @@ impl Tls13HttpsTransport {
         Ok(status)
     }
 
+    /// Pulls the primary's merged read projection after the normal signed
+    /// status authorization.  The response uses a bounded binary frame so a
+    /// large snapshot is not inflated by JSON/base64 overhead.
+    pub fn pull(&mut self, request: &AuthenticatedStatusRequest) -> Result<NetworkPackage, TransportError> {
+        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode pull request: {e}")))?;
+        let response = self.request_with_limit(PULL_PATH, body, DEFAULT_BODY_BYTES)?;
+        if response.status != 200 {
+            let message = serde_json::from_slice::<WireError>(&response.body)
+                .map(|error| error.message)
+                .unwrap_or_else(|_| "primary read request rejected".into());
+            return Err(TransportError::HttpStatus { status: response.status, message });
+        }
+        decode_pull_response(&response.body)
+    }
+
     pub fn recover(&mut self, request: &AuthenticatedStatusRequest) -> Result<StreamOpenReceipt, TransportError> {
         if !request.want_recovery { return Err(TransportError::Protocol("recovery request must set want_recovery".into())); }
         let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode recovery request: {e}")))?;
@@ -458,6 +476,10 @@ impl Tls13HttpsTransport {
     }
 
     fn request(&self, path: &str, body: Vec<u8>) -> Result<HttpResponse, TransportError> {
+        self.request_with_limit(path, body, self.config.max_response_bytes)
+    }
+
+    fn request_with_limit(&self, path: &str, body: Vec<u8>, max_response: usize) -> Result<HttpResponse, TransportError> {
         if body.len() > DEFAULT_BODY_BYTES {
             return Err(TransportError::Limit);
         }
@@ -471,7 +493,7 @@ impl Tls13HttpsTransport {
         stream.write_all(request.as_bytes()).map_err(|error| self.map_io(error))?;
         stream.write_all(&body).map_err(|error| self.map_io(error))?;
         stream.flush().map_err(|error| self.map_io(error))?;
-        read_response(&mut stream, self.config.max_response_bytes).map_err(|error| self.map_cancelled(error))
+        read_response(&mut stream, max_response).map_err(|error| self.map_cancelled(error))
     }
 
     fn request_upload(&self, prefix: &[u8], gzip: &[u8]) -> Result<HttpResponse, TransportError> {
@@ -985,6 +1007,7 @@ impl ServerContext {
         let connection = ServerConnection::new(self.tls_config.clone()).map_err(|e| TransportError::Tls(e.to_string()))?;
         let mut tls = StreamOwned::new(connection, stream);
         let head = read_request_head(&mut tls, self.config.max_body_bytes, deadline, &self.cancel)?;
+        let is_pull = head.path == PULL_PATH;
         let (status, response) = if head.known_path.is_none() {
             (404, serde_json::to_vec(&WireError { message: "unknown sync endpoint".into() }).unwrap_or_else(|_| b"{\"message\":\"not found\"}".to_vec()))
         } else if head.path == UPLOAD_PATH {
@@ -1039,6 +1062,15 @@ impl ServerContext {
                     (error.http_status(), body)
                 }
             }
+        } else if head.path == PULL_PATH {
+            let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
+            let request = serde_json::from_slice::<AuthenticatedStatusRequest>(&body)
+                .map_err(|e| TransportError::Protocol(format!("invalid pull request: {e}")))?;
+            let store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+            match store.primary_download_package(&request, now_ms()) {
+                Ok(package) => (200, encode_pull_response(&package)?),
+                Err(error) => (status_for_error(&error), serde_json::to_vec(&WireError { message: safe_error_message(&error) }).unwrap_or_else(|_| b"{\"message\":\"request rejected\"}".to_vec())),
+            }
         } else if head.path == PAIRING_INVITE_PATH {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
             let request = serde_json::from_slice::<WirePairingInviteRequest>(&body)
@@ -1054,7 +1086,11 @@ impl ServerContext {
             let mut store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
             dispatch_request(&mut store, &request)
         };
-        write_response(&mut tls, status, &response, self.config.max_body_bytes)?;
+        if is_pull && status == 200 {
+            write_binary_response(&mut tls, status, &response, self.config.max_body_bytes)?;
+        } else {
+            write_response(&mut tls, status, &response, self.config.max_body_bytes)?;
+        }
         tls.conn.send_close_notify();
         let _ = tls.flush();
         let _ = tls.get_mut().shutdown(Shutdown::Both);
@@ -1187,6 +1223,49 @@ fn encode_upload(upload: &SignedUpload) -> Result<Vec<u8>, TransportError> {
         return Err(TransportError::Limit);
     }
     Ok(body)
+}
+
+fn encode_pull_response(package: &NetworkPackage) -> Result<Vec<u8>, TransportError> {
+    if package.manifest_bytes.is_empty() || package.manifest_bytes.len() > MAX_MANIFEST_BYTES
+        || package.gzip_bytes.len() > MAX_COMPRESSED_BYTES
+    {
+        return Err(TransportError::Limit);
+    }
+    let manifest_len = u32::try_from(package.manifest_bytes.len()).map_err(|_| TransportError::Limit)?;
+    let gzip_len = u64::try_from(package.gzip_bytes.len()).map_err(|_| TransportError::Limit)?;
+    let total = 8usize
+        .saturating_add(1)
+        .saturating_add(4)
+        .saturating_add(8)
+        .saturating_add(package.manifest_bytes.len())
+        .saturating_add(package.gzip_bytes.len());
+    if total > DEFAULT_BODY_BYTES { return Err(TransportError::Limit); }
+    let mut body = Vec::with_capacity(total);
+    body.extend_from_slice(PULL_MAGIC);
+    body.push(PULL_WIRE_VERSION);
+    body.extend_from_slice(&manifest_len.to_be_bytes());
+    body.extend_from_slice(&gzip_len.to_be_bytes());
+    body.extend_from_slice(&package.manifest_bytes);
+    body.extend_from_slice(&package.gzip_bytes);
+    Ok(body)
+}
+
+fn decode_pull_response(body: &[u8]) -> Result<NetworkPackage, TransportError> {
+    if body.len() < 21 || &body[..8] != PULL_MAGIC || body[8] != PULL_WIRE_VERSION {
+        return Err(TransportError::Protocol("invalid primary read response frame".into()));
+    }
+    let manifest_len = u32::from_be_bytes(body[9..13].try_into().unwrap()) as usize;
+    let gzip_len = u64::from_be_bytes(body[13..21].try_into().unwrap());
+    let gzip_len = usize::try_from(gzip_len).map_err(|_| TransportError::Limit)?;
+    if manifest_len == 0 || manifest_len > MAX_MANIFEST_BYTES || gzip_len > MAX_COMPRESSED_BYTES {
+        return Err(TransportError::Limit);
+    }
+    let expected = 21usize.saturating_add(manifest_len).saturating_add(gzip_len);
+    if expected != body.len() { return Err(TransportError::Protocol("primary read response frame length mismatch".into())); }
+    let manifest_end = 21 + manifest_len;
+    let package = NetworkPackage { manifest_bytes: body[21..manifest_end].to_vec(), gzip_bytes: body[manifest_end..].to_vec() };
+    package.validate().map_err(|error| TransportError::Protocol(format!("invalid primary read package: {error}")))?;
+    Ok(package)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1491,7 +1570,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST is supported".into()));
     }
     let known_path = match path {
-        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        UPLOAD_PATH | PULL_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
@@ -1684,6 +1763,13 @@ fn write_response<S: Write>(stream: &mut S, status: u16, body: &[u8], max_body: 
     stream.flush().map_err(TransportError::from)
 }
 
+fn write_binary_response<S: Write>(stream: &mut S, status: u16, body: &[u8], max_body: usize) -> Result<(), TransportError> {
+    if body.len() > max_body { return Err(TransportError::Limit); }
+    write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).map_err(TransportError::from)?;
+    stream.write_all(body).map_err(TransportError::from)?;
+    stream.flush().map_err(TransportError::from)
+}
+
 fn write_continue<S: Write>(stream: &mut S) -> Result<(), TransportError> {
     stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").map_err(TransportError::from)?;
     stream.flush().map_err(TransportError::from)
@@ -1802,7 +1888,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::protocol::{DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, UploadEnvelope};
-    use crate::{DiagnosticsHost, DiagnosticsRequestAuth, PairingRequest, SyncStore};
+    use crate::{DiagnosticsHost, DiagnosticsRequestAuth, PairingRequest, PrimarySyncConfig, SyncStore};
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::thread;
 
@@ -1847,6 +1933,36 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn loopback_tls13_primary_pull_round_trip_uses_the_primary_read_switch() {
+        let cert = cert();
+        let device = DeviceIdentity::create("pull-secondary", "Pull secondary").unwrap();
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let invite = store.create_pairing_invite("https://localhost:47821", "2222222222222222222222222222222222222222222222222222222222222222", 100_000).unwrap();
+        let pairing = PairingRequest::new(&invite, &device, "linux").unwrap();
+        let state = store.receive_pairing_request(&pairing, 1).unwrap();
+        store.approve_pairing(&state.request_id, 2).unwrap();
+        store.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:0".into(), advertise_host: Some("127.0.0.1".into()),
+            allow_lan: false, allow_secondary_read: true, enabled: true,
+        }, 3).unwrap();
+        let event_ts = now_ms().saturating_sub(1_000);
+        store.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key) VALUES('primary', ?1, 's', 'tokens', 3, 'local', 'primary-row')",
+            rusqlite::params![event_ts],
+        ).unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        let request = crate::AuthenticatedStatusRequest::new_at(&device, "primary-1", true, now_ms()).unwrap();
+        let package = client.pull(&request).unwrap();
+        let (_manifest, rows) = package.validate().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool, "primary");
         assert!(handle.join().unwrap().is_ok());
     }
 

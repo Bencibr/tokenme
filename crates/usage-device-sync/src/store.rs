@@ -18,7 +18,7 @@ use crate::protocol::{
     PairingRequest, SignedUpload, StreamOpenReceipt, UploadEnvelope,
 };
 
-const STATE_VERSION: i64 = 6;
+const STATE_VERSION: i64 = 7;
 const MAX_PENDING_PAIRING_REQUESTS: i64 = 32;
 const MAX_OUTBOX_ENTRIES: i64 = 4_096;
 const MAX_OUTBOX_BYTES: i64 = 512 * 1024 * 1024;
@@ -238,6 +238,8 @@ pub struct PrimarySyncConfig {
     pub bind_addr: String,
     pub advertise_host: Option<String>,
     pub allow_lan: bool,
+    #[serde(default)]
+    pub allow_secondary_read: bool,
     pub enabled: bool,
 }
 
@@ -661,18 +663,20 @@ impl SyncStore {
         self.index.with_network_transaction(|tx| {
             tx.execute(
                 "INSERT INTO device_sync_primary_config(
-                    config_key, primary_id, bind_addr, advertise_host, allow_lan, enabled, updated_at_ms
-                 ) VALUES('primary', ?1, ?2, ?3, ?4, ?5, ?6)
+                    config_key, primary_id, bind_addr, advertise_host, allow_lan, allow_secondary_read, enabled, updated_at_ms
+                 ) VALUES('primary', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(config_key) DO UPDATE SET
                     primary_id = excluded.primary_id,
                     bind_addr = excluded.bind_addr,
                     advertise_host = excluded.advertise_host,
                     allow_lan = excluded.allow_lan,
+                    allow_secondary_read = excluded.allow_secondary_read,
                     enabled = excluded.enabled,
                     updated_at_ms = excluded.updated_at_ms",
                 params![
                     config.primary_id, config.bind_addr, config.advertise_host,
                     if config.allow_lan { 1_i64 } else { 0_i64 },
+                    if config.allow_secondary_read { 1_i64 } else { 0_i64 },
                     if config.enabled { 1_i64 } else { 0_i64 }, now_ms,
                 ],
             ).map_err(sql_err)?;
@@ -685,6 +689,22 @@ impl SyncStore {
             let changed = tx.execute(
                 "UPDATE device_sync_primary_config
                     SET enabled = ?1, updated_at_ms = ?2
+                  WHERE config_key = 'primary' AND primary_id = ?3",
+                params![if enabled { 1_i64 } else { 0_i64 }, now_ms, self.primary_id],
+            ).map_err(sql_err)?;
+            if changed != 1 { return Err(SyncError::NotFound("primary sync configuration".into())); }
+            Ok(())
+        })
+    }
+
+    /// Controls the primary's read policy independently from listener
+    /// lifetime.  The default is false, so existing pairings remain
+    /// secondary-to-primary only until the primary owner opts in.
+    pub fn set_primary_data_sharing(&mut self, enabled: bool, now_ms: i64) -> SyncResult<()> {
+        self.index.with_network_transaction(|tx| {
+            let changed = tx.execute(
+                "UPDATE device_sync_primary_config
+                    SET allow_secondary_read = ?1, updated_at_ms = ?2
                   WHERE config_key = 'primary' AND primary_id = ?3",
                 params![if enabled { 1_i64 } else { 0_i64 }, now_ms, self.primary_id],
             ).map_err(sql_err)?;
@@ -1383,7 +1403,55 @@ impl SyncStore {
             checkpoint_receipt_hash,
             coverage_lo_ms: coverage.map(|range| range.0),
             coverage_hi_ms: coverage.map(|range| range.1),
+            allow_secondary_read: self.primary_config()?.is_some_and(|config| config.allow_secondary_read),
             observed_at_ms,
+        })
+    }
+
+    /// Returns the primary's merged read projection to an already authorized
+    /// secondary.  The request is verified again here instead of relying on a
+    /// previous status call, so a direct pull cannot bypass pairing, revocation
+    /// or the primary owner's sharing switch.
+    pub fn primary_download_package(&self, request: &AuthenticatedStatusRequest, now_ms: i64) -> SyncResult<NetworkPackage> {
+        let status = self.authenticated_status(request, now_ms)?;
+        if status.status != "paired" {
+            return Err(match status.status.as_str() {
+                "pending" => SyncError::NotPaired("pairing request is awaiting approval".into()),
+                "paused" => SyncError::Conflict("primary paused this device".into()),
+                "revoked" => SyncError::Revoked(request.device_id.clone()),
+                _ => SyncError::NotPaired("device is not authorized".into()),
+            });
+        }
+        if !status.allow_secondary_read {
+            return Err(SyncError::Conflict("primary data sharing is disabled".into()));
+        }
+        crate::runtime::export_primary_index_snapshot(&self.index, &request.origin, 30, now_ms)
+    }
+
+    /// Merges a primary read package into the secondary's local index.  The
+    /// primary package is stored under the `linux:primary:` origin, which
+    /// keeps it out of the secondary's next upload and therefore prevents a
+    /// replication loop.
+    pub fn import_primary_package(&mut self, package: &NetworkPackage, merged_at_ms: i64) -> SyncResult<MergeOutcome> {
+        let (manifest, rows) = package.validate()?;
+        if manifest.schema_version != usage_index::INDEX_SCHEMA_VERSION || manifest.origin != "primary" {
+            return Err(SyncError::Unsupported("primary read package is not supported".into()));
+        }
+        self.index.with_network_transaction(|tx| {
+            let mut outcome = MergeOutcome::default();
+            let mut affected_ts = Vec::new();
+            for row in &rows {
+                let merged = merge_row(tx, &self.primary_id, "primary", row, merged_at_ms)?;
+                affected_ts.extend(merged.affected_ts);
+                match merged.kind {
+                    RowKind::Inserted => outcome.inserted = outcome.inserted.saturating_add(1),
+                    RowKind::Updated => outcome.updated = outcome.updated.saturating_add(1),
+                    RowKind::Deduped => outcome.deduped = outcome.deduped.saturating_add(1),
+                }
+            }
+            usage_index::recompute_network_days(tx, &affected_ts).map_err(SyncError::from)?;
+            ensure_network_rollups_finite(tx)?;
+            Ok(outcome)
         })
     }
 
@@ -2267,6 +2335,7 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
                  bind_addr TEXT NOT NULL,
                  advertise_host TEXT,
                  allow_lan INTEGER NOT NULL,
+                 allow_secondary_read INTEGER NOT NULL DEFAULT 0,
                  enabled INTEGER NOT NULL,
                  updated_at_ms INTEGER NOT NULL
              );
@@ -2295,6 +2364,7 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
         ensure_column(tx, "device_sync_secondary_config", "last_ack_generation", "INTEGER")?;
         ensure_column(tx, "device_sync_secondary_config", "last_ack_receipt_hash", "BLOB")?;
         ensure_column(tx, "device_sync_secondary_config", "capture_enabled", "INTEGER NOT NULL DEFAULT 1")?;
+        ensure_column(tx, "device_sync_primary_config", "allow_secondary_read", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(tx, "device_receipt", "origin", "TEXT NOT NULL DEFAULT ''")?;
         ensure_column(tx, "device_receipt", "snapshot_complete", "INTEGER NOT NULL DEFAULT 0")?;
         tx.execute(
@@ -2380,7 +2450,7 @@ fn pending_device_status(conn: &Connection, request: &AuthenticatedStatusRequest
         active_stream_id: None, expected_generation: None, last_generation: None,
         highwater_generation: None, highwater_receipt_hash: None,
         checkpoint_generation: None, checkpoint_receipt_hash: None,
-        coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: now_ms,
+        coverage_lo_ms: None, coverage_hi_ms: None, allow_secondary_read: false, observed_at_ms: now_ms,
     })
 }
 
@@ -2390,12 +2460,24 @@ fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncC
         [], |row| row.get(0),
     ).map_err(sql_err)?;
     if !exists { return Ok(None); }
-    let row: Option<(String, String, Option<String>, i64, i64)> = conn.query_row(
-        "SELECT primary_id, bind_addr, advertise_host, allow_lan, enabled
-           FROM device_sync_primary_config WHERE config_key = 'primary'",
-        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-    ).optional().map_err(sql_err)?;
-    let Some((primary_id, bind_addr, advertise_host, allow_lan, enabled)) = row else { return Ok(None); };
+    let has_allow_secondary_read: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_sync_primary_config') WHERE name = 'allow_secondary_read')",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    let row: Option<(String, String, Option<String>, i64, i64, i64)> = if has_allow_secondary_read {
+        conn.query_row(
+            "SELECT primary_id, bind_addr, advertise_host, allow_lan, allow_secondary_read, enabled
+               FROM device_sync_primary_config WHERE config_key = 'primary'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        ).optional().map_err(sql_err)?
+    } else {
+        conn.query_row(
+            "SELECT primary_id, bind_addr, advertise_host, allow_lan, 0, enabled
+               FROM device_sync_primary_config WHERE config_key = 'primary'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        ).optional().map_err(sql_err)?
+    };
+    let Some((primary_id, bind_addr, advertise_host, allow_lan, allow_secondary_read, enabled)) = row else { return Ok(None); };
     let allow_lan = match allow_lan {
         0 => false,
         1 => true,
@@ -2406,7 +2488,12 @@ fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncC
         1 => true,
         value => return Err(SyncError::Security(format!("primary enabled flag is invalid: {value}"))),
     };
-    let config = PrimarySyncConfig { primary_id: primary_id.clone(), bind_addr, advertise_host, allow_lan, enabled };
+    let allow_secondary_read = match allow_secondary_read {
+        0 => false,
+        1 => true,
+        value => return Err(SyncError::Security(format!("primary allow_secondary_read flag is invalid: {value}"))),
+    };
+    let config = PrimarySyncConfig { primary_id: primary_id.clone(), bind_addr, advertise_host, allow_lan, allow_secondary_read, enabled };
     config.validate(&primary_id)?;
     Ok(Some(config))
 }
@@ -3755,6 +3842,7 @@ mod tests {
             bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()),
             allow_lan: false,
+            allow_secondary_read: false,
             enabled: true,
         };
         store.save_primary_config(&config, 10).unwrap();
@@ -3789,7 +3877,7 @@ mod tests {
         ).unwrap();
         store.save_primary_config(&PrimarySyncConfig {
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
-            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: false,
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, allow_secondary_read: false, enabled: false,
         }, 1).unwrap();
         store.index().conn().execute(
             "INSERT INTO sync_dirty(identity, source_key, event_json, event_ts_ms, revision, dirty_since_ms, updated_ms)

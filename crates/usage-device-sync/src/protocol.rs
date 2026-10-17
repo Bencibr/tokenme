@@ -638,6 +638,30 @@ impl NetworkPackage {
         origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
         window_hi_ms: i64, rows: &[NetworkRow], generated_at_ms: i64, snapshot_complete: bool,
     ) -> SyncResult<Self> {
+        Self::from_rows_with_snapshot_complete_inner(
+            origin, schema_version, window_lo_ms, window_hi_ms, rows, generated_at_ms, snapshot_complete, true,
+        )
+    }
+
+    /// Builds a package for the primary's read projection.  Primary views may
+    /// contain rows that were previously imported from another device; those
+    /// rows are deliberately allowed here because this package is sent to a
+    /// paired secondary over the authenticated, pinned TLS channel.  The
+    /// ordinary secondary export keeps the strict re-export guard above.
+    pub(crate) fn from_rows_with_snapshot_complete_allow_remote(
+        origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
+        window_hi_ms: i64, rows: &[NetworkRow], generated_at_ms: i64, snapshot_complete: bool,
+    ) -> SyncResult<Self> {
+        Self::from_rows_with_snapshot_complete_inner(
+            origin, schema_version, window_lo_ms, window_hi_ms, rows, generated_at_ms, snapshot_complete, false,
+        )
+    }
+
+    fn from_rows_with_snapshot_complete_inner(
+        origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
+        window_hi_ms: i64, rows: &[NetworkRow], generated_at_ms: i64, snapshot_complete: bool,
+        reject_remote: bool,
+    ) -> SyncResult<Self> {
         if rows.len() > MAX_ROWS {
             return Err(SyncError::Limit(format!("rows exceed {MAX_ROWS}")));
         }
@@ -656,7 +680,7 @@ impl NetworkPackage {
             if !identities.insert(row.identity_material()?.to_string()) {
                 return Err(SyncError::Protocol("duplicate row identity in package".into()));
             }
-            if row.source.starts_with("linux:") {
+            if reject_remote && row.source.starts_with("linux:") {
                 return Err(SyncError::Protocol("strict export cannot re-export remote source rows".into()));
             }
             let line = serde_json::to_vec(row).map_err(|e| SyncError::Protocol(format!("encode row: {e}")))?;
@@ -1058,6 +1082,10 @@ pub struct AuthenticatedStatus {
     pub checkpoint_receipt_hash: Option<[u8; 32]>,
     pub coverage_lo_ms: Option<i64>,
     pub coverage_hi_ms: Option<i64>,
+    /// Primary policy advertised to the paired secondary.  Missing on older
+    /// responses means false, preserving the original one-way behaviour.
+    #[serde(default)]
+    pub allow_secondary_read: bool,
     pub observed_at_ms: i64,
 }
 
