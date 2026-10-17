@@ -16,16 +16,6 @@ function share(part: number, whole: number): string {
   return whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : "0%";
 }
 
-function deviceStatusLabel(status: SyncDeviceView["status"]): string {
-  switch (status) {
-    case "pending": return t("scope.device.pending");
-    case "paired": return t("scope.device.paired");
-    case "paused": return t("scope.device.paused");
-    case "revoked": return t("scope.device.revoked");
-    case "reconcile_required": return t("scope.device.reconcile");
-  }
-}
-
 interface MachineRow {
   /** Raw origin; `""` is this machine and never collides with an origin. */
   origin: string;
@@ -69,7 +59,6 @@ export function ScopeDropdown({
   now,
   open,
   onOpen,
-  serverOrigins,
 }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -90,9 +79,10 @@ export function ScopeDropdown({
   }
 
   const registered = new Map((devices ?? []).map((device) => [device.origin, device]));
-  const machineRows = [...machines];
+  // 断开（revoked）的机器从列表整体消失——历史导入也不显示。
+  const machineRows = [...machines].filter((machine) => registered.get(machine.origin)?.status !== "revoked");
   for (const device of devices ?? []) {
-    if (!machineRows.some((machine) => machine.origin === device.origin)) {
+    if (device.status !== "revoked" && !machineRows.some((machine) => machine.origin === device.origin)) {
       machineRows.push({ origin: device.origin, today_tokens: 0 });
     }
   }
@@ -219,11 +209,6 @@ export function ScopeDropdown({
 
           {rows.map((r) => {
             const checked = r.local ? scope.kind === "local" : scope.kind === "origin" && scope.name === r.origin;
-            const manual = serverOrigins !== undefined && !r.local && !r.device && !serverOrigins.has(r.origin);
-            const deviceStatus = r.device ? deviceStatusLabel(r.device.status) : null;
-            const deviceSync = r.device?.status === "paired"
-              ? (r.device.snapshot_complete ? t("scope.device.synced") : t("scope.device.syncing"))
-              : null;
             return (
               <button
                 key={r.origin}
@@ -237,9 +222,6 @@ export function ScopeDropdown({
                 <span className="o-dot" style={{ background: r.color }} aria-hidden="true" />
                 <span className="si-name">
                   <span className="scope-name">{r.name}</span>
-                  {manual ? <span className="si-tag">{t("scope.manual")}</span> : null}
-                  {deviceStatus ? <span className="si-tag">{deviceStatus}</span> : null}
-                  {deviceSync ? <span className="si-tag">{deviceSync}</span> : null}
                 </span>
                 <span className="si-vals">
                   <span className="si-tok num">{compactTokens(r.tokens)}</span>
