@@ -296,8 +296,13 @@ impl Index {
                 let turned = samples.last().map(|last| (last[1] - q.used_percent).abs() >= 2.0).unwrap_or(true);
                 if turned {
                     if samples.len() >= 16 {
+                        // The parallel times array can be shorter than the
+                        // samples on states written before it existed (or a
+                        // pass that panicked mid-write); thin it only when it
+                        // is in lockstep, or remove(1) panics the engine.
+                        let times_in_sync = sample_times.len() == samples.len();
                         samples.remove(1);
-                        if !sample_times.is_empty() {
+                        if times_in_sync {
                             sample_times.remove(1);
                         }
                     }
@@ -2151,6 +2156,57 @@ mod golden {
     fn an_incoherent_meter_is_not_rescued_by_slopes() {
         let samples: Vec<[f64; 2]> = vec![[1.0e6, 10.0], [3.0e6, 30.0], [9.0e6, 50.0], [27.0e6, 70.0], [81.0e6, 90.0]];
         assert_eq!(classify_samples(&samples, None).as_deref(), Some("incompatible"));
+    }
+
+    /// A state written before sample_times existed carries 16 samples and no
+    /// times; one pushed turn makes the arrays 16/1 — thinning index 1 out of a
+    /// 1-long vec panicked the engine, and the restart re-panicked on the same
+    /// stored state: the panel sat in 探测配额 forever. The thin must skip the
+    /// desynced side.
+    #[test]
+    fn thinning_survives_a_desynced_sample_times_array() {
+        let now = now_fixture();
+        let mut idx = Index::open_in_memory().unwrap();
+        let mock = Mock::new(
+            PathBuf::from("/fixture/cycle-desync-1.jsonl"),
+            vec![ev("cline", now - 5 * 60_000, "desync", Some("glm"), None, counts(100_000_000.0))],
+        );
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'cline'", []).unwrap();
+        // 16 turns, zero timestamps — exactly a pre-upgrade state after one
+        // desynced push (16 samples, 1 time).
+        let mut samples = Vec::new();
+        for i in 0..16 {
+            samples.push(format!("[{:.1},{}]", (i as f64 + 1.0) * 10.0e6, (i as f64 + 1.0) * 2.0));
+        }
+        let seeded = format!(
+            r#"{{"identity":"unknown","period_start_ms":{},"period_end_ms":{},"observed_tokens":160000000.0,"previous_tokens":null,"complete":false,"last_used_percent":32.0,"last_sampled_at_ms":{},"samples":[{}],"sample_times":[{}],"meter":null}}"#,
+            now - 60_000, now + 290 * 60_000, now - 60_000,
+            samples.join(","),
+            now - 120_000,
+        );
+        idx.conn().execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('cycle:v1:cline:300:5小时', ?1)",
+            params![seeded],
+        ).unwrap();
+        let quota = |used: f64, sampled: i64| QuotaView {
+            tool: "cline".into(), used_percent: used, window_minutes: 300,
+            resets_at_ms: now + 290 * 60_000, sampled_at_ms: sampled, label: Some("5 小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        // 34% is a ≥2pp turn on top of 16 samples → the thin fires. It must not
+        // panic, and the arrays must stay sane (times ≤ samples).
+        let mut rows = vec![quota(34.0, now)];
+        idx.attach_cycle_usage(&mut rows, now).unwrap();
+        let raw = idx.conn().query_row(
+            "SELECT value FROM meta WHERE key LIKE 'cycle:v1:cline:300%' LIMIT 1",
+            [], |r| r.get::<_, String>(0),
+        ).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let s = state["samples"].as_array().unwrap().len();
+        let t = state["sample_times"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(s, 16, "16 samples minus one thin plus one push");
+        assert!(t <= s, "times stay within lockstep distance");
     }
 
     /// The burn-rate projection: a steady 10M tokens per 20 minutes against an
