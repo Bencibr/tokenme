@@ -36,6 +36,16 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::Instant;
 
+    fn test_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
     struct Server { stop: Arc<AtomicBool>, join: Option<JoinHandle<Result<(), TransportError>>> }
     impl Drop for Server {
         fn drop(&mut self) {
@@ -82,7 +92,7 @@ mod tests {
 
     #[test]
     fn offline_disconnect_is_local_durable_and_retains_history_and_identity() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (identity, config, _) = fixture(dir.path());
         let path = dir.path().join("index.db");
         let mut secondary = SyncStore::open(&path, "primary-1").unwrap();
@@ -116,7 +126,7 @@ mod tests {
 
     #[test]
     fn pending_approval_rejection_expiry_and_cancellation_are_authenticated() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (identity, _, _) = fixture(dir.path());
         let mut primary = SyncStore::open_in_memory("primary-1").unwrap();
         let id = request(&mut primary, &identity, 10);
@@ -139,7 +149,7 @@ mod tests {
 
     #[test]
     fn tls_disconnect_ack_is_idempotent_and_repair_keeps_device_identity() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (identity, mut config, key) = fixture(dir.path());
         let path = dir.path().join("primary.db");
         let mut primary = SyncStore::open(&path, "primary-1").unwrap();
@@ -160,7 +170,7 @@ mod tests {
 
     #[test]
     fn missing_device_on_pinned_primary_is_already_disconnected_but_wrong_pin_is_not() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (_, mut config, key) = fixture(dir.path());
         let primary = SyncStore::open_in_memory("primary-1").unwrap();
         let _server = serve(primary, &mut config, key, dir.path());
@@ -171,7 +181,7 @@ mod tests {
 
     #[test]
     fn missing_identity_never_creates_a_replacement_private_key() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (_, config, _) = fixture(dir.path());
         std::fs::remove_file(&config.identity_path).unwrap();
         assert!(deliver_disconnect_notice(&config, 1).is_err());
@@ -180,7 +190,7 @@ mod tests {
 
     #[test]
     fn occupied_listener_port_falls_back_on_the_same_interface() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (_, config, key) = fixture(dir.path());
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let server = HttpsSyncServer::bind_with_host_fallback(HttpsServerConfig {
@@ -195,7 +205,7 @@ mod tests {
 
     #[test]
     fn endpoint_recovery_preserves_stream_progress_and_cannot_resurrect_a_stopped_binding() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (_, config, _) = fixture(dir.path());
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         store.save_secondary_config(&config, 1).unwrap();
@@ -215,7 +225,7 @@ mod tests {
 
     #[test]
     fn revocation_is_checked_before_retrying_an_immutable_pending_package() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (identity, mut config, key) = fixture(dir.path());
         let mut primary = SyncStore::open_in_memory("primary-1").unwrap();
         let now = usage_core::report::now_ms();
@@ -241,7 +251,7 @@ mod tests {
 
     #[test]
     fn switching_a_stopped_primary_is_atomic_even_when_the_new_binding_write_fails() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let (identity, mut config, _) = fixture(dir.path());
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         store.save_primary_config(&crate::PrimarySyncConfig {
