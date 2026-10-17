@@ -534,6 +534,22 @@ pub(crate) fn persist_sync_event_identity(
     tx: &Transaction<'_>, event_id: i64, event: &UsageEvent, occurrence_id: Option<&str>,
 ) -> Result<()> {
     let identity = sync_event_identity(event, occurrence_id)?;
+    // `sync_event_identity` is an additive projection of `event`. Older
+    // one-shot re-homing repairs changed or removed event rows without also
+    // clearing this table, leaving a stale row that could claim the incoming
+    // identity.  Do the repair in the same transaction as the projection
+    // write so one bad row cannot abort an otherwise valid ingest pass.
+    let conflicting_event_id: Option<i64> = tx.query_row(
+        "SELECT event_id FROM sync_event_identity WHERE identity = ?1 AND event_id <> ?2",
+        params![identity, event_id],
+        |row| row.get(0),
+    ).optional().map_err(sql_err)?;
+    if conflicting_event_id.is_some() {
+        tx.execute(
+            "DELETE FROM sync_event_identity WHERE identity = ?1 AND event_id <> ?2",
+            params![identity, event_id],
+        ).map_err(sql_err)?;
+    }
     tx.execute(
         "INSERT INTO sync_event_identity(event_id, identity, occurrence_id)
          VALUES(?1, ?2, ?3)
@@ -541,6 +557,17 @@ pub(crate) fn persist_sync_event_identity(
              occurrence_id = excluded.occurrence_id",
         params![event_id, identity, occurrence_id],
     ).map_err(sql_err)?;
+    // Keep a pending journal row attached to the repaired event as well.  The
+    // JSON payload (when present) remains the durable update; only its local
+    // row pointer was stale.
+    if conflicting_event_id.is_some() {
+        tx.execute(
+            "UPDATE sync_dirty SET event_id = ?1, source_key = ?3, occurrence_id = ?4,
+                 event_ts_ms = ?5, updated_ms = ?6
+             WHERE identity = ?2",
+            params![event_id, identity, event.source, occurrence_id, event.ts_ms, now_ms()],
+        ).map_err(sql_err)?;
+    }
     Ok(())
 }
 
@@ -633,6 +660,30 @@ fn adjust_sync_dirty_json_bytes(tx: &Transaction<'_>, delta: i64) -> Result<()> 
         "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![next.to_string()],
+    ).map_err(sql_err)?;
+    Ok(())
+}
+
+/// Removes stale rows from the additive sync identity projection.  A few
+/// historical re-homing repairs predate this table and could delete/re-key an
+/// event without touching its projection row.  Keeping the check here makes
+/// opening an existing index self-healing, while keyed rows can still be
+/// repaired lazily by the ingest path.
+fn prune_stale_sync_event_identities(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM sync_event_identity AS i
+          WHERE NOT EXISTS(SELECT 1 FROM event e WHERE e.id = i.event_id)
+             OR EXISTS(
+                SELECT 1 FROM event e
+                 WHERE e.id = i.event_id
+                   AND ((e.dedupe_key IS NOT NULL AND e.dedupe_key <> ''
+                         AND i.identity <> 'key:' || e.dedupe_key)
+                     OR ((e.dedupe_key IS NULL OR e.dedupe_key = '')
+                         AND NOT EXISTS(
+                            SELECT 1 FROM sync_event_occurrence o
+                             WHERE o.event_id = e.id
+                               AND i.identity = 'occ:' || o.occurrence_id))))",
+        [],
     ).map_err(sql_err)?;
     Ok(())
 }
@@ -799,6 +850,33 @@ impl Index {
                     // open heals it.
                     Err(err)
                 }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Opens the index for a foreground owner that can rebuild local usage.
+    ///
+    /// Device sync normally makes corruption fail closed because replacing the
+    /// file could discard remote history, receipts, or trust state. That policy
+    /// is correct for a sync transaction, but it must not leave the panel with
+    /// an empty report and an endless "indexing" state. This entry point keeps
+    /// the damaged image and its sidecars under a `.corrupt-*` name, then
+    /// creates a new schema so the source adapters can rebuild local usage.
+    /// Callers must surface the recovery in their log/UI; the preserved image is
+    /// the recovery input for a later sync-aware salvage tool.
+    pub fn open_recovering_corruption(path: impl Into<PathBuf>) -> Result<(Self, bool)> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match Self::open_connection(&path) {
+            Ok(index) => Ok((index, false)),
+            Err(err) if err.is_corruption() => {
+                if !quarantine(&path) {
+                    return Err(err);
+                }
+                Self::open_connection(&path).map(|index| (index, true))
             }
             Err(err) => Err(err),
         }
@@ -1285,6 +1363,11 @@ impl Index {
             tx.execute("INSERT INTO meta(key, value) VALUES(?1, '1')", params![REPAIR_QODER_SPLIT]).map_err(sql_err)?;
             tx.commit().map_err(sql_err)?;
         }
+        // All compatibility repairs above may have removed or re-keyed event
+        // rows.  Reconcile the additive identity projection after those
+        // mutations, rather than waiting for the next ingest to encounter a
+        // UNIQUE(identity) error.
+        prune_stale_sync_event_identities(&conn)?;
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);
@@ -2364,6 +2447,48 @@ mod tests {
     }
 
     #[test]
+    fn stale_sync_identity_is_repaired_before_it_can_wedge_ingest() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.conn.execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, dedupe_key, source) VALUES
+                ('funide', 1, 'old', 'tokens', 'funide#old', '/old.json'),
+                ('funide', 2, 'new', 'tokens', 'funide#new', '/new.json')",
+            [],
+        ).unwrap();
+        // Simulate the historical repair bug: the identity row survived while
+        // its event was re-keyed, so the new event now wants an identity that
+        // is already claimed by another event id.
+        idx.conn.execute(
+            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(1, 'key:funide#new', NULL)",
+            [],
+        ).unwrap();
+        let event = idx.all_events().unwrap().into_iter().find(|e| e.session == "new").unwrap();
+        let tx = idx.conn.unchecked_transaction().unwrap();
+        persist_sync_event_identity(&tx, 2, &event, None).unwrap();
+        tx.commit().unwrap();
+        let rows: Vec<(i64, String)> = idx.conn.prepare(
+            "SELECT event_id, identity FROM sync_event_identity ORDER BY event_id",
+        ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+            .collect::<std::result::Result<_, _>>().unwrap();
+        assert_eq!(rows, vec![(2, "key:funide#new".to_string())]);
+    }
+
+    #[test]
+    fn stale_sync_identity_cleanup_drops_rekeyed_rows() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.conn.execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, dedupe_key, source) VALUES('funide', 1, 's', 'tokens', 'funide#new', '/s.json')",
+            [],
+        ).unwrap();
+        idx.conn.execute(
+            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(1, 'key:funide#old', NULL)",
+            [],
+        ).unwrap();
+        prune_stale_sync_event_identities(&idx.conn).unwrap();
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM sync_event_identity", [], |r| r.get(0)).unwrap(), 0);
+    }
+
+    #[test]
     fn rebuild_preserves_remote_rows_and_receipt_sidecars() {
         let mut idx = Index::open_in_memory().unwrap();
         idx.conn
@@ -2442,6 +2567,39 @@ mod tests {
             !moved.is_empty(),
             "the damaged image or its sidecars must be kept for forensics: {moved:?}"
         );
+    }
+
+    /// A sync marker must not turn an unreadable image into an endless panel
+    /// boot. The foreground recovery path keeps the original image and starts
+    /// a clean local index; the marker remains so the sync layer can require a
+    /// deliberate re-pair/recovery decision instead of silently trusting it.
+    #[test]
+    fn a_corrupted_sync_index_is_preserved_and_reopened_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let idx = Index::open(&path).unwrap();
+            idx.conn
+                .execute(
+                    "INSERT INTO event(tool, ts_ms, session, meter, source) VALUES('t', 1, 's', 'tokens', '/x')",
+                    [],
+                )
+                .unwrap();
+            idx.conn.execute_batch("PRAGMA writable_schema=ON; INSERT INTO sqlite_master(type, name, tbl_name, rootpage, sql) VALUES('table', 'workbuddy_cn', 'workbuddy_cn', 0, 'CREATE TABLE workbuddy_cn(');").unwrap();
+        }
+        std::fs::write(sync_state_marker_path(&path), b"tokenme-device-sync-state-v1\n").unwrap();
+
+        let (idx, recovered) = Index::open_recovering_corruption(&path).unwrap();
+        assert!(recovered, "the malformed schema must take the recovery path");
+        assert_eq!(idx.event_count().unwrap(), 0, "the replacement starts empty");
+        assert!(sync_state_marker_path(&path).exists(), "the sync marker is retained");
+        let moved: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".corrupt-"))
+            .collect();
+        assert!(moved.iter().any(|n| n.starts_with("index.db.corrupt-")), "the original image is preserved: {moved:?}");
     }
 
     /// The common case: a healthy index verifies without touching the file, so

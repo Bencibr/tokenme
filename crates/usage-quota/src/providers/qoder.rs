@@ -924,11 +924,28 @@ fn umid_candidates() -> Vec<std::path::PathBuf> {
             add_umid_root(&mut out, std::path::PathBuf::from(&p).join("Programs").join(name));
         }
     }
-    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+    let mut program_roots = Vec::new();
+    for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
         if let Some(p) = std::env::var_os(var) {
-            for name in ["Qoder", "Qoder CN", "QoderCN", "Qoder CN IDE"] {
-                add_umid_root(&mut out, std::path::PathBuf::from(&p).join(name));
-            }
+            let p = std::path::PathBuf::from(p);
+            if !program_roots.iter().any(|known| known == &p) { program_roots.push(p); }
+        }
+    }
+    // Qoder's user-selected installer can live on a secondary drive without
+    // registering an uninstall entry or updating the ProgramFiles variables.
+    // Probe the standard Program Files directories on mounted drive letters;
+    // this avoids hard-coding a machine-specific path while covering that
+    // install layout.
+    for drive in b'A'..=b'Z' {
+        let drive = drive as char;
+        for folder in ["Program Files", "Program Files (x86)"] {
+            let root = std::path::PathBuf::from(format!("{drive}:\\{folder}"));
+            if root.is_dir() && !program_roots.iter().any(|known| known == &root) { program_roots.push(root); }
+        }
+    }
+    for root in program_roots {
+        for name in ["Qoder", "Qoder CN", "QoderCN", "Qoder CN IDE"] {
+            add_umid_root(&mut out, root.join(name));
         }
     }
     for root in registry_qoder_roots() {

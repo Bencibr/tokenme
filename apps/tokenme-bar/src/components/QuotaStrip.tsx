@@ -113,7 +113,7 @@ function formatUsedPercent(value: number): string {
 
 /** Tools whose quota probe owns a daily check-in: the group header grows the
  *  badge/button for exactly these. */
-const CHECKIN_TOOLS = ["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn"];
+const CHECKIN_TOOLS = ["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn", "funide"];
 
 /** Segment/dot hues for the per-model cycle breakdown — panel palette vars,
  *  repeating with the same order past the fourth model (the query caps at 8). */

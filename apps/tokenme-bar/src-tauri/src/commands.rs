@@ -858,10 +858,24 @@ fn register_mdns_primary(primary_id: &str, certificate_pin: &str, endpoint: &str
     let instance = format!("TokenMe-{short_id}");
     let hostname = format!("tokenme-{short_id}.local.");
     let properties = vec![("v".to_string(), "1".to_string()), ("proto".to_string(), "tokenme-device-sync/1".to_string()), ("role".to_string(), "primary".to_string()), ("id".to_string(), primary_id.to_string()), ("name".to_string(), "TokenMe primary".to_string()), ("pin".to_string(), format!("sha256:{certificate_pin}")), ("caps".to_string(), "pair,upload".to_string())];
+    // addr_auto lets mdns-sd enumerate the interfaces itself, and on this
+    // Windows test machine that enumeration advertised a WSL vEthernet
+    // address plus three link-local v6 addresses while skipping the real LAN
+    // IPv4 — a remote peer resolved the service to an unreachable address
+    // (wire dump: A=172.26.224.1, AAAA=fe80::…, no 10.0.0.112 record). The
+    // endpoint host is the address the user picked, or the default-route one
+    // infer_advertise_host found, so register exactly that address and fall
+    // back to addr_auto only when the host is a name mdns-sd must resolve.
+    let without_scheme = endpoint.strip_prefix("https://").unwrap_or(endpoint);
+    let without_port = without_scheme.rsplit_once(':').map(|(host, _)| host).unwrap_or(without_scheme);
+    let unbracketed = without_port.trim_start_matches('[').trim_end_matches(']');
+    let advertise_ip = unbracketed.parse::<std::net::IpAddr>().ok();
     let daemon = ServiceDaemon::new().map_err(|error| format!("mDNS unavailable: {error}"))?;
-    let service = ServiceInfo::new(MDNS_SERVICE_TYPE, &instance, &hostname, "", port, &properties[..])
-        .map_err(|error| format!("mDNS service is invalid: {error}"))?
-        .enable_addr_auto();
+    let service = match advertise_ip {
+        Some(ip) => ServiceInfo::new(MDNS_SERVICE_TYPE, &instance, &hostname, &ip.to_string(), port, &properties[..]),
+        None => ServiceInfo::new(MDNS_SERVICE_TYPE, &instance, &hostname, "", port, &properties[..]).map(|service| service.enable_addr_auto()),
+    }
+    .map_err(|error| format!("mDNS service is invalid: {error}"))?;
     daemon.register(service).map_err(|error| format!("mDNS registration failed: {error}"))?;
     let fullname = format!("{instance}.{MDNS_SERVICE_TYPE}");
     let monitor_error = Arc::new(Mutex::new(None));
@@ -934,6 +948,23 @@ fn apply_discovery_result(state: &mut SyncControlState, result: Result<Vec<Disco
     }
 }
 
+/// Preference order for the endpoint an advertisement resolves to: a global
+/// IPv4 first (the shape the invite UI and the TLS transport are exercised
+/// against), then a global/ULA IPv6, then the link-scope addresses — IPv4's
+/// plain 169.254 beats IPv6's fe80, whose zone-suffixed string ([…%14]) is
+/// only meaningful on the resolving machine. Loopback and unspecified are
+/// filtered before ranking.
+fn advertised_address_rank(ip: std::net::IpAddr) -> u8 {
+    match ip {
+        std::net::IpAddr::V4(v4) => if v4.is_link_local() { 2 } else { 0 },
+        std::net::IpAddr::V6(v6) => {
+            let segment = v6.segments()[0];
+            let routable = (0x2000..=0x3fff).contains(&segment) || (0xfc00..=0xfdff).contains(&segment);
+            if routable { 1 } else { 3 }
+        }
+    }
+}
+
 fn discover_mdns_primaries() -> Result<Vec<DiscoveredPrimaryView>, String> {
     let daemon = ServiceDaemon::new().map_err(|error| format!("mDNS unavailable: {error}"))?;
     let receiver = daemon.browse(MDNS_SERVICE_TYPE).map_err(|error| format!("mDNS browse failed: {error}"))?;
@@ -946,7 +977,16 @@ fn discover_mdns_primaries() -> Result<Vec<DiscoveredPrimaryView>, String> {
                 let Some(primary_id) = service.get_property_val_str("id") else { continue; };
                 let Some(pin) = service.get_property_val_str("pin") else { continue; };
                 if !pin.strip_prefix("sha256:").is_some_and(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))) { continue; }
-                let Some(address) = service.get_addresses().iter().find(|address| !address.is_loopback() && !address.to_ip_addr().is_unspecified()) else { continue; };
+                // The responder answers with its whole address set. A link-local
+                // IPv6 only reaches a peer when the zone index happens to line
+                // up — the self-discovery probe here resolved to fe80::…%14 and
+                // a cross-machine pairing would have dialled that dead string —
+                // so rank a routable address first and keep link-local as the
+                // last resort instead of taking the set's first entry.
+                let Some(address) = service.get_addresses().iter()
+                    .filter(|candidate| { let ip = candidate.to_ip_addr(); !ip.is_loopback() && !ip.is_unspecified() })
+                    .min_by_key(|candidate| advertised_address_rank(candidate.to_ip_addr()))
+                else { continue; };
                 let address = address.to_string();
                 let endpoint = if address.contains(':') { format!("https://[{address}]:{}", service.port) } else { format!("https://{address}:{}", service.port) };
                 let certificate_pin = pin.strip_prefix("sha256:").unwrap_or(pin).to_string();

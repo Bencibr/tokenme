@@ -12,7 +12,7 @@
 | 按模型、项目查单次请求 | 面板 → 明细 |
 | 测 TTFT（首 token 延迟）与 TPS | 面板 → 速度（被动测量；Codex / Claude Code 可主动发起一次短请求实测） |
 | 看各家订阅剩余额度与重置倒计时 | 面板 → 概览下方的配额条（窗口跨 80% 或耗尽时弹系统通知） |
-| 每日签到一键代领 | 面板 → 工具页行头（Trae CN、Qoder、Qoder CN、MiniMax Code、WorkBuddy 国内版） |
+| 每日签到一键代领 | 面板 → 工具页行头（Trae CN、Qoder、Qoder CN、MiniMax Code、WorkBuddy 国内版、FunIDE） |
 | 把服务器、容器上的用量汇总进来 | 面板底栏「服务器」一键部署，或 Linux 采集端手动安装（见 §4）；严格 HTTPS 多设备通道可在设备同步面板或 `tokenme sync run` 中使用（见 §4.1） |
 | 给无限额的工具设成本上限 | `tokenme budget set`（见 §5） |
 | 在菜单栏常驻数字或图标 | 托盘显示模式，六种任选（见 §3） |
@@ -98,6 +98,8 @@ MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline�
 ### 3.7 WorkBuddy 双版本
 
 国内版 WorkBuddy（`workbuddy_cn`）读 `~/.workbuddy`，国际版 WorkBuddy AI（`workbuddy`）读 `~/.workbuddy-ai`，用量、配额缓存与宿主退出门控互相独立。国内版轮询会检查每日活动并代领符合条件的日子；开启 高级 → 自动签到 后，关掉 WorkBuddy 客户端、只要 TokenMe 在跑就继续领。总闸与逐工具开关照常止住请求。已确认的日子按账号记住，北京时间零点过期。
+
+FunIDE 使用官方客户端写入的登录状态，轮询先读取 `/billing/balance` 返回的签到状态，只在活动开放且今日未签到时调用 `/billing/checkin`，随后再次读取余额确认结果。高级 → 自动签到关闭时不会自动领取，工具行头的手动签到仍可用。
 
 ### 3.8 额度横幅
 

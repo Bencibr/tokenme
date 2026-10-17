@@ -12,7 +12,7 @@
 | Single requests, filtered by model or project | Panel → Details |
 | Measure TTFT (time to first token) and TPS | Panel → Speed (passive measurement; Codex / Claude Code can also fire one short live probe) |
 | Each subscription's remaining quota and reset countdown | The quota strip below Overview (a system notification fires when a window crosses 80% or is exhausted) |
-| One-click daily check-in | Panel → Tools, in the row header (Trae CN, Qoder, Qoder CN, MiniMax Code, WorkBuddy CN) |
+| One-click daily check-in | Panel → Tools, in the row header (Trae CN, Qoder, Qoder CN, MiniMax Code, WorkBuddy CN, FunIDE) |
 | Fold in usage from servers and containers | One-click deploy from the panel footer's server button, or install the Linux collector by hand (see §4); the strict HTTPS device path is available in the device-sync sheet or through `tokenme sync run` (see §4.1) |
 | Use the strict device-sync path | Panel primary/secondary management or `tokenme sync run/stop/status` over pinned HTTPS/TCP/TLS 1.3 (see §4.1) |
 | Cost caps for tools without a vendor-published limit | `tokenme budget set` (see §5) |
@@ -99,6 +99,8 @@ Three tools keep a short-lived login on disk — MiniMax Code (about an hour), K
 ### 3.7 The two WorkBuddy editions
 
 Domestic **WorkBuddy** (`workbuddy_cn`) reads `~/.workbuddy`; international **WorkBuddy AI** (`workbuddy`) reads `~/.workbuddy-ai`. Their usage, quota caches and host-exit gates are separate. Domestic polling checks the day's activity and claims any eligible, unclaimed day; with Advanced → Auto check-in enabled, claims continue with the WorkBuddy client closed for as long as TokenMe runs. The master gate and the per-tool switch still stop requests. Confirmed days are remembered per account and expire at Beijing midnight.
+
+FunIDE uses the login state written by its official client. Polling reads `/billing/balance`, calls `/billing/checkin` only when the activity is open and today is unclaimed, then reads the balance again to confirm the result. Turning off Advanced → Auto check-in stops automatic claims; the row-header manual action remains available.
 
 ### 3.8 Quota banners
 

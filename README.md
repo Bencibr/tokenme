@@ -25,7 +25,7 @@ TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的�
 - 各家订阅的额度还剩多少、什么时候重置？
 - 这个月每个工具各占了多少开销，缓存到底省了多少？
 
-这些数字平时散在各家自己的控制台和本地日志里，口径互不相通。TokenMe 直接读取这些工具写在磁盘上的日志与数据库，在本机汇成一份索引；无头服务器和容器装上采集端后定时报数，多机用量汇总成同一份账。配额走各家自己的接口或本地凭据做只读探测，支持签到的五家还能在面板里一键代领。
+这些数字平时散在各家自己的控制台和本地日志里，口径互不相通。TokenMe 直接读取这些工具写在磁盘上的日志与数据库，在本机汇成一份索引；无头服务器和容器装上采集端后定时报数，多机用量汇总成同一份账。配额走各家自己的接口或本地凭据做只读探测，支持签到的六家还能在面板里一键代领。
 
 ## TokenMe能干什么？
 
@@ -165,7 +165,7 @@ $ tokenme daily --days 3
 | <img src="crates/usage-core/assets/workbuddy.png" width="20" alt=""> **WorkBuddy**（国内版） | 积分包配额 | ✅ | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/codebuddy.png" width="20" alt=""> **CodeBuddy** | Craft 积分 | — | ✅ | — | ✅ |
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | — | ✅ | ✅ | ⏳ |
-| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手**（原 CatPaw） | 积分余额 | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek 账户余额 | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | — | ✅ | ✅ | ⏳ |
@@ -199,6 +199,11 @@ TokenMe 可以从本地客户端活动中被动测量 **TTFT**（首 token 延�
 
 DSH 按会话汇总：TTFT 取请求均值，TPS 按输出 token 除以解码耗时；旧日志缺首 token 时间则无此指标。主动测试点击后才发一条短提示（消耗套餐额度），结果与被动均值分开显示，提示词与回复一概不留。
 
+
+## 0.1.8 更新内容
+
+- **新增**：FunIDE 自动签到；面板先读取官方余额接口的签到状态，只在活动开放且今日未签到时领取，并用刷新后的余额确认结果。
+- **修复**：局域网 MCP HTTP 凭据有效期统一为 1 天；关闭 MCP 或退出 TokenMe 仍会立即撤销凭据。
 
 ## 0.1.7 更新内容
 

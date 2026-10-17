@@ -46,6 +46,7 @@ pub use codex::CodexQuota;
 pub use copilot::CopilotQuota;
 pub use dsh::DshQuota;
 pub use funide::FunIdeQuota;
+pub use funide::manual_checkin as funide_manual_checkin;
 pub use gemini::GeminiQuota;
 pub use joycode::JoycodeQuota;
 pub use kimicode::KimiCodeQuota;

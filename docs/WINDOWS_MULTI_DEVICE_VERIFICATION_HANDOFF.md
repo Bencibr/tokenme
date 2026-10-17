@@ -2,7 +2,7 @@
 
 > 目标：让 Windows 客户端完成 **Windows 原生** 和 **跨平台真实网络** 验证，并回传可复核证据。
 >
-> 当前结论：协议和面板代码已进入仓库，但 Windows 原生 ACL、Windows named pipe、Windows 防火墙/发现行为以及 Windows 参与的三端局域网互通仍是 `UNVERIFIED`。本文件是验收清单，不是“已通过”声明。
+> 当前结论（2026-10-15）：Windows 私有 named pipe 控制面已经实现，并在本机通过长驻启动、延迟连接、`status`、`stop`、CLI 集成和 NSIS 安装启动验证；Windows ACL 的第二账号拒绝、Windows 防火墙/发现行为以及 Windows 参与的三端局域网互通仍是 `UNVERIFIED`。本文件是验收清单，不是“已通过”声明。
 
 ## 1. 验证边界
 
@@ -104,7 +104,7 @@ fsutil reparsepoint query $Sync
 
 ### 3.3 Windows 控制面（named pipe）
 
-`sync stop/status` 的 Windows 实现应使用用户私有 named pipe，不得把控制面退化为公开 TCP 端口。验证：
+`sync stop/status` 的 Windows 实现使用按数据库路径派生的用户私有 named pipe，DACL 只授予当前 token SID，并设置 `PIPE_REJECT_REMOTE_CLIENTS`；不得把控制面退化为公开 TCP 端口。已完成本机验证：长驻 10 秒后仍可 `status`/`stop`，启动期间延迟连接可重试，`cargo test -p usage-cli` 的 Windows 控制面测试通过，安装包内 CLI 的 `sync status --json` 返回正常。仍需以下真实环境验证：
 
 1. 以普通用户启动从端 runtime。
 2. 以同一用户执行 `tokenme sync status` 和 `tokenme sync stop`，确认能读状态并停止。
@@ -112,7 +112,7 @@ fsutil reparsepoint query $Sync
 4. runtime 异常退出后重新执行 `sync run`，确认旧 pipe 被清理，不能卡在“已运行”。
 5. 退出/重启过程中不要删除 identity、outbox 或待传数据。
 
-如果 Windows 版本尚未提供 named pipe ACL 或命令无法运行，回传错误和日志并标记 `UNVERIFIED/NEEDS_CHANGE`，不要用 loopback TCP 临时替代。
+第二个低权限 Windows 用户、异常退出后的 pipe 清理和跨用户数据读取仍未在本机完成；这些项目保持 `UNVERIFIED`，不要用 loopback TCP 临时替代。
 
 ## 4. Windows 主端验证
 

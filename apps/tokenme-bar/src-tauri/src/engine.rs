@@ -84,9 +84,12 @@ pub struct EngineChannel(pub Sender<Msg>);
 /// Shared between the engine thread, the commands and the tray.
 pub struct Shared {
     pub report: Mutex<Option<Report>>,
+    /// A startup/open failure is separate from the report: a cold panel has
+    /// no report yet, and returning the generic `indexing` sentinel forever
+    /// hides a failure that the user can actually retry.
+    pub startup_error: Mutex<Option<String>>,
     pub settings: Mutex<Settings>,
     ingesting: Mutex<()>,
-    startup_error: Mutex<Option<String>>,
     /// The machine scope every publish folds with. Read at publish time (never
     /// cached in the engine), so a switch applies to the very next report even
     /// if it lands while a slow pass is mid-flight.
@@ -97,9 +100,9 @@ impl Shared {
     pub fn new(settings: Settings) -> Self {
         Self {
             report: Mutex::new(None),
+            startup_error: Mutex::new(None),
             settings: Mutex::new(settings),
             ingesting: Mutex::new(()),
-            startup_error: Mutex::new(None),
             scope: Mutex::new(MachineScope::All),
         }
     }
@@ -132,14 +135,20 @@ impl Shared {
         self.report.lock().ok().and_then(|r| r.clone())
     }
 
-    pub fn startup_error(&self) -> Option<String> {
-        self.startup_error.lock().ok().and_then(|error| error.clone())
+    pub fn set_startup_error(&self, error: impl Into<String>) {
+        if let Ok(mut slot) = self.startup_error.lock() {
+            *slot = Some(error.into());
+        }
     }
 
-    fn set_startup_error(&self, error: Option<String>) {
+    pub fn clear_startup_error(&self) {
         if let Ok(mut slot) = self.startup_error.lock() {
-            *slot = error;
+            *slot = None;
         }
+    }
+
+    pub fn startup_error(&self) -> Option<String> {
+        self.startup_error.lock().ok().and_then(|error| error.clone())
     }
 }
 
@@ -260,16 +269,20 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
     // An index that cannot be opened is not a quiet day either: every pass would
     // return without publishing and the webview would sit on "indexing" forever.
     let shared = app.state::<Shared>();
-    let mut index = match Index::open(index_path()) {
-        Ok(index) => {
-            shared.set_startup_error(None);
+    let mut index = match Index::open_recovering_corruption(index_path()) {
+        Ok((index, true)) => {
+            crate::logging::error(
+                "integrity: the index could not be opened; the original image was preserved and a new index was created for local re-scan",
+            );
             Some(index)
         }
+        Ok((index, false)) => Some(index),
         Err(e) => {
-            let message = format!("index could not be opened: {e}");
-            shared.set_startup_error(Some(message.clone()));
+            app.state::<Shared>().set_startup_error(format!(
+                "index could not be opened; local usage is unavailable until it is repaired: {e}"
+            ));
             crate::logging::error(&format!(
-                "{message} — no data can be published until it is"
+                "index could not be opened — no data can be published until it is: {e}"
             ));
             None
         }
@@ -349,7 +362,24 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
                 // The damaged file could not be moved aside, so there is nothing
                 // better to work with than it: keep the handle the next open
                 // gives back and say out loud that the image is bad.
-                index = Index::open(index_path()).ok();
+                index = match Index::open_recovering_corruption(index_path()) {
+                    Ok((index, true)) => {
+                        crate::logging::error(
+                            "integrity: the damaged device-sync image was preserved and a new index was created for local re-scan",
+                        );
+                        Some(index)
+                    }
+                    Ok((index, false)) => Some(index),
+                    Err(open_error) => {
+                        app.state::<Shared>().set_startup_error(format!(
+                            "index could not be repaired; local usage is unavailable until it is repaired: {open_error}"
+                        ));
+                        crate::logging::error(&format!(
+                            "integrity: reopening the index after failure also failed: {open_error}"
+                        ));
+                        None
+                    }
+                };
                 crate::logging::error(&format!(
                     "integrity: the index image is damaged and could not be replaced ({e}) — \
                      numbers may be wrong until it heals"
@@ -542,6 +572,28 @@ fn ingest<R: Runtime>(
     let shared = app.state::<Shared>();
     // A second ingest while one is running adds nothing but latency.
     let Ok(_guard) = shared.ingesting.try_lock() else { return };
+    if index.is_none() {
+        match Index::open_recovering_corruption(index_path()) {
+            Ok((opened, true)) => {
+                crate::logging::error(
+                    "integrity: the index was repaired on retry; the original image was preserved",
+                );
+                *index = Some(opened);
+                shared.clear_startup_error();
+            }
+            Ok((opened, false)) => {
+                *index = Some(opened);
+                shared.clear_startup_error();
+            }
+            Err(e) => {
+                shared.set_startup_error(format!(
+                    "index could not be repaired; local usage is unavailable until it is repaired: {e}"
+                ));
+                crate::logging::error(&format!("index retry failed: {e}"));
+                return;
+            }
+        }
+    }
     let Some(index) = index.as_mut() else { return };
 
     let cutoff = cutoff_ms();
@@ -764,6 +816,7 @@ fn publish_restored<R: Runtime>(app: &AppHandle<R>) {
     if let Ok(mut slot) = app.state::<Shared>().report.lock() {
         *slot = Some(report.clone());
     }
+    app.state::<Shared>().clear_startup_error();
     let _ = app.emit(REPORT_EVENT, &report);
     let mode = app.state::<Shared>().settings().tray_mode;
     tray::refresh(app, &report, mode);
@@ -1110,9 +1163,9 @@ mod tests {
     fn startup_error_is_cleared_after_a_successful_index_open() {
         let shared = Shared::new(Settings::default());
         assert!(shared.startup_error().is_none());
-        shared.set_startup_error(Some("index could not be opened".into()));
+        shared.set_startup_error("index could not be opened");
         assert_eq!(shared.startup_error().as_deref(), Some("index could not be opened"));
-        shared.set_startup_error(None);
+        shared.clear_startup_error();
         assert!(shared.startup_error().is_none());
     }
 

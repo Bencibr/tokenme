@@ -311,7 +311,7 @@ const zh = {
   "page.tools": "工具",
   "page.tools.hint": "各工具的用量与花费",
   "page.ranks": "排行",
-  "page.ranks.hint": "模型 / 项目 / MCP / Skill 的排序",
+  "page.ranks.hint": "工具 / 模型 / 项目 / MCP / Skill 的排序",
   "page.detail": "明细",
   "page.detail.hint": "最近会话与数据来源",
     "page.speed": "速度",
@@ -653,7 +653,7 @@ const zh = {
   "set.mcp.client.copied": "已复制 MCP 配置",
   "set.mcp.client.expires": "凭据有效期至 {time}",
   "set.checkin": "自动签到",
-    "set.checkin.hint": "总闸：关闭后 Trae CN / Qoder / Qoder CN / MiniMax Code / WorkBuddy 国内版一律不自动签到（手动签到不受影响）；开启后宿主退出也照常签",
+  "set.checkin.hint": "总闸：关闭后 Trae CN / Qoder / Qoder CN / MiniMax Code / WorkBuddy 国内版 / FunIDE 一律不自动签到（手动签到不受影响）；开启后宿主退出也照常签",
   "set.perprobe": "逐工具配额",
   "set.perprobe.hint": "关掉的工具不探测也不显示，例如没在用的就别占位置",
   "set.perprobe.off": "{n} 个已关",
@@ -710,6 +710,7 @@ const zh = {
   "bubble.aria": "今日 {t} tokens",
 
   /* 页面区块标题（App 直传的 Section label） ------------------------------ */
+  "sec.tools": "工具",
   "sec.models": "模型",
   "sec.projects": "项目",
 };
@@ -998,7 +999,7 @@ const en: Record<StrKey, string> = {
   "page.tools": "Tools",
   "page.tools.hint": "Usage and cost by tool",
   "page.ranks": "Rankings",
-  "page.ranks.hint": "Top models, projects, MCP, skills",
+  "page.ranks.hint": "Top tools, models, projects, MCP, skills",
   "page.detail": "Details",
   "page.detail.hint": "Sessions & data sources",
     "page.speed": "Speed",
@@ -1330,7 +1331,7 @@ const en: Record<StrKey, string> = {
   "set.cycle.tokens": "Show cycle token estimate",
   "set.cycle.tokens.hint": "Show local tokens for 5-hour and weekly quota windows; add a projection only when the meter is trustworthy",
   "set.checkin": "Auto check-in",
-    "set.checkin.hint": "Master switch: off, none of Trae CN / Qoder / Qoder CN / MiniMax Code / WorkBuddy CN auto-check-in (manual clicks still work); on, they claim daily even with their apps closed",
+    "set.checkin.hint": "Master switch: off, none of Trae CN / Qoder / Qoder CN / MiniMax Code / WorkBuddy CN / FunIDE auto-check-in (manual clicks still work); on, they claim daily even with their apps closed",
   "set.perprobe": "Quota by tool",
   "set.perprobe.hint": "A switched-off tool is not probed and its rows are hidden",
   "set.perprobe.off": "{n} off",
@@ -1384,6 +1385,7 @@ const en: Record<StrKey, string> = {
   "bubble.pet_model_hint": "Drag to rotate · click for next action",
   "bubble.aria": "Today {t} tokens",
 
+  "sec.tools": "Tools",
   "sec.models": "Models",
   "sec.projects": "Projects",
 };

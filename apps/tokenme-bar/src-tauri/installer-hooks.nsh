@@ -98,6 +98,18 @@
 
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro TokenMeCliPath Add "$INSTDIR\bin\windows-cli-path.ps1"
+  ; Firewall: discovery answers arrive as inbound UDP 5353 and the LAN sync
+  ; listener takes inbound TCP, but Windows never shows its allow prompt for
+  ; silent installs — the default-deny profile drops both and a secondary
+  ; scans an empty LAN forever. The installer holds an elevated token
+  ; (MultiUser highestAvailable), so register allow rules for this exact
+  ; binary; the stale lowercase-era rules name paths this exe outlived.
+  nsExec::Exec 'netsh advfirewall firewall delete rule name="TokenMe (mDNS discovery)"'
+  Pop $0
+  nsExec::Exec 'netsh advfirewall firewall add rule name="TokenMe (mDNS discovery)" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" protocol=UDP localport=5353 profile=any enable=yes'
+  Pop $0
+  nsExec::Exec 'netsh advfirewall firewall add rule name="TokenMe (LAN sync)" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" protocol=TCP profile=any enable=yes'
+  Pop $0
   ; Pin the toast identity: the notification banner resolves the app name
   ; through shell caches that a renamed shortcut does not invalidate, so the
   ; registration wins where the shortcut spelling loses.
@@ -125,6 +137,12 @@
 
 !macro NSIS_HOOK_POSTUNINSTALL
   !insertmacro TokenMeCliPath Remove "$PLUGINSDIR\windows-cli-path.ps1"
+  ; A per-user uninstaller may run unelevated and netsh will fail there; the
+  ; rules then survive until the next install overwrites them.
+  nsExec::Exec 'netsh advfirewall firewall delete rule name="TokenMe (mDNS discovery)"'
+  Pop $0
+  nsExec::Exec 'netsh advfirewall firewall delete rule name="TokenMe (LAN sync)"'
+  Pop $0
   !insertmacro TokenMeDeleteMatchingUninstall HKLM
   !insertmacro TokenMeDeleteMatchingUninstall HKCU
 !macroend

@@ -45,7 +45,10 @@ const LOCAL_MCP_PATH: &str = "/mcp";
 const LOCAL_MCP_PORT: u16 = 47822;
 const LOCAL_MCP_MAX_HEADER_BYTES: usize = 64 * 1024;
 const LOCAL_MCP_MAX_BODY_BYTES: usize = 256 * 1024;
-const LOCAL_MCP_TOKEN_TTL_MS: i64 = 15 * 60 * 1000;
+/// A copied HTTP MCP credential remains usable for one day. It is still
+/// revoked immediately when MCP is disabled or TokenMe exits, so the longer
+/// lifetime only avoids forcing another copy during a normal workday.
+const LOCAL_MCP_TOKEN_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const LOCAL_MCP_MAX_AUTH_BYTES: usize = 256;
 const LOCAL_MCP_MAX_CONNECTIONS: usize = 4;
 const LOCAL_MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1850,6 +1853,7 @@ mod tests {
     fn local_mcp_bearer_is_high_entropy_read_only_and_revoked_on_disable() {
         let state = state();
         let token = new_local_mcp_token();
+        assert_eq!(LOCAL_MCP_TOKEN_TTL_MS, 24 * 60 * 60 * 1000);
         assert!(token.starts_with("tm_"));
         assert!(token.len() >= 40);
         assert_ne!(token, new_local_mcp_token());

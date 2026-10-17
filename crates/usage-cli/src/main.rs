@@ -8,6 +8,8 @@ mod args;
 mod commands;
 mod context;
 mod render;
+#[cfg(windows)]
+mod windows_control;
 
 use clap::{CommandFactory, Parser};
 
