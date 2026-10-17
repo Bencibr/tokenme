@@ -629,7 +629,6 @@ export function QuotaStrip({
           // row's number came from the tool's own records (日志), exactly the
           // rows a reader must not mistake for a vendor meter; budget rows
           // carry their own per-row badge already.
-          const logged = g.rows.some((r) => r.origin === "log");
           return (
             <div
               className="quota-group"
@@ -646,13 +645,6 @@ export function QuotaStrip({
                 <ToolIcon tool={g.tool} size={18} />
                 <span className="quota-tool">{toolDisplay(g.tool)}</span>
                 {plan ? <span className="quota-plan">{translateQuotaVocab(plan)}</span> : null}
-                <span className="quota-origins">
-                  {logged ? (
-                    <span className="quota-badge" data-origin="log">
-                      {ORIGIN("log")}
-                    </span>
-                  ) : null}
-                </span>
                 {CHECKIN_TOOLS.includes(g.tool) ? (
                   <span className="quota-checkin">
                     {groupCheckedIn(g.tool) || (checkinClaimed.get(g.tool) ?? 0) > Date.now() ? (
@@ -787,6 +779,7 @@ export function QuotaStrip({
                       })
                     : null,
                   cycle.eta_to_full_ms ? t("quota.cycle.tip.eta", { eta: etaDuration(cycle.eta_to_full_ms) }) : null,
+                  q.origin === "log" ? t("quota.origin.log.tip") : null,
                   cycle.previous_tokens != null && cycle.previous_tokens > 0
                     ? t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })
                     : null,
