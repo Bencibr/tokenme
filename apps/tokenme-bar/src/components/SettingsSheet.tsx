@@ -55,11 +55,12 @@ async function copyText(value: string): Promise<boolean> {
   }
 }
 
-type Tab = "general" | "alert" | "advanced" | "about";
+type Tab = "general" | "pet" | "alert" | "advanced" | "about";
 // Label keys are literals rather than a `set.tab.${k}` template so the parity
 // gate (scripts/check-i18n-parity.py) can see each tab's copy is reached.
 const TABS: { key: Tab; label: () => string }[] = [
   { key: "general", label: () => t("set.tab.general") },
+  { key: "pet", label: () => t("set.tab.pet") },
   { key: "alert", label: () => t("set.tab.alert") },
   { key: "advanced", label: () => t("set.tab.advanced") },
   { key: "about", label: () => t("set.tab.about") },
@@ -675,6 +676,12 @@ export function SettingsSheet({
             {switchRow(t("set.money"), t("set.money.hint"), settings.show_money, setMoney)}
             {switchRow(t("set.hideunused.tools"), t("set.hideunused.tools.hint"), settings.hide_unused_tools, setHideUnusedTools)}
             {switchRow(t("set.quota.hideunused"), t("set.quota.hideunused.hint"), settings.hide_unused_quota, setHideUnusedQuota)}
+            {switchRow(t("set.cycle.tokens"), t("set.cycle.tokens.hint"), settings.show_cycle_tokens, setCycleTokens)}
+            {switchRow(t("set.cycle.estimation.hide"), t("set.cycle.estimation.hide.hint"), settings.hide_unused_estimation, setHideUnusedEstimation)}
+          </>
+        ) : null}
+        {tab === "pet" ? (
+          <>
             {isWindows || isMac ? (
               <>
                 {switchRow(t("set.bubble"), t("set.bubble.hint"), settings.bubble_enabled, setBubble)}
@@ -713,7 +720,9 @@ export function SettingsSheet({
                 </div>
                 {petError && <p className="sheet-hint sheet-pet-error" role="alert">{petError}</p>}
               </>
-            ) : null}
+            ) : (
+              <p className="sheet-hint">{t("set.pet.none")}</p>
+            )}
           </>
         ) : null}
         {tab === "alert" ? (
@@ -819,20 +828,18 @@ export function SettingsSheet({
             </div>
             {mcpError && mcpEnabled && mcpConfig?.config_json ? <p className="sheet-hint" role="alert">{mcpError}</p> : null}
             {switchRow(t("set.polling"), t("set.polling.hint"), settings.quota_polling, setQuotaPolling)}
-            {switchRow(t("set.cycle.tokens"), t("set.cycle.tokens.hint"), settings.show_cycle_tokens, setCycleTokens)}
-            {switchRow(t("set.cycle.estimation.hide"), t("set.cycle.estimation.hide.hint"), settings.hide_unused_estimation, setHideUnusedEstimation)}
             {switchRow(t("set.ttft"), t("set.ttft.hint"), settings.ttft_enabled, (on) => void setTtft(on), ttftBusy)}
             {ttftError ? <p className="sheet-hint" role="alert">{t("set.ttft.failed")}</p> : null}
             {/* Master off ⇒ no claim can fire at all, so the guarantee would be
                 a promise the app cannot keep; the row locks like set.pause does. */}
             {switchRow(t("set.checkin"), t("set.checkin.hint"), settings.auto_checkin, setAutoCheckin, !settings.quota_polling)}
             {navRow("probe", t("set.perprobe"), t("set.perprobe.hint"), offCount ? t("set.perprobe.off", { n: offCount }) : t("set.perprobe.all"))}
-            {switchRow(t("set.autostart"), null, settings.autostart, setAutostart)}
-            {switchRow(t("set.autoupdate"), t("set.autoupdate.hint"), settings.auto_update_check, setAutoUpdateCheck)}
           </>
         ) : null}
         {tab === "about" ? (
           <>
+            {switchRow(t("set.autostart"), null, settings.autostart, setAutostart)}
+            {switchRow(t("set.autoupdate"), t("set.autoupdate.hint"), settings.auto_update_check, setAutoUpdateCheck)}
             {/* The footer already signs the sheet "TokenMe v…" on every tab;
                 a version row here said it twice. The build number — the one
                 thing the footer doesn't carry — lives in the check row. */}
