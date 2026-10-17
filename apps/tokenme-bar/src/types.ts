@@ -106,6 +106,8 @@ export interface QuotaView {
     observed_tokens: number;
     estimated_tokens?: number | null;
     estimated_used_percent?: number | null;
+    /** Burn-rate projection: at the recent pace, ms until the window total. */
+    eta_to_full_ms?: number | null;
     previous_tokens?: number | null;
     status: "collecting" | "partial" | "complete" | "unavailable" | "unverified";
     period_start_ms: number;

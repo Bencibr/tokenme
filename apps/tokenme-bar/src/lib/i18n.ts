@@ -77,7 +77,6 @@ const zh = {
   "hdr.sync.more": "+{n} 台",
 
   "sync.title": "设备同步",
-  "sync.short": "设备",
   "sync.close": "关闭设备同步",
   "sync.role.ask": "这台设备是…",
   "sync.role.primary": "主端",
@@ -453,6 +452,7 @@ const zh = {
   "set.cycle.tokens.hint": "在 5 小时或周配额下显示本机累计 Token；百分比口径可信时追加预计周期值",
   "quota.cycle.observed": "已用 · {tokens} tokens",
   "quota.cycle.estimated": "预估 ≈ {tokens}（按已用 {used}%）",
+  "quota.cycle.eta": "当前速度约 {eta} 用完",
   "quota.cycle.previous": "上周期 · {tokens} tokens",
   "quota.cycle.collecting": "收集中",
   "quota.cycle.partial": "部分周期",
@@ -791,7 +791,6 @@ const en: Record<StrKey, string> = {
   "hdr.sync.more": "+{n} more",
 
   "sync.title": "Device sync",
-  "sync.short": "Devices",
   "sync.close": "Close device sync",
   "sync.role.ask": "This device is…",
   "sync.role.primary": "Primary",
@@ -1161,6 +1160,7 @@ const en: Record<StrKey, string> = {
   "quota.meta.local": "This machine · filter-independent",
   "quota.cycle.observed": "Used · {tokens} tokens",
   "quota.cycle.estimated": "estimated ≈ {tokens} (using {used}% used)",
+  "quota.cycle.eta": "{eta} at this pace",
   "quota.cycle.previous": "Previous cycle · {tokens} tokens",
   "quota.cycle.collecting": "Collecting",
   "quota.cycle.partial": "Partial cycle",

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loading } from "./Loading";
 import type { NotifyState, QuotaDisplayMode, QuotaOrder, QuotaView } from "../types";
 import { bridge } from "../lib/bridge";
-import { toolColor, toolDisplay, until, freshness } from "../lib/format";
+import { toolColor, toolDisplay, until, freshness, etaDuration } from "../lib/format";
 import { t } from "../lib/i18n";
 import { Section } from "./Section";
 import { ToolIcon } from "./ToolIcon";
@@ -861,6 +861,7 @@ export function QuotaStrip({
                               tokens: formatLimitTokens(cycle.estimated_tokens),
                               used: formatUsedPercent(cycle.estimated_used_percent ?? q.used_percent),
                             })}
+                            {cycle.eta_to_full_ms ? <> · {t("quota.cycle.eta", { eta: etaDuration(cycle.eta_to_full_ms) })}</> : null}
                           </span>
                         ) : null}
                         {cycle.previous_tokens != null && cycle.previous_tokens > 0 ? (

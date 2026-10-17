@@ -183,9 +183,8 @@ export function StatusBar({
           <IconServer size={15} />
           <span className="srv-dot" aria-hidden="true" />
         </button>
-        <button type="button" className="sync-btn" onClick={onOpenSync} title={t("sync.title")} aria-label={t("sync.title")}>
-          <IconDevices size={14} />
-          <span>{t("sync.short")}</span>
+        <button type="button" className="icon-btn" onClick={onOpenSync} title={t("sync.title")} aria-label={t("sync.title")}>
+          <IconDevices size={15} />
         </button>
         <button type="button" className="settings-btn" onClick={onOpenSettings} title={t("status.settings")} aria-label={t("status.settings")}>
           <IconSettings size={15} />

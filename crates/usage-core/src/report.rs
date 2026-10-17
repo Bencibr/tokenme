@@ -194,6 +194,11 @@ pub struct CycleUsage {
     /// shipping an empty list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<CycleModelUsage>,
+    /// Burn-rate projection: at the median pace of the recent sample pairs,
+    /// how long until this window's implied total is reached. Absent when the
+    /// pace is unknown, frozen, or the projection runs past a week.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_to_full_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
