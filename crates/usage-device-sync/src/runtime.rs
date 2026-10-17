@@ -15,6 +15,7 @@ use crate::{
     AuthenticatedStatus, AuthenticatedStatusRequest, DeviceIdentity, DirtyJournalInput,
     NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, StreamOpenReceipt,
     ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
+    TransportError,
 };
 
 // Keep the scheduler lease longer than the transport's 10-minute request
@@ -289,7 +290,7 @@ impl SyncRuntime {
         let request = AuthenticatedStatusRequest::new_at_with_checkpoint(
             &identity, config.primary_id.clone(), true, config.last_ack_generation, request_now,
         )?;
-        let status = self.transport.status(&request).map_err(|error| SyncError::Protocol(format!("secondary status request failed: {error}")))?;
+        let status = self.transport.status(&request).map_err(map_secondary_status_error)?;
         self.store.mark_secondary_connected(now_ms())?;
         match status.status.as_str() {
             "paired" => {}
@@ -457,6 +458,13 @@ fn retryable_secondary_error(error: &SyncError) -> bool {
         SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired" => false,
         SyncError::Protocol(_) | SyncError::Auth(_) | SyncError::NotPaired(_) | SyncError::Conflict(_) => true,
         _ => false,
+    }
+}
+
+fn map_secondary_status_error(error: TransportError) -> SyncError {
+    match error {
+        TransportError::HttpStatus { status: 409, message } if message.contains("reconciliation is required") => SyncError::ReconcileRequired,
+        error => SyncError::Protocol(format!("secondary status request failed: {error}")),
     }
 }
 
@@ -760,5 +768,23 @@ mod tests {
         };
         assert!(validate_secondary_status(&config, &status, false).is_ok());
         assert!(matches!(validate_secondary_status(&config, &status, true), Err(SyncError::ReconcileRequired)));
+    }
+
+    #[test]
+    fn secondary_status_reconciliation_response_disables_the_secondary() {
+        let error = map_secondary_status_error(TransportError::HttpStatus {
+            status: 409,
+            message: "reconciliation is required before retrying this package".into(),
+        });
+        assert!(matches!(error, SyncError::ReconcileRequired));
+    }
+
+    #[test]
+    fn unrelated_secondary_status_conflicts_remain_retryable_protocol_errors() {
+        let error = map_secondary_status_error(TransportError::HttpStatus {
+            status: 409,
+            message: "primary paused this device".into(),
+        });
+        assert!(matches!(error, SyncError::Protocol(message) if message.contains("HTTP status 409")));
     }
 }
