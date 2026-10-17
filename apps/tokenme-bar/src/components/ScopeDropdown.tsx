@@ -85,6 +85,7 @@ export function ScopeDropdown({
     if (machine.origin === "") return true;
     const device = registered.get(machine.origin);
     if (device) return device.status !== "revoked";
+    // shortcut: server list is loading, keep rows until it resolves to avoid SSH flicker.
     return serverOrigins === undefined || serverOrigins.has(machine.origin);
   });
   for (const device of devices ?? []) {
