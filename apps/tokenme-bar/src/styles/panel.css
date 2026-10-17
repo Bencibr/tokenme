@@ -1078,6 +1078,9 @@
    so panning the panel never reorders anything by accident. */
 .quota-row,
 .quota-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   touch-action: pan-y;
 }
 
@@ -1129,6 +1132,7 @@
    放在拖拽手柄里，点击必须拦下 pointer 事件免得带出拖拽。 */
 .quota-checkin {
   display: inline-flex;
+  margin-left: auto;
 }
 
 .checkin-btn {

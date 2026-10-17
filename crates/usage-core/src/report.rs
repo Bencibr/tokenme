@@ -393,9 +393,24 @@ impl<'a> ReportOptions<'a> {
 /// but it may touch the network or a local server, so callers own the cadence.
 pub fn poll_quota(adapters: &[Box<dyn crate::SourceAdapter>]) -> Vec<QuotaView> {
     let at = now_ms();
+    // One thread per adapter: a pass costs the slowest probe, not the sum of
+    // all of them — trae's page decrypts and antigravity's attach handshake no
+    // longer hold the HTTP-only probes hostage. Each probe hits its own vendor
+    // domain, so per-vendor request rates are unchanged. Panics still propagate
+    // to the caller, the same contract the serial loop had.
+    let polled = std::thread::scope(|scope| {
+        let handles: Vec<_> = adapters
+            .iter()
+            .map(|adapter| scope.spawn(|| adapter.quota()))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("quota probe panicked"))
+            .collect::<Vec<_>>()
+    });
     let mut out = Vec::new();
-    for adapter in adapters {
-        for q in adapter.quota() {
+    for (adapter, rows) in adapters.iter().zip(polled) {
+        for q in rows {
             out.push(QuotaView {
                 tool: adapter.id().to_string(),
                 used_percent: q.used_percent,
