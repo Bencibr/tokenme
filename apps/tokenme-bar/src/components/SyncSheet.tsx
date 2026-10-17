@@ -375,13 +375,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     if (ok) { setDiagnosticsCopied(true); window.setTimeout(() => setDiagnosticsCopied(false), 1600); }
   };
 
-  // Local debug clients (本机的 Claude) consume the MCP connection config, not
-  // a signed grant: enable the diagnostics server with the chosen lifetime,
-  // apply the scope choice as LAN-control powers, then hand over the config.
+  // Local debug clients consume the MCP connection config, not a signed grant:
+  // the main MCP switch owns its lifetime and the scope choice only changes
+  // LAN-control powers.
   const createLocalFlow = async () => {
     if (!diagnosticsScopes.length) { setDiagnosticsError(t("sync.diagnostics.invalid_config")); return; }
-    const ttl_ms = diagnosticsTtl === "5m" ? 5 * 60 * 1000 : diagnosticsTtl === "15m" ? 15 * 60 * 1000 : 60 * 60 * 1000;
-    await runDiagnostics({ action: "configure", enabled: true, ttl_ms });
+    await runDiagnostics({ action: "configure", enabled: true });
     if (!mounted.current) return;
     const control = diagnosticsScopes.includes("sync.control");
     if (control !== lanControl) {
@@ -665,10 +664,14 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                 <b>{t("sync.diagnostics.title")}</b>
               </div>
               <p className="explain">{t("sync.diagnostics.explain")}</p>
-              <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.ttl")}</span></div>
-              <div className="seg seg-wide" role="radiogroup" aria-label={t("sync.diagnostics.ttl")}>
-                {DIAGNOSTICS_TTLS.map((ttl) => <button type="button" className="seg-btn" key={ttl} role="radio" aria-checked={diagnosticsTtl === ttl} onClick={() => setDiagnosticsTtl(ttl)}>{ttl === "5m" ? t("sync.diagnostics.ttl.5m") : ttl === "15m" ? t("sync.diagnostics.ttl.15m") : t("sync.diagnostics.ttl.60m")}</button>)}
-              </div>
+              {grantTargets.length ? (
+                <>
+                  <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.ttl")}</span></div>
+                  <div className="seg seg-wide" role="radiogroup" aria-label={t("sync.diagnostics.ttl")}>
+                    {DIAGNOSTICS_TTLS.map((ttl) => <button type="button" className="seg-btn" key={ttl} role="radio" aria-checked={diagnosticsTtl === ttl} onClick={() => setDiagnosticsTtl(ttl)}>{ttl === "5m" ? t("sync.diagnostics.ttl.5m") : ttl === "15m" ? t("sync.diagnostics.ttl.15m") : t("sync.diagnostics.ttl.60m")}</button>)}
+                  </div>
+                </>
+              ) : null}
               <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.scope")}</span></div>
               <div className="scopes" role="group" aria-label={t("sync.diagnostics.scope")}>
                 {DIAGNOSTICS_SCOPES.map((scope) => <button type="button" key={scope} aria-pressed={diagnosticsScopes.includes(scope)} onClick={() => toggleDiagnosticsScope(scope)}>{scope === "diagnostics.read" ? t("sync.diagnostics.scope.read") : t("sync.diagnostics.scope.control")}</button>)}
@@ -704,13 +707,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               ) : (
                 <>
                   <div className="sync-btnrow">
-                    <button type="button" className="btn-accent" disabled={commandBusy} onClick={() => void createLocalFlow()}>{t("sync.diagnostics.create_short")}</button>
+                    <button type="button" className="btn-accent" disabled={commandBusy} onClick={() => void createLocalFlow()}>{t("sync.diagnostics.create_local")}</button>
                   </div>
                   {localCred ? (
                     <div className="sync-credbox">
                       <div className="sync-diagnostics-label"><span>{t("sync.diagnostics.generated")}</span></div>
                       <input className="sync-input" readOnly value={localCred.endpoint ?? ""} aria-label={t("sync.diagnostics.generated")} onFocus={(event) => event.currentTarget.select()} />
-                      {localCred.expires_at_ms ? <div className="sheet-hint">{timeLeft(localCred.expires_at_ms)}</div> : null}
+                      <div className="sheet-hint">
+                        {localCred.expires_at_ms ? timeLeft(localCred.expires_at_ms) : t("sync.diagnostics.persistent")}
+                      </div>
                       <div className="sync-btnrow">
                         <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void copyLocalFlow()}>{localCopied ? t("sync.diagnostics.copied") : t("sync.diagnostics.copy_code")}</button>
                         <button type="button" className="btn-quiet" disabled={commandBusy} onClick={revokeLocalFlow}>{t("sync.diagnostics.revoke_local")}</button>

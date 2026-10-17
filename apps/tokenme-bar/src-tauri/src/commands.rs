@@ -365,7 +365,7 @@ pub fn get_mcp_client_config(state: State<'_, crate::diagnostics::DiagnosticsSta
     let Some((endpoint, bearer, expiry)) = config else {
         return Ok(McpClientConfigView {
             config_json: String::new(), endpoint: None, ready: false,
-            reason: Some("请先开启 MCP 诊断服务；凭据过期后关闭再开启可生成新配置".into()),
+            reason: Some("请先开启 MCP 诊断服务；MCP 保持开启时配置长期有效，手动关闭后重新开启会生成新凭据".into()),
             expires_at_ms: None, control,
         });
     };
@@ -374,7 +374,7 @@ pub fn get_mcp_client_config(state: State<'_, crate::diagnostics::DiagnosticsSta
     })).map_err(|error| format!("cannot encode MCP client config: {error}"))?;
     Ok(McpClientConfigView {
         config_json, endpoint: Some(endpoint), ready: true, reason: None,
-        expires_at_ms: Some(expiry), control,
+        expires_at_ms: expiry, control,
     })
 }
 

@@ -824,7 +824,11 @@ export function SettingsSheet({
                   <button type="button" className="sheet-action" onClick={() => void copyMcpConfig()}>
                     {mcpCopied ? t("set.mcp.client.copied") : t("set.mcp.client.copy")}
                   </button>
-                  {mcpConfig.expires_at_ms ? <p className="sheet-hint">{t("set.mcp.client.expires", { time: new Date(mcpConfig.expires_at_ms).toLocaleString() })}</p> : null}
+                  <p className="sheet-hint">
+                    {mcpConfig.expires_at_ms
+                      ? t("set.mcp.client.expires", { time: new Date(mcpConfig.expires_at_ms).toLocaleString() })
+                      : t("set.mcp.client.persistent")}
+                  </p>
                   {mcpConfig.reason ? <p className="sheet-hint" role="alert">{mcpConfig.reason}</p> : null}
                 </div>
               ) : (
