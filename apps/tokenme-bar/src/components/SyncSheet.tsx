@@ -67,6 +67,11 @@ function isSecondaryAuthorizationError(value: string | null | undefined): boolea
 
 function presentSyncError(value: string | null | undefined): string | null {
   if (!value) return null;
+  if (value.includes("pairing request is awaiting approval")) return t("sync.pairing.waiting_primary");
+  if (value.includes("pairing request was rejected")) return t("sync.error.pairing_rejected");
+  if (value.includes("pairing invite expired")) return t("sync.error.pairing_expired");
+  if (value.includes("primary paused this device")) return t("sync.error.primary_paused");
+  if (value.includes("device is revoked")) return t("sync.error.device_revoked");
   return isSecondaryAuthorizationError(value) ? t("sync.error.secondary_unauthorized") : value;
 }
 
@@ -130,12 +135,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   }, [onClose]);
 
   const run = async (request: SyncManagementRequest, onSuccess?: (next: SyncDevicesSnapshot) => void) => {
-    if (!mounted.current || operationInFlight.current) return;
+    const interruptsRead = request.action === "stop" || request.action === "unpair";
+    if (!mounted.current || (operationInFlight.current && operationInFlight.current !== "poll"
+      && (!interruptsRead || operationInFlight.current === "mutation"))) return;
     setPendingConfirm(null);
     clearDiagnosticsPoll();
     const generation = ++operationGeneration.current;
     operationInFlight.current = "mutation";
     setBusy(true);
+    if (interruptsRead) { setInitializing(false); setDiscovering(false); }
     setError(null);
     setPollGeneration((value) => value + 1);
     try {
@@ -143,10 +151,9 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       if (!mounted.current || generation !== operationGeneration.current) return;
       onSnapshot(next);
       onSuccess?.(next);
-      // Mutations return a snapshot, but take one explicit status read after
-      // the write so stale pairing/device rows cannot remain on screen.
-      const latest = await bridge.syncDevices({ action: "status" });
-      if (mounted.current && generation === operationGeneration.current) onSnapshot(latest);
+      // The command already returns its post-write snapshot. A second status
+      // call can re-enter recovery and overwrite an intentional stop.
+      if (interruptsRead) { setPickedRole(null); setConfirmTarget(null); setScreen("setup"); }
     } catch (e) {
       if (mounted.current && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -194,7 +201,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
           // short bounded window to appear before showing role setup.
           if (next.role === "unconfigured" && !next.pairing_pending && attempt < 8) {
             await new Promise<void>((resolve) => { window.setTimeout(resolve, 250); });
-            if (alive && generation === operationGeneration.current) return read(attempt + 1);
+            if (alive && generation === operationGeneration.current) return await read(attempt + 1);
           }
         } catch (e) {
           if (alive && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
@@ -249,8 +256,10 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const awaitingSecondaryApproval = snapshot.role === "secondary" && !snapshot.stream_id
     && (snapshot.service_running || isSecondaryAuthorizationError(snapshot.last_error));
   const primaryDeviceStateMayChange = snapshot.role === "primary" && snapshot.devices.some((device) => device.role === "secondary" && device.status === "paired");
-  const shouldPoll = snapshot.pairing_pending || primaryDeviceStateMayChange || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
+  const shouldPoll = snapshot.pairing_pending || primaryDeviceStateMayChange || awaitingSecondaryApproval
+    || (snapshot.service_running && (hasPendingRequest || snapshot.role === "secondary"));
   const commandBusy = busy || initializing || discovering;
+  const stopBusy = operationInFlight.current === "mutation";
 
   // Silent status polling keeps the overview live while a pairing decision or
   // approval is outstanding; nothing renders for it directly.
@@ -261,7 +270,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     let timer: number | undefined;
     const poll = async () => {
       if (!alive) return;
-      const maxAttempts = snapshot.pairing_pending || primaryDeviceStateMayChange ? Number.POSITIVE_INFINITY : 12;
+      const maxAttempts = snapshot.pairing_pending || primaryDeviceStateMayChange || (snapshot.role === "secondary" && snapshot.service_running) ? Number.POSITIVE_INFINITY : 12;
       if (attempts >= maxAttempts) return;
       if (operationInFlight.current) {
         timer = window.setTimeout(() => void poll(), 500);
@@ -272,7 +281,6 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       let retryDelay = 5000;
       const generation = ++operationGeneration.current;
       operationInFlight.current = "poll";
-      setBusy(true);
       try {
         const next = await bridge.syncDevices({ action: "status" });
         if (alive && mounted.current && generation === operationGeneration.current) { onSnapshot(next); setError(null); }
@@ -281,13 +289,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
         if (alive && mounted.current && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
       } finally {
         if (operationInFlight.current === "poll" && generation === operationGeneration.current) operationInFlight.current = null;
-        if (alive && mounted.current && generation === operationGeneration.current) setBusy(false);
       }
       if (alive && generation === operationGeneration.current && attempts < maxAttempts) timer = window.setTimeout(() => void poll(), retryDelay);
     };
     timer = window.setTimeout(() => void poll(), 5000);
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [clearDiagnosticsPoll, onSnapshot, pollGeneration, primaryDeviceStateMayChange, shouldPoll, snapshot.pairing_pending]);
+  }, [clearDiagnosticsPoll, onSnapshot, pollGeneration, primaryDeviceStateMayChange, shouldPoll, snapshot.pairing_pending, snapshot.role, snapshot.service_running]);
 
   const applyDiagnosticsResponse = useCallback((response: DiagnosticsResponse, generation?: number) => {
     if (generation !== undefined && generation !== operationGeneration.current) return;
@@ -503,7 +510,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : ""}`} aria-hidden="true" />
       <span className="sync-dev-name">{device.display_name}</span>
       {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : null}
-      <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "revoke", device_id: device.device_id }, message: t("sync.revoke.confirm", { name: device.display_name }) })}>{t("sync.disconnect")}</button>
+      {isPrimary && (device.status === "paired" || device.status === "paused") ? <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => void run({ action: device.status === "paused" ? "resume" : "pause", device_id: device.device_id })}>{device.status === "paused" ? t("sync.resume") : t("sync.pause")}</button> : null}
+      <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({ request: isSecondary ? { action: "unpair" } : { action: "revoke", device_id: device.device_id }, message: t("sync.revoke.confirm", { name: device.display_name }) })}>{t("sync.disconnect")}</button>
     </div>
   );
 
@@ -649,7 +657,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   </div>
                   <div className="role-right">
                     <span className="role-state">{snapshot.service_running ? t("sync.state.running") : t("sync.state.recovering")}</span>
-                    <button type="button" className="stopbtn" disabled={commandBusy} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
+                    <button type="button" className="stopbtn" disabled={stopBusy} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>
                   </div>

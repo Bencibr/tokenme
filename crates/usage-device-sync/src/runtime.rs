@@ -149,6 +149,7 @@ impl SyncRuntime {
             return Err(error);
         }
         let mut total = RuntimeRunReport::default();
+        let mut consecutive_errors = 0_u32;
         while !stop.load(Ordering::Acquire) {
             let lease_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, lease_now, self.config.lease_ttl_ms)? {
@@ -179,6 +180,11 @@ impl SyncRuntime {
                     if self.secondary_identity.is_some() {
                         let message = error.to_string();
                         let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
+                        if matches!(error, SyncError::Revoked(_) | SyncError::ReconcileRequired | SyncError::EpochStale | SyncError::Security(_))
+                            || matches!(&error, SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired")
+                        {
+                            let _ = self.store.set_secondary_enabled(false, now_ms());
+                        }
                     }
                     let _ = self.store.release_scheduler_lease(&self.config.owner);
                     return Err(error);
@@ -192,6 +198,7 @@ impl SyncRuntime {
             total.in_flight = pass.in_flight;
             total.bytes = pass.bytes;
             let pass_had_error = pass.last_error.is_some();
+            consecutive_errors = if pass_had_error { consecutive_errors.saturating_add(1) } else { 0 };
             let pass_had_no_claim_with_pending = pass.claimed == 0 && pass.pending > 0;
             total.last_error = pass.last_error;
             let renew_now = now_ms();
@@ -207,8 +214,9 @@ impl SyncRuntime {
                 continue;
             }
             let started = std::time::Instant::now();
-            while started.elapsed() < self.config.poll_interval && !stop.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(50).min(self.config.poll_interval));
+            let interval = self.config.poll_interval.saturating_mul(1_u32 << consecutive_errors.min(4)).min(Duration::from_secs(60));
+            while started.elapsed() < interval && !stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(50).min(interval));
             }
         }
         let _ = self.store.release_scheduler_lease(&self.config.owner);
@@ -298,6 +306,8 @@ impl SyncRuntime {
         match status.status.as_str() {
             "paired" => {}
             "pending" => return Err(SyncError::NotPaired("pairing request is awaiting approval".into())),
+            "rejected" => return Err(SyncError::NotPaired("pairing request was rejected".into())),
+            "expired" => return Err(SyncError::NotPaired("pairing invite expired".into())),
             "paused" => return Err(SyncError::Conflict("primary paused this device".into())),
             "revoked" => return Err(SyncError::Revoked(identity.device_id.clone())),
             "reconcile_required" => return Err(SyncError::ReconcileRequired),
@@ -445,6 +455,7 @@ fn validate_secondary_status(config: &crate::SecondarySyncConfig, status: &Authe
 fn retryable_secondary_error(error: &SyncError) -> bool {
     match error {
         SyncError::Conflict(message) if message == "secondary sync is disabled" => false,
+        SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired" => false,
         SyncError::Protocol(_) | SyncError::Auth(_) | SyncError::NotPaired(_) | SyncError::Conflict(_) => true,
         _ => false,
     }

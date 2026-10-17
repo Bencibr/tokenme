@@ -743,10 +743,23 @@ impl HttpsSyncServer {
     /// panel/runtime can append trace events and update check results while
     /// the HTTPS server is running without exposing arbitrary host access.
     pub fn bind_with_host(config: HttpsServerConfig, store: SyncStore, host: DiagnosticsHost) -> Result<Self, TransportError> {
+        Self::bind_with_host_options(config, store, host, false)
+    }
+
+    /// Desktop services can recover from a port occupied by another process.
+    /// Keep the bind interface and TLS identity, then publish the actual port.
+    pub fn bind_with_host_fallback(config: HttpsServerConfig, store: SyncStore, host: DiagnosticsHost) -> Result<Self, TransportError> {
+        Self::bind_with_host_options(config, store, host, true)
+    }
+
+    fn bind_with_host_options(config: HttpsServerConfig, store: SyncStore, host: DiagnosticsHost, fallback: bool) -> Result<Self, TransportError> {
         config.validate()?;
         crate::protocol::ensure_private_dir(&config.staging_dir).map_err(TransportError::State)?;
         let tls_config = server_config(&config)?;
-        let listener = TcpListener::bind(config.bind_addr).map_err(TransportError::from)?;
+        let listener = match TcpListener::bind(config.bind_addr) {
+            Err(error) if fallback && error.kind() == io::ErrorKind::AddrInUse => TcpListener::bind(SocketAddr::new(config.bind_addr.ip(), 0)),
+            result => result,
+        }.map_err(TransportError::from)?;
         listener.set_nonblocking(false).map_err(TransportError::from)?;
         let diagnostics = DiagnosticsService::new_with_host(store.primary_id(), host).map_err(TransportError::Diagnostics)?;
         let context = ServerContext {
