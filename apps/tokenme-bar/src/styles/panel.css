@@ -1214,7 +1214,14 @@
   background: rgba(13, 143, 116, 0.12); color: var(--accent-ink);
 }
 .role-name { font-weight: 500; }
-.role-state { font-size: 11px; color: var(--ink-3); }
+.role-state { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--ink-3); }
+.role-state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
+.role-state-running { color: var(--accent-ink); }
+.role-state-running::before { background: var(--accent-ink); }
+.role-state-recovering { color: #b47b1d; }
+.role-state-recovering::before { background: #b47b1d; }
+.role-state-error { color: #c25b4e; }
+.role-state-error::before { background: #c25b4e; }
 .role-right { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; margin-right: 3px; }
 .meta { font-size: 11px; color: var(--ink-3); margin-top: 5px; }
 .stopbtn {

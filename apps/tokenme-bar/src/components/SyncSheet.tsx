@@ -61,6 +61,14 @@ function timeLeft(ms: number): string {
   return t("sync.rel.left_hour", { n: Math.floor(minutes / 60) });
 }
 
+function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recovering" | "stopped" | "disconnected" | "error"; label: string } {
+  if (snapshot.last_error || snapshot.operation_state === "error") return { kind: "error", label: t("sync.state.error") };
+  if (snapshot.service_running) return { kind: "running", label: t("sync.state.running") };
+  if (snapshot.operation_state === "running") return { kind: "recovering", label: t("sync.state.recovering") };
+  if (snapshot.operation_state === "offline") return { kind: "disconnected", label: t("sync.state.disconnected") };
+  return { kind: "stopped", label: t("sync.state.stopped") };
+}
+
 export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDevicesSnapshot; onSnapshot: (next: SyncDevicesSnapshot) => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -422,14 +430,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const isPrimary = snapshot.role === "primary";
   const isSecondary = snapshot.role === "secondary";
+  const status = syncStatus(snapshot);
   const pendingRequests = snapshot.pairing_requests.filter((request) => request.status === "pending");
   const connectedDevices = snapshot.devices.filter((device) => device.status !== "revoked");
   const primaryDevices = connectedDevices.filter((device) => device.role === "primary");
   const secondaryDevices = connectedDevices.filter((device) => device.role === "secondary");
 
-  // A persisted role stays visible while the transport is recovering; only an
-  // explicit stop returns to role selection.
-  const effectiveScreen: Screen = screen === "overview" && (snapshot.role === "unconfigured" || snapshot.operation_state === "offline") ? "setup" : screen;
+  // Keep a persisted role visible while stopped or recovering; only a cleared
+  // pairing returns to role selection.
+  const effectiveScreen: Screen = screen === "overview" && snapshot.role === "unconfigured" ? "setup" : screen;
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {
@@ -611,8 +620,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                     </div>
                   </div>
                   <div className="role-right">
-                    <span className="role-state">{snapshot.service_running ? t("sync.state.running") : t("sync.state.recovering")}</span>
-                    <button type="button" className="stopbtn" disabled={commandBusy} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
+                    <span className={`role-state role-state-${status.kind}`} aria-live="polite">{status.label}</span>
+                    <button type="button" className="stopbtn" disabled={commandBusy || !snapshot.service_running} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>
                   </div>
