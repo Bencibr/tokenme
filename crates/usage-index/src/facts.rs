@@ -235,22 +235,10 @@ impl Index {
             // The meter verdict comes from data when a completed window has
             // reconciled; otherwise the per-tool seed lists answer. A new
             // account re-enters at its seed.
-            let classified = if reset_seen || usage_reset {
-                old.as_ref().and_then(|s| classify_samples(&s.samples, s.meter.as_deref()))
-            } else {
-                None
-            };
-            let meter = if account_changed {
-                None
-            } else {
-                classified.or_else(|| old.as_ref().and_then(|s| s.meter.clone()))
-            };
-            let effective = meter.clone().unwrap_or_else(|| {
-                if trusted { "confirmed".to_string() } else if unverified_seed { "unverified".to_string() } else { "unknown".to_string() }
-            });
             // Sample collection for the open window: every ≥2pp move of the
             // percent leaves one (tokens, percent) turn, capped to keep the
-            // early low-percent anchor.
+            // early low-percent anchor. Collected before the meter verdict so
+            // the live self-healing below sees the current turn.
             let mut samples = if account_changed || reset_seen || usage_reset {
                 Vec::new()
             } else {
@@ -265,6 +253,28 @@ impl Index {
                     samples.push([observed_tokens, q.used_percent]);
                 }
             }
+            let classified = if reset_seen || usage_reset {
+                old.as_ref().and_then(|s| classify_samples(&s.samples, s.meter.as_deref()))
+            } else {
+                None
+            };
+            let mut meter = if account_changed {
+                None
+            } else {
+                classified.or_else(|| old.as_ref().and_then(|s| s.meter.clone()))
+            };
+            // Live self-healing: an inherited "incompatible" clears the moment
+            // the open window's own deltas vouch for the meter. Waiting for the
+            // reset made a single fluke conviction a life sentence across every
+            // low-travel window — one that never moves 15pp could never re-elect.
+            // Upgrades only: condemnation still requires a full window's ≥3×
+            // divergence at its end, so one noisy pair cannot flip the verdict.
+            if meter.as_deref() == Some("incompatible") && slope_coherent(&samples).unwrap_or(false) {
+                meter = Some("confirmed".to_string());
+            }
+            let effective = meter.clone().unwrap_or_else(|| {
+                if trusted { "confirmed".to_string() } else if unverified_seed { "unverified".to_string() } else { "unknown".to_string() }
+            });
             let estimated_tokens = if known_boundary && !account_changed && observed_tokens > 0.0 {
                 let allowed = match effective.as_str() {
                     // data-proven: the reconciliation itself vouches for the meter
@@ -804,21 +814,44 @@ fn percent_is_unverified_token_like(tool: &str) -> bool {
     matches!(tool, "cline" | "zcode")
 }
 
+/// The delta evidence behind a meter verdict. Consecutive-pair slopes (Δtokens
+/// per percent point) have both ends of every delta observed locally, so a
+/// mid-window start cancels out — the head a two-end estimate never saw cannot
+/// poison a slope. `Some` only once ≥3 usable pairs exist: fewer cannot
+/// outvote an inherited verdict. `Some(true)` = coherent: a positive median,
+/// ≥70% of pairs within 3× of it, and the current anchor's implied total
+/// agreeing with the median (a rescue vouches for the meter, not for a tally
+/// that missed half the window). `Some(false)` = the slopes themselves fan out
+/// or freeze — percent moving over flat tokens, or ratio chaos in the body of
+/// the window.
+fn slope_coherent(samples: &[[f64; 2]]) -> Option<bool> {
+    let last = samples.last()?;
+    let mut slopes: Vec<f64> = samples.windows(2)
+        .filter_map(|pair| {
+            let travel = pair[1][1] - pair[0][1];
+            (travel >= 1.0).then(|| (pair[1][0] - pair[0][0]) * 100.0 / travel)
+        })
+        .collect();
+    if slopes.len() < 3 {
+        return None;
+    }
+    slopes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = if slopes.len() % 2 == 0 { (slopes[slopes.len() / 2 - 1] + slopes[slopes.len() / 2]) / 2.0 } else { slopes[slopes.len() / 2] };
+    let implied = last[0] * 100.0 / last[1].max(0.1);
+    let inliers = slopes.iter().filter(|slope| **slope >= median / 3.0 && **slope <= median * 3.0).count();
+    Some(median > 0.0 && implied >= median / 3.0 && implied <= median * 3.0 && inliers as f64 >= 0.7 * slopes.len() as f64)
+}
+
 /// The window-end reconciliation. The fast path is unchanged: with ≥15pp of
 /// travel, two-end estimates within 1.5× confirm the meter outright. Beyond
 /// that the two-end method is the suspect, not the meter — a tally that
 /// started mid-window misses exactly the head, so its first anchor sits low
 /// and the ends drift apart (≥3× used to condemn the meter outright). Before
-/// condemning, or sticking, the verdict asks the local deltas: consecutive-
-/// pair slopes (Δtokens/Δpercent) have both ends observed locally, so the
-/// unseen head cancels. A rescue needs ≥3 usable pairs, a positive median
-/// slope, ≥70% of pairs within 3× of it, and the current anchor's implied
-/// total agreeing with the median — i.e. broad local evidence that the
-/// percent really does track tokens; the estimate number itself stays
-/// conservative until the next clean window. Without that evidence a ≥3×
-/// divergence is still "incompatible", 1.5–3× still sticks, and fewer than
-/// three pairs never upgrade anything. Seeds are opinions, completed windows
-/// are evidence — unchanged.
+/// condemning, or sticking, the verdict asks [`slope_coherent`]: coherent
+/// deltas rescue the meter, frozen or fanned-out deltas let the old rules
+/// stand (≥3× condemns, 1.5–3× sticks, and fewer than three pairs never
+/// changes anything). Seeds are opinions, completed windows are evidence —
+/// unchanged.
 fn classify_samples(samples: &[[f64; 2]], previous: Option<&str>) -> Option<String> {
     let first = samples.first()?;
     let last = samples.last()?;
@@ -832,33 +865,12 @@ fn classify_samples(samples: &[[f64; 2]], previous: Option<&str>) -> Option<Stri
     if hi <= lo * 1.5 {
         return Some("confirmed".to_string());
     }
-    let mut slopes: Vec<f64> = samples.windows(2)
-        .filter_map(|pair| {
-            let travel = pair[1][1] - pair[0][1];
-            (travel >= 1.0).then(|| (pair[1][0] - pair[0][0]) * 100.0 / travel)
-        })
-        .collect();
-    let rescued = if slopes.len() >= 3 {
-        slopes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if slopes.len() % 2 == 0 { (slopes[slopes.len() / 2 - 1] + slopes[slopes.len() / 2]) / 2.0 } else { slopes[slopes.len() / 2] };
-        let inliers = slopes.iter().filter(|slope| **slope >= median / 3.0 && **slope <= median * 3.0).count();
-        // A foreign meter shows up as near-zero slopes (percent moves, tokens
-        // do not) — the median guard refuses to rescue those. The current
-        // anchor must agree with the median (both are implied window totals):
-        // a rescue vouches for the meter, not for a tally that missed half
-        // the window.
-        let implied = estimate(last);
-        let anchor_agrees = median > 0.0 && implied >= median / 3.0 && implied <= median * 3.0;
-        median > 0.0 && anchor_agrees && inliers as f64 >= 0.7 * slopes.len() as f64
-    } else {
-        false
-    };
-    if rescued {
-        Some("confirmed".to_string())
-    } else if hi >= lo * 3.0 {
-        Some("incompatible".into())
-    } else {
-        previous.map(str::to_string)
+    match slope_coherent(samples) {
+        Some(true) => Some("confirmed".to_string()),
+        Some(false) if hi >= lo * 3.0 => Some("incompatible".into()),
+        Some(false) => previous.map(str::to_string),
+        None if hi >= lo * 3.0 => Some("incompatible".into()),
+        None => previous.map(str::to_string),
     }
 }
 
@@ -2084,6 +2096,66 @@ mod golden {
     fn an_incoherent_meter_is_not_rescued_by_slopes() {
         let samples: Vec<[f64; 2]> = vec![[1.0e6, 10.0], [3.0e6, 30.0], [9.0e6, 50.0], [27.0e6, 70.0], [81.0e6, 90.0]];
         assert_eq!(classify_samples(&samples, None).as_deref(), Some("incompatible"));
+    }
+
+    /// The Cline 5h row that shipped live self-healing: one fluke window left
+    /// the meter "incompatible", and re-election at the reset needs a full
+    /// ≥15pp window — a low-travel window could never clear it, so the verdict
+    /// outlived its evidence forever. The live pass now clears the inherited
+    /// verdict the moment the open window's own deltas are coherent, and the
+    /// upgrade persists into the stored state.
+    #[test]
+    fn a_live_coherent_window_clears_an_inherited_incompatible() {
+        let now = now_fixture();
+        let mut idx = Index::open_in_memory().unwrap();
+        let first = Mock::new(
+            PathBuf::from("/fixture/cycle-live-1.jsonl"),
+            vec![ev("cline", now - 5 * 60_000, "live", Some("glm"), None, counts(45_000_000.0))],
+        );
+        idx.ingest_adapter(&first, &DateFilter::default()).unwrap();
+        idx.conn().execute("UPDATE event SET tool = 'cline'", []).unwrap();
+        let quota = |used: f64, sampled: i64, resets: i64| QuotaView {
+            tool: "cline".into(), used_percent: used, window_minutes: 300,
+            resets_at_ms: resets, sampled_at_ms: sampled, label: Some("clinepass(monthly)·5小时".into()),
+            id: None, origin: usage_core::QuotaOrigin::Probe, cycle: None,
+        };
+        // The inherited conviction, exactly as an earlier fluke window left it.
+        let seeded = format!(
+            r#"{{"identity":"unknown","period_start_ms":{},"period_end_ms":{},"observed_tokens":28300000.0,"previous_tokens":null,"complete":false,"last_used_percent":3.0,"last_sampled_at_ms":{},"samples":[[11300000.0,1.0],[28300000.0,3.0]],"meter":"incompatible"}}"#,
+            now - 60_000, now + 290 * 60_000, now - 60_000,
+        );
+        idx.conn().execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('cycle:v1:cline:300:clinepass(monthly)·5小时', ?1)",
+            params![seeded],
+        ).unwrap();
+        // Three coherent turns at ~20M tokens per 2pp on top of the seeded pair.
+        for (used, tokens, at) in [
+            (5.0, 45_000_000.0, now),
+            (7.0, 20_000_000.0, now + 60_000),
+            (9.0, 20_000_000.0, now + 119_000),
+        ] {
+            let mock = Mock::new(
+                PathBuf::from(format!("/fixture/cycle-live-{}.jsonl", used as i64)),
+                vec![ev("cline", at, &format!("live-{}", used as i64), Some("glm"), None, counts(tokens))],
+            );
+            idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+            idx.conn().execute("UPDATE event SET tool = 'cline'", []).unwrap();
+            let mut rows = vec![quota(used, at, now + 290 * 60_000)];
+            idx.attach_cycle_usage(&mut rows, at).unwrap();
+            if used == 9.0 {
+                let cycle = rows[0].cycle.as_ref().unwrap();
+                assert_eq!(cycle.status, CycleStatus::Partial, "the live window cleared the inherited verdict");
+                // The first pass's tally lags (0 tokens at 5% — collection had
+                // just started), leaving one negative-slope outlier; the median
+                // shrugs it off and the estimate rides the remaining pairs.
+                assert!(cycle.estimated_tokens.unwrap() > 700_000_000.0, "9% at 65M → ~722M");
+            }
+        }
+        let raw = idx.conn().query_row(
+            "SELECT value FROM meta WHERE key LIKE 'cycle:v1:cline:300%' LIMIT 1",
+            [], |r| r.get::<_, String>(0),
+        ).unwrap();
+        assert!(raw.contains("\"confirmed\""), "the upgrade persists into the stored meter");
     }
 
     #[test]
