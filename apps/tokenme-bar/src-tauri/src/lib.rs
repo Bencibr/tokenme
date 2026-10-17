@@ -37,9 +37,11 @@ pub fn run() {
     let (tx, rx) = std::sync::mpsc::channel::<engine::Msg>();
 
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            panel::show(app, None);
-        }))
+        // Single-instance hand-off deliberately shows nothing: the panel only
+        // ever appears from a tray click, whose live icon rect anchors it
+        // pixel-centered. A geometry-less show here fell back to the menu
+        // bar's right end — a corner the user got shown on every reinstall.
+        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
