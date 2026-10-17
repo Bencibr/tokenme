@@ -59,6 +59,7 @@ export function ScopeDropdown({
   now,
   open,
   onOpen,
+  serverOrigins,
 }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -79,8 +80,13 @@ export function ScopeDropdown({
   }
 
   const registered = new Map((devices ?? []).map((device) => [device.origin, device]));
-  // 断开（revoked）的机器从列表整体消失——历史导入也不显示。
-  const machineRows = [...machines].filter((machine) => registered.get(machine.origin)?.status !== "revoked");
+  // 选择器只展示可管理的来源；历史手动导入仍留在索引里，但不冒充机器。
+  const machineRows = [...machines].filter((machine) => {
+    if (machine.origin === "") return true;
+    const device = registered.get(machine.origin);
+    if (device) return device.status !== "revoked";
+    return serverOrigins === undefined || serverOrigins.has(machine.origin);
+  });
   for (const device of devices ?? []) {
     if (device.status !== "revoked" && !machineRows.some((machine) => machine.origin === device.origin)) {
       machineRows.push({ origin: device.origin, today_tokens: 0 });

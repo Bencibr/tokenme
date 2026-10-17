@@ -55,8 +55,8 @@ interface Props {
    *  menu → settings sheet → panel. */
   scopeMenuOpen: boolean;
   onScopeMenuOpen: (open: boolean) => void;
-  /** Origins backed by a configured server; the scope menu tags other
-   *  non-device origins as manual export/import data. */
+  /** Origins backed by a configured server; the scope menu hides other
+   *  non-device origins as historical export/import data. */
   serverOrigins?: Set<string>;
   /** Registered strict-sync devices; read-only in this slice. */
   syncDevices?: SyncDevicesSnapshot;
