@@ -75,6 +75,14 @@ function presentSyncError(value: string | null | undefined): string | null {
   return isSecondaryAuthorizationError(value) ? t("sync.error.secondary_unauthorized") : value;
 }
 
+function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recovering" | "stopped" | "disconnected" | "error"; label: string } {
+  if (snapshot.last_error || snapshot.operation_state === "error") return { kind: "error", label: t("sync.state.error") };
+  if (snapshot.service_running) return { kind: "running", label: t("sync.state.running") };
+  if (snapshot.operation_state === "running") return { kind: "recovering", label: t("sync.state.recovering") };
+  if (snapshot.operation_state === "offline") return { kind: "disconnected", label: t("sync.state.disconnected") };
+  return { kind: "stopped", label: t("sync.state.stopped") };
+}
+
 export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDevicesSnapshot; onSnapshot: (next: SyncDevicesSnapshot) => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -451,6 +459,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const isPrimary = snapshot.role === "primary";
   const isSecondary = snapshot.role === "secondary";
+  const status = syncStatus(snapshot);
   const pendingRequests = snapshot.pairing_requests.filter((request) => request.status === "pending");
   const connectedDevices = snapshot.devices.filter((device) => device.status !== "revoked");
   const primaryDevices = connectedDevices.filter((device) => device.role === "primary");
@@ -467,6 +476,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const showSyncError = shownError && !(effectiveScreen === "setup" && isSecondaryAuthorizationError(rawSyncError))
     ? shownError
     : null;
+  const roleStatus = awaitingSecondaryApproval
+    ? t("sync.device.pending")
+    : snapshot.last_error?.includes("primary paused this device")
+      ? t("sync.device.paused")
+      : status.label;
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {
@@ -656,7 +670,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                     </div>
                   </div>
                   <div className="role-right">
-                    <span className="role-state">{!snapshot.service_running ? t("sync.state.stopped") : awaitingSecondaryApproval ? t("sync.device.pending") : snapshot.last_error?.includes("primary paused this device") ? t("sync.device.paused") : snapshot.last_error ? t("sync.state.recovering") : t("sync.state.running")}</span>
+                    <span className={`role-state role-state-${status.kind}`} aria-live="polite">{roleStatus}</span>
                     <button type="button" className="stopbtn" disabled={stopBusy} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>
