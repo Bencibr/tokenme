@@ -69,6 +69,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [screen, setScreen] = useState<Screen>(() => (snapshot.role === "unconfigured" ? "setup" : "overview"));
   const [pickedRole, setPickedRole] = useState<"primary" | "secondary" | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<DiscoveredPrimaryView | null>(null);
+  const [manualInvite, setManualInvite] = useState("");
+  const [inviteCopied, setInviteCopied] = useState(false);
   const [pollGeneration, setPollGeneration] = useState(0);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmation | null>(null);
   const [diagnosticsEnabled, setDiagnosticsEnabled] = useState(false);
@@ -443,6 +445,28 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     void run({ action: "pair_discovered", primary_id: confirmTarget.primary_id, endpoint: confirmTarget.endpoint, certificate_pin: confirmTarget.certificate_pin, origin: "secondary", display_name: null, os: null }, () => setScreen("done"));
   };
 
+  const pairWithInvite = () => {
+    const invite = manualInvite.trim();
+    if (!invite) return;
+    void run({ action: "pair", invite, origin: "secondary", display_name: null, os: null }, () => {
+      setManualInvite("");
+      setScreen("done");
+    });
+  };
+
+  const createInvite = () => {
+    setInviteCopied(false);
+    void run({ action: "create_invite" });
+  };
+
+  const copyInvite = async () => {
+    if (!snapshot.invite_url) return;
+    if (await copyText(snapshot.invite_url)) {
+      setInviteCopied(true);
+      window.setTimeout(() => setInviteCopied(false), 1600);
+    }
+  };
+
   const deviceRow = (device: (typeof snapshot.devices)[number]) => (
     <div className="sync-dev" key={device.device_id}>
       <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : ""}`} aria-hidden="true" />
@@ -513,13 +537,23 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                 <div className="sync-scan"><div>{t("sync.discovery.empty")}</div></div>
               )}
               {!discovering && !snapshot.discovered_primaries.length ? (
-                <div className="sync-crumb">
-                  <span>{t("sync.discovery.none")}</span>
-                  <button type="button" className="sync-back" disabled={commandBusy} onClick={() => void discover()}>{t("sync.discovery.rescan")}</button>
-                  <span>{t("sync.discovery.or")}</span>
-                  <button type="button" className="sync-back" onClick={() => setScreen("diagnostics")}>{t("sync.discovery.diag_link")}</button>
-                  <span>{t("sync.discovery.diag_tail")}</span>
-                </div>
+                <>
+                  <div className="sync-crumb">
+                    <span>{t("sync.discovery.none")}</span>
+                    <button type="button" className="sync-back" disabled={commandBusy} onClick={() => void discover()}>{t("sync.discovery.rescan")}</button>
+                    <span>{t("sync.discovery.or")}</span>
+                    <button type="button" className="sync-back" onClick={() => setScreen("diagnostics")}>{t("sync.discovery.diag_link")}</button>
+                    <span>{t("sync.discovery.diag_tail")}</span>
+                  </div>
+                  <div className="sync-manual-panel sync-credbox">
+                    <div className="sync-diagnostics-label"><span>{t("sync.discovery.manual.title")}</span></div>
+                    <p className="explain">{t("sync.discovery.manual.explain")}</p>
+                    <textarea className="sync-invite" value={manualInvite} onChange={(event) => setManualInvite(event.target.value)} placeholder={t("sync.discovery.manual.placeholder")} aria-label={t("sync.discovery.manual.title")} />
+                    <div className="sync-btnrow">
+                      <button type="button" className="btn-accent" disabled={commandBusy || !manualInvite.trim()} onClick={pairWithInvite}>{t("sync.discovery.manual.go")}</button>
+                    </div>
+                  </div>
+                </>
               ) : null}
             </>
           ) : null}
@@ -596,6 +630,17 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   <div className="sync-sect2">{t("sync.ov.paired_sect_sec")}</div>
                   {primaryDevices.map((device) => deviceRow(device))}
                 </>
+              ) : null}
+              {isPrimary ? (
+                <div className="sync-manual-panel sync-credbox">
+                  <div className="sync-diagnostics-label"><span>{t("sync.invite.title")}</span></div>
+                  <p className="explain">{t("sync.invite.explain")}</p>
+                  {snapshot.invite_url ? <textarea className="sync-invite" readOnly value={snapshot.invite_url} aria-label={t("sync.invite.title")} onFocus={(event) => event.currentTarget.select()} /> : null}
+                  <div className="sync-btnrow">
+                    <button type="button" className="btn-accent" disabled={commandBusy} onClick={createInvite}>{t("sync.invite.create")}</button>
+                    {snapshot.invite_url ? <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => void copyInvite()}>{inviteCopied ? t("sync.invite.copied") : t("sync.invite.copy")}</button> : null}
+                  </div>
+                </div>
               ) : null}
             </>
           ) : null}

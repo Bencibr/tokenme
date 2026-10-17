@@ -184,6 +184,7 @@ pub fn sync_event(action: &str, ok: bool, error_code: Option<&str>) {
 enum DiagnosticLog {
     Panel,
     Scan,
+    Sync,
     Diagnostics,
 }
 
@@ -192,8 +193,9 @@ impl DiagnosticLog {
         match value {
             "panel" => Ok(Self::Panel),
             "scan" => Ok(Self::Scan),
+            "sync" => Ok(Self::Sync),
             "diagnostics" => Ok(Self::Diagnostics),
-            _ => Err("log must be one of panel, scan, diagnostics".into()),
+            _ => Err("log must be one of panel, scan, sync, diagnostics".into()),
         }
     }
 
@@ -204,6 +206,7 @@ impl DiagnosticLog {
                 .get()
                 .and_then(|path| path.parent().map(|dir| dir.join("scan.log")))
                 .unwrap_or_else(|| log_dir().join("scan.log")),
+            Self::Sync => diagnostics_path(),
             Self::Diagnostics => diagnostics_path(),
         }
     }
@@ -504,4 +507,15 @@ fn install_panic_hook() {
         write_line("panic", &format!("thread={thread}{at} {info}"));
         default_hook(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{diagnostics_path, DiagnosticLog};
+
+    #[test]
+    fn sync_log_reads_the_structured_sync_audit_file() {
+        assert_eq!(DiagnosticLog::parse("sync"), Ok(DiagnosticLog::Sync));
+        assert_eq!(DiagnosticLog::Sync.path(), diagnostics_path());
+    }
 }
