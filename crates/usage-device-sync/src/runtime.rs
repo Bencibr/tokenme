@@ -368,7 +368,7 @@ impl SyncRuntime {
             if rows.is_empty() && !complete {
                 return Err(SyncError::Limit("snapshot page made no cursor progress".into()));
             }
-            if rows.is_empty() && complete {
+            if rows.is_empty() && complete && cursor.complete && cursor.completion_generation.is_some() {
                 // An already-ACKed cursor with no dirty revision is an idle
                 // pass, not a new empty generation.  In particular, do not
                 // let generated_at_ms manufacture receipts every poll.
@@ -376,9 +376,9 @@ impl SyncRuntime {
             }
             let window_lo_ms = page.coverage_lo_ms;
             let window_hi_ms = page.coverage_hi_ms;
-            let package = NetworkPackage::from_rows(
+            let package = NetworkPackage::from_rows_with_snapshot_complete(
                 config.origin.clone(), usage_index::INDEX_SCHEMA_VERSION, window_lo_ms, window_hi_ms,
-                &rows, now_ms,
+                &rows, now_ms, complete,
             )?;
             let journal = dirty_by_identity.into_iter().filter_map(|(identity_key, dirty)| {
                 rows.iter().find(|row| sync_dirty_identity(row) == identity_key).map(|row| DirtyJournalInput {
@@ -601,7 +601,7 @@ mod tests {
         let staging = tempfile::tempdir().unwrap();
         let server = crate::HttpsSyncServer::bind(server_config(&cert_der, &key_der, staging.path().join("staging")), primary).unwrap();
         let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections(2));
+        let server_thread = thread::spawn(move || server.run_connections(3));
         let identity_dir = tempfile::tempdir().unwrap();
         let identity_path = identity_dir.path().join("secondary-identity.json");
         secondary.save_secondary_config(&SecondarySyncConfig {
@@ -618,7 +618,7 @@ mod tests {
         let mut runtime = SyncRuntime::new_secondary(secondary, transport, SyncRuntimeConfig::new("secondary-test-owner").unwrap(), device);
         let first_now = usage_core::report::now_ms();
         let report = runtime.run_once_with_clock(|| first_now).unwrap();
-        assert_eq!(report.acknowledged, 0, "an empty idle cursor must not create an empty generation");
+        assert_eq!(report.acknowledged, 1, "an empty initial snapshot still needs a signed completion marker");
         assert_eq!(runtime.store().outbox_summary().unwrap().pending, 0);
         let second = runtime.run_once_with_clock(|| first_now + 5_000).unwrap();
         assert_eq!(second.acknowledged, 0, "idle polling at a different time must remain outbox-free");
@@ -627,8 +627,9 @@ mod tests {
         assert!(config.stream_id.is_some());
         assert_eq!(config.data_epoch, Some(1));
         assert!(config.last_connected_at_ms.is_some());
-        assert_eq!(config.last_ack_generation, None);
-        assert!(config.last_ack_receipt_hash.is_none());
+        assert_eq!(config.last_ack_generation, Some(1));
+        assert!(config.last_ack_receipt_hash.is_some());
+        assert_eq!(runtime.store().snapshot_cursor(&config).unwrap().completion_generation, Some(1));
         assert!(server_thread.join().unwrap().is_ok());
     }
 

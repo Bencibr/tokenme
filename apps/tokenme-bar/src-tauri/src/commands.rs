@@ -255,6 +255,8 @@ pub struct SyncDeviceView {
     pub data_epoch: u64,
     pub active_stream_id: Option<String>,
     pub last_generation: Option<u64>,
+    pub last_merged_at_ms: Option<i64>,
+    pub snapshot_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -302,6 +304,8 @@ fn sync_device_view(device: DeviceStatusView) -> SyncDeviceView {
         data_epoch: device.data_epoch,
         active_stream_id: device.active_stream_id,
         last_generation: device.last_generation,
+        last_merged_at_ms: device.last_merged_at_ms,
+        snapshot_complete: device.snapshot_complete,
     }
 }
 

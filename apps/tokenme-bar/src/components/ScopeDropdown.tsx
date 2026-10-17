@@ -106,7 +106,10 @@ export function ScopeDropdown({
     const local = m.origin === "";
     const rec = local ? undefined : newest.get(m.origin);
     const device = local ? undefined : registered.get(m.origin);
-    const importedAt = rec ? rec.imported_at_ms : null;
+    // Strict device-sync receipts are newer than the legacy report.syncs
+    // records. Prefer them so a paired device cannot inherit an unrelated
+    // manual-import timestamp such as "1 week ago".
+    const importedAt = device?.last_merged_at_ms ?? rec?.imported_at_ms ?? null;
     return {
       origin: m.origin,
       name: local ? t("scope.local") : m.origin,
@@ -115,7 +118,8 @@ export function ScopeDropdown({
       color: local ? "var(--accent)" : SLOTS[slot++ % SLOTS.length],
       importedAt,
       age: importedAt === null ? null : relativeTime(importedAt, now),
-      stale: (importedAt !== null && now - importedAt > STALE_MS) || (device !== undefined && device.status !== "paired"),
+      stale: importedAt === null || now - importedAt > STALE_MS
+        || (device !== undefined && (device.status !== "paired" || !device.snapshot_complete)),
       device,
     };
   });
@@ -221,6 +225,9 @@ export function ScopeDropdown({
             const checked = r.local ? scope.kind === "local" : scope.kind === "origin" && scope.name === r.origin;
             const manual = !r.local && serverOrigins.size > 0 && !serverOrigins.has(r.origin);
             const deviceStatus = r.device ? deviceStatusLabel(r.device.status) : null;
+            const deviceSync = r.device?.status === "paired"
+              ? (r.device.snapshot_complete ? t("scope.device.synced") : t("scope.device.syncing"))
+              : null;
             return (
               <button
                 key={r.origin}
@@ -236,6 +243,7 @@ export function ScopeDropdown({
                   <span className="scope-name">{r.name}</span>
                   {manual ? <span className="si-tag">{t("scope.manual")}</span> : null}
                   {deviceStatus ? <span className="si-tag">{deviceStatus}</span> : null}
+                  {deviceSync ? <span className="si-tag">{deviceSync}</span> : null}
                 </span>
                 <span className="si-vals">
                   <span className="si-tok num">{compactTokens(r.tokens)}</span>

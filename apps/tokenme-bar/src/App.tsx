@@ -205,6 +205,12 @@ const [page, setPage] = useState<PageKey>(() => {
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
+      // Device receipts are not part of Report.syncs. Refresh the local sync
+      // view after an engine publish so ScopeDropdown shows the latest ACK and
+      // snapshot completion instead of a stale mount-time status.
+      void bridge.syncDevices().then((v) => {
+        if (alive) setSyncDevices(v);
+      }).catch(() => {});
       // Any publish — this refresh's result, a cadence tick, a healed engine —
       // means the figures on screen are new, so the busy readout is done.
       setRefreshPending(null);

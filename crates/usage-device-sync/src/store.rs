@@ -18,7 +18,7 @@ use crate::protocol::{
     PairingRequest, SignedUpload, StreamOpenReceipt, UploadEnvelope,
 };
 
-const STATE_VERSION: i64 = 5;
+const STATE_VERSION: i64 = 6;
 const MAX_PENDING_PAIRING_REQUESTS: i64 = 32;
 const MAX_OUTBOX_ENTRIES: i64 = 4_096;
 const MAX_OUTBOX_BYTES: i64 = 512 * 1024 * 1024;
@@ -132,6 +132,8 @@ pub struct DeviceRecord {
     pub data_epoch: u64,
     pub active_stream_id: Option<String>,
     pub last_generation: Option<u64>,
+    pub last_merged_at_ms: Option<i64>,
+    pub snapshot_complete: bool,
 }
 
 /// Device registry fields safe for a status/UI reader. The long-term public
@@ -147,6 +149,8 @@ pub struct DeviceStatusView {
     pub data_epoch: u64,
     pub active_stream_id: Option<String>,
     pub last_generation: Option<u64>,
+    pub last_merged_at_ms: Option<i64>,
+    pub snapshot_complete: bool,
 }
 
 impl From<DeviceRecord> for DeviceStatusView {
@@ -161,6 +165,8 @@ impl From<DeviceRecord> for DeviceStatusView {
             data_epoch: record.data_epoch,
             active_stream_id: record.active_stream_id,
             last_generation: record.last_generation,
+            last_merged_at_ms: record.last_merged_at_ms,
+            snapshot_complete: record.snapshot_complete,
         }
     }
 }
@@ -295,6 +301,7 @@ pub struct ImportReceipt {
     pub updated: u64,
     pub deduped: u64,
     pub merged_at_ms: i64,
+    pub snapshot_complete: bool,
     pub receipt_hash: [u8; 32],
 }
 
@@ -387,6 +394,7 @@ pub struct SnapshotCursor {
     pub last_identity: Option<String>,
     pub last_dirty_revision: u64,
     pub complete: bool,
+    pub completion_generation: Option<u64>,
 }
 
 impl ImportReceipt {
@@ -403,6 +411,26 @@ impl ImportReceipt {
         outcome: MergeOutcome,
         merged_at_ms: i64,
     ) -> Self {
+        Self::new_with_snapshot_complete(
+            primary_id, device_id, origin, stream_id, data_epoch, generation,
+            manifest_hash, gzip_hash, rows, outcome, merged_at_ms, false,
+        )
+    }
+
+    fn new_with_snapshot_complete(
+        primary_id: &str,
+        device_id: &str,
+        origin: &str,
+        stream_id: &str,
+        data_epoch: u64,
+        generation: u64,
+        manifest_hash: [u8; 32],
+        gzip_hash: [u8; 32],
+        rows: u64,
+        outcome: MergeOutcome,
+        merged_at_ms: i64,
+        snapshot_complete: bool,
+    ) -> Self {
         let mut receipt = Self {
             primary_id: primary_id.to_string(),
             device_id: device_id.to_string(),
@@ -417,6 +445,7 @@ impl ImportReceipt {
             updated: outcome.updated,
             deduped: outcome.deduped,
             merged_at_ms,
+            snapshot_complete,
             receipt_hash: [0; 32],
         };
         receipt.receipt_hash = receipt.compute_hash();
@@ -724,18 +753,21 @@ impl SyncStore {
     pub fn snapshot_cursor(&self, config: &SecondarySyncConfig) -> SyncResult<SnapshotCursor> {
         let Some(stream_id) = config.stream_id.as_deref() else { return Ok(SnapshotCursor::default()); };
         let Some(data_epoch) = config.data_epoch else { return Ok(SnapshotCursor::default()); };
-        let row: Option<(Option<String>, i64, i64)> = self.index.conn().query_row(
-            "SELECT last_identity, last_dirty_revision, complete
+        let row: Option<(Option<String>, i64, i64, Option<i64>)> = self.index.conn().query_row(
+            "SELECT last_identity, last_dirty_revision, complete, completion_generation
                FROM device_sync_snapshot_cursor
               WHERE device_id = ?1 AND stream_id = ?2 AND data_epoch = ?3",
             params![config.device_id, stream_id, data_epoch as i64],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).optional().map_err(sql_err)?;
-        let Some((last_identity, dirty_revision, complete)) = row else { return Ok(SnapshotCursor::default()); };
+        let Some((last_identity, dirty_revision, complete, completion_generation)) = row else { return Ok(SnapshotCursor::default()); };
         if dirty_revision < 0 || complete < 0 || complete > 1 {
             return Err(SyncError::Security("snapshot cursor contains invalid state".into()));
         }
-        Ok(SnapshotCursor { last_identity, last_dirty_revision: dirty_revision as u64, complete: complete != 0 })
+        if completion_generation.is_some_and(|generation| generation <= 0) {
+            return Err(SyncError::Security("snapshot cursor completion generation is invalid".into()));
+        }
+        Ok(SnapshotCursor { last_identity, last_dirty_revision: dirty_revision as u64, complete: complete != 0, completion_generation: completion_generation.map(|generation| generation as u64) })
     }
 
     pub fn save_secondary_config(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
@@ -1575,14 +1607,15 @@ impl SyncStore {
                     return Err(SyncError::ReconcileRequired);
                 }
                 tx.execute(
-                    "INSERT INTO device_sync_snapshot_cursor(device_id, stream_id, data_epoch, last_identity, last_dirty_revision, complete, updated_at_ms)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    "INSERT INTO device_sync_snapshot_cursor(device_id, stream_id, data_epoch, last_identity, last_dirty_revision, complete, completion_generation, updated_at_ms)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(device_id, stream_id, data_epoch) DO UPDATE SET
                          last_identity = excluded.last_identity,
                          last_dirty_revision = excluded.last_dirty_revision,
                          complete = excluded.complete,
+                         completion_generation = excluded.completion_generation,
                          updated_at_ms = excluded.updated_at_ms",
-                    params![entry.device_id, entry.stream_id, entry.data_epoch as i64, entry.snapshot_next_identity, dirty_revision as i64, if complete { 1_i64 } else { 0_i64 }, now_ms],
+                    params![entry.device_id, entry.stream_id, entry.data_epoch as i64, entry.snapshot_next_identity, dirty_revision as i64, if complete { 1_i64 } else { 0_i64 }, if complete { Some(entry.generation as i64) } else { None }, now_ms],
                 ).map_err(sql_err)?;
             }
             let legacy_json_bytes: i64 = tx.query_row(
@@ -1721,7 +1754,8 @@ impl SyncStore {
         let result = self.index.with_network_transaction(|tx| {
             import_tx_reader(
                 tx, &primary_id, &device_id, &stream_id, epoch, generation, &manifest.origin,
-                manifest_hash, gzip_hash, &envelope.manifest_bytes, reader, compressed_len, merged_at_ms,
+                manifest_hash, gzip_hash, manifest.snapshot_complete, &envelope.manifest_bytes,
+                reader, compressed_len, merged_at_ms,
             )
         });
         if matches!(&result, Err(SyncError::ReconcileRequired)) {
@@ -1958,6 +1992,7 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
                  data_epoch INTEGER NOT NULL, primary_id TEXT NOT NULL, origin TEXT NOT NULL, manifest_hash BLOB NOT NULL,
                  gzip_hash BLOB NOT NULL, rows INTEGER NOT NULL, inserted INTEGER NOT NULL,
                  updated INTEGER NOT NULL, deduped INTEGER NOT NULL, merged_at_ms INTEGER NOT NULL,
+                 snapshot_complete INTEGER NOT NULL DEFAULT 0,
                  receipt_hash BLOB NOT NULL, PRIMARY KEY(device_id, stream_id, generation)
              );
              CREATE TABLE IF NOT EXISTS device_package_marker(
@@ -1995,7 +2030,7 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
              CREATE TABLE IF NOT EXISTS device_sync_snapshot_cursor(
                  device_id TEXT NOT NULL, stream_id TEXT NOT NULL, data_epoch INTEGER NOT NULL,
                  last_identity TEXT, last_dirty_revision INTEGER NOT NULL DEFAULT 0,
-                 complete INTEGER NOT NULL DEFAULT 0, updated_at_ms INTEGER NOT NULL,
+                 complete INTEGER NOT NULL DEFAULT 0, completion_generation INTEGER, updated_at_ms INTEGER NOT NULL,
                  PRIMARY KEY(device_id, stream_id, data_epoch)
              );
              CREATE TABLE IF NOT EXISTS device_sync_journal(
@@ -2063,6 +2098,7 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
         ensure_column(tx, "device_sync_outbox", "snapshot_next_identity", "TEXT")?;
         ensure_column(tx, "device_sync_outbox", "snapshot_dirty_revision", "INTEGER")?;
         ensure_column(tx, "device_sync_outbox", "snapshot_complete", "INTEGER")?;
+        ensure_column(tx, "device_sync_snapshot_cursor", "completion_generation", "INTEGER")?;
         ensure_column(tx, "device_sync_journal", "payload_revision", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(tx, "device_sync_journal", "dirty_revision", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(tx, "device_sync_secondary_config", "last_connected_at_ms", "INTEGER")?;
@@ -2070,6 +2106,7 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
         ensure_column(tx, "device_sync_secondary_config", "last_ack_receipt_hash", "BLOB")?;
         ensure_column(tx, "device_sync_secondary_config", "capture_enabled", "INTEGER NOT NULL DEFAULT 1")?;
         ensure_column(tx, "device_receipt", "origin", "TEXT NOT NULL DEFAULT ''")?;
+        ensure_column(tx, "device_receipt", "snapshot_complete", "INTEGER NOT NULL DEFAULT 0")?;
         tx.execute(
             "UPDATE device_receipt SET origin = COALESCE((SELECT origin FROM device_registry WHERE device_registry.device_id = device_receipt.device_id), '') WHERE origin = ''",
             [],
@@ -2257,21 +2294,50 @@ fn device_tx(conn: &Connection, device_id: &str) -> SyncResult<Option<DeviceReco
     let Some((origin, display_name, os, public_key, status, data_epoch)) = row else { return Ok(None); };
     let public_key: [u8; 32] = public_key.as_slice().try_into().map_err(|_| SyncError::Security("registered public key length is invalid".into()))?;
     let status = DeviceStatus::parse(&status)?;
-    let active: Option<(String, i64)> = conn.query_row(
-        "SELECT stream_id, last_generation FROM device_stream WHERE device_id = ?1 AND active = 1",
-        params![device_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional().map_err(sql_err)?;
-    Ok(Some(DeviceRecord { device_id: device_id.to_string(), origin, display_name, os, public_key, role: DeviceRole::Secondary, status, data_epoch: data_epoch as u64, active_stream_id: active.as_ref().map(|v| v.0.clone()), last_generation: active.map(|v| v.1 as u64), }))
+    let has_snapshot_complete: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_receipt') WHERE name = 'snapshot_complete')",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    let active: Option<(String, i64, Option<i64>, bool)> = if has_snapshot_complete {
+        conn.query_row(
+            "SELECT s.stream_id, s.last_generation,
+                    (SELECT h.updated_at_ms FROM device_highwater h
+                      WHERE h.device_id = s.device_id AND h.stream_id = s.stream_id),
+                    EXISTS(SELECT 1 FROM device_receipt r
+                      WHERE r.device_id = s.device_id AND r.stream_id = s.stream_id AND r.snapshot_complete = 1)
+               FROM device_stream s
+              WHERE s.device_id = ?1 AND s.active = 1",
+            params![device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional().map_err(sql_err)?
+    } else {
+        conn.query_row(
+            "SELECT s.stream_id, s.last_generation,
+                    (SELECT h.updated_at_ms FROM device_highwater h
+                      WHERE h.device_id = s.device_id AND h.stream_id = s.stream_id)
+               FROM device_stream s
+              WHERE s.device_id = ?1 AND s.active = 1",
+            params![device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, false)),
+        ).optional().map_err(sql_err)?
+    };
+    Ok(Some(DeviceRecord {
+        device_id: device_id.to_string(), origin, display_name, os, public_key,
+        role: DeviceRole::Secondary, status, data_epoch: data_epoch as u64,
+        active_stream_id: active.as_ref().map(|v| v.0.clone()),
+        last_generation: active.as_ref().map(|v| v.1 as u64),
+        last_merged_at_ms: active.as_ref().and_then(|v| v.2),
+        snapshot_complete: active.is_some_and(|v| v.3),
+    }))
 }
 
 fn read_receipt(conn: &Connection, device_id: &str, stream_id: &str, generation: u64) -> SyncResult<Option<ImportReceipt>> {
-    let row: Option<(String, String, String, String, i64, i64, Vec<u8>, Vec<u8>, i64, i64, i64, i64, i64, Vec<u8>)> = conn.query_row(
-        "SELECT primary_id, device_id, origin, stream_id, data_epoch, generation, manifest_hash, gzip_hash, rows, inserted, updated, deduped, merged_at_ms, receipt_hash FROM device_receipt WHERE device_id = ?1 AND stream_id = ?2 AND generation = ?3",
+    let row: Option<(String, String, String, String, i64, i64, Vec<u8>, Vec<u8>, i64, i64, i64, i64, i64, i64, Vec<u8>)> = conn.query_row(
+        "SELECT primary_id, device_id, origin, stream_id, data_epoch, generation, manifest_hash, gzip_hash, rows, inserted, updated, deduped, merged_at_ms, snapshot_complete, receipt_hash FROM device_receipt WHERE device_id = ?1 AND stream_id = ?2 AND generation = ?3",
         params![device_id, stream_id, generation as i64],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?)),
     ).optional().map_err(sql_err)?;
-    let Some((primary_id, device_id, origin, stream_id, data_epoch, generation, manifest_hash, gzip_hash, rows, inserted, updated, deduped, merged_at_ms, receipt_hash)) = row else { return Ok(None); };
+    let Some((primary_id, device_id, origin, stream_id, data_epoch, generation, manifest_hash, gzip_hash, rows, inserted, updated, deduped, merged_at_ms, snapshot_complete, receipt_hash)) = row else { return Ok(None); };
     let receipt = ImportReceipt {
         primary_id,
         device_id,
@@ -2286,6 +2352,7 @@ fn read_receipt(conn: &Connection, device_id: &str, stream_id: &str, generation:
         updated: updated as u64,
         deduped: deduped as u64,
         merged_at_ms,
+        snapshot_complete: snapshot_complete != 0,
         receipt_hash: blob32(&receipt_hash)?,
     };
     if receipt.compute_hash() != receipt.receipt_hash {
@@ -2350,6 +2417,7 @@ fn import_tx_reader<R: Read>(
     origin: &str,
     manifest_hash: [u8; 32],
     gzip_hash: [u8; 32],
+    snapshot_complete: bool,
     manifest_bytes: &[u8],
     compressed: R,
     compressed_len: usize,
@@ -2452,10 +2520,13 @@ fn import_tx_reader<R: Read>(
         ensure_network_rollups_finite(tx)?;
     }
 
-    let receipt = ImportReceipt::new(primary_id, device_id, origin, stream_id, data_epoch, generation, manifest_hash, gzip_hash, row_count, outcome, merged_at_ms);
+    let receipt = ImportReceipt::new_with_snapshot_complete(
+        primary_id, device_id, origin, stream_id, data_epoch, generation,
+        manifest_hash, gzip_hash, row_count, outcome, merged_at_ms, snapshot_complete,
+    );
     tx.execute(
-        "INSERT INTO device_receipt(device_id, stream_id, generation, data_epoch, primary_id, origin, manifest_hash, gzip_hash, rows, inserted, updated, deduped, merged_at_ms, receipt_hash) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-        params![device_id, stream_id, generation as i64, data_epoch as i64, primary_id, origin, manifest_hash.as_slice(), gzip_hash.as_slice(), receipt.rows as i64, receipt.inserted as i64, receipt.updated as i64, receipt.deduped as i64, merged_at_ms, receipt.receipt_hash.as_slice()],
+        "INSERT INTO device_receipt(device_id, stream_id, generation, data_epoch, primary_id, origin, manifest_hash, gzip_hash, rows, inserted, updated, deduped, merged_at_ms, snapshot_complete, receipt_hash) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![device_id, stream_id, generation as i64, data_epoch as i64, primary_id, origin, manifest_hash.as_slice(), gzip_hash.as_slice(), receipt.rows as i64, receipt.inserted as i64, receipt.updated as i64, receipt.deduped as i64, merged_at_ms, if snapshot_complete { 1_i64 } else { 0_i64 }, receipt.receipt_hash.as_slice()],
     ).map_err(sql_err)?;
     if !cross_stream_duplicate {
         tx.execute(

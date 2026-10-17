@@ -531,6 +531,11 @@ pub struct NetworkManifest {
     pub rows: u64,
     pub sums: NetworkSums,
     pub generated_at_ms: i64,
+    /// True only on the final package of a secondary's initial snapshot.
+    /// `default` keeps manifests produced by older clients readable while
+    /// making completion explicit for new clients.
+    #[serde(default)]
+    pub snapshot_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -626,6 +631,13 @@ impl NetworkPackage {
         origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
         window_hi_ms: i64, rows: &[NetworkRow], generated_at_ms: i64,
     ) -> SyncResult<Self> {
+        Self::from_rows_with_snapshot_complete(origin, schema_version, window_lo_ms, window_hi_ms, rows, generated_at_ms, false)
+    }
+
+    pub fn from_rows_with_snapshot_complete(
+        origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
+        window_hi_ms: i64, rows: &[NetworkRow], generated_at_ms: i64, snapshot_complete: bool,
+    ) -> SyncResult<Self> {
         if rows.len() > MAX_ROWS {
             return Err(SyncError::Limit(format!("rows exceed {MAX_ROWS}")));
         }
@@ -635,7 +647,7 @@ impl NetworkPackage {
         if !origin_ok(&origin) || window_lo_ms >= window_hi_ms {
             return Err(SyncError::Protocol("invalid package origin/window".into()));
         }
-        let stub = NetworkManifest { format: SYNC_FORMAT.into(), schema_version: schema_version.clone(), origin: origin.clone(), window_lo_ms, window_hi_ms, rows: rows.len() as u64, sums: NetworkSums::default(), generated_at_ms };
+        let stub = NetworkManifest { format: SYNC_FORMAT.into(), schema_version: schema_version.clone(), origin: origin.clone(), window_lo_ms, window_hi_ms, rows: rows.len() as u64, sums: NetworkSums::default(), generated_at_ms, snapshot_complete };
         let mut plain = Vec::new();
         let mut sums = NetworkSums::default();
         let mut identities = BTreeSet::new();
@@ -657,7 +669,7 @@ impl NetworkPackage {
         encoder.write_all(&plain).map_err(|e| SyncError::Io(PathBuf::from("package"), e))?;
         let gzip_bytes = encoder.finish().map_err(|e| SyncError::Io(PathBuf::from("package"), e))?;
         if gzip_bytes.len() > MAX_COMPRESSED_BYTES { return Err(SyncError::Limit("compressed package too large".into())); }
-        let manifest = NetworkManifest { format: SYNC_FORMAT.into(), schema_version, origin, window_lo_ms, window_hi_ms, rows: rows.len() as u64, sums, generated_at_ms };
+        let manifest = NetworkManifest { format: SYNC_FORMAT.into(), schema_version, origin, window_lo_ms, window_hi_ms, rows: rows.len() as u64, sums, generated_at_ms, snapshot_complete };
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| SyncError::Protocol(format!("encode manifest: {e}")))?;
         if manifest_bytes.len() > MAX_MANIFEST_BYTES { return Err(SyncError::Limit("manifest too large".into())); }
         Ok(Self { manifest_bytes, gzip_bytes })
@@ -1221,12 +1233,24 @@ mod tests {
     }
 
     #[test]
+    fn package_roundtrip_carries_snapshot_completion_and_accepts_old_manifests() {
+        let package = NetworkPackage::from_rows_with_snapshot_complete("a", "4", 0, 100, &[row(Some("complete"))], 1, true).unwrap();
+        let (manifest, _) = package.validate().unwrap();
+        assert!(manifest.snapshot_complete);
+
+        let mut old_manifest = serde_json::to_value(&manifest).unwrap();
+        old_manifest.as_object_mut().unwrap().remove("snapshot_complete");
+        let parsed: NetworkManifest = serde_json::from_value(old_manifest).unwrap();
+        assert!(!parsed.snapshot_complete);
+    }
+
+    #[test]
     fn package_rejects_a_long_unterminated_line_before_unbounded_allocation() {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&vec![b'x'; MAX_LINE_BYTES + 1]).unwrap();
         let manifest = NetworkManifest {
             format: SYNC_FORMAT.into(), schema_version: "4".into(), origin: "a".into(),
-            window_lo_ms: 0, window_hi_ms: 100, rows: 1, sums: NetworkSums::default(), generated_at_ms: 1,
+            window_lo_ms: 0, window_hi_ms: 100, rows: 1, sums: NetworkSums::default(), generated_at_ms: 1, snapshot_complete: false,
         };
         let package = NetworkPackage {
             manifest_bytes: serde_json::to_vec(&manifest).unwrap(),

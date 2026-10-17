@@ -401,6 +401,8 @@ export interface SyncDeviceView {
   data_epoch: number;
   active_stream_id: string | null;
   last_generation: number | null;
+  last_merged_at_ms: number | null;
+  snapshot_complete: boolean;
 }
 
 export interface SyncPairingRequestView {
