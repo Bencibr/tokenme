@@ -2059,6 +2059,7 @@ mod tests {
             last_checked_at_ms: None,
             invite_url: None,
             invite_expires_at_ms: None,
+            pairing_pending: false,
             discovered_primaries: Vec::new(),
             devices: Vec::new(),
             pairing_requests: Vec::new(),

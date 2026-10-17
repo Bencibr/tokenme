@@ -226,7 +226,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
   const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id;
-  const shouldPoll = snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval);
+  const shouldPoll = snapshot.pairing_pending || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
   const commandBusy = busy || initializing || discovering;
 
   // Silent status polling keeps the overview live while a pairing decision or
@@ -238,7 +238,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     let timer: number | undefined;
     const poll = async () => {
       if (!alive) return;
-      if (attempts >= 12) return;
+      const maxAttempts = snapshot.pairing_pending ? Number.POSITIVE_INFINITY : 12;
+      if (attempts >= maxAttempts) return;
       if (operationInFlight.current) {
         timer = window.setTimeout(() => void poll(), 500);
         return;
@@ -259,11 +260,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
         if (operationInFlight.current === "poll" && generation === operationGeneration.current) operationInFlight.current = null;
         if (alive && mounted.current && generation === operationGeneration.current) setBusy(false);
       }
-      if (alive && generation === operationGeneration.current && attempts < 12) timer = window.setTimeout(() => void poll(), retryDelay);
+      if (alive && generation === operationGeneration.current && attempts < maxAttempts) timer = window.setTimeout(() => void poll(), retryDelay);
     };
     timer = window.setTimeout(() => void poll(), 5000);
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [clearDiagnosticsPoll, onSnapshot, pollGeneration, shouldPoll]);
+  }, [clearDiagnosticsPoll, onSnapshot, pollGeneration, shouldPoll, snapshot.pairing_pending]);
 
   const applyDiagnosticsResponse = useCallback((response: DiagnosticsResponse, generation?: number) => {
     if (generation !== undefined && generation !== operationGeneration.current) return;
@@ -422,13 +423,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const isPrimary = snapshot.role === "primary";
   const isSecondary = snapshot.role === "secondary";
   const pendingRequests = snapshot.pairing_requests.filter((request) => request.status === "pending");
-  const connectedDevices = snapshot.devices.filter((device) => device.status === "paired" || device.status === "paused");
+  const connectedDevices = snapshot.devices.filter((device) => device.status !== "revoked");
   const primaryDevices = connectedDevices.filter((device) => device.role === "primary");
   const secondaryDevices = connectedDevices.filter((device) => device.role === "secondary");
 
-  // The overview is a running state: a stopped or unconfigured role lands on
-  // role selection, so a dead overview never shows (原型：停止即回选择).
-  const effectiveScreen: Screen = screen === "overview" && (snapshot.role === "unconfigured" || !snapshot.service_running) ? "setup" : screen;
+  // A persisted role stays visible while the transport is recovering; only an
+  // explicit stop returns to role selection.
+  const effectiveScreen: Screen = screen === "overview" && (snapshot.role === "unconfigured" || snapshot.operation_state === "offline") ? "setup" : screen;
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {
@@ -471,6 +472,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     <div className="sync-dev" key={device.device_id}>
       <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : ""}`} aria-hidden="true" />
       <span className="sync-dev-name">{device.display_name}</span>
+      {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : null}
       <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "revoke", device_id: device.device_id }, message: t("sync.revoke.confirm", { name: device.display_name }) })}>{t("sync.disconnect")}</button>
     </div>
   );
@@ -495,22 +497,33 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
           {effectiveScreen === "setup" ? (
             <>
-              <div className="sync-ask">{t("sync.role.ask")}</div>
-              <div className="sync-choice-grid">
-                <button type="button" className="sync-choice-card" aria-pressed={pickedRole === "primary"} disabled={commandBusy} onClick={() => setPickedRole("primary")}>
-                  <span className="sync-choice-ico"><IconRadioTower size={22} /></span>
-                  <strong>{t("sync.role.primary")}</strong>
-                  <span>{t("sync.primary.hint")}</span>
-                </button>
-                <button type="button" className="sync-choice-card" aria-pressed={pickedRole === "secondary"} disabled={commandBusy} onClick={() => setPickedRole("secondary")}>
-                  <span className="sync-choice-ico"><IconMonitorDown size={22} /></span>
-                  <strong>{t("sync.role.secondary")}</strong>
-                  <span>{t("sync.pair.hint")}</span>
-                </button>
-              </div>
-              <div className="sync-btnrow">
-                <button type="button" className="btn-accent" disabled={!pickedRole || commandBusy} onClick={nextFromSetup}>{t("sync.setup.next")}</button>
-              </div>
+              {snapshot.pairing_pending ? (
+                <>
+                  <div className="sync-waiting"><strong>{t("sync.pairing.recovering")}</strong><span>{t("sync.pairing.recovering_hint")}</span></div>
+                  <div className="sync-btnrow">
+                    <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "unpair" }, message: t("sync.pairing.cancel_confirm") })}>{t("sync.disconnect")}</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="sync-ask">{t("sync.role.ask")}</div>
+                  <div className="sync-choice-grid">
+                    <button type="button" className="sync-choice-card" aria-pressed={pickedRole === "primary"} disabled={commandBusy} onClick={() => setPickedRole("primary")}>
+                      <span className="sync-choice-ico"><IconRadioTower size={22} /></span>
+                      <strong>{t("sync.role.primary")}</strong>
+                      <span>{t("sync.primary.hint")}</span>
+                    </button>
+                    <button type="button" className="sync-choice-card" aria-pressed={pickedRole === "secondary"} disabled={commandBusy} onClick={() => setPickedRole("secondary")}>
+                      <span className="sync-choice-ico"><IconMonitorDown size={22} /></span>
+                      <strong>{t("sync.role.secondary")}</strong>
+                      <span>{t("sync.pair.hint")}</span>
+                    </button>
+                  </div>
+                  <div className="sync-btnrow">
+                    <button type="button" className="btn-accent" disabled={!pickedRole || commandBusy} onClick={nextFromSetup}>{t("sync.setup.next")}</button>
+                  </div>
+                </>
+              )}
             </>
           ) : null}
 
@@ -598,7 +611,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                     </div>
                   </div>
                   <div className="role-right">
-                    <span className="role-state">{t("sync.state.running")}</span>
+                    <span className="role-state">{snapshot.service_running ? t("sync.state.running") : t("sync.state.recovering")}</span>
                     <button type="button" className="stopbtn" disabled={commandBusy} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>

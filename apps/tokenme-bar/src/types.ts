@@ -443,6 +443,7 @@ export interface SyncDevicesSnapshot {
   last_checked_at_ms: number | null;
   invite_url: string | null;
   invite_expires_at_ms: number | null;
+  pairing_pending: boolean;
   discovered_primaries: DiscoveredPrimaryView[];
   devices: SyncDeviceView[];
   pairing_requests: SyncPairingRequestView[];

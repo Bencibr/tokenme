@@ -24,6 +24,7 @@ use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Theme, TrayMode}
 use crate::tray;
 
 const DEFAULT_PRIMARY_BIND: &str = "0.0.0.0:47821";
+const SYNC_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Terminates the tray application, rather than merely hiding its panel.
 #[tauri::command]
@@ -111,6 +112,17 @@ pub struct SyncControl {
     state: Arc<Mutex<SyncControlState>>,
 }
 
+struct SyncRecoveryService {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for SyncRecoveryService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("SyncRecoveryService").field("join", &self.join.is_some()).finish()
+    }
+}
+
 #[derive(Debug, Default)]
 struct SyncControlState {
     role: String,
@@ -128,6 +140,7 @@ struct SyncControlState {
     discovered_primaries: Vec<DiscoveredPrimaryView>,
     pending_pairing_attempted: bool,
     discovery_in_flight: bool,
+    recovery: Option<SyncRecoveryService>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +254,13 @@ impl Drop for SecondaryRuntimeService {
     }
 }
 
+impl Drop for SyncRecoveryService {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() { let _ = join.join(); }
+    }
+}
+
 /// State and mutating actions for the strict sync service. The IPC surface is
 /// one command, but every mutation below opens the real SyncStore and returns
 /// its error; the old SSH ServerSheet remains a separate feature.
@@ -279,6 +299,7 @@ pub struct SyncDevicesView {
     pub last_checked_at_ms: Option<i64>,
     pub invite_url: Option<String>,
     pub invite_expires_at_ms: Option<i64>,
+    pub pairing_pending: bool,
     pub discovered_primaries: Vec<DiscoveredPrimaryView>,
     pub devices: Vec<SyncDeviceView>,
     pub pairing_requests: Vec<PairingRequestState>,
@@ -487,8 +508,37 @@ fn send_pending_pairing(pending: &PendingPairing) -> Result<(), String> {
     );
     transport_config.pinned_certificate_sha256 = pending.certificate_pin;
     let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|error| error.to_string())?;
-    transport.send_pairing_request(&pending.request).map_err(|error| format!("pairing request failed: {error}"))?;
-    Ok(())
+    transport.send_pairing_request(&pending.request).map(|_| ()).map_err(|error| format!("pairing request failed: {error}"))
+}
+
+fn pairing_invite_needs_renewal(error: &str) -> bool {
+    error.contains("pairing invite expired")
+        || error.contains("pairing invite already consumed")
+        || error.contains("pairing invite is already bound")
+        || error.contains("pairing invite was concurrently claimed")
+}
+
+fn renew_pending_pairing(pending: &PendingPairing, identity: &DeviceIdentity) -> Result<PendingPairing, String> {
+    let mut transport_config = HttpsTransportConfig::pinned(
+        pending.endpoint.clone(), pending.server_name.clone(), pending.certificate_der.clone(),
+    );
+    transport_config.pinned_certificate_sha256 = pending.certificate_pin;
+    let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|error| error.to_string())?;
+    let (invite, certificate_der) = transport.request_pairing_invite(&pending.primary_id, &pending.endpoint)
+        .map_err(|error| format!("cannot renew pairing invite: {error}"))?;
+    let certificate_pin = parse_pin(&invite.certificate_pin)?;
+    if hash_bytes(&certificate_der) != certificate_pin || certificate_pin != pending.certificate_pin {
+        return Err("renewed pairing invite changed the pinned primary certificate".into());
+    }
+    let request = PairingRequest::new(&invite, identity, pending.request.os.clone()).map_err(|error| error.to_string())?;
+    Ok(PendingPairing {
+        request,
+        primary_id: pending.primary_id.clone(),
+        endpoint: invite.endpoint,
+        server_name: pending.server_name.clone(),
+        certificate_der,
+        certificate_pin,
+    })
 }
 
 fn primary_endpoint(config: &PrimarySyncConfig) -> Option<String> {
@@ -1016,12 +1066,10 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let index_path = sync_index_path()?;
     let secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| format!("cannot read secondary sync configuration: {error}"))?;
     let primary_config = SyncStore::read_primary_config(&index_path).map_err(|error| format!("cannot read primary sync configuration: {error}"))?;
-    let pending_pairing = if secondary_config.is_none() && !state.pending_pairing_attempted {
-        read_pending_pairing()?
-    } else {
-        None
-    };
-    if state.role.is_empty() {
+    let pending_pairing = if secondary_config.is_none() { read_pending_pairing()? } else { None };
+    let restore_secondary = secondary_config.is_some()
+        && (state.role.is_empty() || (state.role == "secondary" && state.runtime.is_none()));
+    if restore_secondary {
         if let Some(config) = &secondary_config {
             state.role = "secondary".into();
             state.primary_id = Some(config.primary_id.clone());
@@ -1034,14 +1082,16 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
                     state.phase = SyncPhase::Error;
                     if let Ok(mut store) = SyncStore::open(&index_path, config.primary_id.clone()) {
                         let now = current_ms();
-                        let _ = store.set_secondary_enabled(false, now);
                         let _ = store.set_secondary_last_error(state.last_error.as_deref(), now);
                     }
                 } else {
                     state.phase = SyncPhase::Success;
                 }
             }
-        } else if let Some(pending) = pending_pairing {
+        }
+    }
+    if state.role.is_empty() && !state.pending_pairing_attempted {
+        if let Some(pending) = pending_pairing {
             state.pending_pairing_attempted = true;
             if let Err(error) = resume_pending_pairing(state, &index_path, pending) {
                 state.last_error = Some(error);
@@ -1049,7 +1099,12 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
             } else {
                 state.phase = SyncPhase::Success;
             }
-        } else if let Some(config) = &primary_config {
+        }
+    }
+    let restore_primary = primary_config.is_some()
+        && (state.role.is_empty() || (state.role == "primary" && state.service.is_none()));
+    if restore_primary {
+        if let Some(config) = &primary_config {
             state.role = "primary".into();
             state.primary_id = Some(config.primary_id.clone());
             state.endpoint = primary_endpoint(config);
@@ -1082,6 +1137,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let data_epoch = secondary_config.as_ref().and_then(|config| config.data_epoch);
     let last_error = state.last_error.clone().or_else(|| secondary_config.as_ref().and_then(|config| config.last_error.clone()));
     state.last_checked_at_ms = Some(current_ms());
+    let pairing_pending = secondary_config.is_none() && read_pending_pairing()?.is_some();
     Ok(SyncDevicesView {
         primary_id,
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
@@ -1101,6 +1157,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         last_checked_at_ms: state.last_checked_at_ms,
         invite_url: state.invite_url.clone(),
         invite_expires_at_ms: state.invite_expires_at_ms,
+        pairing_pending,
         discovered_primaries: state.discovered_primaries.clone(),
         devices: snapshot.devices.into_iter().map(sync_device_view).collect(),
         pairing_requests: snapshot.pairing_requests,
@@ -1111,26 +1168,13 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
 /// first snapshot. A disabled config is an intentional user stop and must not
 /// be treated as an autostart request.
 pub fn restore_sync_on_launch(app: &tauri::AppHandle) {
+    ensure_sync_recovery_loop(app);
     let Some(control) = app.try_state::<SyncControl>() else { return; };
     let Ok(mut state) = control.state.lock() else { return; };
     if let Err(error) = sync_snapshot(&mut state, Some(app.clone())) {
         state.last_error = Some(error);
         state.phase = SyncPhase::Error;
         return;
-    }
-    // A primary bind failure is deterministic until the user changes the
-    // address or resolves the port conflict; persist the stop so startup does
-    // not retry the same failure forever.
-    if state.role == "primary" && state.service.is_none() {
-        if let Ok(index_path) = sync_index_path() {
-            if let Ok(Some(config)) = SyncStore::read_primary_config(&index_path) {
-                if config.enabled {
-                    if let Ok(mut store) = SyncStore::open(&index_path, config.primary_id) {
-                        let _ = store.set_primary_enabled(false, current_ms());
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1148,6 +1192,33 @@ fn clear_persisted_primary_after_secondary_commit(index_path: &std::path::Path) 
 
 fn rearm_pending_pairing_retry(state: &mut SyncControlState) {
     state.pending_pairing_attempted = false;
+}
+
+fn ensure_sync_recovery_loop(app: &AppHandle) {
+    let Some(control) = app.try_state::<SyncControl>() else { return; };
+    let Ok(mut state) = control.state.lock() else { return; };
+    if state.recovery.is_some() { return; }
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let state_ref = Arc::downgrade(&control.state);
+    let app = app.clone();
+    let join = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Acquire) {
+            let deadline = Instant::now() + SYNC_RECOVERY_INTERVAL;
+            while Instant::now() < deadline {
+                if thread_stop.load(Ordering::Acquire) { return; }
+                thread::sleep(Duration::from_millis(100));
+            }
+            let Some(state_ref) = state_ref.upgrade() else { return; };
+            let Ok(mut state) = state_ref.lock() else { return; };
+            rearm_pending_pairing_retry(&mut state);
+            if let Err(error) = sync_snapshot(&mut state, Some(app.clone())) {
+                state.last_error = Some(error);
+                state.phase = SyncPhase::Error;
+            }
+        }
+    });
+    state.recovery = Some(SyncRecoveryService { stop, join: Some(join) });
 }
 
 fn pair_secondary_with_details(
@@ -1228,9 +1299,7 @@ fn pair_secondary_with_details(
         Ok(()) => Ok(()),
         Err(error) => {
             let mut rollback = SyncStore::open(index_path, primary_id).map_err(|open_error| open_error.to_string())?;
-            let now = current_ms();
-            let _ = rollback.set_secondary_enabled(false, now);
-            let _ = rollback.set_secondary_last_error(Some(error.as_str()), now);
+            let _ = rollback.set_secondary_last_error(Some(error.as_str()), current_ms());
             Err(error)
         }
     }
@@ -1245,7 +1314,16 @@ fn resume_pending_pairing(state: &mut SyncControlState, index_path: &std::path::
     if identity.device_id != pending.request.device_id || identity.origin != pending.request.origin {
         return Err("pending pairing identity does not match the stored request".into());
     }
-    send_pending_pairing(&pending)?;
+    let pending = match send_pending_pairing(&pending) {
+        Ok(()) => pending,
+        Err(error) if pairing_invite_needs_renewal(&error) => {
+            let renewed = renew_pending_pairing(&pending, &identity)?;
+            write_pending_pairing(&renewed)?;
+            send_pending_pairing(&renewed)?;
+            renewed
+        }
+        Err(error) => return Err(error),
+    };
     let mut store = SyncStore::open(index_path, pending.primary_id.clone()).map_err(|error| error.to_string())?;
     let config = SecondarySyncConfig {
         primary_id: pending.primary_id.clone(), device_id: identity.device_id.clone(), origin: identity.origin.clone(),
@@ -1271,9 +1349,7 @@ fn resume_pending_pairing(state: &mut SyncControlState, index_path: &std::path::
         Err(error) => {
             let primary_id = state.primary_id.clone().ok_or_else(|| "pending secondary primary id is missing".to_string())?;
             let mut rollback = SyncStore::open(index_path, primary_id).map_err(|open_error| open_error.to_string())?;
-            let now = current_ms();
-            let _ = rollback.set_secondary_enabled(false, now);
-            let _ = rollback.set_secondary_last_error(Some(error.as_str()), now);
+            let _ = rollback.set_secondary_last_error(Some(error.as_str()), current_ms());
             Err(error)
         }
     }
@@ -1287,11 +1363,6 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
         let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
         match action {
         SyncManagementRequest::Status => {
-            // An explicit refresh is the user's retry action after a
-            // transient network failure during startup recovery. Keep the
-            // pending file and reuse its signed request_id on the next
-            // snapshot instead of permanently suppressing the retry.
-            rearm_pending_pairing_retry(state);
             Ok(())
         },
         SyncManagementRequest::Discover => {
@@ -1309,12 +1380,8 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             match start_secondary_runtime(state) {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    // Do not leave an unusable config enabled: a failed manual
-                    // start must be retried by an explicit user action.
                     let mut rollback = SyncStore::open(&index_path, primary_id).map_err(|open_error| open_error.to_string())?;
-                    let now = current_ms();
-                    let _ = rollback.set_secondary_enabled(false, now);
-                    let _ = rollback.set_secondary_last_error(Some(error.as_str()), now);
+                    let _ = rollback.set_secondary_last_error(Some(error.as_str()), current_ms());
                     Err(error)
                 }
             }
@@ -1369,11 +1436,16 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             if state.role == "primary" || state.service.is_some() {
                 return Err("stop the primary sync service before unpairing this device".into());
             }
-            let Some(config) = SyncStore::read_secondary_config(&index_path).map_err(|e| e.to_string())? else {
+            let config = SyncStore::read_secondary_config(&index_path).map_err(|e| e.to_string())?;
+            if let Some(config) = config {
+                stop_service(state);
+                clear_secondary_binding(&index_path, &config)?;
+            } else if read_pending_pairing()?.is_some() {
+                clear_pending_pairing()?;
+                state.pending_pairing_attempted = true;
+            } else {
                 return Err("this device is not paired".into());
-            };
-            stop_service(state);
-            clear_secondary_binding(&index_path, &config)?;
+            }
             state.role.clear();
             state.primary_id = None;
             state.endpoint = None;
@@ -2180,7 +2252,7 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
 
 #[cfg(test)]
 mod sync_tests {
-    use super::{advertised_endpoint_host, merge_discovered_primary, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
+    use super::{advertised_endpoint_host, merge_discovered_primary, pairing_invite_needs_renewal, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
 
@@ -2226,10 +2298,17 @@ mod sync_tests {
     }
 
     #[test]
-    fn explicit_status_refresh_rearms_pending_pairing_recovery() {
+    fn recovery_tick_rearms_pending_pairing_recovery() {
         let mut state = SyncControlState { pending_pairing_attempted: true, ..SyncControlState::default() };
         rearm_pending_pairing_retry(&mut state);
         assert!(!state.pending_pairing_attempted, "refresh must allow the persisted request to retry");
+    }
+
+    #[test]
+    fn expired_pairing_invites_are_the_only_retry_errors_that_renew_invites() {
+        assert!(pairing_invite_needs_renewal("pairing request failed: pairing invite expired"));
+        assert!(pairing_invite_needs_renewal("pairing request failed: pairing invite is already bound to request req-1"));
+        assert!(!pairing_invite_needs_renewal("pairing request failed: certificate pin mismatch"));
     }
 
     #[test]
