@@ -858,7 +858,6 @@ export function QuotaStrip({
                         {cycle.estimated_tokens != null ? (
                           <span className="quota-cycle-est">
                             {t("quota.cycle.estimated", {
-                              window: cycleWindow(q.label),
                               tokens: formatLimitTokens(cycle.estimated_tokens),
                               used: formatUsedPercent(cycle.estimated_used_percent ?? q.used_percent),
                             })}
