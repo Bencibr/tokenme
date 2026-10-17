@@ -1247,10 +1247,11 @@
 .quota-cycle {
   position: relative;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
   padding: 1px 0 2px 26px;
+  white-space: nowrap;
+  overflow: hidden;
   color: var(--ink-3);
   font-size: 10px;
   line-height: 1.35;
@@ -1290,6 +1291,9 @@
 /* The per-model breakdown under a cycle line: one single-line row per model,
    same geometry as the quota rows above (bar / percent / used). */
 .quota-cycle-est {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--accent-ink);
 }
 
