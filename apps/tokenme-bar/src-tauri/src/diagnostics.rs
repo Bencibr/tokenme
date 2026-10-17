@@ -38,7 +38,7 @@ pub const CODE_TOOL_UNAVAILABLE: &str = "tool_unavailable";
 pub const CODE_PRIMARY_UNAVAILABLE: &str = "primary_unavailable";
 pub const CODE_GRANT_FAILED: &str = "grant_failed";
 
-const MAX_SESSION_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+const MAX_SESSION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_PARAMS_BYTES: usize = 32 * 1024;
 const MAX_OPERATION_HISTORY: usize = 64;
 const LOCAL_MCP_PATH: &str = "/mcp";
@@ -264,13 +264,13 @@ impl Scope {
 pub struct DiagnosticsState {
     inner: Mutex<Inner>,
     local_http: Mutex<Option<LocalMcpHttpServer>>,
-    /// Requested local-credential lifetime; 0 reads as the 15-minute default,
-    /// clamped to 5..60 minutes on use.
+    /// Kept for management-request compatibility; local MCP credentials always
+    /// use the fixed seven-day lifetime below.
     local_token_ttl_ms: AtomicI64,
 }
 
-const LOCAL_TOKEN_TTL_MIN_MS: i64 = 5 * 60 * 1000;
-const LOCAL_TOKEN_TTL_MAX_MS: i64 = 60 * 60 * 1000;
+const LOCAL_TOKEN_TTL_MIN_MS: i64 = LOCAL_MCP_TOKEN_TTL_MS;
+const LOCAL_TOKEN_TTL_MAX_MS: i64 = LOCAL_MCP_TOKEN_TTL_MS;
 
 impl DiagnosticsState {
     fn local_token_ttl(&self) -> i64 {
@@ -280,6 +280,8 @@ impl DiagnosticsState {
 
     fn set_local_token_ttl(&self, ttl_ms: Option<i64>) {
         if let Some(ttl) = ttl_ms {
+            // The old API accepted a requested TTL; normalize it so no caller
+            // can mint a shorter-lived MCP Bearer.
             self.local_token_ttl_ms.store(ttl.clamp(LOCAL_TOKEN_TTL_MIN_MS, LOCAL_TOKEN_TTL_MAX_MS), Ordering::Relaxed);
         }
     }
@@ -1522,6 +1524,8 @@ fn safe_sync_view(status: &SyncDevicesView) -> Value {
             "data_epoch": device.data_epoch,
             "active_stream_id": device.active_stream_id,
             "last_generation": device.last_generation,
+            "last_merged_at_ms": device.last_merged_at_ms,
+            "snapshot_complete": device.snapshot_complete,
         })).collect::<Vec<_>>(),
     })
 }
@@ -1894,6 +1898,26 @@ mod tests {
     }
 
     #[test]
+    fn local_mcp_bearer_lifetime_is_fixed_at_seven_days() {
+        let state = state();
+        assert_eq!(state.local_token_ttl(), 7 * 24 * 60 * 60 * 1000);
+        state.set_local_token_ttl(Some(1));
+        assert_eq!(state.local_token_ttl(), 7 * 24 * 60 * 60 * 1000);
+        state.set_local_token_ttl(Some(i64::MAX));
+        assert_eq!(state.local_token_ttl(), 7 * 24 * 60 * 60 * 1000);
+    }
+
+    #[test]
+    fn local_mcp_session_can_use_the_full_bearer_lifetime() {
+        let state = lan_state();
+        let ttl = state.local_http_session_ttl(Scope::Read);
+        assert!(ttl > MAX_SESSION_TTL_MS - 1_000);
+        assert!(state.create_session_for_panel(
+            "local-http".into(), Scope::Read.local_origin().into(), Scope::Read.local_scopes(), ttl,
+        ).is_ok());
+    }
+
+    #[test]
     fn unknown_tool_definition_scope_is_denied() {
         assert_eq!(tool_definition_scope("diagnostics.read"), Ok(Scope::Read));
         assert_eq!(tool_definition_scope("sync.control"), Ok(Scope::Control));
@@ -2039,6 +2063,7 @@ mod tests {
             last_checked_at_ms: None,
             invite_url: None,
             invite_expires_at_ms: None,
+            pairing_pending: false,
             discovered_primaries: Vec::new(),
             devices: Vec::new(),
             pairing_requests: Vec::new(),

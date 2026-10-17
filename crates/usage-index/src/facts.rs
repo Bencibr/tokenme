@@ -804,12 +804,21 @@ fn percent_is_unverified_token_like(tool: &str) -> bool {
     matches!(tool, "cline" | "zcode")
 }
 
-/// The window-end reconciliation: with ≥15 percentage points of travel, a
-/// token-like meter produces matching token÷percent estimates at both ends
-/// (≤1.5× apart → "confirmed"); diverging ≥3× means the percent counts
-/// something else ("incompatible"); in between or without enough travel, the
-/// previous verdict sticks. This is what makes the tiers self-adjusting —
-/// seeds are opinions, completed windows are evidence.
+/// The window-end reconciliation. The fast path is unchanged: with ≥15pp of
+/// travel, two-end estimates within 1.5× confirm the meter outright. Beyond
+/// that the two-end method is the suspect, not the meter — a tally that
+/// started mid-window misses exactly the head, so its first anchor sits low
+/// and the ends drift apart (≥3× used to condemn the meter outright). Before
+/// condemning, or sticking, the verdict asks the local deltas: consecutive-
+/// pair slopes (Δtokens/Δpercent) have both ends observed locally, so the
+/// unseen head cancels. A rescue needs ≥3 usable pairs, a positive median
+/// slope, ≥70% of pairs within 3× of it, and the current anchor's implied
+/// total agreeing with the median — i.e. broad local evidence that the
+/// percent really does track tokens; the estimate number itself stays
+/// conservative until the next clean window. Without that evidence a ≥3×
+/// divergence is still "incompatible", 1.5–3× still sticks, and fewer than
+/// three pairs never upgrade anything. Seeds are opinions, completed windows
+/// are evidence — unchanged.
 fn classify_samples(samples: &[[f64; 2]], previous: Option<&str>) -> Option<String> {
     let first = samples.first()?;
     let last = samples.last()?;
@@ -820,10 +829,31 @@ fn classify_samples(samples: &[[f64; 2]], previous: Option<&str>) -> Option<Stri
     let a = estimate(first);
     let b = estimate(last);
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    if lo <= 0.0 {
-        return previous.map(str::to_string);
-    }
     if hi <= lo * 1.5 {
+        return Some("confirmed".to_string());
+    }
+    let mut slopes: Vec<f64> = samples.windows(2)
+        .filter_map(|pair| {
+            let travel = pair[1][1] - pair[0][1];
+            (travel >= 1.0).then(|| (pair[1][0] - pair[0][0]) * 100.0 / travel)
+        })
+        .collect();
+    let rescued = if slopes.len() >= 3 {
+        slopes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = if slopes.len() % 2 == 0 { (slopes[slopes.len() / 2 - 1] + slopes[slopes.len() / 2]) / 2.0 } else { slopes[slopes.len() / 2] };
+        let inliers = slopes.iter().filter(|slope| **slope >= median / 3.0 && **slope <= median * 3.0).count();
+        // A foreign meter shows up as near-zero slopes (percent moves, tokens
+        // do not) — the median guard refuses to rescue those. The current
+        // anchor must agree with the median (both are implied window totals):
+        // a rescue vouches for the meter, not for a tally that missed half
+        // the window.
+        let implied = estimate(last);
+        let anchor_agrees = median > 0.0 && implied >= median / 3.0 && implied <= median * 3.0;
+        median > 0.0 && anchor_agrees && inliers as f64 >= 0.7 * slopes.len() as f64
+    } else {
+        false
+    };
+    if rescued {
         Some("confirmed".to_string())
     } else if hi >= lo * 3.0 {
         Some("incompatible".into())
@@ -2026,6 +2056,34 @@ mod golden {
         let cycle = last[0].cycle.as_ref().unwrap();
         assert_eq!(cycle.status, CycleStatus::Unavailable, "incompatible meters answer nothing");
         assert_eq!(cycle.estimated_tokens, None);
+    }
+
+    /// The Gemini 5h window that shipped this fix: the tally started at 1.07%,
+    /// so the first anchor missed the head and the two ends sat 1.86× apart —
+    /// in between the old rules, which kept an earlier "incompatible" verdict
+    /// alive forever. The pairwise slopes are flat (~2.8M tokens per point)
+    /// and the current anchor agrees with them, so the meter is confirmed
+    /// instead of slandered.
+    #[test]
+    fn a_polluted_first_anchor_rescues_a_coherent_meter() {
+        let samples: Vec<[f64; 2]> = vec![
+            [1619837.0, 1.0749939999999958], [29733254.0, 11.458840000000004], [37338282.0, 13.820343999999997],
+            [46854233.0, 16.70317], [52941137.0, 19.097613999999997], [62547462.0, 22.725530000000006],
+            [70353254.0, 25.41475], [78298901.0, 28.334104999999997], [89989084.0, 31.452435],
+            [96595211.0, 34.140139999999995], [104505060.0, 36.66674], [110234840.0, 39.136547],
+            [114605076.0, 41.28619], [128308505.0, 46.13835], [135827837.0, 48.60894999999999],
+            [146728529.0, 52.492207],
+        ];
+        assert_eq!(classify_samples(&samples, Some("incompatible")).as_deref(), Some("confirmed"));
+    }
+
+    /// Exponential token growth against a linear percent is a real foreign
+    /// meter: the pairwise slopes fan out (10M → 270M implied), so no rescue —
+    /// the divergence is in the body of the window, not the head.
+    #[test]
+    fn an_incoherent_meter_is_not_rescued_by_slopes() {
+        let samples: Vec<[f64; 2]> = vec![[1.0e6, 10.0], [3.0e6, 30.0], [9.0e6, 50.0], [27.0e6, 70.0], [81.0e6, 90.0]];
+        assert_eq!(classify_samples(&samples, None).as_deref(), Some("incompatible"));
     }
 
     #[test]

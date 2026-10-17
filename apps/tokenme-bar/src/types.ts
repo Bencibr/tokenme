@@ -401,6 +401,8 @@ export interface SyncDeviceView {
   data_epoch: number;
   active_stream_id: string | null;
   last_generation: number | null;
+  last_merged_at_ms: number | null;
+  snapshot_complete: boolean;
 }
 
 export interface SyncPairingRequestView {
@@ -441,6 +443,7 @@ export interface SyncDevicesSnapshot {
   last_checked_at_ms: number | null;
   invite_url: string | null;
   invite_expires_at_ms: number | null;
+  pairing_pending: boolean;
   discovered_primaries: DiscoveredPrimaryView[];
   devices: SyncDeviceView[];
   pairing_requests: SyncPairingRequestView[];

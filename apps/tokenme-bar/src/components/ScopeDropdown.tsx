@@ -12,21 +12,8 @@ const SLOTS = ["var(--cat-2)", "var(--cat-4)", "var(--cat-7)", "var(--cat-8)", "
 /** The line the header badge draws: an import older than this reads amber. */
 const STALE_MS = 24 * 3_600_000;
 
-/** No server feature in use: nothing to contrast, so no manual-import tags. */
-const NO_ORIGINS: Set<string> = new Set();
-
 function share(part: number, whole: number): string {
   return whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : "0%";
-}
-
-function deviceStatusLabel(status: SyncDeviceView["status"]): string {
-  switch (status) {
-    case "pending": return t("scope.device.pending");
-    case "paired": return t("scope.device.paired");
-    case "paused": return t("scope.device.paused");
-    case "revoked": return t("scope.device.revoked");
-    case "reconcile_required": return t("scope.device.reconcile");
-  }
 }
 
 interface MachineRow {
@@ -55,9 +42,8 @@ interface Props {
   /** Open state lives in App so Escape closes menu → sheet → panel in order. */
   open: boolean;
   onOpen: (open: boolean) => void;
-  /** Origins backed by a configured server. Origins outside a non-empty set
-   *  arrived by a manual export/import and are tagged; an empty set shows no
-   *  tags at all. */
+  /** Origins backed by a configured server; other non-device origins are
+   *  historical/manual imports, even when no server is configured. */
   serverOrigins?: Set<string>;
 }
 
@@ -73,7 +59,7 @@ export function ScopeDropdown({
   now,
   open,
   onOpen,
-  serverOrigins = NO_ORIGINS,
+  serverOrigins,
 }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -94,9 +80,16 @@ export function ScopeDropdown({
   }
 
   const registered = new Map((devices ?? []).map((device) => [device.origin, device]));
-  const machineRows = [...machines];
+  // 选择器只展示可管理的来源；历史手动导入仍留在索引里，但不冒充机器。
+  const machineRows = [...machines].filter((machine) => {
+    if (machine.origin === "") return true;
+    const device = registered.get(machine.origin);
+    if (device) return device.status !== "revoked";
+    // shortcut: server list is loading, keep rows until it resolves to avoid SSH flicker.
+    return serverOrigins === undefined || serverOrigins.has(machine.origin);
+  });
   for (const device of devices ?? []) {
-    if (!machineRows.some((machine) => machine.origin === device.origin)) {
+    if (device.status !== "revoked" && !machineRows.some((machine) => machine.origin === device.origin)) {
       machineRows.push({ origin: device.origin, today_tokens: 0 });
     }
   }
@@ -106,7 +99,10 @@ export function ScopeDropdown({
     const local = m.origin === "";
     const rec = local ? undefined : newest.get(m.origin);
     const device = local ? undefined : registered.get(m.origin);
-    const importedAt = rec ? rec.imported_at_ms : null;
+    // Strict device-sync receipts are newer than the legacy report.syncs
+    // records. Prefer them so a paired device cannot inherit an unrelated
+    // manual-import timestamp such as "1 week ago".
+    const importedAt = device?.last_merged_at_ms ?? rec?.imported_at_ms ?? null;
     return {
       origin: m.origin,
       name: local ? t("scope.local") : m.origin,
@@ -115,7 +111,8 @@ export function ScopeDropdown({
       color: local ? "var(--accent)" : SLOTS[slot++ % SLOTS.length],
       importedAt,
       age: importedAt === null ? null : relativeTime(importedAt, now),
-      stale: (importedAt !== null && now - importedAt > STALE_MS) || (device !== undefined && device.status !== "paired"),
+      stale: importedAt === null || now - importedAt > STALE_MS
+        || (device !== undefined && (device.status !== "paired" || !device.snapshot_complete)),
       device,
     };
   });
@@ -219,8 +216,6 @@ export function ScopeDropdown({
 
           {rows.map((r) => {
             const checked = r.local ? scope.kind === "local" : scope.kind === "origin" && scope.name === r.origin;
-            const manual = !r.local && serverOrigins.size > 0 && !serverOrigins.has(r.origin);
-            const deviceStatus = r.device ? deviceStatusLabel(r.device.status) : null;
             return (
               <button
                 key={r.origin}
@@ -234,8 +229,6 @@ export function ScopeDropdown({
                 <span className="o-dot" style={{ background: r.color }} aria-hidden="true" />
                 <span className="si-name">
                   <span className="scope-name">{r.name}</span>
-                  {manual ? <span className="si-tag">{t("scope.manual")}</span> : null}
-                  {deviceStatus ? <span className="si-tag">{deviceStatus}</span> : null}
                 </span>
                 <span className="si-vals">
                   <span className="si-tok num">{compactTokens(r.tokens)}</span>

@@ -858,7 +858,6 @@ export function QuotaStrip({
                         {cycle.estimated_tokens != null ? (
                           <span className="quota-cycle-est">
                             {t("quota.cycle.estimated", {
-                              window: cycleWindow(q.label),
                               tokens: formatLimitTokens(cycle.estimated_tokens),
                               used: formatUsedPercent(cycle.estimated_used_percent ?? q.used_percent),
                             })}
@@ -875,16 +874,9 @@ export function QuotaStrip({
                                 className="quota-cycwarn"
                                 aria-label={t("quota.cycle.unsupported")}
                                 title={t("quota.cycle.unsupported")}
-                                onClick={() => {
-                                  const wk = `w:${rowKey(q)}`;
-                                  setModelTipKey(modelTipKey === wk ? null : wk);
-                                }}
                               >
                                 !
                               </button>
-                              {modelTipKey === `w:${rowKey(q)}` ? (
-                                <span className="rank-tip quota-warntip">{t("quota.cycle.unsupported")}</span>
-                              ) : null}
                             </>
                           ) : !hideUnusedEstimation ? (
                             <em>{cycleStatus}</em>

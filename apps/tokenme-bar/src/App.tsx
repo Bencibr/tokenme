@@ -79,9 +79,10 @@ const [page, setPage] = useState<PageKey>(() => {
   // Remote servers: the list powers the footer icon's dot and the scope menu's
   // "manual" tags; the sheet itself only borrows it.
   const [servers, setServers] = useState<ServerView[]>([]);
+  const [serversLoaded, setServersLoaded] = useState(false);
   const [serversOpen, setServersOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
-  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, role: "unconfigured", service_running: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] });
+  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, role: "unconfigured", service_running: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [] });
   // The sheet's own close guard (a running install must not be dismissed) —
   // Escape asks through this ref instead of closing the sheet blind.
   const serverCloseRef = useRef<() => void>(() => {});
@@ -192,7 +193,10 @@ const [page, setPage] = useState<PageKey>(() => {
     void bridge
       .servers()
       .then((v) => {
-        if (alive) setServers(v);
+        if (alive) {
+          setServers(v);
+          setServersLoaded(true);
+        }
       })
       .catch(() => {});
     void bridge
@@ -201,10 +205,19 @@ const [page, setPage] = useState<PageKey>(() => {
         if (alive) setSyncDevices(v);
       })
       .catch(() => {});
-    const unServers = bridge.onServersUpdated((v) => setServers(v));
+    const unServers = bridge.onServersUpdated((v) => {
+      setServers(v);
+      setServersLoaded(true);
+    });
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
+      // Device receipts are not part of Report.syncs. Refresh the local sync
+      // view after an engine publish so ScopeDropdown shows the latest ACK and
+      // snapshot completion instead of a stale mount-time status.
+      void bridge.syncDevices().then((v) => {
+        if (alive) setSyncDevices(v);
+      }).catch(() => {});
       // Any publish — this refresh's result, a cadence tick, a healed engine —
       // means the figures on screen are new, so the busy readout is done.
       setRefreshPending(null);
@@ -464,10 +477,13 @@ const [page, setPage] = useState<PageKey>(() => {
     return new Set(w.breakdown.tools.filter((t) => t.sessions > 0).map((t) => t.key));
   }, [report, period]);
 
-  // The scope menu's "manual import" tags: everything not server-backed. With
-  // no servers configured the set stays empty and the menu shows no tags.
+  // The scope menu compares indexed origins with configured SSH servers; an
+  // indexed origin can be historical/manual data even when this set is empty.
   // Hooks rule: above the boot screen's early return, like `tools`.
-  const serverOrigins = useMemo(() => new Set(servers.map((s) => s.name)), [servers]);
+  const serverOrigins = useMemo(
+    () => (serversLoaded ? new Set(servers.map((s) => s.name)) : undefined),
+    [servers, serversLoaded],
+  );
 
   if (!report) {
     // "indexing" is the backend sentinel for "first scan still running"; the

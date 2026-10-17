@@ -1364,6 +1364,14 @@
   white-space: normal;
 }
 
+/* The cycle-estimate warning is one short phrase: shrink to fit under the !
+   instead of spanning the row like the model-list tips above. */
+.quota-mwrap .rank-tip.quota-warntip {
+  left: auto;
+  right: 0;
+  white-space: nowrap;
+}
+
 .quota-models-mix {
   display: flex;
   height: 4px;
