@@ -3207,24 +3207,6 @@
 }
 
 /* Keep device management distinct from the adjacent server and refresh controls. */
-.sync-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 5px;
-  color: var(--ink-2);
-  font-size: var(--t-meta);
-  border-radius: var(--r-md);
-  white-space: nowrap;
-  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
-}
-
-.sync-btn:hover {
-  color: var(--ink);
-  background: var(--fill-hover);
-}
-
 @keyframes srv-pulse {
   50% {
     opacity: 0.35;
