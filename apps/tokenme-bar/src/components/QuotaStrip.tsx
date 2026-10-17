@@ -874,16 +874,9 @@ export function QuotaStrip({
                                 className="quota-cycwarn"
                                 aria-label={t("quota.cycle.unsupported")}
                                 title={t("quota.cycle.unsupported")}
-                                onClick={() => {
-                                  const wk = `w:${rowKey(q)}`;
-                                  setModelTipKey(modelTipKey === wk ? null : wk);
-                                }}
                               >
                                 !
                               </button>
-                              {modelTipKey === `w:${rowKey(q)}` ? (
-                                <span className="rank-tip quota-warntip">{t("quota.cycle.unsupported")}</span>
-                              ) : null}
                             </>
                           ) : !hideUnusedEstimation ? (
                             <em>{cycleStatus}</em>
