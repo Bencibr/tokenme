@@ -807,8 +807,40 @@ impl SyncStore {
                 params![if enabled { 1_i64 } else { 0_i64 }, now_ms, self.primary_id],
             ).map_err(sql_err)?;
             if changed != 1 { return Err(SyncError::NotFound("secondary sync configuration".into())); }
+            if enabled {
+                tx.execute(
+                    "DELETE FROM meta WHERE key = 'device_sync_disconnect_requested' AND value = ?1",
+                    params![self.primary_id],
+                ).map_err(sql_err)?;
+            }
             Ok(())
         })
+    }
+
+    /// Record an explicit user disconnect before attempting the remote revoke.
+    /// The marker survives a network failure so the recovery loop can retry it.
+    pub fn request_secondary_disconnect(&mut self, now_ms: i64) -> SyncResult<()> {
+        self.index.with_network_transaction(|tx| {
+            let changed = tx.execute(
+                "UPDATE device_sync_secondary_config SET enabled = 0, updated_at_ms = ?1 WHERE config_key = 'secondary' AND primary_id = ?2",
+                params![now_ms, self.primary_id],
+            ).map_err(sql_err)?;
+            if changed != 1 { return Err(SyncError::NotFound("secondary sync configuration".into())); }
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_disconnect_requested', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![self.primary_id],
+            ).map_err(sql_err)?;
+            Ok(())
+        })
+    }
+
+    pub fn secondary_disconnect_requested(&self) -> SyncResult<bool> {
+        let value: Option<String> = self.index.conn().query_row(
+            "SELECT value FROM meta WHERE key = 'device_sync_disconnect_requested'",
+            [], |row| row.get(0),
+        ).optional().map_err(sql_err)?;
+        Ok(value.as_deref() == Some(self.primary_id.as_str()))
     }
 
     /// Remove the active secondary binding while leaving local usage history and
@@ -821,6 +853,10 @@ impl SyncStore {
             ).optional().map_err(sql_err)?;
             tx.execute(
                 "DELETE FROM device_sync_secondary_config WHERE config_key = 'secondary' AND primary_id = ?1",
+                params![self.primary_id],
+            ).map_err(sql_err)?;
+            tx.execute(
+                "DELETE FROM meta WHERE key = 'device_sync_disconnect_requested' AND value = ?1",
                 params![self.primary_id],
             ).map_err(sql_err)?;
             tx.execute(
@@ -1179,6 +1215,27 @@ impl SyncStore {
             tx.execute("UPDATE device_stream SET active = 0 WHERE device_id = ?1", params![device_id]).map_err(sql_err)?;
             Ok(new_epoch as u64)
         })
+    }
+
+    pub fn disconnect_device(&mut self, request: &AuthenticatedStatusRequest, now_ms: i64) -> SyncResult<()> {
+        if request.primary_id != self.primary_id {
+            return Err(SyncError::Auth("disconnect targets another primary".into()));
+        }
+        let (public_key, status, origin): (Vec<u8>, String, String) = self.index.conn().query_row(
+            "SELECT public_key, status, origin FROM device_registry WHERE device_id = ?1",
+            params![request.device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional().map_err(sql_err)?.ok_or_else(|| SyncError::NotPaired(request.device_id.clone()))?;
+        if origin != request.origin {
+            return Err(SyncError::Auth("disconnect origin does not match paired device".into()));
+        }
+        let public_key = public_key_from_bytes(&public_key)?;
+        request.verify(&public_key)?;
+        if !request.is_fresh(now_ms) {
+            return Err(SyncError::Auth("disconnect request is expired or from the future".into()));
+        }
+        if status == "revoked" { return Ok(()); }
+        self.revoke_device(&request.device_id, now_ms).map(|_| ())
     }
 
     pub fn receipt(&self, device_id: &str, stream_id: &str, generation: u64) -> SyncResult<Option<ImportReceipt>> {
@@ -2893,6 +2950,19 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_disconnect_revokes_the_device_and_is_idempotent() {
+        let device = identity("explicit-disconnect");
+        let (mut store, stream) = paired_store_for(&device);
+        let request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, 10).unwrap();
+        store.disconnect_device(&request, 20).unwrap();
+        let record = store.device(&device.device_id).unwrap().unwrap();
+        assert_eq!(record.status, DeviceStatus::Revoked);
+        assert_eq!(record.active_stream_id, None);
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT active FROM device_stream WHERE device_id = ?1 AND stream_id = ?2", params![device.device_id, stream.stream_id], |row| row.get(0)).unwrap(), 0);
+        store.disconnect_device(&request, 21).unwrap();
+    }
+
+    #[test]
     fn authenticated_status_surfaces_a_corrupt_highwater_hash() {
         let device = identity("corrupt-highwater");
         let (store, stream) = paired_store_for(&device);
@@ -3599,9 +3669,12 @@ mod tests {
             last_ack_generation: None, last_ack_receipt_hash: None,
         };
         store.save_secondary_config(&config, 1).unwrap();
+        store.request_secondary_disconnect(2).unwrap();
+        assert!(store.secondary_disconnect_requested().unwrap());
         let identity_path = store.clear_secondary_config(2).unwrap();
         assert_eq!(identity_path, Some(PathBuf::from("identity.json")));
         assert!(store.secondary_config().unwrap().is_none());
+        assert!(!store.secondary_disconnect_requested().unwrap());
         assert_eq!(store.index().event_count().unwrap(), 0);
         assert_eq!(store.index().conn().query_row::<String, _, _>(
             "SELECT value FROM meta WHERE key = 'device_sync_last_unpaired_at_ms'", [], |row| row.get(0),

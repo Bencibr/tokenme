@@ -226,7 +226,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
   const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id;
-  const shouldPoll = snapshot.pairing_pending || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
+  const primaryDeviceStateMayChange = snapshot.role === "primary" && snapshot.devices.some((device) => device.role === "secondary" && device.status === "paired");
+  const shouldPoll = snapshot.pairing_pending || primaryDeviceStateMayChange || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
   const commandBusy = busy || initializing || discovering;
 
   // Silent status polling keeps the overview live while a pairing decision or
@@ -238,7 +239,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     let timer: number | undefined;
     const poll = async () => {
       if (!alive) return;
-      const maxAttempts = snapshot.pairing_pending ? Number.POSITIVE_INFINITY : 12;
+      const maxAttempts = snapshot.pairing_pending || primaryDeviceStateMayChange ? Number.POSITIVE_INFINITY : 12;
       if (attempts >= maxAttempts) return;
       if (operationInFlight.current) {
         timer = window.setTimeout(() => void poll(), 500);
@@ -264,7 +265,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     };
     timer = window.setTimeout(() => void poll(), 5000);
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [clearDiagnosticsPoll, onSnapshot, pollGeneration, shouldPoll, snapshot.pairing_pending]);
+  }, [clearDiagnosticsPoll, onSnapshot, pollGeneration, primaryDeviceStateMayChange, shouldPoll, snapshot.pairing_pending]);
 
   const applyDiagnosticsResponse = useCallback((response: DiagnosticsResponse, generation?: number) => {
     if (generation !== undefined && generation !== operationGeneration.current) return;
