@@ -1046,6 +1046,12 @@ impl Index {
                 params![key],
             )
             .map_err(sql_err)?;
+        tx
+            .execute(
+                "DELETE FROM sync_event_identity WHERE event_id IN (SELECT id FROM event WHERE source = ?1)",
+                params![key],
+            )
+            .map_err(sql_err)?;
         let n = tx.execute("DELETE FROM event WHERE source = ?1", params![key]).map_err(sql_err)?;
         tx.execute("DELETE FROM file_state WHERE source_key = ?1", params![key]).map_err(sql_err)?;
         // Same transaction as the deletes: the rollup never shows the purged

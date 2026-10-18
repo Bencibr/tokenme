@@ -15,6 +15,7 @@ use crate::{
     AuthenticatedStatus, AuthenticatedStatusRequest, DeviceIdentity, DirtyJournalInput,
     NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, StreamOpenReceipt,
     ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
+    TransportError,
 };
 
 // Keep the scheduler lease longer than the transport's 10-minute request
@@ -120,10 +121,7 @@ impl SyncRuntime {
             self.run_owned_once(None, &mut now_ms)
         })();
         if let Err(error) = &result {
-            if self.secondary_identity.is_some() {
-                let message = error.to_string();
-                let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
-            }
+            self.remember_secondary_error(error, now_ms());
         }
         let _ = self.store.release_scheduler_lease(&self.config.owner);
         result
@@ -150,6 +148,7 @@ impl SyncRuntime {
             return Err(error);
         }
         let mut total = RuntimeRunReport::default();
+        let mut consecutive_errors = 0_u32;
         while !stop.load(Ordering::Acquire) {
             self.occurrence_init_progressed = false;
             let lease_now = now_ms();
@@ -178,10 +177,7 @@ impl SyncRuntime {
             let pass = match pass {
                 Ok(pass) => pass,
                 Err(error) => {
-                    if self.secondary_identity.is_some() {
-                        let message = error.to_string();
-                        let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
-                    }
+                    self.remember_secondary_error(&error, now_ms());
                     let _ = self.store.release_scheduler_lease(&self.config.owner);
                     return Err(error);
                 }
@@ -194,6 +190,8 @@ impl SyncRuntime {
             total.in_flight = pass.in_flight;
             total.bytes = pass.bytes;
             let pass_had_error = pass.last_error.is_some();
+            let waiting_for_primary = pass.last_error.as_deref().is_some_and(|message| message.contains("awaiting approval") || message.contains("primary paused this device"));
+            consecutive_errors = if pass_had_error && !waiting_for_primary { consecutive_errors.saturating_add(1) } else { 0 };
             let pass_had_no_claim_with_pending = pass.claimed == 0 && pass.pending > 0;
             let pass_had_occurrence_progress = self.occurrence_init_progressed;
             total.last_error = pass.last_error;
@@ -214,8 +212,9 @@ impl SyncRuntime {
                 continue;
             }
             let started = std::time::Instant::now();
-            while started.elapsed() < self.config.poll_interval && !stop.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(50).min(self.config.poll_interval));
+            let interval = self.config.poll_interval.saturating_mul(1_u32 << consecutive_errors.min(4)).min(Duration::from_secs(60));
+            while started.elapsed() < interval && !stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(50).min(interval));
             }
         }
         let _ = self.store.release_scheduler_lease(&self.config.owner);
@@ -283,13 +282,11 @@ impl SyncRuntime {
         // ACK.  This is the backpressure valve that lets the sender drain a
         // bounded outbox instead of filling it during one preparation loop.
         let summary = self.store.outbox_summary()?;
-        if summary.pending > 0 || summary.in_flight > 0 {
-            return Ok(false);
-        }
+        let has_pending = summary.pending > 0 || summary.in_flight > 0;
         let had_stream = config.stream_id.is_some();
         let local_has_history = if had_stream { true } else { self.store.secondary_has_history(&config)? };
         let mut catchup_complete = true;
-        if had_stream {
+        if had_stream && !has_pending {
             let snapshot_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, snapshot_now, self.config.lease_ttl_ms)? {
                 return Err(SyncError::Security("sync scheduler lease was lost before snapshot".into()));
@@ -300,11 +297,13 @@ impl SyncRuntime {
         let request = AuthenticatedStatusRequest::new_at_with_checkpoint(
             &identity, config.primary_id.clone(), true, config.last_ack_generation, request_now,
         )?;
-        let status = self.transport.status(&request).map_err(|error| SyncError::Protocol(format!("secondary status request failed: {error}")))?;
+        let status = self.transport.status(&request).map_err(map_secondary_status_error)?;
         self.store.mark_secondary_connected(now_ms())?;
         match status.status.as_str() {
             "paired" => {}
             "pending" => return Err(SyncError::NotPaired("pairing request is awaiting approval".into())),
+            "rejected" => return Err(SyncError::NotPaired("pairing request was rejected".into())),
+            "expired" => return Err(SyncError::NotPaired("pairing invite expired".into())),
             "paused" => return Err(SyncError::Conflict("primary paused this device".into())),
             "revoked" => return Err(SyncError::Revoked(identity.device_id.clone())),
             "reconcile_required" => return Err(SyncError::ReconcileRequired),
@@ -327,7 +326,7 @@ impl SyncRuntime {
             return Err(SyncError::Security("sync scheduler lease was lost before stream update".into()));
         }
         self.store.update_secondary_stream(&receipt, stream_now)?;
-        if !had_stream {
+        if !had_stream && !has_pending {
             let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
             let snapshot_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, snapshot_now, self.config.lease_ttl_ms)? {
@@ -336,7 +335,18 @@ impl SyncRuntime {
             catchup_complete = self.enqueue_local_snapshot(&config, &identity, snapshot_now)?;
         }
         self.store.set_secondary_last_error(None, now_ms())?;
-        Ok(catchup_complete)
+        Ok(catchup_complete && !has_pending)
+    }
+
+    fn remember_secondary_error(&mut self, error: &SyncError, now_ms: i64) {
+        if self.secondary_identity.is_none() { return; }
+        let message = error.to_string();
+        let _ = self.store.set_secondary_last_error(Some(&message), now_ms);
+        if matches!(error, SyncError::Revoked(_) | SyncError::ReconcileRequired | SyncError::EpochStale | SyncError::Security(_))
+            || matches!(error, SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired")
+        {
+            let _ = self.store.set_secondary_enabled(false, now_ms);
+        }
     }
 
     fn enqueue_local_snapshot(&mut self, config: &crate::SecondarySyncConfig, identity: &DeviceIdentity, now_ms: i64) -> SyncResult<bool> {
@@ -464,8 +474,16 @@ fn validate_secondary_status(config: &crate::SecondarySyncConfig, status: &Authe
 fn retryable_secondary_error(error: &SyncError) -> bool {
     match error {
         SyncError::Conflict(message) if message == "secondary sync is disabled" => false,
+        SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired" => false,
         SyncError::Protocol(_) | SyncError::Auth(_) | SyncError::NotPaired(_) | SyncError::Conflict(_) => true,
         _ => false,
+    }
+}
+
+fn map_secondary_status_error(error: TransportError) -> SyncError {
+    match error {
+        TransportError::HttpStatus { status: 409, message } if message.contains("reconciliation is required") => SyncError::ReconcileRequired,
+        error => SyncError::Protocol(format!("secondary status request failed: {error}")),
     }
 }
 
@@ -831,5 +849,23 @@ mod tests {
         };
         assert!(validate_secondary_status(&config, &status, false).is_ok());
         assert!(matches!(validate_secondary_status(&config, &status, true), Err(SyncError::ReconcileRequired)));
+    }
+
+    #[test]
+    fn secondary_status_reconciliation_response_disables_the_secondary() {
+        let error = map_secondary_status_error(TransportError::HttpStatus {
+            status: 409,
+            message: "reconciliation is required before retrying this package".into(),
+        });
+        assert!(matches!(error, SyncError::ReconcileRequired));
+    }
+
+    #[test]
+    fn unrelated_secondary_status_conflicts_remain_retryable_protocol_errors() {
+        let error = map_secondary_status_error(TransportError::HttpStatus {
+            status: 409,
+            message: "primary paused this device".into(),
+        });
+        assert!(matches!(error, SyncError::Protocol(message) if message.contains("HTTP status 409")));
     }
 }

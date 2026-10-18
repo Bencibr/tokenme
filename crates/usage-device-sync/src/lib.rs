@@ -7,6 +7,7 @@
 
 mod protocol;
 mod diagnostics;
+mod lifecycle;
 mod runtime;
 mod store;
 mod transport;
@@ -37,8 +38,9 @@ pub use protocol::{
 pub use store::{
     DeviceRecord, DeviceRole, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, ImportReceipt,
     DirtyJournalEntry, DirtyJournalInput, MergeOutcome, OutboxEntry, OutboxState, OutboxSummary,
-    PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SnapshotCursor, SyncError, SyncResult, SyncStore,
+    DisconnectNotice, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SnapshotCursor, SyncError, SyncResult, SyncStore,
 };
+pub use lifecycle::deliver_disconnect_notice;
 pub use runtime::{export_index_snapshot, export_index_snapshots, export_index_snapshots_from_snapshot, LocalSnapshot, RuntimeRunReport, SyncRuntime, SyncRuntimeConfig};
 pub use transport::{
     ensure_server_certificate, load_pem_certificate, load_pem_private_key, ClientTransportCancellation, DeviceSyncTransport, HttpsServerConfig,

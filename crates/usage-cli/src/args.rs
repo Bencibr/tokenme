@@ -65,8 +65,8 @@ pub struct Global {
     pub verbose: bool,
 
     /// JSON diagnostics grant/configuration file for the remote MCP stdio
-    /// bridge. Without this file diagnostics-stdio remains a local,
-    /// fail-closed protocol host.
+    /// bridge. Without this file diagnostics-stdio serves the local standard
+    /// MCP JSON-RPC protocol over stdin/stdout.
     #[arg(long, value_name = "PATH", global = true)]
     pub diagnostics_config: Option<PathBuf>,
 }
@@ -212,7 +212,7 @@ pub enum SyncCmd {
     /// Run the paired secondary outbox/snapshot runtime in the foreground.
     Run,
 
-    /// Stop the user-level secondary runtime through its private Unix socket.
+    /// Stop the user-level secondary runtime through its private local control channel.
     Stop,
 
     /// Create a one-time invite on the primary.

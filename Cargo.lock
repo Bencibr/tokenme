@@ -2003,6 +2003,7 @@ dependencies = [
  "usage-device-sync",
  "usage-index",
  "usage-quota",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -184,7 +184,8 @@ fn diagnostics_stdio_is_a_jsonrpc_only_cli_host() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("each stdout line is JSON-RPC"))
         .collect::<Vec<_>>();
     assert_eq!(responses.len(), 2, "stdout must contain one bounded response per request");
-    assert!(responses.iter().all(|response| response.get("error").is_some()), "unauthenticated requests must fail closed: {responses:?}");
+    assert!(responses[0].get("error").is_some(), "malformed requests must fail closed: {responses:?}");
+    assert_eq!(responses[1]["result"]["serverInfo"]["name"], "tokenme-diagnostics", "local MCP initialize must return the fixed registry: {responses:?}");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("tokenme:"), "CLI diagnostics host must not mix logs into stdout");
     remove_db(&db);
 }

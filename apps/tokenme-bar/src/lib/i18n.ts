@@ -714,6 +714,7 @@ const zh = {
   "bubble.aria": "今日 {t} tokens",
 
   /* 页面区块标题（App 直传的 Section label） ------------------------------ */
+  "sec.tools": "工具",
   "sec.models": "模型",
   "sec.projects": "项目",
 };
@@ -1392,6 +1393,7 @@ const en: Record<StrKey, string> = {
   "bubble.pet_model_hint": "Drag to rotate · click for next action",
   "bubble.aria": "Today {t} tokens",
 
+  "sec.tools": "Tools",
   "sec.models": "Models",
   "sec.projects": "Projects",
 };

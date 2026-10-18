@@ -26,6 +26,8 @@ const OUTBOX_BACKOFF_MAX_MS: i64 = 15 * 60 * 1000;
 const RECEIPT_DOMAIN: &[u8] = b"tokenme-device-sync/receipt/v1";
 const TOKENS_SCHEMA: &str = "tokens/v1";
 const MAX_TOKEN_CONFLICT_PAIRS_PER_KEY: i64 = 1_024;
+const DISCONNECT_NOTICE_PREFIX: &str = "device_sync_disconnect:";
+const MAX_DISCONNECT_NOTICES: i64 = 128;
 
 #[derive(Debug, Error)]
 pub enum SyncError {
@@ -216,6 +218,17 @@ pub struct SecondarySyncConfig {
     pub last_ack_receipt_hash: Option<[u8; 32]>,
 }
 
+/// Public trust material and a reference to a private identity file. A local
+/// disconnect commits before the network notification; no private key is copied
+/// into SQLite, and later role changes do not erase this retry record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisconnectNotice {
+    pub config: SecondarySyncConfig,
+    pub attempts: u32,
+    pub next_attempt_ms: i64,
+    pub last_error: Option<String>,
+}
+
 /// Persisted primary listener settings. `enabled` is the user's last start
 /// choice; stopping the listener only flips that bit and leaves sync history
 /// and trust state untouched.
@@ -310,10 +323,11 @@ pub struct ImportReceipt {
 pub enum OutboxState {
     Pending,
     InFlight,
+    Retired,
 }
 
 impl OutboxState {
-    fn as_str(self) -> &'static str { match self { Self::Pending => "pending", Self::InFlight => "in_flight" } }
+    fn as_str(self) -> &'static str { match self { Self::Pending => "pending", Self::InFlight => "in_flight", Self::Retired => "retired" } }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,7 +374,7 @@ impl OutboxEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboxSummary {
     pub pending: u64,
     pub in_flight: u64,
@@ -517,40 +531,7 @@ impl SyncStore {
         let new_primary_id = new_primary_id.into();
         validate_identifier("primary_id", &new_primary_id)?;
         if new_primary_id == self.primary_id { return Ok(()); }
-        self.index.with_network_transaction(|tx| {
-            for table in [
-                "device_registry", "device_stream", "device_receipt", "device_package_marker",
-                "device_package_tombstone", "device_highwater", "device_sync_conflict",
-                "device_sync_outbox", "device_sync_snapshot_cursor", "device_sync_journal",
-                "device_sync_outbox_sequence", "device_sync_scheduler_lease", "device_sync_recovery",
-                "device_sync_secondary_config", "device_sync_primary_config", "device_pairing_invite",
-                "device_pairing_request",
-            ] {
-                tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
-            }
-            // Keep the retained local dirty journal's byte accounting valid
-            // after the old role's outbox is isolated.
-            let dirty_json_bytes: i64 = tx.query_row(
-                "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty",
-                [], |row| row.get(0),
-            ).map_err(sql_err)?;
-            tx.execute(
-                "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![dirty_json_bytes.to_string()],
-            ).map_err(sql_err)?;
-            tx.execute(
-                "INSERT INTO device_sync_meta(key, value) VALUES('primary_id', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![new_primary_id],
-            ).map_err(sql_err)?;
-            tx.execute(
-                "INSERT INTO meta(key, value) VALUES('device_sync_last_role_switch_at_ms', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![now_ms.to_string()],
-            ).map_err(sql_err)?;
-            Ok::<_, SyncError>(())
-        })?;
+        self.index.with_network_transaction(|tx| rotate_primary_id_tx(tx, &new_primary_id, now_ms))?;
         self.primary_id = new_primary_id;
         Ok(())
     }
@@ -772,32 +753,22 @@ impl SyncStore {
 
     pub fn save_secondary_config(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
         config.validate(&self.primary_id)?;
-        let config = config.clone();
+        self.index.with_network_transaction(|tx| save_secondary_config_tx(tx, config, now_ms))
+    }
+
+    /// Commit the new role and its connection together. Invalid configuration
+    /// or a failed SQLite write leaves the stopped primary and its trust intact.
+    pub fn transition_to_secondary(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
+        config.validate(&config.primary_id)?;
+        let rotate = self.primary_id != config.primary_id;
         self.index.with_network_transaction(|tx| {
-            tx.execute(
-                "INSERT OR REPLACE INTO device_sync_secondary_config(
-                    config_key, primary_id, device_id, origin, endpoint, server_name,
-                    certificate_der, certificate_pin, identity_path, stream_id, data_epoch,
-                    expected_generation, enabled, capture_enabled, last_error, last_manifest_hash, last_gzip_hash,
-                    last_connected_at_ms, last_ack_generation, last_ack_receipt_hash, updated_at_ms
-                 ) VALUES('secondary', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-                params![
-                    config.primary_id, config.device_id, config.origin, config.endpoint,
-                    config.server_name, config.certificate_der, config.certificate_pin.as_slice(),
-                    config.identity_path.to_string_lossy().as_ref(), config.stream_id,
-                    config.data_epoch.map(|value| value as i64), config.expected_generation.map(|value| value as i64),
-                    if config.enabled { 1_i64 } else { 0_i64 }, if config.capture_enabled { 1_i64 } else { 0_i64 }, config.last_error,
-                    config.last_manifest_hash.map(|value| value.to_vec()), config.last_gzip_hash.map(|value| value.to_vec()),
-                    config.last_connected_at_ms, config.last_ack_generation.map(|value| value as i64),
-                    config.last_ack_receipt_hash.map(|value| value.to_vec()), now_ms,
-                ],
-            ).map_err(sql_err)?;
-            tx.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES('device_sync_initial_coverage_lo', ?1)",
-                params![now_ms.saturating_sub(30_i64.saturating_mul(86_400_000)) .to_string()],
-            ).map_err(sql_err)?;
+            if rotate { rotate_primary_id_tx(tx, &config.primary_id, now_ms)?; }
+            save_secondary_config_tx(tx, config, now_ms)?;
+            tx.execute("DELETE FROM device_sync_primary_config", []).map_err(sql_err)?;
             Ok::<_, SyncError>(())
-        })
+        })?;
+        self.primary_id = config.primary_id.clone();
+        Ok(())
     }
 
     pub fn set_secondary_enabled(&mut self, enabled: bool, now_ms: i64) -> SyncResult<()> {
@@ -817,22 +788,109 @@ impl SyncStore {
         })
     }
 
-    /// Record an explicit user disconnect before attempting the remote revoke.
-    /// The marker lets the next snapshot finish the best-effort notification;
-    /// the panel clears the local binding after that attempt even if the
-    /// primary is already unreachable.
-    pub fn request_secondary_disconnect(&mut self, now_ms: i64) -> SyncResult<()> {
+    /// Update only the transport address after a pinned discovery probe. Do
+    /// not overwrite stream/ACK progress written by the running scheduler.
+    pub fn update_secondary_endpoint(&mut self, device_id: &str, previous: &str, endpoint: &str, now_ms: i64) -> SyncResult<bool> {
         self.index.with_network_transaction(|tx| {
             let changed = tx.execute(
-                "UPDATE device_sync_secondary_config SET enabled = 0, updated_at_ms = ?1 WHERE config_key = 'secondary' AND primary_id = ?2",
-                params![now_ms, self.primary_id],
+                "UPDATE device_sync_secondary_config SET endpoint = ?1, updated_at_ms = ?2
+                 WHERE primary_id = ?3 AND device_id = ?4 AND endpoint = ?5 AND enabled = 1",
+                params![endpoint, now_ms, self.primary_id, device_id, previous],
             ).map_err(sql_err)?;
-            if changed != 1 { return Err(SyncError::NotFound("secondary sync configuration".into())); }
+            Ok(changed == 1)
+        })
+    }
+
+    /// Atomically detach locally, retire the old sender's immutable packages,
+    /// and retain a bounded notification for background delivery. No network
+    /// ACK is required to stop or to pair with another primary.
+    pub fn request_secondary_disconnect(&mut self, now_ms: i64) -> SyncResult<()> {
+        let Some(config) = self.secondary_config()? else { return Ok(()); };
+        self.queue_secondary_disconnect(&config, now_ms)
+    }
+
+    pub fn queue_secondary_disconnect(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
+        config.validate(&config.primary_id)?;
+        let mut config = config.clone();
+        config.enabled = false;
+        let key = format!("{DISCONNECT_NOTICE_PREFIX}{}", config.device_id);
+        let notice = DisconnectNotice { config: config.clone(), attempts: 0, next_attempt_ms: now_ms, last_error: None };
+        let encoded = serde_json::to_string(&notice).map_err(|error| SyncError::Invalid(error.to_string()))?;
+        self.index.with_network_transaction(|tx| {
+            let count: i64 = tx.query_row("SELECT count(*) FROM meta WHERE key GLOB 'device_sync_disconnect:*'", [], |row| row.get(0)).map_err(sql_err)?;
+            if count >= MAX_DISCONNECT_NOTICES { return Err(SyncError::Limit("pending disconnect notification queue is full".into())); }
             tx.execute(
-                "INSERT INTO meta(key, value) VALUES('device_sync_disconnect_requested', ?1)
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![self.primary_id],
+                params![key, encoded],
             ).map_err(sql_err)?;
+            // Keep one identity per primary across explicit re-pairing. This
+            // preserves the primary's per-device event keys and prevents a
+            // fresh snapshot from counting the same local history twice.
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![format!("device_sync_identity:{}", config.primary_id), config.identity_path.to_string_lossy().as_ref()],
+            ).map_err(sql_err)?;
+            tx.execute(
+                "UPDATE device_sync_outbox SET state = 'retired', last_error = 'explicitly disconnected'
+                 WHERE device_id = ?1",
+                params![config.device_id],
+            ).map_err(sql_err)?;
+            tx.execute("DELETE FROM device_sync_secondary_config WHERE config_key = 'secondary' AND device_id = ?1", params![config.device_id]).map_err(sql_err)?;
+            tx.execute("DELETE FROM meta WHERE key = 'device_sync_disconnect_requested'", []).map_err(sql_err)?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_last_unpaired_at_ms', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![now_ms.to_string()],
+            ).map_err(sql_err)?;
+            Ok(())
+        })
+    }
+
+    pub fn read_disconnect_notices(path: impl AsRef<std::path::Path>, now_ms: i64) -> SyncResult<Vec<DisconnectNotice>> {
+        let path = path.as_ref();
+        if !path.exists() { return Ok(Vec::new()); }
+        if std::fs::symlink_metadata(path).map_err(|error| SyncError::Io(path.to_path_buf(), error))?.file_type().is_symlink() {
+            return Err(SyncError::Security("sync index is a symlink".into()));
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        read_disconnect_notices_conn(&conn, now_ms)
+    }
+
+    pub fn read_retained_identity_path(path: impl AsRef<std::path::Path>, primary_id: &str) -> SyncResult<Option<PathBuf>> {
+        if !path.as_ref().exists() { return Ok(None); }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let value: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = ?1", params![format!("device_sync_identity:{primary_id}")], |row| row.get(0)).optional().map_err(sql_err)?;
+        Ok(value.map(PathBuf::from))
+    }
+
+    pub fn finish_disconnect_notice(&mut self, device_id: &str, now_ms: i64, error: Option<&str>) -> SyncResult<()> {
+        let key = format!("{DISCONNECT_NOTICE_PREFIX}{device_id}");
+        self.index.with_network_transaction(|tx| {
+            let Some(error) = error else {
+                // The pinned primary confirmed revocation. Retain audit
+                // metadata, but release retired payload bytes: the local
+                // usage index remains the source for the next full snapshot.
+                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)", params![key], |row| row.get(0)).map_err(sql_err)?;
+                if !exists { return Ok(()); }
+                let retired: i64 = tx.query_row("SELECT count(*) FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired'", params![device_id], |row| row.get(0)).map_err(sql_err)?;
+                tx.execute("DELETE FROM device_sync_journal WHERE device_id = ?1 AND outbox_id IN (SELECT id FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired')", params![device_id]).map_err(sql_err)?;
+                tx.execute("DELETE FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired'", params![device_id]).map_err(sql_err)?;
+                let audit = serde_json::json!({ "completed_at_ms": now_ms, "retired_packages": retired }).to_string();
+                tx.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![format!("device_sync_disconnect_done:{device_id}"), audit]).map_err(sql_err)?;
+                tx.execute("DELETE FROM meta WHERE key = ?1", params![key]).map_err(sql_err)?;
+                return Ok(());
+            };
+            let encoded: Option<String> = tx.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |row| row.get(0)).optional().map_err(sql_err)?;
+            if let Some(encoded) = encoded {
+                let mut notice: DisconnectNotice = serde_json::from_str(&encoded).map_err(|error| SyncError::Invalid(error.to_string()))?;
+                notice.attempts = notice.attempts.saturating_add(1);
+                let delay = (15_000_i64.saturating_mul(1_i64 << notice.attempts.saturating_sub(1).min(6))).min(OUTBOX_BACKOFF_MAX_MS);
+                notice.next_attempt_ms = now_ms.saturating_add(delay);
+                notice.last_error = Some(error.chars().take(512).collect());
+                let encoded = serde_json::to_string(&notice).map_err(|error| SyncError::Invalid(error.to_string()))?;
+                tx.execute("UPDATE meta SET value = ?2 WHERE key = ?1", params![key, encoded]).map_err(sql_err)?;
+            }
             Ok(())
         })
     }
@@ -1223,21 +1281,31 @@ impl SyncStore {
         if request.primary_id != self.primary_id {
             return Err(SyncError::Auth("disconnect targets another primary".into()));
         }
-        let (public_key, status, origin): (Vec<u8>, String, String) = self.index.conn().query_row(
-            "SELECT public_key, status, origin FROM device_registry WHERE device_id = ?1",
-            params![request.device_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional().map_err(sql_err)?.ok_or_else(|| SyncError::NotPaired(request.device_id.clone()))?;
-        if origin != request.origin {
-            return Err(SyncError::Auth("disconnect origin does not match paired device".into()));
-        }
-        let public_key = public_key_from_bytes(&public_key)?;
-        request.verify(&public_key)?;
-        if !request.is_fresh(now_ms) {
-            return Err(SyncError::Auth("disconnect request is expired or from the future".into()));
-        }
-        if status == "revoked" { return Ok(()); }
-        self.revoke_device(&request.device_id, now_ms).map(|_| ())
+        self.index.with_network_transaction(|tx| {
+            let registered: Option<(Vec<u8>, String, String)> = tx.query_row(
+                "SELECT public_key, status, origin FROM device_registry WHERE device_id = ?1",
+                params![request.device_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional().map_err(sql_err)?;
+            let identity = match registered.as_ref() {
+                Some((key, _, origin)) => Some((key.clone(), origin.clone())),
+                None => tx.query_row(
+                    "SELECT public_key, origin FROM device_pairing_request WHERE device_id = ?1 ORDER BY created_at_ms DESC, request_id DESC LIMIT 1",
+                    params![request.device_id], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional().map_err(sql_err)?,
+            };
+            let Some((key, origin)) = identity else { return Err(SyncError::NotPaired(request.device_id.clone())); };
+            if origin != request.origin { return Err(SyncError::Auth("disconnect origin does not match paired device".into())); }
+            request.verify(&public_key_from_bytes(&key)?)?;
+            if !request.is_fresh(now_ms) { return Err(SyncError::Auth("disconnect request is expired or from the future".into())); }
+            // Approval and cancellation share one write transaction. A pending
+            // request cannot turn into an approved zombie halfway through stop.
+            if registered.as_ref().is_some_and(|(_, status, _)| status != "revoked") {
+                tx.execute("UPDATE device_registry SET status = 'revoked', data_epoch = data_epoch + 1, revoked_at_ms = ?2 WHERE device_id = ?1", params![request.device_id, now_ms]).map_err(sql_err)?;
+                tx.execute("UPDATE device_stream SET active = 0 WHERE device_id = ?1", params![request.device_id]).map_err(sql_err)?;
+            }
+            tx.execute("UPDATE device_pairing_request SET status = 'rejected' WHERE device_id = ?1 AND status IN ('pending', 'expired')", params![request.device_id]).map_err(sql_err)?;
+            Ok(())
+        })
     }
 
     pub fn receipt(&self, device_id: &str, stream_id: &str, generation: u64) -> SyncResult<Option<ImportReceipt>> {
@@ -1248,11 +1316,14 @@ impl SyncStore {
         if request.primary_id != self.primary_id {
             return Err(SyncError::Auth("status targets another primary".into()));
         }
-        let (public_key, status, epoch, origin): (Vec<u8>, String, i64, String) = self.index.conn().query_row(
+        let registered: Option<(Vec<u8>, String, i64, String)> = self.index.conn().query_row(
             "SELECT public_key, status, data_epoch, origin FROM device_registry WHERE device_id = ?1",
             params![request.device_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).optional().map_err(sql_err)?.ok_or_else(|| SyncError::NotPaired(request.device_id.clone()))?;
+        ).optional().map_err(sql_err)?;
+        let Some((public_key, status, epoch, origin)) = registered else {
+            return pending_device_status(self.index.conn(), request, observed_at_ms);
+        };
         if origin != request.origin {
             return Err(SyncError::Auth("status origin does not match paired device".into()));
         }
@@ -1581,7 +1652,7 @@ impl SyncStore {
                 "SELECT o.id FROM device_sync_outbox o
                  WHERE o.state = 'pending' AND o.next_attempt_ms <= ?1
                    AND o.id = (SELECT MIN(first.id) FROM device_sync_outbox first
-                               WHERE first.device_id = o.device_id AND first.stream_id = o.stream_id)
+                               WHERE first.device_id = o.device_id AND first.stream_id = o.stream_id AND first.state != 'retired')
                  ORDER BY o.id LIMIT ?2",
             ).map_err(sql_err)?;
             let rows = stmt.query_map(params![now_ms, limit], |row| row.get::<_, i64>(0)).map_err(sql_err)?;
@@ -1713,15 +1784,14 @@ impl SyncStore {
     }
 
     pub fn outbox_summary(&self) -> SyncResult<OutboxSummary> {
-        self.index.conn().query_row(
-            "SELECT COALESCE(sum(state = 'pending'), 0), COALESCE(sum(state = 'in_flight'), 0),
-                    COALESCE((SELECT sum(length(manifest_bytes) + length(gzip_bytes) + length(signature)) FROM device_sync_outbox), 0)
-                  + COALESCE((SELECT sum(length(row_json)) FROM device_sync_journal), 0)
-                  + COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'device_sync_dirty_json_bytes'), 0)
-               FROM device_sync_outbox",
-            [],
-            |row| Ok(OutboxSummary { pending: row.get::<_, i64>(0)? as u64, in_flight: row.get::<_, i64>(1)? as u64, bytes: row.get::<_, i64>(2)? as u64 }),
-        ).map_err(sql_err)
+        outbox_summary_conn(self.index.conn())
+    }
+
+    pub fn read_outbox_summary(path: impl AsRef<std::path::Path>) -> SyncResult<OutboxSummary> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'device_sync_outbox')", [], |row| row.get(0)).map_err(sql_err)?;
+        if !exists { return Ok(OutboxSummary::default()); }
+        outbox_summary_conn(&conn)
     }
 
     pub fn acquire_scheduler_lease(&mut self, owner: &str, now_ms: i64, ttl_ms: i64) -> SyncResult<bool> {
@@ -2030,6 +2100,67 @@ fn adjust_dirty_json_bytes_tx(tx: &Transaction<'_>, delta: i64) -> SyncResult<()
     Ok(())
 }
 
+fn rotate_primary_id_tx(tx: &Transaction<'_>, new_primary_id: &str, now_ms: i64) -> SyncResult<()> {
+    for table in [
+        "device_registry", "device_stream", "device_receipt", "device_package_marker",
+        "device_package_tombstone", "device_highwater", "device_sync_conflict",
+        "device_sync_outbox", "device_sync_snapshot_cursor", "device_sync_journal",
+        "device_sync_outbox_sequence", "device_sync_scheduler_lease", "device_sync_recovery",
+        "device_sync_secondary_config", "device_sync_primary_config", "device_pairing_invite",
+        "device_pairing_request",
+    ] {
+        tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
+    }
+    // Keep the retained local dirty journal's byte accounting valid
+    // after the old role's outbox is isolated.
+    let dirty_json_bytes: i64 = tx.query_row(
+        "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![dirty_json_bytes.to_string()],
+    ).map_err(sql_err)?;
+    tx.execute(
+        "INSERT INTO device_sync_meta(key, value) VALUES('primary_id', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![new_primary_id],
+    ).map_err(sql_err)?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES('device_sync_last_role_switch_at_ms', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![now_ms.to_string()],
+    ).map_err(sql_err)?;
+    Ok::<_, SyncError>(())
+}
+
+fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO device_sync_secondary_config(
+            config_key, primary_id, device_id, origin, endpoint, server_name,
+            certificate_der, certificate_pin, identity_path, stream_id, data_epoch,
+            expected_generation, enabled, capture_enabled, last_error, last_manifest_hash, last_gzip_hash,
+            last_connected_at_ms, last_ack_generation, last_ack_receipt_hash, updated_at_ms
+         ) VALUES('secondary', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        params![
+            config.primary_id, config.device_id, config.origin, config.endpoint,
+            config.server_name, config.certificate_der, config.certificate_pin.as_slice(),
+            config.identity_path.to_string_lossy().as_ref(), config.stream_id,
+            config.data_epoch.map(|value| value as i64), config.expected_generation.map(|value| value as i64),
+            if config.enabled { 1_i64 } else { 0_i64 }, if config.capture_enabled { 1_i64 } else { 0_i64 }, config.last_error,
+            config.last_manifest_hash.map(|value| value.to_vec()), config.last_gzip_hash.map(|value| value.to_vec()),
+            config.last_connected_at_ms, config.last_ack_generation.map(|value| value as i64),
+            config.last_ack_receipt_hash.map(|value| value.to_vec()), now_ms,
+        ],
+    ).map_err(sql_err)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO meta(key, value) VALUES('device_sync_initial_coverage_lo', ?1)",
+        params![now_ms.saturating_sub(30_i64.saturating_mul(86_400_000)) .to_string()],
+    ).map_err(sql_err)?;
+    Ok::<_, SyncError>(())
+}
+
 fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
     index.with_network_transaction(|tx| {
         tx.execute_batch(
@@ -2199,6 +2330,58 @@ fn validate_identifier(label: &str, value: &str) -> SyncResult<()> {
         return Err(SyncError::Invalid(format!("{label} is empty, too long, or contains control characters")));
     }
     Ok(())
+}
+
+fn read_disconnect_notices_conn(conn: &Connection, now_ms: i64) -> SyncResult<Vec<DisconnectNotice>> {
+    let mut stmt = conn.prepare("SELECT value FROM meta WHERE key GLOB 'device_sync_disconnect:*' ORDER BY key LIMIT 128").map_err(sql_err)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(sql_err)?;
+    let mut notices = Vec::new();
+    for row in rows {
+        let notice: DisconnectNotice = serde_json::from_str(&row.map_err(sql_err)?).map_err(|error| SyncError::Invalid(error.to_string()))?;
+        notice.config.validate(&notice.config.primary_id)?;
+        if notice.next_attempt_ms <= now_ms { notices.push(notice); }
+    }
+    notices.sort_by_key(|notice| notice.next_attempt_ms);
+    Ok(notices)
+}
+
+fn outbox_summary_conn(conn: &Connection) -> SyncResult<OutboxSummary> {
+    conn.query_row(
+        "SELECT COALESCE(sum(state = 'pending'), 0), COALESCE(sum(state = 'in_flight'), 0),
+                COALESCE((SELECT sum(length(manifest_bytes) + length(gzip_bytes) + length(signature)) FROM device_sync_outbox), 0)
+              + COALESCE((SELECT sum(length(row_json)) FROM device_sync_journal), 0)
+              + COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'device_sync_dirty_json_bytes'), 0)
+           FROM device_sync_outbox",
+        [], |row| Ok(OutboxSummary { pending: row.get::<_, i64>(0)? as u64, in_flight: row.get::<_, i64>(1)? as u64, bytes: row.get::<_, i64>(2)? as u64 }),
+    ).map_err(sql_err)
+}
+
+fn pending_device_status(conn: &Connection, request: &AuthenticatedStatusRequest, now_ms: i64) -> SyncResult<AuthenticatedStatus> {
+    let pending: Option<(Vec<u8>, String, String, i64)> = conn.query_row(
+        "SELECT p.public_key, p.origin, p.status, i.expires_at_ms
+         FROM device_pairing_request p JOIN device_pairing_invite i ON i.invite_id = p.invite_id
+         WHERE p.device_id = ?1 ORDER BY p.created_at_ms DESC, p.request_id DESC LIMIT 1",
+        params![request.device_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional().map_err(sql_err)?;
+    let Some((key, origin, status, expires_at_ms)) = pending else { return Err(SyncError::NotPaired(request.device_id.clone())); };
+    if origin != request.origin { return Err(SyncError::Auth("status origin does not match pending device".into())); }
+    request.verify(&public_key_from_bytes(&key)?)?;
+    if !request.is_fresh(now_ms) { return Err(SyncError::Auth("status request is expired or from the future".into())); }
+    let status = match status.as_str() {
+        "pending" if now_ms >= expires_at_ms => "expired",
+        "pending" => "pending",
+        "rejected" => "rejected",
+        "expired" => "expired",
+        _ => return Err(SyncError::NotPaired(request.device_id.clone())),
+    };
+    Ok(AuthenticatedStatus {
+        primary_id: request.primary_id.clone(), device_id: request.device_id.clone(), origin,
+        request_nonce: request.nonce, status: status.into(), data_epoch: 0,
+        active_stream_id: None, expected_generation: None, last_generation: None,
+        highwater_generation: None, highwater_receipt_hash: None,
+        checkpoint_generation: None, checkpoint_receipt_hash: None,
+        coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: now_ms,
+    })
 }
 
 fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncConfig>> {
@@ -2437,6 +2620,7 @@ fn read_outbox(conn: &Connection, id: i64) -> SyncResult<Option<OutboxEntry>> {
     let state = match state.as_str() {
         "pending" => OutboxState::Pending,
         "in_flight" => OutboxState::InFlight,
+        "retired" => OutboxState::Retired,
         other => return Err(SyncError::Security(format!("invalid outbox state {other:?}"))),
     };
     Ok(Some(OutboxEntry {
@@ -3672,9 +3856,13 @@ mod tests {
         };
         store.save_secondary_config(&config, 1).unwrap();
         store.request_secondary_disconnect(2).unwrap();
-        assert!(store.secondary_disconnect_requested().unwrap());
+        assert!(store.secondary_config().unwrap().is_none(), "explicit disconnect must detach locally before any network ACK");
+        assert!(!store.secondary_disconnect_requested().unwrap());
+        let notices = read_disconnect_notices_conn(store.index().conn(), 2).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].config.identity_path, PathBuf::from("identity.json"));
         let identity_path = store.clear_secondary_config(2).unwrap();
-        assert_eq!(identity_path, Some(PathBuf::from("identity.json")));
+        assert_eq!(identity_path, None);
         assert!(store.secondary_config().unwrap().is_none());
         assert!(!store.secondary_disconnect_requested().unwrap());
         assert_eq!(store.index().event_count().unwrap(), 0);

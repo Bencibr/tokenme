@@ -190,7 +190,7 @@ Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请�
 }
 ```
 
-只读配置中的 bearer 由 TokenMe 随机生成，有效期 15 分钟，只授予 `diagnostics.read`。设置中的“允许局域网 MCP 控制”默认关闭；开启后会生成单独的控制配置和短期 `sync.control` bearer，控制配置与只读配置必须分别复制或下载，不能混用。控制配置只开放白名单操作，包括 `sync.start_primary`、`sync.stop_primary`、同步角色切换、配对管理和受限面板操作；关闭控制开关会立即撤销控制凭据，关闭只读 MCP 或 TokenMe 退出也会使两类配置失效。该兼容入口仍使用 HTTP，bearer 只能防止未持有配置的请求，不能提供传输保密性；跨不可信网络或需要长期控制时应使用带证书 DER、pin 和 grant 的 HTTPS 诊断配置。
+只读配置中的 bearer 由 TokenMe 随机生成，有效期 1 天，只授予 `diagnostics.read`。设置中的“允许局域网 MCP 控制”默认关闭；开启后会生成单独的控制配置和同样有效 1 天的 `sync.control` bearer，控制配置与只读配置必须分别复制或下载，不能混用。控制配置只开放白名单操作，包括 `sync.start_primary`、`sync.stop_primary`、同步角色切换、配对管理和受限面板操作；关闭控制开关会立即撤销控制凭据，关闭只读 MCP 或 TokenMe 退出也会使两类配置失效。该兼容入口仍使用 HTTP，bearer 只能防止未持有配置的请求，不能提供传输保密性；跨不可信网络或需要长期控制时应使用带证书 DER、pin 和 grant 的 HTTPS 诊断配置。
 把这段 JSON 粘贴到同一局域网内另一台电脑上的 Claude、Cursor、Cline 或其他 MCP 客户端即可连接；如果默认端口 `47822` 已被占用，TokenMe 会自动切换到空闲端口，并把实际端口写进配置。关闭开关会停止 endpoint 并撤销 MCP 会话。Windows 防火墙若拦截入站连接，需要允许 TokenMe 使用配置中显示的 TCP 端口。
 
 ## diagnostics-stdio

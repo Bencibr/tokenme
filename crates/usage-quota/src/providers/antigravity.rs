@@ -105,7 +105,6 @@ const MAX_PORTS: usize = 4;
 /// Which install a discovered server belongs to. The probes are per tool, so
 /// discovery filters on this: the desktop probe answers for `Desktop` and
 /// `Cli` servers (the CLI shares the desktop login), the IDE probe for `Ide`.
-#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerKind {
     Desktop,
@@ -267,7 +266,7 @@ impl std::fmt::Debug for LanguageServer {
 /// mac-side argv walk), so attach answers nothing here and the CLI spawn —
 /// behind its breaker — remains the meter, exactly the pre-attach fallback.
 #[cfg(windows)]
-fn attach() -> Option<Vec<QuotaSample>> {
+fn attach(_kind: ServerKind) -> Option<Vec<QuotaSample>> {
     None
 }
 

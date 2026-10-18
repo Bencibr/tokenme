@@ -386,7 +386,10 @@ fn capture_panel_windows(window: &WebviewWindow) -> Result<PanelScreenshot, Stri
     };
     use windows_sys::Win32::Storage::Xps::PrintWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::PW_RENDERFULLCONTENT;
-    let hwnd = window.hwnd().map_err(|error| format!("cannot read TokenMe panel window: {error}"))?;
+    // Tauri exposes the HWND from the `windows` crate while these low-level
+    // capture calls use `windows-sys`; both wrap the same native pointer, but
+    // Rust does not implicitly convert between the wrapper types.
+    let hwnd = window.hwnd().map_err(|error| format!("cannot read TokenMe panel window: {error}"))?.0 as _;
     let mut rect: RECT = unsafe { zeroed() };
     if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect) } == 0 {
         return Err("cannot read TokenMe panel bounds".into());
@@ -438,8 +441,16 @@ fn click_panel_windows(window: &WebviewWindow, x: f64, y: f64) -> Result<(), Str
     let position = window.outer_position().map_err(|error| format!("cannot read TokenMe panel position: {error}"))?;
     let mut cursor = POINT { x: 0, y: 0 };
     if unsafe { GetCursorPos(&mut cursor) } == 0 { return Err("cannot read current cursor position".into()); }
-    let sx = i32::try_from(f64::from(position.x) + x).map_err(|_| "panel click coordinate is too large".to_string())?;
-    let sy = i32::try_from(f64::from(position.y) + y).map_err(|_| "panel click coordinate is too large".to_string())?;
+    let sx_f = f64::from(position.x) + x;
+    let sy_f = f64::from(position.y) + y;
+    if !sx_f.is_finite() || !sy_f.is_finite()
+        || sx_f < f64::from(i32::MIN) || sx_f > f64::from(i32::MAX)
+        || sy_f < f64::from(i32::MIN) || sy_f > f64::from(i32::MAX)
+    {
+        return Err("panel click coordinate is too large".to_string());
+    }
+    let sx = sx_f.round() as i32;
+    let sy = sy_f.round() as i32;
     if unsafe { SetCursorPos(sx, sy) } == 0 { return Err("cannot move cursor to TokenMe panel".into()); }
     unsafe { mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0); }
     let _ = unsafe { SetCursorPos(cursor.x, cursor.y) };

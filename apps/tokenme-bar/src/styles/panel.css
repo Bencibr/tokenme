@@ -34,6 +34,20 @@
   clip-path: inset(0 round 12px);
 }
 
+/* WebView2 composites the surface one pixel short of the layout viewport on
+   Windows: the page paints the right/bottom border (measured via the page's
+   own computed style), but the presented frame drops the last column and
+   row, so anything drawn on the exact edge never reaches the screen — the
+   panel lost its right and bottom hairline while left/top rendered. Pull
+   the panel in by that pixel here so the border lands inside the visible
+   region; the freed sliver is window-transparent and shows the desktop.
+   macOS keeps the full-bleed box its native layer clip is sized to. */
+[data-env="tauri"][data-platform="windows"] .panel {
+  width: calc(100% - 1px);
+  height: calc(100vh - 1px);
+  max-height: calc(100vh - 1px);
+}
+
 @keyframes panel-in {
   from {
     opacity: 0;

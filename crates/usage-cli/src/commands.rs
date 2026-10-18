@@ -29,41 +29,39 @@ pub const MAX_PERIODS: i64 = 90;
 
 /// Serve the diagnostics MCP protocol from the current sync database.
 ///
-/// The protocol owns authentication and grants; the CLI host only opens the
-/// local SyncStore and hands its stdin/stdout to the bounded stdio bridge.
+/// Remote bridge mode owns authentication and grants; local mode accepts the
+/// standard MCP JSON-RPC shape directly over stdio.
 /// Keeping this command outside `context::build` is intentional: it must not
 /// ingest logs, print progress, or put anything except JSON-RPC responses on
-/// stdout. The debugger identity is carried by each signed MCP request; the
-/// service authority is intentionally process-scoped, so a restarted command
-/// cannot accept grants issued by the previous process.
+/// stdout. No local socket or listener is opened. A local process still
+/// exposes only the fixed diagnostics registry and bounded argument surface.
 pub fn diagnostics_stdio(global: &crate::args::Global) -> Result<(), String> {
     let db_path = global
         .db
         .clone()
         .or_else(usage_index::Index::default_path)
         .ok_or_else(|| "diagnostics stdio needs --db <path> on this platform".to_string())?;
-    if !db_path.exists() {
-        return Err(format!("diagnostics stdio requires an existing sync database: {}", db_path.display()));
-    }
-    let status = SyncStore::read_status(&db_path).map_err(|error| format!("cannot read sync identity from {}: {error}", db_path.display()))?;
-    let primary_id = if let Some(primary_id) = status.primary_id {
-        primary_id
-    } else {
-        SyncStore::read_secondary_config(&db_path)
-            .map_err(|error| format!("cannot read secondary identity from {}: {error}", db_path.display()))?
-            .map(|config| config.primary_id)
-            .ok_or_else(|| format!("no device-sync identity is stored in {}; pair or start sync first", db_path.display()))?
-    };
     if let Some(config_path) = &global.diagnostics_config {
+        if !db_path.exists() {
+            return Err(format!("diagnostics bridge requires an existing sync database: {}", db_path.display()));
+        }
+        let status = SyncStore::read_status(&db_path).map_err(|error| format!("cannot read sync identity from {}: {error}", db_path.display()))?;
+        let primary_id = status.primary_id
+            .or_else(|| SyncStore::read_secondary_config(&db_path).ok().flatten().map(|config| config.primary_id))
+            .ok_or_else(|| format!("no device-sync identity is stored in {}; pair or start sync first", db_path.display()))?;
         return diagnostics_bridge_stdio(&db_path, &primary_id, config_path);
     }
+    let status = SyncStore::read_status(&db_path).map_err(|error| format!("cannot read local MCP database state from {}: {error}", db_path.display()))?;
+    let primary_id = status.primary_id
+        .or_else(|| SyncStore::read_secondary_config(&db_path).ok().flatten().map(|config| config.primary_id))
+        .unwrap_or_else(|| "local-mcp".into());
     let store = SyncStore::open(&db_path, primary_id).map_err(|error| format!("cannot open sync store {}: {error}", db_path.display()))?;
     let service = DiagnosticsService::new(store.primary_id()).map_err(|error| format!("cannot start diagnostics service: {error}"))?;
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
-    service.serve_stdio(&store, &mut reader, &mut writer).map_err(|error| format!("diagnostics stdio failed: {error}"))
+    service.serve_local_stdio(&store, &mut reader, &mut writer).map_err(|error| format!("diagnostics stdio failed: {error}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1952,9 +1950,19 @@ pub fn sync_stop(ctx: &Ctx) -> Result<(), String> {
         }
         return Ok(());
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        Err("sync stop uses a private Unix socket; Windows named-pipe ACL implementation is UNVERIFIED on this platform".into())
+        let response = crate::windows_control::request(&ctx.db_path, "stop")?;
+        println!("{response}");
+        if let Some(config) = SyncStore::read_secondary_config(&ctx.db_path).map_err(|error| error.to_string())? {
+            let mut store = SyncStore::open(&ctx.db_path, config.primary_id).map_err(|error| error.to_string())?;
+            store.set_secondary_enabled(false, ctx.now_ms).map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        Err("sync stop control plane is unsupported on this platform".into())
     }
 }
 
@@ -1967,7 +1975,9 @@ fn secondary_runtime_status(db_path: &std::path::Path) -> bool {
         let mut response = [0u8; 64];
         socket.read(&mut response).is_ok()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    { crate::windows_control::request(db_path, "status").is_ok() }
+    #[cfg(all(not(unix), not(windows)))]
     { false }
 }
 
@@ -2046,7 +2056,6 @@ fn run_secondary_service(
                     "stop" => {
                         stop_requested = true;
                         stop.store(true, Ordering::Release);
-                        cancellation.cancel();
                         let _ = socket.write_all(b"stopping\n");
                     }
                     "status" => {
@@ -2067,7 +2076,18 @@ fn run_secondary_service(
         if stop_requested { break; }
     }
     stop.store(true, Ordering::Release);
-    cancellation.cancel();
+    if stop_requested {
+        // Let an upload that already reached the primary commit its ACK. If
+        // the transport is genuinely stuck, retain the bounded cancellation
+        // escape hatch instead of making `sync stop` wait indefinitely.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !join.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !join.is_finished() { cancellation.cancel(); }
+    } else {
+        cancellation.cancel();
+    }
     let joined = join.join().map_err(|_| "secondary runtime thread panicked".to_string());
     let cleanup = std::fs::remove_file(&path).map_err(|error| format!("cannot remove secondary control socket: {error}"));
     if let Some(error) = control_error { return Err(error); }
@@ -2083,13 +2103,52 @@ fn run_secondary_service(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn run_secondary_service(
+    runtime: SyncRuntime, cancellation: usage_device_sync::ClientTransportCancellation,
+    primary_id: String, db_path: PathBuf, json: bool,
+    adapters: Vec<Box<dyn usage_core::SourceAdapter>>,
+) -> Result<(), String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let control = crate::windows_control::start(&db_path, Arc::clone(&stop), cancellation.clone())?;
+    let runtime_stop = Arc::clone(&stop);
+    let join = thread::spawn(move || {
+        let mut runtime = runtime;
+        runtime.run_until_with_ingest(&runtime_stop, usage_core::report::now_ms, |store| {
+            let filter = DateFilter::new(Some(retention_cutoff(usage_core::report::now_ms())), None);
+            let options = usage_index::IngestOptions { force: false, claim_wait: std::time::Duration::from_millis(500) };
+            if let Err(error) = store.index_mut().ingest_with(&adapters, &filter, &options) {
+                eprintln!("tokenme: resident sync ingest failed ({error}); pending local data was retained");
+            }
+            Ok(())
+        })
+    });
+    eprintln!("tokenme: secondary sync runtime started; stop with `tokenme sync stop`");
+    let joined = join.join().map_err(|_| "secondary runtime thread panicked".to_string());
+    let control_result = control.shutdown();
+    let result = match joined {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(error) => Err(error),
+    }?;
+    control_result?;
+    let report = result;
+    if stop.load(Ordering::Acquire) {
+        let mut store = SyncStore::open(&db_path, primary_id).map_err(|error| error.to_string())?;
+        store.set_secondary_enabled(false, usage_core::report::now_ms()).map_err(|error| error.to_string())?;
+    }
+    if json { print_json(&report); }
+    else { println!("secondary runtime stopped: {} pending package(s), {} acknowledged", report.pending, report.acknowledged); }
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn run_secondary_service(
     _runtime: SyncRuntime, _cancellation: usage_device_sync::ClientTransportCancellation,
     _primary_id: String, _db_path: PathBuf, _json: bool,
     _adapters: Vec<Box<dyn usage_core::SourceAdapter>>,
 ) -> Result<(), String> {
-    Err("sync run uses a private Unix socket; Windows named-pipe ACL implementation is UNVERIFIED on this platform".into())
+    Err("sync run control plane is unsupported on this platform".into())
 }
 
 pub fn sync_invite(
