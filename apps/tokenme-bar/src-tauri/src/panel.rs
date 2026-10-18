@@ -1510,7 +1510,31 @@ fn anchor(window: &WebviewWindow, rect: Option<Rect>) {
         Some(rect) => {
             let (rx, ry) = rect_origin(rect);
             let (rw, rh) = rect_size(rect);
-            let (x, y) = clamp_point(window, rx + rw / 2.0 - WIDTH / 2.0, ry + rh + GAP);
+            // muda's tray rect is in PHYSICAL pixels; WIDTH/GAP are logical
+            // points. On a Retina display subtracting the bare logical width
+            // landed the panel (scale−1)·WIDTH/2 to the right of the icon —
+            // scale the constants into the rect's pixel space first.
+            let scale = window
+                .available_monitors()
+                .ok()
+                .and_then(|monitors| {
+                    let center = rx + rw / 2.0;
+                    monitors
+                        .iter()
+                        .find(|m| {
+                            let p = m.position();
+                            let s = m.size();
+                            center >= p.x as f64 && center < p.x as f64 + s.width as f64
+                        })
+                        .or_else(|| monitors.first())
+                        .map(|m| m.scale_factor())
+                })
+                .unwrap_or(1.0);
+            let (x, y) = clamp_point(
+                window,
+                rx + rw / 2.0 - WIDTH * scale / 2.0,
+                ry + rh + GAP * scale,
+            );
             Some((x, y, "tray rect"))
         }
         // Where the panel belongs when no tray rectangle is known: a launch-time

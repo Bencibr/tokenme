@@ -1092,6 +1092,9 @@
    so panning the panel never reorders anything by accident. */
 .quota-row,
 .quota-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   touch-action: pan-y;
 }
 
@@ -1143,6 +1146,7 @@
    放在拖拽手柄里，点击必须拦下 pointer 事件免得带出拖拽。 */
 .quota-checkin {
   display: inline-flex;
+  margin-left: auto;
 }
 
 .checkin-btn {
@@ -1269,10 +1273,11 @@
 .quota-cycle {
   position: relative;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
   padding: 1px 0 2px 26px;
+  white-space: nowrap;
+  overflow: hidden;
   color: var(--ink-3);
   font-size: 10px;
   line-height: 1.35;
@@ -1312,6 +1317,9 @@
 /* The per-model breakdown under a cycle line: one single-line row per model,
    same geometry as the quota rows above (bar / percent / used). */
 .quota-cycle-est {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--accent-ink);
 }
 
@@ -3782,6 +3790,18 @@
   padding: 2px;
 }
 
+.sync-discovery-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.sync-discovery-actions .btn-quiet {
+  flex: none;
+  padding: 3px 8px;
+}
+
 .sync-scan {
   padding: 18px 0 14px;
   color: var(--ink-3);
@@ -4034,6 +4054,55 @@
 
 .sync-credbox .sync-input {
   margin-top: 4px;
+}
+
+.sync-secondary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: var(--ink-2);
+  font-size: var(--t-meta);
+  font-weight: 600;
+}
+
+.sync-secondary-head .btn-quiet {
+  flex: none;
+}
+
+.sync-secondary-empty {
+  padding: 5px 0 2px;
+  color: var(--ink-3);
+  font-size: var(--t-meta);
+}
+
+.sync-invite-reveal {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hair);
+}
+
+.sync-invite-reveal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: var(--t-meta);
+  font-weight: 600;
+}
+
+.sync-invite-reveal-head .btn-quiet {
+  flex: none;
+}
+
+.sync-invite-reveal .sync-btnrow {
+  margin-top: 8px;
+}
+
+.sync-invite-reveal .sync-btnrow .btn-quiet {
+  flex: none;
 }
 
 .sync-field-grid {
@@ -4317,6 +4386,22 @@
   background: var(--accent-soft);
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   border-radius: var(--r-md);
+}
+
+.sheet-notice.is-error {
+  justify-content: flex-start;
+  color: var(--bad);
+  background: var(--bad-soft);
+  border-color: color-mix(in srgb, var(--bad) 34%, transparent);
+}
+
+.sheet-notice.is-error svg {
+  flex: none;
+}
+
+.sheet-notice.is-error span {
+  min-width: 0;
+  line-height: 1.45;
 }
 
 /* list */

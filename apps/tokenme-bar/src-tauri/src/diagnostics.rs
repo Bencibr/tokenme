@@ -64,7 +64,10 @@ struct PersistedLocalMcp {
 }
 
 impl Default for PersistedLocalMcp {
-    fn default() -> Self { Self { enabled: false, bearer: None, control_enabled: false } }
+    // A missing local MCP state file means a new installation. Start the
+    // local control surface with every currently registered local scope. An
+    // explicit persisted `enabled: false` is still honored by the loader.
+    fn default() -> Self { Self { enabled: true, bearer: None, control_enabled: true } }
 }
 
 fn local_mcp_state_path() -> Option<PathBuf> {
@@ -121,6 +124,35 @@ fn infer_local_lan_host() -> Result<String, String> {
 fn new_local_mcp_token() -> String {
     let bytes: [u8; 32] = rand::rng().random();
     format!("tm_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn local_mcp_token_fingerprint(token: &str) -> String {
+    Sha256::digest(token.as_bytes()).iter().take(8).map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn log_local_mcp_config(event: &str, config: Option<(String, String, bool, Option<i64>)>) {
+    let payload = match config {
+        Some((endpoint, token, control_enabled, expires_at_ms)) => json!({
+            "event": event,
+            "enabled": true,
+            "endpoint": endpoint,
+            "scopes": if control_enabled { vec!["diagnostics.read", "sync.control"] } else { vec!["diagnostics.read"] },
+            "control_enabled": control_enabled,
+            "expires_at_ms": expires_at_ms,
+            "authorization": "[REDACTED]",
+            "bearer_sha256_prefix": local_mcp_token_fingerprint(&token),
+        }),
+        None => json!({
+            "event": event,
+            "enabled": false,
+            "endpoint": Value::Null,
+            "scopes": Vec::<&str>::new(),
+            "control_enabled": false,
+            "expires_at_ms": Value::Null,
+            "authorization": "[REDACTED]",
+        }),
+    };
+    logging::info(&format!("mcp.config {payload}"));
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
@@ -336,11 +368,25 @@ impl DiagnosticsState {
         };
         let config = PersistedLocalMcp { enabled, bearer, control_enabled };
         *self.persisted.lock().map_err(|_| "MCP 持久化状态被占用".to_string())? = config.clone();
-        save_persisted_local_mcp(&config)
+        let result = save_persisted_local_mcp(&config);
+        if result.is_ok() {
+            self.log_local_mcp_config(if enabled { "persisted" } else { "disabled" });
+        }
+        result
+    }
+
+    fn log_local_mcp_config(&self, event: &str) {
+        let config = self.local_http.lock().ok().and_then(|current| current.as_ref().map(|server| (
+            server.endpoint.clone(),
+            server.read_token.clone(),
+            server.control_enabled,
+            server.expires_at_ms,
+        )));
+        log_local_mcp_config(event, config);
     }
 
     fn clear_persisted(&self) {
-        *self.persisted.lock().unwrap_or_else(|error| error.into_inner()) = PersistedLocalMcp::default();
+        *self.persisted.lock().unwrap_or_else(|error| error.into_inner()) = PersistedLocalMcp { enabled: false, bearer: None, control_enabled: false };
     }
 
     pub(crate) fn local_http_endpoint(&self) -> Option<String> {
@@ -376,6 +422,8 @@ impl DiagnosticsState {
         for session in state.sessions.values_mut().filter(|session| session.view.origin.starts_with("mcp-http")) {
             session.revoked = Some(CODE_SESSION_REVOKED);
         }
+        drop(state);
+        self.log_local_mcp_config(if enabled { "control_enabled" } else { "control_disabled" });
         Ok(())
     }
 
@@ -429,6 +477,7 @@ impl DiagnosticsState {
         let port = listener.local_addr().map_err(|error| format!("无法读取局域网 MCP HTTP 端口: {error}"))?.port();
         let endpoint = format!("http://{host}:{port}{LOCAL_MCP_PATH}");
         let read_token = self.persisted_bearer().unwrap_or_else(new_local_mcp_token);
+        let control_enabled = self.persisted.lock().ok().is_some_and(|config| config.control_enabled);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let app = app.clone();
@@ -436,7 +485,9 @@ impl DiagnosticsState {
             .name("tokenme-mcp-http".into())
             .spawn(move || run_local_mcp_http(listener, app, thread_stop))
             .map_err(|error| format!("无法启动局域网 MCP HTTP 服务线程: {error}"))?;
-        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms: None, control_enabled: false, stop, join: Some(join) });
+        *current = Some(LocalMcpHttpServer { endpoint: endpoint.clone(), read_token, expires_at_ms: None, control_enabled, stop, join: Some(join) });
+        drop(current);
+        self.log_local_mcp_config("started");
         Ok(endpoint)
     }
 
@@ -812,7 +863,8 @@ fn run_local_mcp_http(listener: TcpListener, app: AppHandle, stop: Arc<AtomicBoo
         }
         handlers = active_handlers;
         match listener.accept() {
-            Ok((stream, _peer)) if handlers.len() >= LOCAL_MCP_MAX_CONNECTIONS => {
+            Ok((mut stream, _peer)) if handlers.len() >= LOCAL_MCP_MAX_CONNECTIONS => {
+                let _ = stream.set_nonblocking(false);
                 let mut stream = stream;
                 let _ = stream.set_write_timeout(Some(LOCAL_MCP_REQUEST_TIMEOUT));
                 let body = serde_json::to_vec(&json_rpc_error(Value::Null, -32000, "local MCP connection limit reached")).unwrap_or_default();
@@ -820,6 +872,11 @@ fn run_local_mcp_http(listener: TcpListener, app: AppHandle, stop: Arc<AtomicBoo
                 let _ = stream.shutdown(std::net::Shutdown::Both);
             }
             Ok((mut stream, _peer)) => {
+                if let Err(error) = stream.set_nonblocking(false) {
+                    logging::error(&format!("tokenme mcp http: client socket blocking mode unavailable: {error}"));
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    continue;
+                }
                 let app = app.clone();
                 let handler = thread::Builder::new().name("tokenme-mcp-http-request".into()).spawn(move || {
                     let _ = stream.set_read_timeout(Some(LOCAL_MCP_REQUEST_TIMEOUT));
@@ -1113,6 +1170,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         ("sync.start_primary", "Start the existing primary sync service", "sync.control"),
         ("sync.pair", "Pair this device from a complete tokenme invite after TLS pin validation", "sync.control"),
         ("sync.stop_primary", "Stop the existing primary sync service", "sync.control"),
+        ("sync.stop_secondary", "Stop the existing secondary sync service and disconnect this device", "sync.control"),
         ("sync.discover", "Run one existing local discovery action", "sync.control"),
         ("sync.approve_pairing", "Approve one existing pairing request", "sync.control"),
         ("sync.reject_pairing", "Reject one existing pairing request", "sync.control"),
@@ -1277,6 +1335,15 @@ async fn dispatch(
             let status = sync_status(app).await?;
             if status.role != "primary" {
                 return Err(DiagnosticsError::new(CODE_HANDLER_FAILED, "primary sync service is not active"));
+            }
+            let result = control_sync(app, SyncManagementRequest::Stop).await;
+            diagnostics.revoke_all();
+            result
+        }
+        "sync.stop_secondary" => {
+            let status = sync_status(app).await?;
+            if status.role != "secondary" {
+                return Err(DiagnosticsError::new(CODE_HANDLER_FAILED, "secondary sync service is not active"));
             }
             let result = control_sync(app, SyncManagementRequest::Stop).await;
             diagnostics.revoke_all();
@@ -1583,6 +1650,14 @@ fn safe_sync_view(status: &SyncDevicesView) -> Value {
         "pending_bytes": status.pending_bytes,
         "has_error": status.last_error.is_some(),
         "has_discovery_error": status.discovery_error.is_some(),
+        "discovered_primaries": status.discovered_primaries.iter().map(|primary| json!({
+            "service_name": primary.service_name,
+            "primary_id": primary.primary_id,
+            "display_name": primary.display_name,
+            "endpoint": primary.endpoint,
+            "certificate_pin": primary.certificate_pin,
+            "identity_conflict": primary.identity_conflict,
+        })).collect::<Vec<_>>(),
         "last_connected_at_ms": status.last_connected_at_ms,
         "operation_state": status.operation_state,
         "last_checked_at_ms": status.last_checked_at_ms,
@@ -1966,6 +2041,11 @@ mod tests {
 
     #[test]
     fn persisted_mcp_state_keeps_the_bearer_only_while_enabled() {
+        let fresh = PersistedLocalMcp::default();
+        assert!(fresh.enabled);
+        assert!(fresh.control_enabled);
+        assert!(fresh.bearer.is_none());
+
         let token = new_local_mcp_token();
         let on = parse_persisted_local_mcp(&serde_json::json!({
             "enabled": true, "bearer": token, "control_enabled": true,

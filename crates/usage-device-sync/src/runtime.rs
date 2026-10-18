@@ -62,6 +62,7 @@ pub struct SyncRuntime {
     config: SyncRuntimeConfig,
     secondary_identity: Option<DeviceIdentity>,
     occurrences_initialized: bool,
+    occurrence_init_progressed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +73,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, occurrences_initialized: false }
+        Self { store, transport, config, secondary_identity: None, occurrences_initialized: false, occurrence_init_progressed: false }
     }
 
     pub fn new_secondary(
@@ -81,7 +82,7 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        Self { store, transport, config, secondary_identity: Some(identity), occurrences_initialized: false }
+        Self { store, transport, config, secondary_identity: Some(identity), occurrences_initialized: false, occurrence_init_progressed: false }
     }
 
     pub fn store(&self) -> &SyncStore { &self.store }
@@ -149,6 +150,7 @@ impl SyncRuntime {
         let mut total = RuntimeRunReport::default();
         let mut consecutive_errors = 0_u32;
         while !stop.load(Ordering::Acquire) {
+            self.occurrence_init_progressed = false;
             let lease_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, lease_now, self.config.lease_ttl_ms)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
@@ -191,6 +193,7 @@ impl SyncRuntime {
             let waiting_for_primary = pass.last_error.as_deref().is_some_and(|message| message.contains("awaiting approval") || message.contains("primary paused this device"));
             consecutive_errors = if pass_had_error && !waiting_for_primary { consecutive_errors.saturating_add(1) } else { 0 };
             let pass_had_no_claim_with_pending = pass.claimed == 0 && pass.pending > 0;
+            let pass_had_occurrence_progress = self.occurrence_init_progressed;
             total.last_error = pass.last_error;
             let renew_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, renew_now, self.config.lease_ttl_ms)? {
@@ -199,9 +202,13 @@ impl SyncRuntime {
             }
             if stop.load(Ordering::Acquire) { break; }
             // A long offline catch-up must continue immediately after a page
-            // was ACKed.  Once the page is complete, or when a retry is in
-            // backoff with no claimable row, use the normal poll cadence.
-            if !catchup_complete && !pass_had_error && !pass_had_no_claim_with_pending {
+            // was ACKed.  A page that advances local identity setup may also
+            // continue immediately; a no-op page stays on the poll cadence.
+            if !catchup_complete
+                && (pass.acknowledged > 0 || pass_had_occurrence_progress)
+                && !pass_had_error
+                && !pass_had_no_claim_with_pending
+            {
                 continue;
             }
             let started = std::time::Instant::now();
@@ -352,22 +359,33 @@ impl SyncRuntime {
     }
 
     fn enqueue_local_snapshot(&mut self, config: &crate::SecondarySyncConfig, identity: &DeviceIdentity, now_ms: i64) -> SyncResult<bool> {
-        if !self.occurrences_initialized {
+        let historical_ready = if self.occurrences_initialized {
+            true
+        } else {
             let complete = self.store.index_mut().ensure_sync_occurrences_page(256).map_err(SyncError::from)?;
-            if !complete { return Ok(false); }
-            self.occurrences_initialized = true;
-        }
+            if !complete { self.occurrence_init_progressed = true; }
+            if complete { self.occurrences_initialized = true; }
+            complete
+        };
         let mut cursor = self.store.snapshot_cursor(config)?;
+        if !historical_ready { cursor.last_identity = None; }
         for _ in 0..MAX_SNAPSHOT_PAGES_PER_PASS {
             let summary = self.store.outbox_summary()?;
             if summary.pending > 0 || summary.in_flight > 0 {
                 return Ok(false);
             }
-            let page = self.store.index().sync_snapshot_page(
-                cursor.last_identity.as_deref(), cursor.last_dirty_revision, now_ms,
-                self.config.snapshot_days, usage_index::SYNC_SNAPSHOT_PAGE_ROWS,
-                usage_index::SYNC_SNAPSHOT_PAGE_BYTES,
-            ).map_err(SyncError::from)?;
+            let page = if historical_ready {
+                self.store.index().sync_snapshot_page(
+                    cursor.last_identity.as_deref(), cursor.last_dirty_revision, now_ms,
+                    self.config.snapshot_days, usage_index::SYNC_SNAPSHOT_PAGE_ROWS,
+                    usage_index::SYNC_SNAPSHOT_PAGE_BYTES,
+                )
+            } else {
+                self.store.index().sync_dirty_page(
+                    cursor.last_dirty_revision, now_ms, self.config.snapshot_days,
+                    usage_index::SYNC_SNAPSHOT_PAGE_ROWS, usage_index::SYNC_SNAPSHOT_PAGE_BYTES,
+                )
+            }.map_err(SyncError::from)?;
             let mut rows_by_identity = BTreeMap::<String, NetworkRow>::new();
             for event in page.events {
                 let row = network_row(event.event, event.occurrence_id)?;
@@ -385,6 +403,7 @@ impl SyncRuntime {
             rows.sort_by(|left, right| left.identity_material().unwrap_or("").cmp(right.identity_material().unwrap_or("")));
             let complete = page.events_done && page.dirty_done;
             if rows.is_empty() && !complete {
+                if !historical_ready { return Ok(false); }
                 return Err(SyncError::Limit("snapshot page made no cursor progress".into()));
             }
             if rows.is_empty() && complete && cursor.complete && cursor.completion_generation.is_some() {
@@ -617,7 +636,7 @@ mod tests {
         (cert.der().to_vec(), key.serialize_der())
     }
 
-    fn paired_primary(device: &DeviceIdentity) -> (SyncStore, crate::StreamOpenReceipt) {
+    fn paired_primary_without_stream(device: &DeviceIdentity) -> SyncStore {
         let mut primary = SyncStore::open_in_memory("primary-1").unwrap();
         let invite = primary.create_pairing_invite(
             "https://localhost:47821",
@@ -627,6 +646,11 @@ mod tests {
         let request = PairingRequest::new(&invite, device, "linux").unwrap();
         let state = primary.receive_pairing_request(&request, 1).unwrap();
         primary.approve_pairing(&state.request_id, 2).unwrap();
+        primary
+    }
+
+    fn paired_primary(device: &DeviceIdentity) -> (SyncStore, crate::StreamOpenReceipt) {
+        let mut primary = paired_primary_without_stream(device);
         let stream = primary.open_stream_for_registered(&device.device_id, 3).unwrap();
         (primary, stream)
     }
@@ -695,6 +719,63 @@ mod tests {
         assert_eq!(config.last_ack_generation, Some(1));
         assert!(config.last_ack_receipt_hash.is_some());
         assert_eq!(runtime.store().snapshot_cursor(&config).unwrap().completion_generation, Some(1));
+        assert!(server_thread.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn secondary_runtime_uploads_dirty_rows_before_historical_identity_catchup() {
+        let device = DeviceIdentity::create("runtime-incremental", "Secondary").unwrap();
+        let primary = paired_primary_without_stream(&device);
+        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
+        let (cert_der, key_der) = certificate();
+        let staging = tempfile::tempdir().unwrap();
+        let server = crate::HttpsSyncServer::bind(server_config(&cert_der, &key_der, staging.path().join("staging")), primary).unwrap();
+        let addr = server.local_addr().unwrap();
+        let identity_dir = tempfile::tempdir().unwrap();
+        let identity_path = identity_dir.path().join("secondary-identity.json");
+        let first_now = usage_core::report::now_ms();
+        secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_id: "primary-1".into(), device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
+            certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(), identity_path,
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }, first_now).unwrap();
+        for id in 1..=257_i64 {
+            secondary.index_mut().conn().execute(
+                "INSERT INTO event(id, tool, ts_ms, session, meter, source) VALUES(?1, 'codex', ?2, ?3, 'tokens', 'history.jsonl')",
+                rusqlite::params![id, first_now, format!("history-{id}")],
+            ).unwrap();
+        }
+        secondary.index_mut().conn().execute(
+            "INSERT INTO event(id, tool, ts_ms, session, meter, dedupe_key, source) VALUES(258, 'codex', ?1, 'live', 'tokens', 'live-row', 'live.jsonl')",
+            rusqlite::params![first_now],
+        ).unwrap();
+        secondary.index_mut().conn().execute(
+            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(258, 'key:live-row', NULL)",
+            [],
+        ).unwrap();
+        secondary.index_mut().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:live-row', 'live.jsonl', X'', 258, ?1, 1, ?1, ?1)",
+            rusqlite::params![first_now],
+        ).unwrap();
+
+        let server_thread = thread::spawn(move || server.run_connections(3));
+        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
+        )).unwrap();
+        let mut runtime = SyncRuntime::new_secondary(secondary, transport, SyncRuntimeConfig::new("secondary-incremental-owner").unwrap(), device);
+        let report = runtime.run_once_with_clock(|| first_now).unwrap();
+        assert_eq!(report.acknowledged, 1, "a new dirty row must upload before history mapping finishes");
+        let initialized_to: i64 = runtime.store().index().conn().query_row(
+            "SELECT value FROM meta WHERE key = 'device_sync_occurrence_init_event_id'",
+            [], |row| row.get::<_, String>(0),
+        ).unwrap().parse().unwrap();
+        assert_eq!(initialized_to, 256);
+        let config = runtime.store().secondary_config().unwrap().unwrap();
+        assert!(!runtime.store().snapshot_cursor(&config).unwrap().complete);
         assert!(server_thread.join().unwrap().is_ok());
     }
 

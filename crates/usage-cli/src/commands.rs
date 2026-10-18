@@ -2056,7 +2056,6 @@ fn run_secondary_service(
                     "stop" => {
                         stop_requested = true;
                         stop.store(true, Ordering::Release);
-                        cancellation.cancel();
                         let _ = socket.write_all(b"stopping\n");
                     }
                     "status" => {
@@ -2077,7 +2076,18 @@ fn run_secondary_service(
         if stop_requested { break; }
     }
     stop.store(true, Ordering::Release);
-    cancellation.cancel();
+    if stop_requested {
+        // Let an upload that already reached the primary commit its ACK. If
+        // the transport is genuinely stuck, retain the bounded cancellation
+        // escape hatch instead of making `sync stop` wait indefinitely.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !join.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !join.is_finished() { cancellation.cancel(); }
+    } else {
+        cancellation.cancel();
+    }
     let joined = join.join().map_err(|_| "secondary runtime thread panicked".to_string());
     let cleanup = std::fs::remove_file(&path).map_err(|error| format!("cannot remove secondary control socket: {error}"));
     if let Some(error) = control_error { return Err(error); }

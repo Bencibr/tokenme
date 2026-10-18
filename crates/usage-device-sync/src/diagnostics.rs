@@ -701,7 +701,7 @@ impl DiagnosticsHost {
     /// operation is visible through `diagnostics.get_operation` so an MCP
     /// client can observe completion after the host schedules the action.
     pub fn begin_control_operation(&self, action: &str, started_at_ms: i64) -> Result<String, DiagnosticsError> {
-        if !matches!(action, "sync.start_primary" | "sync.stop_primary" | "sync.discover" | "sync.pair" | "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request" | "sync.pause" | "sync.resume" | "sync.revoke_device" | "sync.refresh" | "ui.open_sync_sheet" | "ui.focus_device" | "ui.click_panel") {
+        if !matches!(action, "sync.start_primary" | "sync.stop_primary" | "sync.stop_secondary" | "sync.discover" | "sync.pair" | "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request" | "sync.pause" | "sync.resume" | "sync.revoke_device" | "sync.refresh" | "ui.open_sync_sheet" | "ui.focus_device" | "ui.click_panel") {
             return Err(DiagnosticsError::UnknownTool);
         }
         let mut random = [0u8; 16];
@@ -770,6 +770,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { id: ToolId::Other, name: "sync.start_primary", scope: DiagnosticsScope::SyncControl, description: "Start the primary service through the host state machine." },
     ToolSpec { id: ToolId::Other, name: "sync.pair", scope: DiagnosticsScope::SyncControl, description: "Pair this device from a complete tokenme invite after TLS pin validation." },
     ToolSpec { id: ToolId::Other, name: "sync.stop_primary", scope: DiagnosticsScope::SyncControl, description: "Stop the primary service and revoke diagnostics sessions." },
+    ToolSpec { id: ToolId::Other, name: "sync.stop_secondary", scope: DiagnosticsScope::SyncControl, description: "Stop the secondary service and disconnect this device." },
     ToolSpec { id: ToolId::Other, name: "sync.discover", scope: DiagnosticsScope::SyncControl, description: "Start one bounded LAN discovery operation." },
     ToolSpec { id: ToolId::Other, name: "sync.approve_pairing", scope: DiagnosticsScope::SyncControl, description: "Approve one pairing request through the host handler." },
     ToolSpec { id: ToolId::Other, name: "sync.reject_pairing", scope: DiagnosticsScope::SyncControl, description: "Reject one pairing request through the host handler." },

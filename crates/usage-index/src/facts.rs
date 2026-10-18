@@ -73,16 +73,26 @@ fn estimate_cycle_tokens(observed_tokens: f64, used_percent: f64) -> Option<f64>
 /// of the last few sample pairs (Δtokens/Δtime — quantized percent steps and
 /// indexing bursts average out); a negative or frozen pace (stale sample,
 /// foreign meter) answers nothing. The result is clamped to one minute..one
-/// week: below that it is noise, above that it is a fantasy. States written
-/// before sample timestamps existed stay silent until fresh turns arrive.
+/// week: below that it is noise, above that it is a fantasy.
+///
+/// States written before timestamps existed carry old turns without clocks —
+/// the times align with the NEWEST tail of the samples only, so the projection
+/// runs over pairs where both ends have clocks. Demanding full lockstep
+/// (times == samples) would stay silent for a dozen turns on every migrated
+/// state.
 fn burn_eta(samples: &[[f64; 2]], times: &[i64], used_percent: f64, observed_tokens: f64) -> Option<i64> {
-    if samples.len() < 3 || times.len() != samples.len() || used_percent >= 99.5 {
+    let n = samples.len();
+    if n < 3 || times.is_empty() || used_percent >= 99.5 {
         return None;
     }
-    let tail = samples.len().saturating_sub(5).max(1);
-    let mut rates: Vec<f64> = samples[tail..]
+    let timed = times.len().min(n);
+    if timed < 2 {
+        return None;
+    }
+    let from = n - timed;
+    let mut rates: Vec<f64> = samples[from..]
         .windows(2)
-        .zip(times[tail..].windows(2))
+        .zip(times.windows(2))
         .filter_map(|(pair, time)| {
             let dt = (time[1] - time[0]) as f64;
             let travel = pair[1][1] - pair[0][1];
@@ -2221,6 +2231,13 @@ mod golden {
         let frozen = vec![[50.0e6, 20.0], [50.0e6, 22.0], [50.0e6, 24.0], [50.0e6, 26.0]];
         assert_eq!(burn_eta(&frozen, &times, 26.0, 50.0e6), None);
         assert_eq!(burn_eta(&samples, &[], 26.0, 80.0e6), None);
+        // 迁移态：老采样没有钟，时间戳只覆盖尾部两轮 —— 尾部成对投影仍然工作。
+        let mut migrated = vec![[5.0e6, 8.0], [15.0e6, 12.0]];
+        migrated.extend_from_slice(&samples);
+        let mut migrated_times = vec![0i64, 0];
+        migrated_times.extend_from_slice(&times);
+        let eta = burn_eta(&migrated, &migrated_times, 26.0, 80.0e6).unwrap();
+        assert!((eta as f64) > 26.0e6 && (eta as f64) < 29.0e6, "{eta}");
     }
 
     /// The Cline 5h row that shipped live self-healing: one fluke window left

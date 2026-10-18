@@ -39,6 +39,12 @@ const DEBOUNCE: Duration = Duration::from_millis(800);
 /// those from spinning. A finished call surfaces at most this much later; the
 /// manual refresh bypasses the floor because the user asked for "now".
 const MIN_PASS_GAP: Duration = Duration::from_secs(3);
+/// The adaptive floor widens with the last pass's cost (×3) and never exceeds
+/// this — a pathological pass must not silence the watcher for minutes.
+const MAX_PASS_COST: Duration = Duration::from_secs(5);
+/// With the panel hidden the numbers have no watcher; ingest and quota both
+/// back off to this floor.
+const HIDDEN_PASS_GAP: Duration = Duration::from_secs(15);
 
 /// Minimum gap between report rebuilds on file-change wakes. A rebuild reads
 /// the day rollup plus a few live slices, so it is cheap — but every one still
@@ -55,6 +61,9 @@ const PUBLISH_GAP: Duration = Duration::from_secs(10);
 /// machine's top CPU taxpayer. Vendor answers themselves barely move in a
 /// minute; the built-in probes' own cache is five minutes.
 const QUOTA_PASS_TTL: Duration = Duration::from_secs(60);
+/// With the panel hidden nobody is reading the numbers live; the probe cache
+/// serves for three times as long between real vendor rounds.
+const QUOTA_HIDDEN_TTL: Duration = Duration::from_secs(180);
 static QUOTA_PASS: Mutex<Option<(Instant, Vec<QuotaView>)>> = Mutex::new(None);
 /// Set by the manual refresh: the button promises fresh vendor numbers, so the
 /// next pass re-probes for real regardless of the TTL.
@@ -400,6 +409,7 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
     ingest(&app, &mut index, &adapters, &detected, &pricing, "initial scan", &mut last_publish,
         &mut snapshot, &mut snapshot_at, &mut wake_roots);
     let mut last_pass = Instant::now();
+    let mut last_pass_cost = Duration::from_secs(1);
     // The cadence clock runs on its own: a machine whose tools log every
     // second would otherwise reset `recv_timeout` with every wake and starve
     // the timer — measured here, a 15s setting drifted to 30-60s between
@@ -425,13 +435,25 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
                 }
                 if reason != "manual refresh" {
                     let since = last_pass.elapsed();
-                    if since < MIN_PASS_GAP {
-                        std::thread::sleep(MIN_PASS_GAP - since);
+                    // Adaptive floor: the wider the last pass, the longer the
+                    // breather — a 700ms index pass at 18 wakes a minute was a
+                    // third of a core. With the panel tucked away nobody is
+                    // watching the numbers, so the floor widens further.
+                    let mut gap = MIN_PASS_GAP.max(last_pass_cost * 3);
+                    if crate::panel::is_panel_hidden() {
+                        gap = gap.max(HIDDEN_PASS_GAP);
+                    }
+                    if since < gap {
+                        std::thread::sleep(gap - since);
                     }
                 }
+                let pass_started = Instant::now();
                 last_pass = Instant::now();
                 ingest(&app, &mut index, &adapters, &detected, &pricing, reason, &mut last_publish,
                     &mut snapshot, &mut snapshot_at, &mut wake_roots);
+                last_pass_cost = last_pass_cost
+                    .max(pass_started.elapsed())
+                    .min(MAX_PASS_COST);
             }
             Work::Resummarize => {
                 crate::logging::info("pricing refreshed — re-summarizing indexed events");
@@ -934,7 +956,12 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
     }
     if let Ok(slot) = QUOTA_PASS.lock() {
         if let Some((at, q)) = slot.as_ref() {
-            if at.elapsed() < QUOTA_PASS_TTL {
+            // A manual refresh (QUOTA_PASS_BUST) empties the slot above, so
+            // whatever survives here answers the live TTL; with the panel
+            // hidden the same answer serves three times as long — the probes
+            // are the multi-threaded decrypt work nobody is watching.
+            let ttl = if crate::panel::is_panel_hidden() { QUOTA_HIDDEN_TTL } else { QUOTA_PASS_TTL };
+            if at.elapsed() < ttl {
                 return q.clone();
             }
         }

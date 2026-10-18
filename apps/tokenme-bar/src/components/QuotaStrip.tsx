@@ -629,7 +629,6 @@ export function QuotaStrip({
           // row's number came from the tool's own records (日志), exactly the
           // rows a reader must not mistake for a vendor meter; budget rows
           // carry their own per-row badge already.
-          const logged = g.rows.some((r) => r.origin === "log");
           return (
             <div
               className="quota-group"
@@ -646,13 +645,6 @@ export function QuotaStrip({
                 <ToolIcon tool={g.tool} size={18} />
                 <span className="quota-tool">{toolDisplay(g.tool)}</span>
                 {plan ? <span className="quota-plan">{translateQuotaVocab(plan)}</span> : null}
-                <span className="quota-origins">
-                  {logged ? (
-                    <span className="quota-badge" data-origin="log">
-                      {ORIGIN("log")}
-                    </span>
-                  ) : null}
-                </span>
                 {CHECKIN_TOOLS.includes(g.tool) ? (
                   <span className="quota-checkin">
                     {groupCheckedIn(g.tool) || (checkinClaimed.get(g.tool) ?? 0) > Date.now() ? (
@@ -776,6 +768,22 @@ export function QuotaStrip({
                 const rowTail =
                     tail === ` · ${plan}` || tail.startsWith(` · ${t("quota.label.used", { value: "" }).trimEnd()}`) ? "" : tail;
                 const cycle = q.cycle;
+                // One-line cycle row on the panel; the hover tip carries the
+                // details (meter basis, pace wording, the previous window).
+                const cycleTip = cycle ? [
+                  t("quota.cycle.observed", { tokens: formatCycleTokens(cycle.observed_tokens) }),
+                  cycle.estimated_tokens != null
+                    ? t("quota.cycle.tip.estimate", {
+                        used: formatUsedPercent(cycle.estimated_used_percent ?? q.used_percent),
+                        estimate: formatLimitTokens(cycle.estimated_tokens),
+                      })
+                    : null,
+                  cycle.eta_to_full_ms ? t("quota.cycle.tip.eta", { eta: etaDuration(cycle.eta_to_full_ms) }) : null,
+                  q.origin === "log" ? t("quota.origin.log.tip") : null,
+                  cycle.previous_tokens != null && cycle.previous_tokens > 0
+                    ? t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })
+                    : null,
+                ].filter(Boolean).join(" · ") : null;
                 const cycleStatus = cycle?.status === "complete"
                   ? t("quota.cycle.complete")
                   : cycle?.status === "partial"
@@ -853,19 +861,13 @@ export function QuotaStrip({
                     <span className="quota-reset num">{resetNode}</span>
                     </div>
                     {showCycleTokens && cycle && (cycle.observed_tokens > 0 || cycle.estimated_tokens != null || !hideUnusedEstimation) ? (
-                      <div className="quota-cycle" role="status">
+                      <div className="quota-cycle" role="status" title={cycleTip ?? undefined}>
                         <span>{t("quota.cycle.observed", { tokens: formatCycleTokens(cycle.observed_tokens) })}</span>
                         {cycle.estimated_tokens != null ? (
                           <span className="quota-cycle-est">
-                            {t("quota.cycle.estimated", {
-                              tokens: formatLimitTokens(cycle.estimated_tokens),
-                              used: formatUsedPercent(cycle.estimated_used_percent ?? q.used_percent),
-                            })}
-                            {cycle.eta_to_full_ms ? <> · {t("quota.cycle.eta", { eta: etaDuration(cycle.eta_to_full_ms) })}</> : null}
+                            {t("quota.cycle.estimated", { tokens: formatLimitTokens(cycle.estimated_tokens) })}
+                            {cycle.eta_to_full_ms ? <span>{t("quota.cycle.eta", { eta: etaDuration(cycle.eta_to_full_ms) })}</span> : null}
                           </span>
-                        ) : null}
-                        {cycle.previous_tokens != null && cycle.previous_tokens > 0 ? (
-                          <span>{t("quota.cycle.previous", { tokens: formatCycleTokens(cycle.previous_tokens) })}</span>
                         ) : null}
                         {cycle.estimated_tokens == null ? (
                           cycle.status === "unavailable" ? (
