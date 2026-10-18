@@ -142,7 +142,7 @@ fn tool_registry_is_fixed_and_contains_no_execution_surface() {
     let expected = [
         "device.get_status", "device.get_build", "logs.tail", "logs.search", "sync.get_status",
         "sync.get_requests", "sync.get_trace", "diagnostics.run_check", "diagnostics.get_operation",
-        "app.get_panel_state", "ui.capture_panel", "sync.start_primary", "sync.pair", "sync.stop_primary", "sync.discover",
+        "app.get_panel_state", "ui.capture_panel", "sync.start_primary", "sync.pair", "sync.stop_primary", "sync.stop_secondary", "sync.discover",
         "sync.approve_pairing", "sync.reject_pairing", "sync.clear_expired_request", "sync.pause",
         "sync.resume", "sync.revoke_device", "sync.refresh", "ui.open_sync_sheet", "ui.focus_device", "ui.click_panel",
     ];

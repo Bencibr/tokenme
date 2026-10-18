@@ -256,6 +256,33 @@ fn sync_identity_initialization_is_bounded_and_restart_stable() {
 }
 
 #[test]
+fn sync_dirty_page_does_not_wait_for_historical_identities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paired.jsonl");
+    std::fs::write(&path, br#"{"id":"live","ts":1789172800000,"session":"s","in":1}
+"#).unwrap();
+    let adapter = Mock::new("mocka", dir.path());
+    let mut idx = Index::open_in_memory().unwrap();
+    idx.conn().execute(
+        "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL)",
+        [],
+    ).unwrap();
+    idx.conn().execute(
+        "INSERT INTO device_sync_secondary_config(config_key, enabled) VALUES('secondary', 1)",
+        [],
+    ).unwrap();
+    idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    idx.conn().execute("DELETE FROM sync_event_identity", []).unwrap();
+
+    let page = idx.sync_dirty_page(0, 1_800_000_000_000, 30, 64, 256 * 1024).unwrap();
+    assert_eq!(page.events.len(), 0);
+    assert_eq!(page.dirty_events.len(), 1);
+    assert!(!page.events_done, "historical identity initialization is still incomplete");
+    assert!(page.dirty_done);
+    assert_eq!(page.next_identity, None);
+}
+
+#[test]
 fn dirty_rows_that_fill_a_page_defer_events_to_the_next_page() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dirty-and-event.jsonl");

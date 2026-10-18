@@ -1560,6 +1560,33 @@ impl Index {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<SyncSnapshotPage> {
+        self.sync_snapshot_page_mode(after_identity, after_dirty_revision, now_ms, days, max_rows, max_bytes, true)
+    }
+
+    /// Reads a bounded dirty-only page while historical identities are still
+    /// being initialized. It deliberately does not inspect the full event
+    /// projection, so new paired changes can upload before old history is mapped.
+    pub fn sync_dirty_page(
+        &self,
+        after_dirty_revision: u64,
+        now_ms: i64,
+        days: i64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<SyncSnapshotPage> {
+        self.sync_snapshot_page_mode(None, after_dirty_revision, now_ms, days, max_rows, max_bytes, false)
+    }
+
+    fn sync_snapshot_page_mode(
+        &self,
+        after_identity: Option<&str>,
+        after_dirty_revision: u64,
+        now_ms: i64,
+        days: i64,
+        max_rows: usize,
+        max_bytes: usize,
+        include_events: bool,
+    ) -> Result<SyncSnapshotPage> {
         if days <= 0 || days > 3650 { return Err(Error::Sync("sync snapshot days must be in 1..=3650".into())); }
         if max_rows == 0 || max_rows > SYNC_SNAPSHOT_PAGE_ROWS {
             return Err(Error::Sync(format!("sync snapshot page rows must be in 1..={SYNC_SNAPSHOT_PAGE_ROWS}")));
@@ -1576,7 +1603,7 @@ impl Index {
             [], |row| row.get::<_, String>(0),
         ).optional().map_err(sql_err)?.and_then(|value| value.parse().ok()).unwrap_or(fallback);
 
-        let missing_identities: i64 = if after_identity.is_none() {
+        let missing_identities: i64 = if include_events && after_identity.is_none() {
             tx.query_row(
                 &format!("SELECT count(*) FROM event e LEFT JOIN sync_event_identity m ON m.event_id = e.id
                     WHERE ({ORIGIN_SQL}) = '' AND m.event_id IS NULL
@@ -1586,7 +1613,7 @@ impl Index {
         } else {
             0
         };
-        if missing_identities != 0 {
+        if include_events && missing_identities != 0 {
             return Err(Error::Sync("event is missing its persisted sync identity".into()));
         }
 
@@ -1629,7 +1656,7 @@ impl Index {
         // the first page can use an empty lower bound and every later page
         // remains a real indexed range seek.  An `IS NULL OR` predicate made
         // SQLite scan and sort the whole projection on every page.
-        let identity_cursor = after_identity.map(str::to_string);
+        let identity_cursor = if include_events { after_identity.map(str::to_string) } else { None };
         let identity_lower_bound = identity_cursor.as_deref().unwrap_or("");
         let mut events = Vec::new();
         let mut event_cursor = identity_cursor.clone();
@@ -1642,7 +1669,7 @@ impl Index {
                 AND m.identity > ?3
               ORDER BY m.identity, m.event_id LIMIT ?4"
         );
-        if bytes_used < max_bytes && event_limit > 0 {
+        if include_events && bytes_used < max_bytes && event_limit > 0 {
             let mut stmt = tx.prepare(&event_sql).map_err(sql_err)?;
             let rows = stmt.query_map(
                 params![coverage_lo_ms, coverage_hi_ms, identity_lower_bound, event_limit as i64],
@@ -1665,16 +1692,20 @@ impl Index {
                 events.push(SyncSnapshotEvent { identity, occurrence_id, event });
             }
         }
-        let event_done: bool = tx.query_row(
-            &format!("SELECT NOT EXISTS(
-                SELECT 1
-                  FROM sync_event_identity m INDEXED BY sync_event_identity_cursor
-                  CROSS JOIN event e ON e.id = m.event_id
-                 WHERE ({ORIGIN_SQL}) = '' AND e.ts_ms >= ?1 AND e.ts_ms < ?2
-                   AND m.identity > ?3
-            )"),
-            params![coverage_lo_ms, coverage_hi_ms, event_cursor.as_deref().unwrap_or("" )], |row| row.get(0),
-        ).map_err(sql_err)?;
+        let event_done: bool = if include_events {
+            tx.query_row(
+                &format!("SELECT NOT EXISTS(
+                    SELECT 1
+                      FROM sync_event_identity m INDEXED BY sync_event_identity_cursor
+                      CROSS JOIN event e ON e.id = m.event_id
+                     WHERE ({ORIGIN_SQL}) = '' AND e.ts_ms >= ?1 AND e.ts_ms < ?2
+                       AND m.identity > ?3
+                )"),
+                params![coverage_lo_ms, coverage_hi_ms, event_cursor.as_deref().unwrap_or("" )], |row| row.get(0),
+            ).map_err(sql_err)?
+        } else {
+            false
+        };
         tx.commit().map_err(sql_err)?;
         Ok(SyncSnapshotPage {
             coverage_lo_ms, coverage_hi_ms, events, dirty_events,

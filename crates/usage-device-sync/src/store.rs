@@ -818,7 +818,9 @@ impl SyncStore {
     }
 
     /// Record an explicit user disconnect before attempting the remote revoke.
-    /// The marker survives a network failure so the recovery loop can retry it.
+    /// The marker lets the next snapshot finish the best-effort notification;
+    /// the panel clears the local binding after that attempt even if the
+    /// primary is already unreachable.
     pub fn request_secondary_disconnect(&mut self, now_ms: i64) -> SyncResult<()> {
         self.index.with_network_transaction(|tx| {
             let changed = tx.execute(
