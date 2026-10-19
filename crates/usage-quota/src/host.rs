@@ -8,7 +8,9 @@
 //! terminal, and a wrong "not running" would silently freeze a live row).
 //!
 //! The names are base process names, compared case-insensitively with or
-//! without the platform's `.exe` suffix.
+//! without the platform's `.exe` suffix. A tool may also list *family*
+//! fragments ([`HOST_PATTERNS`]) for forks that rebrand the executable but keep
+//! the product token in its name.
 
 use std::collections::HashSet;
 
@@ -16,7 +18,10 @@ use std::collections::HashSet;
 /// "the user is using this tool right now".
 pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("qoder", &["Qoder"]),
-    ("qoder_cn", &["Qoder CN", "QoderCN", "Qoder CN IDE", "qoder-cn-ide"]),
+    (
+        "qoder_cn",
+        &["Qoder CN", "QoderCN", "Qoder CN IDE", "qoder-cn-ide"],
+    ),
     ("atomcode", &["atomcode"]),
     ("funide", &["FunIDE"]),
     ("dsh", &["DSH Desktop", "dsh-desktop"]),
@@ -55,19 +60,32 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     // only processes that name the product, and they live and die with it.
     // The CN build's helpers carry the edition in their name and gate their
     // own tool — a machine running only Trae CN probes nothing for `trae`.
-    ("trae", &[
-        "Trae Helper",
-        "Trae Helper (GPU)",
-        "Trae Helper (Renderer)",
-        "Trae Helper (Plugin)",
-    ]),
-    ("trae_cn", &[
-        "Trae CN Helper",
-        "Trae CN Helper (GPU)",
-        "Trae CN Helper (Renderer)",
-        "Trae CN Helper (Plugin)",
-    ]),
+    (
+        "trae",
+        &[
+            "Trae Helper",
+            "Trae Helper (GPU)",
+            "Trae Helper (Renderer)",
+            "Trae Helper (Plugin)",
+        ],
+    ),
+    (
+        "trae_cn",
+        &[
+            "Trae CN Helper",
+            "Trae CN Helper (GPU)",
+            "Trae CN Helper (Renderer)",
+            "Trae CN Helper (Plugin)",
+        ],
+    ),
 ];
+
+/// `(tool id, name fragments)` — a fork of the same product usually keeps the
+/// product token in its executable name (`ZCode-<edition>.exe`,
+/// `ZCodium Exp.exe`), even when it renames its data directory. Matching a
+/// fragment keeps the host-exit pause useful without shipping a new build for
+/// every fork; exact names in [`HOST_PROCESSES`] still take the fast path.
+pub const HOST_PATTERNS: &[(&str, &[&str])] = &[("zcode", &["zcode", "zcodium"])];
 
 /// Whether the tool's host application is running. A tool with no mapping is
 /// always "running": the probe keeps going rather than guessing a stop.
@@ -168,9 +186,19 @@ pub fn matches(alive: &HashSet<String>, name: &str) -> bool {
 }
 
 /// Convenience over [`host_running`] + [`running_process_names`]: one snapshot
-/// answers every tool in the pass.
+/// answers every tool in the pass. A name that only matches a family fragment
+/// counts as running, so a renamed fork is not mistaken for a closed host.
 pub fn any_host_running(tool: &str, alive: &HashSet<String>) -> bool {
-    host_running(tool, &|name| matches(alive, name))
+    if host_running(tool, &|name| matches(alive, name)) {
+        return true;
+    }
+    let Some((_, patterns)) = HOST_PATTERNS.iter().find(|(id, _)| *id == tool) else {
+        return false;
+    };
+    alive.iter().any(|process| {
+        let bare = process.trim_end_matches(".exe").to_lowercase();
+        patterns.iter().any(|fragment| bare.contains(fragment))
+    })
 }
 
 #[cfg(test)]
@@ -189,8 +217,10 @@ mod tests {
 
     #[test]
     fn an_unmapped_tool_is_always_running() {
-        let empty: HashSet<String> = HashSet::new();
-        assert!(host_running("pi", &|_| false), "a CLI tool runs in any terminal");
+        assert!(
+            host_running("pi", &|_| false),
+            "a CLI tool runs in any terminal"
+        );
     }
 
     #[test]
@@ -205,6 +235,31 @@ mod tests {
         assert!(!any_host_running("opencode", &alive));
         alive.insert("OpenCode".to_string());
         assert!(any_host_running("opencode", &alive));
+    }
+
+    #[test]
+    fn a_rebranded_zcode_fork_still_counts_as_running() {
+        for name in [
+            "zcode custom edition.exe",
+            "zcodium exp.exe",
+            "ZCode-CE.exe",
+            "ZCode Dev.exe",
+        ] {
+            let alive = HashSet::from([name.to_string()]);
+            assert!(any_host_running("zcode", &alive), "{name} is a ZCode fork");
+        }
+        let closed = HashSet::from(["unrelated.exe".to_string()]);
+        assert!(!any_host_running("zcode", &closed));
+    }
+
+    #[test]
+    #[ignore = "reads the live process table; needs a ZCode-family host running"]
+    fn the_live_process_table_sees_a_zcode_fork() {
+        let alive = running_process_names();
+        assert!(
+            any_host_running("zcode", &alive),
+            "no ZCode-family process in: {alive:?}"
+        );
     }
 
     #[test]
@@ -255,7 +310,10 @@ mod tests {
         assert!(any_host_running("cola", &alive));
         alive.clear();
         alive.insert("Cola Helper (Renderer)".to_string());
-        assert!(!any_host_running("cola", &alive), "helpers alone are not the host");
+        assert!(
+            !any_host_running("cola", &alive),
+            "helpers alone are not the host"
+        );
     }
 
     /// The desktop app's process name carries no space on Windows
@@ -275,6 +333,9 @@ mod tests {
         assert!(any_host_running("workbuddy_cn", &alive));
         alive.clear();
         alive.insert("WorkBuddy Helper (Renderer)".to_string());
-        assert!(!any_host_running("workbuddy", &alive), "helpers alone are not the host");
+        assert!(
+            !any_host_running("workbuddy", &alive),
+            "helpers alone are not the host"
+        );
     }
 }
