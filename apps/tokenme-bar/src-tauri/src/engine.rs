@@ -459,7 +459,10 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
                         gap = gap.max(HIDDEN_PASS_GAP);
                     }
                     if since < gap {
-                        std::thread::sleep(gap - since);
+                        let shared = app.state::<Shared>();
+                        if wait_for_ingest_gap(&shared.scope_refresh_queued, gap - since) {
+                            fold_scope(&app, &mut index, &adapters, &detected, &pricing);
+                        }
                     }
                 }
                 let pass_started = Instant::now();
@@ -479,18 +482,7 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
                 // a snapshot built from the old prices.
             }
             Work::Scope => {
-                let shared = app.state::<Shared>();
-                let scope = shared.scope();
-                shared.scope_refresh_queued.store(false, Ordering::Release);
-                let started = Instant::now();
-                crate::logging::info(&format!("scope_fold: phase=start scope={}", scope_kind(&scope)));
-                let published = resummarize(&app, &mut index, &adapters, &detected, &pricing, true);
-                crate::logging::info(&format!(
-                    "scope_fold: phase=finish scope={} outcome={} total_ms={}",
-                    scope_kind(&shared.scope()),
-                    if published { "published" } else { "failed" },
-                    started.elapsed().as_millis(),
-                ));
+                fold_scope(&app, &mut index, &adapters, &detected, &pricing);
             }
             Work::Stopped => return Exit::Disconnected,
         }
@@ -504,6 +496,38 @@ enum Work {
     Scope,
     /// Every sender dropped. The only way this loop can end on its own.
     Stopped,
+}
+
+// shortcut: scope priority can lag by 25ms; use a wakeable wait if more controls need to interrupt this gap.
+fn wait_for_ingest_gap(scope_queued: &AtomicBool, remaining: Duration) -> bool {
+    let deadline = Instant::now() + remaining;
+    loop {
+        if scope_queued.load(Ordering::Acquire) { return true; }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return false; }
+        std::thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+}
+
+fn fold_scope<R: Runtime>(
+    app: &AppHandle<R>,
+    index: &mut Option<Index>,
+    adapters: &[Box<dyn SourceAdapter>],
+    detected: &[DetectedSource],
+    pricing: &PricingMap,
+) {
+    let shared = app.state::<Shared>();
+    if !shared.scope_refresh_queued.swap(false, Ordering::AcqRel) { return; }
+    let scope = shared.scope();
+    let started = Instant::now();
+    crate::logging::info(&format!("scope_fold: phase=start scope={}", scope_kind(&scope)));
+    let published = resummarize(app, index, adapters, detected, pricing, true);
+    crate::logging::info(&format!(
+        "scope_fold: phase=finish scope={} outcome={} total_ms={}",
+        scope_kind(&shared.scope()),
+        if published { "published" } else { "failed" },
+        started.elapsed().as_millis(),
+    ));
 }
 
 /// Idle until something happens, then debounce a burst of wake-ups into one pass.
@@ -1268,6 +1292,20 @@ mod tests {
         shared.scope_refresh_queued.store(false, Ordering::Release);
         assert_eq!(shared.set_scope(remote, Some(&tx)), Ok((false, false)));
         assert!(rx.try_recv().is_err(), "selecting the active scope must be a no-op");
+    }
+
+    #[test]
+    fn queued_scope_interrupts_adaptive_ingest_gap() {
+        let queued = std::sync::Arc::new(AtomicBool::new(false));
+        let wake = std::sync::Arc::clone(&queued);
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            wake.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        assert!(wait_for_ingest_gap(&queued, Duration::from_secs(15)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        setter.join().unwrap();
     }
 
     /// The `auto_checkin` exemption is exactly as wide as the claim registry:
