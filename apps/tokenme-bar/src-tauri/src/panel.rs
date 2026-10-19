@@ -1641,6 +1641,12 @@ fn start_click_away_monitor(app: &AppHandle) {
                 // lets the hover-expand land first, so the drag loop grabs the
                 // expanded geometry instead of the docked one — and plain
                 // clicks never spawn the drag thread at all.
+                //
+                // The press no longer starts a Rust drag: the frontend owns the
+                // click contract (an unmoved press opens the panel) and arms its
+                // drag guard on the press. Both loop paths can start a drag now,
+                // so "moved" is what decides the release below — a moved press
+                // must never be mistaken for a click and pop the panel open.
                 if down {
                     if let Some((start_x, start_y)) = bubble_press {
                         if (point.x - start_x).abs() > 6 || (point.y - start_y).abs() > 6 {
@@ -1651,6 +1657,8 @@ fn start_click_away_monitor(app: &AppHandle) {
                 }
                 if !down && was_down {
                     if let Some((start_x, start_y)) = bubble_press.take() {
+                        // A drag may already have moved the pet before this
+                        // monitor saw the motion — that press is not a click.
                         let stayed = has_point
                             && (point.x - start_x).abs() <= 6
                             && (point.y - start_y).abs() <= 6
@@ -1665,8 +1673,10 @@ fn start_click_away_monitor(app: &AppHandle) {
                             // A moved bubble press was a drag, and the native
                             // move loop consumed the pointer events the webview
                             // was waiting for: it never saw the drop, so its
-                            // dock-to-edge never ran. Tell it the drag is over.
-                            let _ = app.emit("bubble-drag-ended", ());
+                            // dock-to-edge never ran. Tell it the drag is over
+                            // — with the drop's verdict — so it docks instead of
+                            // running the click contract.
+                            let _ = app.emit("bubble-drag-ended", true);
                         }
                     }
                 }

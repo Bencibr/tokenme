@@ -5,6 +5,11 @@ node_modules
 __pycache__/
 *.pyc
 
+# playwright e2e artifacts
+apps/tokenme-bar/test-results/
+apps/tokenme-bar/playwright-report/
+apps/tokenme-bar/blob-report/
+
 .DS_Store
 apps/tokenme-bar/src-tauri/target
 apps/tokenme-bar/src-tauri/gen/schemas

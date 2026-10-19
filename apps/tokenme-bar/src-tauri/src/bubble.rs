@@ -152,6 +152,7 @@ pub fn begin_drag(app: &AppHandle) {
     std::thread::Builder::new()
         .name("tokenme-bubble-drag".into())
         .spawn(move || {
+            let mut moved = false;
             let mut cursor = POINT { x: 0, y: 0 };
             let mut grab = (0, 0);
             let mut started = unsafe { GetCursorPos(&mut cursor) } != 0;
@@ -162,7 +163,6 @@ pub fn begin_drag(app: &AppHandle) {
                 }
             }
             if started {
-                let mut moved = false;
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(16));
                     let mut point = POINT { x: 0, y: 0 };
@@ -179,12 +179,13 @@ pub fn begin_drag(app: &AppHandle) {
                         break;
                     }
                 }
-                if moved {
-                    // The webview's pointer stream ends once the window starts
-                    // moving under it; report the drop so it can dock.
-                    let _ = app.emit("bubble-drag-ended", ());
-                }
             }
+            // Every session reports its drop, moved or not. The frontend arms
+            // its drag guard on the press, so a loop that ended silently left
+            // hover, expand and docking latched off until the next click; the
+            // payload also tells it whether the press travelled, because the
+            // window follows the cursor and the webview cannot see the move.
+            let _ = app.emit("bubble-drag-ended", moved);
             DRAGGING.store(false, std::sync::atomic::Ordering::Release);
         })
         .ok();

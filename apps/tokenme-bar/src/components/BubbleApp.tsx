@@ -78,6 +78,12 @@ export function BubbleApp() {
   const [petAssetFailed, setPetAssetFailed] = useState(false);
   const onPetAssetError = useCallback(() => setPetAssetFailed(true), []);
   const moved = useRef(false);
+  // The native drag loop moves the window WITH the cursor, so the pointer's
+  // client coordinates never change during a drag: a press that carried the
+  // pet across the desktop looks perfectly stationary to `moved`, and the
+  // release then ran the click contract and popped the panel open. Screen
+  // coordinates and the loop's own verdict are the drag's real witnesses.
+  const dragMoved = useRef(false);
   const press = useRef<{ x: number; y: number } | null>(null);
   // After a drop the pet may sit right under the cursor; hover-enter stays
   // suppressed until the cursor has left the bubble once (see dockToEdge).
@@ -432,16 +438,33 @@ export function BubbleApp() {
     void listen("bubble-drag-started", () => {
       // The Rust monitor can start a drag without any pointer event reaching
       // this webview; mark it so hover timers stand down until the drop.
+      // `press` is left alone: the release still needs it to tell a click from
+      // a drag when the loop reports back.
       dragging.current = true;
       setPetDragging(true);
       clearLeaveTimer();
-      press.current = null;
+      // A monitor-initiated drag may reach the webview with no press of its
+      // own: start the verdict clean so a stale one can't outlive the drop.
+      moved.current = false;
+      dragMoved.current = false;
     });
-    void listen("bubble-drag-ended", () => {
+    void listen<boolean>("bubble-drag-ended", (event) => {
+      // The Rust loop is the authority on whether the press moved the window.
+      // Every session reports now, moved or not: a session that ended without
+      // a word used to leave `dragging` latched, freezing hover, expand and
+      // docking until the next click. A drop that did carry the pet docks; one
+      // that did not leaves the press to the webview's pointer-up, which runs
+      // the click contract — the loop never travelled, so nothing was dropped.
+      const moved = event.payload === true;
+      dragMoved.current = moved;
+      // The webview's own pointer-up may have already concluded this press (a
+      // dock is scheduled and `press` is gone): don't dock a second time.
+      const pending = dragging.current || press.current !== null;
       dragging.current = false;
       setPetDragging(false);
-      companion.play("settle");
+      if (!moved || !pending) return;
       press.current = null;
+      companion.play("settle");
       void dockToEdge(true).catch(reportGeometryError);
     }).then((fn) => {
       if (cancelled) fn();
@@ -529,7 +552,10 @@ export function BubbleApp() {
     if (event.button !== 0) return;
     clearLeaveTimer();
     moved.current = false;
-    press.current = { x: event.clientX, y: event.clientY };
+    dragMoved.current = false;
+    // Screen coordinates: the native drag keeps the cursor pinned to the same
+    // client point while the window travels (see `dragMoved`).
+    press.current = { x: event.screenX, y: event.screenY };
     if (isMac) {
       // mac: the press arms nothing. The click contract (open the panel)
       // runs ONCE, from pointerup; the drag session arms on the first real
@@ -558,7 +584,7 @@ export function BubbleApp() {
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const start = press.current;
     if (!start) return;
-    if (Math.abs(event.clientX - start.x) > 6 || Math.abs(event.clientY - start.y) > 6) {
+    if (Math.abs(event.screenX - start.x) > 6 || Math.abs(event.screenY - start.y) > 6) {
       moved.current = true;
       if (isMac && !macDragStarted.current) {
         // The move is real: hand the pointer to the native drag session. The
@@ -575,11 +601,14 @@ export function BubbleApp() {
     }
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = press.current;
+    const travelled = start !== null
+      && (Math.abs(event.screenX - start.x) > 6 || Math.abs(event.screenY - start.y) > 6);
     if (isMac) {
       // The single click contract on mac: a press that never became a drag
       // toggles the panel — once, here, and nowhere else.
-      const dragged = macDragStarted.current;
+      const dragged = macDragStarted.current || travelled;
       macDragStarted.current = false;
       dragging.current = false;
       setPetDragging(false);
@@ -590,8 +619,11 @@ export function BubbleApp() {
       }
       return;
     }
-    if (!dragging.current) return;
-    const wasMoved = moved.current;
+    // The native drop may already have concluded this press (see the
+    // `bubble-drag-ended` listener) — with nothing left to conclude, leave it
+    // rather than running a second dock or a stray click contract.
+    if (!press.current && !dragging.current) return;
+    const wasMoved = moved.current || travelled || dragMoved.current;
     dragging.current = false;
     setPetDragging(false);
     press.current = null;
@@ -605,6 +637,36 @@ export function BubbleApp() {
       companion.play("cheer");
       setExpanded(false);
     }
+  };
+
+  const onPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    // A cancelled pointer is never a click. The OS reclaims the stream instead
+    // of delivering a release (capture lost, the native loop taking the
+    // window), and routing it through onPointerUp turned that into a panel
+    // toggle — the very confusion this fix is about. A cancel that had
+    // travelled still settles on its edge.
+    const start = press.current;
+    const travelled = start !== null
+      && (Math.abs(event.screenX - start.x) > 6 || Math.abs(event.screenY - start.y) > 6);
+    clearLeaveTimer();
+    if (isMac) {
+      macDragStarted.current = false;
+      dragging.current = false;
+      setPetDragging(false);
+      press.current = null;
+      return;
+    }
+    const wasMoved = moved.current || travelled || dragMoved.current;
+    dragging.current = false;
+    setPetDragging(false);
+    if (!wasMoved) {
+      // Keep `press`: the native loop's verdict may still be on its way, and
+      // the drop needs it to conclude. The next pointerdown resets it.
+      return;
+    }
+    // We dock here, so the loop's own report must not dock a second time.
+    press.current = null;
+    setTimeout(() => void dockToEdge(true).catch(reportGeometryError), 80);
   };
 
   const tokens = report?.day.summary.total_tokens ?? 0;
@@ -625,7 +687,7 @@ export function BubbleApp() {
       onPointerDown={(event) => void onPointerDown(event)}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
+      onPointerCancel={onPointerCancel}
       role="button"
       tabIndex={0}
       aria-label={t("bubble.aria", { t: ballTokens(tokens) })}
