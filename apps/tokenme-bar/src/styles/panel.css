@@ -2465,7 +2465,9 @@
 
 .empty-body {
   margin: 0 0 var(--s3);
-  max-width: 30em;
+  /* 20 full-width chars + slack: the how-to line breaks after its comma
+      instead of orphaning the last character on its own line */
+  max-width: 20.5em;
   font-size: var(--t-body);
   color: var(--ink-2);
   line-height: 1.6;
