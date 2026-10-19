@@ -240,6 +240,7 @@ pub struct PrimarySyncConfig {
     pub advertise_host: Option<String>,
     pub allow_lan: bool,
     pub enabled: bool,
+    #[serde(default, alias = "allow_secondary_read")]
     pub share_data_with_secondaries: bool,
 }
 
@@ -2325,6 +2326,17 @@ fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, 
 
 fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
     index.with_network_transaction(|tx| {
+        // Preserve consent from the earlier primary-read setting. If both
+        // columns exist, the current setting wins, including an explicit off.
+        let (current_sharing, legacy_sharing) = primary_sharing_columns(tx)?;
+        if legacy_sharing {
+            let sql = if current_sharing {
+                "ALTER TABLE device_sync_primary_config DROP COLUMN allow_secondary_read"
+            } else {
+                "ALTER TABLE device_sync_primary_config RENAME COLUMN allow_secondary_read TO share_data_with_secondaries"
+            };
+            tx.execute_batch(sql).map_err(sql_err)?;
+        }
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS device_sync_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS device_registry(
@@ -2549,29 +2561,27 @@ fn pending_device_status(conn: &Connection, request: &AuthenticatedStatusRequest
     })
 }
 
+fn primary_sharing_columns(conn: &Connection) -> SyncResult<(bool, bool)> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_sync_primary_config') WHERE name = 'share_data_with_secondaries'),
+                EXISTS(SELECT 1 FROM pragma_table_info('device_sync_primary_config') WHERE name = 'allow_secondary_read')",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(sql_err)
+}
+
 fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncConfig>> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_primary_config')",
         [], |row| row.get(0),
     ).map_err(sql_err)?;
     if !exists { return Ok(None); }
-    let has_sharing_column: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_sync_primary_config') WHERE name = 'share_data_with_secondaries')",
-        [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    let row: Option<(String, String, Option<String>, i64, i64, i64)> = if has_sharing_column {
-        conn.query_row(
-            "SELECT primary_id, bind_addr, advertise_host, allow_lan, enabled, share_data_with_secondaries
-               FROM device_sync_primary_config WHERE config_key = 'primary'",
-            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-        ).optional().map_err(sql_err)?
-    } else {
-        conn.query_row(
-            "SELECT primary_id, bind_addr, advertise_host, allow_lan, enabled
-               FROM device_sync_primary_config WHERE config_key = 'primary'",
-            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, 0)),
-        ).optional().map_err(sql_err)?
-    };
+    let (current_sharing, legacy_sharing) = primary_sharing_columns(conn)?;
+    let sharing_column = if current_sharing { "share_data_with_secondaries" } else if legacy_sharing { "allow_secondary_read" } else { "0" };
+    let sql = format!("SELECT primary_id, bind_addr, advertise_host, allow_lan, enabled, {sharing_column}
+                       FROM device_sync_primary_config WHERE config_key = 'primary'");
+    let row: Option<(String, String, Option<String>, i64, i64, i64)> = conn.query_row(
+        &sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    ).optional().map_err(sql_err)?;
     let Some((primary_id, bind_addr, advertise_host, allow_lan, enabled, sharing)) = row else { return Ok(None); };
     let allow_lan = match allow_lan {
         0 => false,
@@ -3931,6 +3941,73 @@ mod tests {
         ).unwrap(), 1);
         store.mark_secondary_connected(42).unwrap();
         assert_eq!(store.secondary_config().unwrap().unwrap().last_connected_at_ms, Some(42));
+    }
+
+    fn legacy_primary_index(sharing: i64, current: Option<i64>) -> Index {
+        let index = Index::open_in_memory().unwrap();
+        index.conn().execute_batch(
+            "CREATE TABLE device_sync_primary_config(
+                 config_key TEXT PRIMARY KEY, primary_id TEXT NOT NULL, bind_addr TEXT NOT NULL,
+                 advertise_host TEXT, allow_lan INTEGER NOT NULL, allow_secondary_read INTEGER NOT NULL DEFAULT 0,
+                 enabled INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+             );
+             INSERT INTO event(tool, ts_ms, session, meter, in_tok, source)
+             VALUES('local', 1, 'session', 'tokens', 3, 'local');",
+        ).unwrap();
+        index.conn().execute(
+            "INSERT INTO device_sync_primary_config VALUES('primary', 'primary-1', '127.0.0.1:47821', '127.0.0.1', 0, ?1, 1, 10)",
+            [sharing],
+        ).unwrap();
+        if let Some(value) = current {
+            index.conn().execute_batch("ALTER TABLE device_sync_primary_config ADD COLUMN share_data_with_secondaries INTEGER NOT NULL DEFAULT 0").unwrap();
+            index.conn().execute("UPDATE device_sync_primary_config SET share_data_with_secondaries = ?1", [value]).unwrap();
+        }
+        index
+    }
+
+    #[test]
+    fn legacy_primary_sharing_is_read_and_migrated_without_resetting_consent() {
+        for enabled in [false, true] {
+            let index = legacy_primary_index(if enabled { 1 } else { 0 }, None);
+            assert_eq!(read_primary_config_conn(index.conn()).unwrap().unwrap().share_data_with_secondaries, enabled);
+            let mut store = SyncStore::new(index, "primary-1").unwrap();
+            assert_eq!(store.primary_config().unwrap().unwrap().share_data_with_secondaries, enabled);
+            assert_eq!(store.index().event_count().unwrap(), 1);
+            assert_eq!(primary_sharing_columns(store.index().conn()).unwrap(), (true, false));
+            store.set_primary_data_sharing(false, 20).unwrap();
+            migrate(store.index_mut(), "primary-1").unwrap();
+            assert!(!store.primary_config().unwrap().unwrap().share_data_with_secondaries);
+        }
+    }
+
+    #[test]
+    fn current_primary_sharing_off_wins_over_an_obsolete_enabled_value() {
+        let index = legacy_primary_index(1, Some(0));
+        assert!(!read_primary_config_conn(index.conn()).unwrap().unwrap().share_data_with_secondaries);
+        let store = SyncStore::new(index, "primary-1").unwrap();
+        assert!(!store.primary_config().unwrap().unwrap().share_data_with_secondaries);
+        assert_eq!(primary_sharing_columns(store.index().conn()).unwrap(), (true, false));
+        assert_eq!(store.index().event_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn corrupt_legacy_primary_sharing_does_not_become_enabled() {
+        let index = legacy_primary_index(2, None);
+        assert!(matches!(read_primary_config_conn(index.conn()), Err(SyncError::Security(_))));
+        let store = SyncStore::new(index, "primary-1").unwrap();
+        assert!(matches!(store.primary_config(), Err(SyncError::Security(_))));
+    }
+
+    #[test]
+    fn primary_config_accepts_the_legacy_json_setting() {
+        let config: PrimarySyncConfig = serde_json::from_value(serde_json::json!({
+            "primary_id": "primary-1", "bind_addr": "127.0.0.1:47821", "advertise_host": "127.0.0.1",
+            "allow_lan": false, "enabled": true, "allow_secondary_read": true,
+        })).unwrap();
+        assert!(config.share_data_with_secondaries);
+        let saved = serde_json::to_value(config).unwrap();
+        assert_eq!(saved["share_data_with_secondaries"], true);
+        assert!(saved.get("allow_secondary_read").is_none());
     }
 
     #[test]
