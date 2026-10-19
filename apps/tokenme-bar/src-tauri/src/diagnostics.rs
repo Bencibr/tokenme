@@ -166,11 +166,11 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DiagnosticsError {
     pub code: &'static str,
-    pub message: &'static str,
+    pub message: String,
 }
 
 impl DiagnosticsError {
-    fn new(code: &'static str, message: &'static str) -> Self { Self { code, message } }
+    fn new(code: &'static str, message: impl Into<String>) -> Self { Self { code, message: message.into() } }
 }
 
 impl std::fmt::Display for DiagnosticsError {
@@ -1307,7 +1307,7 @@ async fn dispatch(
             if !panel_is_visible(app) {
                 return Err(DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel is not visible; call ui.open_sync_sheet first"));
             }
-            let image = panel::capture_panel(app).map_err(|_| DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, "TokenMe panel screenshot is unavailable; check platform capture permission"))?;
+            let image = panel::capture_panel(app).map_err(panel_capture_error)?;
             if image.data.len() > usage_device_sync::MAX_DIAGNOSTICS_IMAGE_BYTES { return Err(DiagnosticsError::new(CODE_INVALID_PARAMS, "TokenMe panel screenshot is too large")); }
             Ok(json!({
                 "_mcp_image": {
@@ -1889,6 +1889,10 @@ pub fn diagnostics_session(
 
 fn now_ms() -> i64 { usage_core::report::now_ms() }
 
+fn panel_capture_error(error: String) -> DiagnosticsError {
+    DiagnosticsError::new(CODE_TOOL_UNAVAILABLE, format!("TokenMe panel screenshot failed: {error}"))
+}
+
 fn configure_local_mcp(app: &AppHandle, state: &DiagnosticsState, enabled: bool, ttl_ms: Option<i64>) -> Result<DiagnosticsStatus, DiagnosticsError> {
     if enabled {
         let _ = ttl_ms;
@@ -2012,6 +2016,13 @@ mod tests {
         assert_eq!(result["content"][0]["mimeType"], "image/png");
         assert_eq!(result["structuredContent"]["width"], 2);
         assert!(result["structuredContent"].get("_mcp_image").is_none());
+    }
+
+    #[test]
+    fn panel_capture_error_preserves_the_platform_reason() {
+        let error = panel_capture_error("macOS permission is disabled".into());
+        assert_eq!(error.code, CODE_TOOL_UNAVAILABLE);
+        assert!(error.message.contains("macOS permission is disabled"));
     }
 
     #[test]

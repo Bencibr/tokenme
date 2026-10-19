@@ -280,6 +280,14 @@ fn capture_panel_macos(window: &WebviewWindow) -> Result<PanelScreenshot, String
     use tauri_nspanel::cocoa::base::id;
     use tauri_nspanel::objc::{msg_send, sel, sel_impl};
 
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+    }
+    if !unsafe { CGPreflightScreenCaptureAccess() } {
+        return Err("macOS Screen & System Audio Recording permission is disabled for TokenMe; enable TokenMe in System Settings > Privacy & Security > Screen & System Audio Recording, then restart TokenMe".into());
+    }
+
     let native = window.ns_window().map_err(|error| format!("cannot read TokenMe panel window: {error}"))?;
     if native.is_null() {
         return Err("TokenMe panel native window is unavailable".into());
@@ -324,7 +332,7 @@ fn capture_panel_macos(window: &WebviewWindow) -> Result<PanelScreenshot, String
     };
     if !status.success() {
         let _ = fs::remove_dir_all(&directory);
-        return Err("macOS denied or failed to capture the TokenMe panel".into());
+        return Err(format!("macOS screencapture failed with status {status}"));
     }
     let data = match fs::read(&path) {
         Ok(data) => data,
