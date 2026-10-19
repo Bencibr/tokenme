@@ -1067,6 +1067,68 @@ def index_totals(db):
 # v1 session into a v2 directory under a new id and both roots are read.
 
 
+def codely():
+    """Tuanjie Codely / Cowork chat snapshots: one `tokens` object per API round.
+
+    `input` is the whole prompt and `cached` is its cached prefix, so the uncached
+    stage is the difference; `thoughts` is a breakdown of `output`, never extra.
+    The file is rewritten whole on every save, but each message keeps its UUID, so
+    replaying every snapshot still bills each call once.
+    """
+    root = (os.environ.get("CODELY_CLI_HOME") or "").strip() or os.path.join(HOME, ".codely-cli")
+    agg = defaultdict(float)
+    seen = set()
+    n = snapshots = repeats = unstamped = 0
+    for path in files(os.path.join(root, "tmp", "**", "chat-*.json")):
+        snapshots += 1
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                doc = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        record = doc.get("conversationRecord") or {}
+        session = record.get("sessionId") or doc.get("tag") or Path(path).stem[5:]
+        for ordinal, message in enumerate(record.get("messages") or []):
+            tokens = message.get("tokens") if isinstance(message, dict) else None
+            if not isinstance(tokens, dict):
+                continue
+            stamp = message.get("timestamp")
+            if not isinstance(stamp, str):
+                unstamped += 1
+                continue
+            try:
+                dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError:
+                unstamped += 1
+                continue
+            message_id = message.get("id")
+            ident = f"codely#{session}#{message_id}" if message_id else f"codely#{session}#idx{ordinal}"
+            if ident in seen:
+                repeats += 1
+                continue
+            seen.add(ident)
+            inp = num(tokens.get("input"))
+            cr = num(tokens.get("cached"))
+            out = num(tokens.get("output"))
+            reason = num(tokens.get("thoughts"))
+            n += 1
+            agg["in"] += max(inp - cr, 0.0)
+            agg["cr"] += cr
+            agg["out"] += out
+            agg["reason"] += reason
+    return {
+        "n": n,
+        "in": agg["in"],
+        "cc": 0.0,
+        "cr": agg["cr"],
+        "out": agg["out"],
+        "reason": agg["reason"],
+        "credits": 0.0,
+        "notes": f"{snapshots} chat snapshots, rewritten duplicates collapsed={repeats}, "
+                 f"unstamped rows={unstamped}",
+    }
+
+
 def kimicode():
     roots = []
     for var in ("KIMI_CODE_HOME", "KIMI_DATA_DIR"):
@@ -1280,6 +1342,7 @@ def compute_all():
         **opencode_family(),
         **pi_family(),
         "cline": cline(),
+        "codely": codely(),
         "zcode": zcode(),
         "agnes": agnes(),
         "atomcode": atomcode(),

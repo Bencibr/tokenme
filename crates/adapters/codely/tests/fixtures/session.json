@@ -1,0 +1,64 @@
+{
+  "tag": "sess-1",
+  "timestamp": "2026-09-14T13:00:07.000Z",
+  "type": "manual",
+  "clientHistory": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "[agent-auto] This is the Codely CLI. We are setting up the context for our chat.\nToday's date is 2026年9月14日星期一.\nMy timezone is: Asia/Shanghai\nI'm currently working in the directory: C:/w/demo\nHere is the folder structure of the current working directories:\n\nC:/w/demo/\n├───README.md"
+        }
+      ]
+    }
+  ],
+  "conversationRecord": {
+    "sessionId": "sess-1",
+    "projectHash": "demo-hash",
+    "startTime": "2026-09-14T13:00:00.000Z",
+    "lastUpdated": "2026-09-14T13:00:07.000Z",
+    "messages": [
+      {
+        "id": "user-1",
+        "timestamp": "2026-09-14T13:00:00.000Z",
+        "type": "user",
+        "content": [{ "text": "hello" }]
+      },
+      {
+        "id": "m1",
+        "timestamp": "2026-09-14T13:00:05.000Z",
+        "type": "gemini",
+        "model": "codely-core",
+        "tokens": {
+          "input": 1000,
+          "output": 50,
+          "cached": 400,
+          "thoughts": 0,
+          "tool": 0,
+          "total": 1050
+        }
+      },
+      {
+        "id": "m2",
+        "timestamp": "2026-09-14T13:00:06.000Z",
+        "type": "gemini",
+        "model": "GLM-5.3",
+        "tokens": null
+      },
+      {
+        "id": "m3",
+        "timestamp": "2026-09-14T13:00:07.000Z",
+        "type": "gemini",
+        "model": "GLM-5.3",
+        "tokens": {
+          "input": 500,
+          "output": 20,
+          "cached": 0,
+          "thoughts": 5,
+          "tool": 0,
+          "total": 520
+        }
+      }
+    ]
+  }
+}

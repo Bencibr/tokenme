@@ -3,7 +3,7 @@ import { lang, t } from "./i18n";
 
 const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** Fixed 14-slot categorical ramp; index order is the order tools appear. */
+/** One categorical slot per tool; index order is the order tools appear. */
 const TOOL_ORDER = [
   "claude",
   "codex",
@@ -34,6 +34,9 @@ const TOOL_ORDER = [
   // The IDE install is its own tool; it joins at the end so no existing
   // tool's color slot moves.
   "antigravity_ide",
+  // Codely CLI and the Tuanjie Cowork desktop share one store — one tool row.
+  "codely",
+
 ];
 
 const DISPLAY: Record<string, string> = {
@@ -67,6 +70,7 @@ const DISPLAY: Record<string, string> = {
   kimicode: "Kimi Code",
   minimaxcode: "MiniMax Code",
   omp: "Oh My Pi",
+  codely: "Codely",
   gemini: "Gemini CLI",
   cursor: "Cursor",
 };

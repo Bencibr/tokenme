@@ -8,6 +8,7 @@ mod catpaw;
 mod claude;
 mod codebuddy;
 mod cline;
+mod codely;
 mod cola;
 mod codex;
 mod copilot;
@@ -41,6 +42,7 @@ pub use catpaw::CatpawQuota;
 pub use claude::ClaudeQuota;
 pub use codebuddy::CodeBuddyQuota;
 pub use cline::ClineQuota;
+pub use codely::CodelyQuota;
 pub use cola::ColaQuota;
 pub use codex::CodexQuota;
 pub use copilot::CopilotQuota;
@@ -87,6 +89,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(MiniMaxCodeQuota),
         Box::new(FunIdeQuota),
         Box::new(ClineQuota),
+        Box::new(CodelyQuota),
         Box::new(OpenCodeQuota),
         Box::new(CodexQuota),
         Box::new(CopilotQuota),

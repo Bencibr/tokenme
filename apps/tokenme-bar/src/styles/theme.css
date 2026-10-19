@@ -84,6 +84,8 @@
   /* omp（金色，补齐此前欠下的槽位）与 Antigravity IDE（桌面同族的灰橄榄） */
   --cat-26: #9a7a2f;
   --cat-27: #4a6d5f;
+  /* codely（含团结 Cowork 桌面版，共用 CLI 存储）的暖橄榄绿 */
+  --cat-28: #7a6a2f;
 
   /* activity scale, quiet → saturated */
   --heat-1: #d8e7e4;
@@ -221,6 +223,7 @@
     --cat-25: #70a0f0;
   --cat-26: #d9b55e;
   --cat-27: #79c2a8;
+  --cat-28: #e0c060;
 
     --heat-1: #1a3f36;
     --heat-2: #215c4d;
@@ -317,6 +320,7 @@
   --cat-25: #70a0f0;
   --cat-26: #d9b55e;
   --cat-27: #79c2a8;
+  --cat-28: #e0c060;
 
   --heat-1: #1a3f36;
   --heat-2: #215c4d;

@@ -46,6 +46,10 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     // (妙手.exe on this machine), the pre-rename names stay for old installs.
     ("catpaw", &["妙手", "CatPawAI", "CatPaw"]),
     ("cline", &["Cline", "cline", "cline-app", "code-sidecar"]),
+    // Codely's desktop face is "Tuanjie Cowork" and its CLI/core are `codely`
+    // and `codely-binary`; a session open in any of them spends against the
+    // same account.
+    ("codely", &["Tuanjie Cowork", "cowork", "codely", "codely-binary"]),
     ("codex", &["codex", "Codex"]),
     ("opencode", &["opencode", "OpenCode"]),
     ("claude", &["claude", "Claude"]),

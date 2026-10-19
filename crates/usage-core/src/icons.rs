@@ -29,6 +29,9 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("opencode", &[]),
     ("pi", &[]),
     ("cline", &["Cline"]),
+    // The desktop product is installed under its vendor name; the CLI has no
+    // bundle of its own.
+    ("codely", &["Tuanjie Cowork", "Codely"]),
     ("zcode", &["ZCode"]),
     ("qoder", &["Qoder"]),
     ("qoder_cn", &["Qoder CN", "QoderCN", "Qoder CN IDE"]),
@@ -82,6 +85,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     ("workbuddy_cn", include_bytes!("../assets/workbuddy.png")),
     ("codebuddy", include_bytes!("../assets/codebuddy.png")),
     ("cline", include_bytes!("../assets/cline.png")),
+    // Codely: the 256-px layer of the desktop app's own toast icon.
+    ("codely", include_bytes!("../assets/codely.png")),
     // OpenCode is a CLI, but the vendor ships an official mark (their own
     // apple-touch icon) — shipped, not scraped from an unrelated bundle.
     ("opencode", include_bytes!("../assets/opencode.png")),

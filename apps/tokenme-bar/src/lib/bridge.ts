@@ -713,13 +713,13 @@ const browserSettings: PanelSettings = {
   build: "dev",
 };
 
-/** The same 20 rows the Rust registry answers, so a browser review of the
+/** The same rows the Rust registry answers, so a browser review of the
  *  settings sheet shows the real page instead of an empty one. `answered_here`
- *  mirrors the ten tools with a cached answer on this machine. */
+ *  mirrors the tools with a cached answer on this machine. */
 const browserProbes: ProbeTool[] = [
   "claude", "agnes", "antigravity", "antigravity_ide", "trae_cn", "atomcode", "cola", "kimicode", "minimaxcode", "funide",
   "cline", "opencode", "codex", "copilot", "gemini", "joycode", "qoder", "qoder_cn", "workbuddy", "workbuddy_cn", "catpaw",
-  "zcode", "dsh", "trae",
+  "zcode", "dsh", "trae", "codely",
 ].map((id) => ({
   id,
   host_gated: !["kimicode", "minimaxcode", "copilot", "gemini"].includes(id),

@@ -1816,6 +1816,7 @@ dependencies = [
  "usage-adapter-claude",
  "usage-adapter-cline",
  "usage-adapter-codebuddy",
+ "usage-adapter-codely",
  "usage-adapter-codex",
  "usage-adapter-dsh",
  "usage-adapter-funide",
@@ -1907,6 +1908,17 @@ version = "0.1.9"
 dependencies = [
  "chrono",
  "dirs",
+ "serde_json",
+ "tempfile",
+ "usage-core",
+]
+
+[[package]]
+name = "usage-adapter-codely"
+version = "0.1.8"
+dependencies = [
+ "dirs",
+ "serde",
  "serde_json",
  "tempfile",
  "usage-core",
