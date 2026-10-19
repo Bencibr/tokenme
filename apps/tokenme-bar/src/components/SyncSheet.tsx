@@ -329,7 +329,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   };
 
   const deviceRow = (device: (typeof snapshot.devices)[number]) => {
-    const hostName = device.origin.trim() || device.display_name.trim() || device.device_id;
+    const hostName = device.display_name.trim() || device.origin.trim() || device.device_id;
     return (
       <div className="sync-dev" key={device.device_id}>
         <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : ""}`} aria-hidden="true" />
