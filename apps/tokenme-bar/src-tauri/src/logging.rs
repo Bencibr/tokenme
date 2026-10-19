@@ -235,8 +235,13 @@ fn line_timestamp_ms(line: &str) -> Option<i64> {
         }
     }
     let timestamp = line.get(..19)?;
+    let fractional_ms = if line.as_bytes().get(19) == Some(&b'.') {
+        line.get(20..23)?.parse::<i64>().ok()?
+    } else {
+        0
+    };
     let naive = NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").ok()?;
-    Local.from_local_datetime(&naive).single().map(|date| date.timestamp_millis())
+    Local.from_local_datetime(&naive).single().map(|date| date.timestamp_millis() + fractional_ms)
 }
 
 fn bounded_lines(log: &str, since_ms: Option<i64>) -> Result<Vec<String>, String> {
@@ -409,7 +414,13 @@ fn write_line(level: &str, msg: &str) {
     let _guard = LOCK.lock();
     let now = Local::now();
     rotate(path, &now);
-    let line = format!("{} [{level}] {msg}\n", now.format("%Y-%m-%d %H:%M:%S"));
+    let thread = std::thread::current();
+    let line = format!(
+        "{} [{level}] [pid={}] [thread={}] {msg}\n",
+        now.format("%Y-%m-%d %H:%M:%S%.3f"),
+        std::process::id(),
+        thread.name().unwrap_or("unnamed"),
+    );
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(line.as_bytes());
     }

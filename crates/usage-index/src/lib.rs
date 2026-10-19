@@ -256,7 +256,15 @@ const SELECT_EVENT_COLS: &str = "id, tool, ts_ms, session, project, model, meter
     cr_tok, out_tok, reason_tok, credits, dedupe_key, source";
 
 pub(crate) fn sql_err(e: rusqlite::Error) -> Error {
-    Error::Sqlite(e.to_string())
+    match e {
+        rusqlite::Error::SqliteFailure(code, message) => Error::Sqlite(format!(
+            "{} (sqlite_code={:?}, sqlite_extended_code={})",
+            message.unwrap_or_else(|| "SQLite failure".into()),
+            code.code,
+            code.extended_code,
+        )),
+        other => Error::Sqlite(other.to_string()),
+    }
 }
 
 /// The origin of a row's `source`, in SQL. The Rust twin is

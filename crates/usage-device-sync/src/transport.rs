@@ -103,6 +103,34 @@ impl From<io::Error> for TransportError {
     }
 }
 
+fn sync_error_code(error: &SyncError) -> &'static str {
+    match error {
+        SyncError::Sqlite(message) if message.contains("sqlite_code=DatabaseBusy") => "sqlite_busy",
+        SyncError::Sqlite(message) if message.contains("sqlite_code=DatabaseLocked") => "sqlite_locked",
+        SyncError::Sqlite(_) => "sqlite",
+        SyncError::Io(..) => "io",
+        _ => "sync_state",
+    }
+}
+
+fn transport_error_code(error: &TransportError) -> &'static str {
+    match error {
+        TransportError::Config(_) => "configuration",
+        TransportError::Tls(_) => "tls",
+        TransportError::PinMismatch => "tls_pin",
+        TransportError::Io(_) => "io",
+        TransportError::Timeout => "timeout",
+        TransportError::Cancelled => "cancelled",
+        TransportError::HttpStatus { .. } => "http_status",
+        TransportError::Protocol(_) => "protocol",
+        TransportError::Limit => "limit",
+        TransportError::Busy => "busy",
+        TransportError::PeerRejected(_) => "peer_rejected",
+        TransportError::State(error) => sync_error_code(error),
+        TransportError::Diagnostics(_) => "diagnostics",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpsTransportConfig {
     /// HTTPS URL with an authority and optional path forbidden. Examples:
@@ -614,6 +642,7 @@ struct ServerContext {
     health: AtomicU8,
     active_sockets: Mutex<BTreeMap<u64, TcpStream>>,
     next_socket_id: AtomicU64,
+    log_sink: Mutex<Option<Arc<dyn Fn(bool, &str) + Send + Sync>>>,
 }
 
 struct ActiveSocketGuard<'a> {
@@ -773,6 +802,7 @@ impl HttpsSyncServer {
             health: AtomicU8::new(HEALTH_READY),
             active_sockets: Mutex::new(BTreeMap::new()),
             next_socket_id: AtomicU64::new(1),
+            log_sink: Mutex::new(None),
         };
         Ok(Self { listener, context: Arc::new(context) })
     }
@@ -781,6 +811,17 @@ impl HttpsSyncServer {
     /// server.  It contains only the allow-listed log/trace/check setters.
     pub fn diagnostics_host(&self) -> DiagnosticsHost {
         self.context.diagnostics.host()
+    }
+
+    /// Routes safe runtime events to the embedding application's log.
+    pub fn set_log_sink(
+        &self,
+        sink: impl Fn(bool, &str) + Send + Sync + 'static,
+    ) -> Result<(), TransportError> {
+        *self.context.log_sink.lock().map_err(|_| {
+            TransportError::Config("sync log sink lock poisoned".into())
+        })? = Some(Arc::new(sink));
+        Ok(())
     }
 
     /// Issues a separately-scoped, short-lived diagnostics grant for an
@@ -898,11 +939,15 @@ impl HttpsSyncServer {
                     let context = context.clone();
                     let fatal_tx = fatal_tx.clone();
                     handlers.push(thread::spawn(move || {
+                        let started = Instant::now();
                         if let Err(error) = context.handle_connection(stream, peer, permit) {
+                            let code = transport_error_code(&error);
+                            context.log_event(true, &format!(
+                                "sync: action=connection outcome=error error_code={code} total_ms={}",
+                                started.elapsed().as_millis(),
+                            ));
                             if matches!(error, TransportError::State(_) | TransportError::Config(_)) {
                                 let _ = fatal_tx.send(error);
-                            } else {
-                                eprintln!("tokenme sync: recoverable connection error from {peer}: {error}");
                             }
                         }
                     }));
@@ -929,6 +974,15 @@ impl HttpsSyncServer {
 }
 
 impl ServerContext {
+    fn log_event(&self, is_error: bool, message: &str) {
+        let sink = self.log_sink.lock().ok().and_then(|slot| slot.clone());
+        if let Some(sink) = sink {
+            sink(is_error, message);
+        } else if is_error {
+            eprintln!("tokenme sync: {message}");
+        }
+    }
+
     fn health(&self) -> &'static str {
         match self.health.load(AtomicOrdering::Acquire) {
             HEALTH_READY => "ready",
@@ -989,9 +1043,21 @@ impl ServerContext {
             (404, serde_json::to_vec(&WireError { message: "unknown sync endpoint".into() }).unwrap_or_else(|_| b"{\"message\":\"not found\"}".to_vec()))
         } else if head.path == UPLOAD_PATH {
             let metadata = read_upload_metadata(&mut tls, head.content_length, self.config.max_body_bytes, deadline, &self.cancel)?;
+            let authorize_started = Instant::now();
             let authorized = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))
                 .and_then(|store| store.authorize_upload_metadata(&metadata.envelope, &metadata.signature).map_err(TransportError::State));
             if let Err(error) = authorized {
+                if matches!(&error, TransportError::State(SyncError::Sqlite(_))) {
+                    let code = transport_error_code(&error);
+                    let detail = match &error {
+                        TransportError::State(SyncError::Sqlite(message)) => format!(" sqlite={message}"),
+                        _ => String::new(),
+                    };
+                    self.log_event(true, &format!(
+                        "sync: action=upload_authorize outcome=error error_code={code}{detail} total_ms={}",
+                        authorize_started.elapsed().as_millis(),
+                    ));
+                }
                 let (status, message) = match &error {
                     TransportError::State(error) => (status_for_error(error), safe_error_message(error)),
                     _ => (400, "request rejected".into()),
@@ -1005,6 +1071,7 @@ impl ServerContext {
                     Ok(_device) => {
                         if head.expect_continue { write_continue(&mut tls)?; }
                         let staged = stage_upload(&mut tls, &metadata, &self.config.staging_dir, deadline, &self.cancel)?;
+                        let import_started = Instant::now();
                         let result = (|| {
                             if self.cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
                             let file = OpenOptions::new().read(true).open(&staged).map_err(TransportError::from)?;
@@ -1015,8 +1082,26 @@ impl ServerContext {
                         let cleanup = fs::remove_file(&staged).map_err(TransportError::from);
                         if let Err(error) = cleanup { return Err(error); }
                         match result {
-                            Ok(receipt) => (200, serde_json::to_vec(&receipt).map_err(|e| TransportError::Protocol(e.to_string()))?),
-                            Err(TransportError::State(error)) => (status_for_error(&error), serde_json::to_vec(&WireError { message: safe_error_message(&error) }).unwrap_or_else(|_| b"{\"message\":\"request rejected\"}".to_vec())),
+                            Ok(receipt) => {
+                                self.log_event(false, &format!(
+                                    "sync: action=upload_import outcome=ok generation={} gzip_bytes={} rows={} inserted={} updated={} deduped={} total_ms={}",
+                                    receipt.generation, metadata.gzip_len, receipt.rows, receipt.inserted,
+                                    receipt.updated, receipt.deduped, import_started.elapsed().as_millis(),
+                                ));
+                                (200, serde_json::to_vec(&receipt).map_err(|e| TransportError::Protocol(e.to_string()))?)
+                            }
+                            Err(TransportError::State(error)) => {
+                                let code = sync_error_code(&error);
+                                let detail = match &error {
+                                    SyncError::Sqlite(message) => format!(" sqlite={message}"),
+                                    _ => String::new(),
+                                };
+                                self.log_event(true, &format!(
+                                    "sync: action=upload_import outcome=error error_code={code}{detail} gzip_bytes={} total_ms={}",
+                                    metadata.gzip_len, import_started.elapsed().as_millis(),
+                                ));
+                                (status_for_error(&error), serde_json::to_vec(&WireError { message: safe_error_message(&error) }).unwrap_or_else(|_| b"{\"message\":\"request rejected\"}".to_vec()))
+                            }
                             Err(error) => return Err(error),
                         }
                     }

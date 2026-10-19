@@ -2524,7 +2524,15 @@ fn device_id_from_public_key(public_key: &[u8; 32]) -> String {
 }
 
 fn sql_err(error: rusqlite::Error) -> SyncError {
-    SyncError::Sqlite(error.to_string())
+    match error {
+        rusqlite::Error::SqliteFailure(code, message) => SyncError::Sqlite(format!(
+            "{} (sqlite_code={:?}, sqlite_extended_code={})",
+            message.unwrap_or_else(|| "SQLite failure".into()),
+            code.code,
+            code.extended_code,
+        )),
+        other => SyncError::Sqlite(other.to_string()),
+    }
 }
 
 fn device_tx(conn: &Connection, device_id: &str) -> SyncResult<Option<DeviceRecord>> {
