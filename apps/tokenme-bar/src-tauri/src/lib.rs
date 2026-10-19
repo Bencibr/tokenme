@@ -3,6 +3,7 @@ mod diagnostics;
 mod bubble;
 mod lang;
 mod logging;
+mod performance;
 mod engine;
 mod notify;
 mod scan_log;
@@ -73,6 +74,7 @@ pub fn run() {
             commands::set_show_cycle_tokens,
             commands::get_ttft_snapshot,
             commands::set_ttft_enabled,
+            commands::set_performance_monitoring,
             active_speed::run_active_speed_test,
             commands::set_hide_unused_tools,
             commands::set_hide_unused_quota,
@@ -136,6 +138,18 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             logging::init();
+            if app.state::<engine::Shared>().settings().performance_monitoring {
+                if let Err(error) = performance::set_enabled(true) {
+                    logging::error(&format!("performance: could not start sampler: {error}"));
+                    let shared = app.state::<engine::Shared>();
+                    if let Ok(mut settings) = shared.settings.lock() {
+                        settings.performance_monitoring = false;
+                        if let Err(save_error) = settings.clone().save() {
+                            logging::error(&format!("performance: could not reset failed setting: {save_error}"));
+                        }
+                    };
+                }
+            }
             notify::init(app.handle());
             // The check-in ledger rides the panel's own log dir; the probes
             // themselves call through this hook, so usage-quota stays

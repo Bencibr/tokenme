@@ -201,6 +201,9 @@ pub struct Settings {
     /// Opt-in passive client-side TTFT collection.
     #[serde(default)]
     pub ttft_enabled: bool,
+    /// Opt-in process CPU and resident-memory sampling to panel.log.
+    #[serde(default)]
+    pub performance_monitoring: bool,
     /// Hide tools whose session count for the period is zero from the tools
     /// page and the quota list. Default on: a tool that did nothing this
     /// window is noise, and the pages' job is comparing what ran. The tools
@@ -281,6 +284,7 @@ impl Default for Settings {
             quota_display_mode: QuotaDisplayMode::default(),
             show_cycle_tokens: false,
             ttft_enabled: false,
+            performance_monitoring: false,
             hide_unused_tools: true,
             hide_unused_quota: false,
             hide_unused_estimation: false,
@@ -394,6 +398,7 @@ mod tests {
         assert!(s.notify_muted.is_empty());
         assert_eq!(s.plan_expiry_notify_days, Some(3));
         assert!(!s.auto_checkin, "the guarantee is opt-in, never implied by an old file");
+        assert!(!s.performance_monitoring, "performance sampling stays off for existing settings files");
     }
 
     /// The auto check-in guarantee widens what leaves the machine — claims
@@ -422,6 +427,7 @@ mod tests {
         // Behaviour switches are always written, so a
         // hand-edited file cannot leave them ambiguous.
         assert!(json.contains("\"quota_polling\":true"), "{json}");
+        assert!(json.contains("\"performance_monitoring\":false"), "{json}");
     }
 
     #[test]

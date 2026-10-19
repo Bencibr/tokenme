@@ -558,6 +558,7 @@ export interface Bridge {
   setShowMoney: (on: boolean) => Promise<void>;
   setQuotaDisplayMode: (mode: QuotaDisplayMode) => Promise<void>;
   setShowCycleTokens: (on: boolean) => Promise<void>;
+  setPerformanceMonitoring: (on: boolean) => Promise<void>;
   ttftSnapshot: () => Promise<TtftSnapshot>;
   runActiveSpeedTest: (provider: ActiveSpeedTest["provider"]) => Promise<ActiveSpeedTest>;
   setTtftEnabled: (on: boolean) => Promise<void>;
@@ -685,6 +686,7 @@ export interface PanelSettings {
   quota_display_mode: QuotaDisplayMode;
   show_cycle_tokens: boolean;
   ttft_enabled: boolean;
+  performance_monitoring: boolean;
   hide_unused_tools: boolean;
   hide_unused_quota: boolean;
   hide_unused_estimation: boolean;

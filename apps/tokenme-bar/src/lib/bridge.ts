@@ -353,6 +353,11 @@ export const bridge: Bridge = {
     await invoke<void>("set_ttft_enabled", { on });
   },
 
+  async setPerformanceMonitoring(on: boolean): Promise<void> {
+    if (!inTauri) { browserSettings.performance_monitoring = on; return; }
+    await invoke<void>("set_performance_monitoring", { on });
+  },
+
   onTtftUpdated(handler) {
     return inTauri ? once<TtftSnapshot>("ttft-updated", handler) : () => {};
   },
@@ -640,6 +645,7 @@ const browserSettings: PanelSettings = {
   quota_display_mode: "used",
   show_cycle_tokens: false,
   ttft_enabled: false,
+  performance_monitoring: false,
   hide_unused_tools: true,
   hide_unused_quota: false,
   hide_unused_estimation: false,
