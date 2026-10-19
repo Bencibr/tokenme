@@ -529,7 +529,18 @@ const [page, setPage] = useState<PageKey>(() => {
 
         <main className="scroll" tabIndex={-1} ref={scroll}>
           {isEmpty ? (
-            <EmptyState sources={report.sources} onRefresh={() => void refresh()} />
+            loading ? (
+              /* The rescan hides everything and shows just the spinner; when
+                 the fresh report lands the same test renders the hero again —
+                 empty or not. */
+              <div className="empty">
+                <div className="empty-rescan">
+                  <Loading size={34} label={t("empty.scanning")} />
+                </div>
+              </div>
+            ) : (
+              <EmptyState onRefresh={() => void refresh()} />
+            )
           ) : (
             /* `key` remounts the page, which is what the entry animation needs. */
             <div className="page" key={page}>

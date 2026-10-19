@@ -1,15 +1,13 @@
-import type { SourceStatus } from "../types";
-import { toolDisplay } from "../lib/format";
 import { t } from "../lib/i18n";
 import { IconRefresh } from "./Icons";
 
 /**
- * The quiet gauge that fills the empty sheet's leftover whitespace. The brand
- * dual-ring at rest (same geometry as <Loading />, frozen: bright outer arc,
- * faint inner) sits inside a dotted orbit — the circle the first data points
- * will complete — with a few waiting dots on a wider orbit. Ambient, not busy:
- * the dotted ring creeps and the dots twinkle far slower than the spinner,
- * and `prefers-reduced-motion` freezes all of it. Purely decorative.
+ * The quiet gauge that fronts the empty sheet. The brand dual-ring at rest
+ * (same geometry as <Loading />, frozen: bright outer arc, faint inner) sits
+ * inside a dotted orbit — the circle the first data points will complete —
+ * with a few waiting dots on a wider orbit. Ambient, not busy: the dotted
+ * ring creeps and the dots twinkle far slower than the spinner, and
+ * `prefers-reduced-motion` freezes all of it. Purely decorative.
  */
 function EmptyArt() {
   return (
@@ -36,25 +34,21 @@ function EmptyArt() {
   );
 }
 
-/** Nothing on this machine is readable yet — say exactly what to install. */
-export function EmptyState({ sources, onRefresh }: { sources: SourceStatus[]; onRefresh: () => void }) {
+/**
+ * Nothing on this machine is readable yet: one quiet hero — ring, why it's
+ * empty, and the one action out. Every tab renders this same screen; the
+ * rescan swaps it for the loading line and back, empty or not.
+ */
+export function EmptyState({ onRefresh }: { onRefresh: () => void }) {
   return (
     <div className="empty">
+      <EmptyArt />
       <p className="empty-title">{t("empty.title")}</p>
       <p className="empty-body">{t("empty.body")}</p>
-      <ul className="empty-list">
-        {sources.map((s) => (
-          <li key={s.id}>
-            <span className="empty-name">{toolDisplay(s.id)}</span>
-            <span className="empty-path">{s.roots[0] ?? "~"}</span>
-          </li>
-        ))}
-      </ul>
       <button type="button" className="empty-cta" onClick={onRefresh}>
         <IconRefresh size={12} />
         {t("empty.cta")}
       </button>
-      <EmptyArt />
     </div>
   );
 }

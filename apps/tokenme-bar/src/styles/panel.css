@@ -1745,8 +1745,7 @@
 .rank,
 .call-list,
 .sess-list,
-.src-list,
-.empty-list {
+.src-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -2446,7 +2445,15 @@
   min-height: 100%;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  text-align: center;
   padding: var(--s6) var(--s4) var(--s5);
+}
+
+.empty-rescan {
+  /* the one visible thing while a rescan runs; auto margins center the
+      spinner in the sheet without the overflow-clipping of justify-content */
+  margin: auto 0;
 }
 
 .empty-title {
@@ -2458,38 +2465,17 @@
 
 .empty-body {
   margin: 0 0 var(--s3);
+  max-width: 30em;
   font-size: var(--t-body);
   color: var(--ink-2);
   line-height: 1.6;
-}
-
-.empty-list li {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--s2);
-  padding: 5px 0;
-  border-top: 1px solid var(--hair);
-  font-size: var(--t-meta);
-}
-
-.empty-name {
-  color: var(--ink);
-  font-weight: 550;
-}
-
-.empty-path {
-  color: var(--ink-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .empty-cta {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-top: var(--s4);
+  margin: 0 0 auto;
   padding: 5px var(--s3);
   font-size: var(--t-meta);
   color: var(--accent-ink);
@@ -2502,13 +2488,12 @@
 }
 
 /* The empty-state artwork: brand dual-ring at rest inside the dotted circle
-   the first data will complete. Lives on the leftover whitespace under the
-   CTA — auto margins center it there and collapse to 0 when the source list
-   alone fills the sheet. */
+   the first data will complete. Tops the hero above the title; its top auto
+   margin pairs with the CTA's bottom one to center the whole group on the
+   leftover space, collapsing to 0 when the sheet runs out of room. */
 .empty-art {
-  align-self: center;
-  margin: auto 0;
-  padding: var(--s3) 0;
+  margin: auto 0 0;
+  padding: 0 0 var(--s3);
 }
 
 .empty-art svg {

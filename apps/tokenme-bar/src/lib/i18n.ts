@@ -528,8 +528,9 @@ const zh = {
   /* 空态与启动 ------------------------------------------------------------ */
   "empty.title": "未检测到任何数据源",
   "empty.body":
-    "tokenme 只读本机已有的 AI 命令行日志并统计用量计数。安装下列任意一个并运行一次会话后，点右下角刷新即可看到数据。",
+    "tokenme 只读本机已有的 AI 命令行日志并统计用量计数。安装任意一个支持的工具并运行一次会话后，这里就会出现数据。",
   "empty.cta": "重新扫描",
+  "empty.scanning": "正在重新扫描…",
   "boot.indexing": "正在索引本机用量…",
   "boot.failed": "读取失败：{e}",
   "boot.retry": "重试",
@@ -1211,8 +1212,9 @@ const en: Record<StrKey, string> = {
 
   "empty.title": "No data sources detected",
   "empty.body":
-    "TokenMe reads local usage data from supported AI tools. Install a supported tool, run it once, then rescan.",
+    "TokenMe reads the AI CLI logs already on this machine and counts usage. Install any supported tool, run one session, and figures appear here.",
   "empty.cta": "Rescan",
+  "empty.scanning": "Rescanning…",
   "boot.indexing": "Indexing local usage…",
   "boot.failed": "Failed to read: {e}",
   "boot.retry": "Retry",
