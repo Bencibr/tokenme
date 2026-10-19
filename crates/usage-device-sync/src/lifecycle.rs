@@ -255,7 +255,7 @@ mod tests {
         let (identity, mut config, _) = fixture(dir.path());
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         store.save_primary_config(&crate::PrimarySyncConfig {
-            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(), advertise_host: Some("127.0.0.1".into()), allow_lan: false, allow_secondary_read: false, enabled: false,
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(), advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: false, share_data_with_secondaries: false,
         }, 1).unwrap();
         let request_id = request(&mut store, &identity, 2);
         store.approve_pairing(&request_id, 3).unwrap();

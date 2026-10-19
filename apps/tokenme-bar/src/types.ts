@@ -431,12 +431,12 @@ export interface SyncDevicesSnapshot {
   primary_id: string | null;
   role: SyncDeviceRole | "unconfigured";
   service_running: boolean;
+  primary_data_sharing_enabled: boolean;
   service_health: string | null;
   endpoint: string | null;
   certificate_pin: string | null;
   stream_id: string | null;
   data_epoch: number | null;
-  allow_secondary_read: boolean;
   pending: number;
   in_flight: number;
   pending_bytes: number;

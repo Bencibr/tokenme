@@ -605,7 +605,19 @@ pub(crate) fn sync_dirty_enabled(tx: &Transaction<'_>) -> Result<bool> {
         &format!("SELECT {column} FROM device_sync_secondary_config WHERE config_key = 'secondary'"),
         [], |row| row.get(0),
     ).optional().map_err(sql_err)?;
-    Ok(enabled == Some(1))
+    let primary_table_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_primary_config')",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    let primary_configured = if primary_table_exists {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM device_sync_primary_config WHERE config_key = 'primary')",
+            [], |row| row.get(0),
+        ).map_err(sql_err)?
+    } else { false };
+    // Keep a local-only change journal while a primary is configured, even
+    // when network sharing is off, so re-enabling cannot skip offline edits.
+    Ok(enabled == Some(1) || primary_configured)
 }
 
 pub(crate) fn mark_sync_dirty(
@@ -1870,9 +1882,8 @@ impl Index {
         Ok(SyncSnapshot { coverage_lo_ms, coverage_hi_ms, events, dirty_events })
     }
 
-    /// Seeds durable keyless occurrence identities for local history that
-    /// predates pairing. It is intentionally called only after the secondary
-    /// gate is enabled; ordinary users do not pay for this mirror.
+    /// Seeds durable identities for local history that predates sync. It is
+    /// called only after a sync role is opted in; ordinary indexes skip it.
     pub fn ensure_sync_occurrences_page(&mut self, limit: usize) -> Result<bool> {
         if limit == 0 || limit > 256 {
             return Err(Error::Sync("sync occurrence page must be in 1..=256".into()));
@@ -2415,6 +2426,22 @@ mod tests {
         assert!(has_event_id);
         assert!(has_index);
         assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT length(event_json) FROM sync_dirty", [], |row| row.get(0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn configured_primary_keeps_local_change_journal_even_when_sharing_is_off() {
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.conn.execute_batch(
+            "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, capture_enabled INTEGER);
+             CREATE TABLE device_sync_primary_config(config_key TEXT PRIMARY KEY);
+             INSERT INTO device_sync_primary_config(config_key) VALUES('primary');
+             INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'local-row');",
+        ).unwrap();
+        let tx = idx.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        mark_sync_dirty(&tx, "key:local-row", "local.jsonl", None, 1, 10, 11).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |row| row.get(0)).unwrap(), 1);
     }
 
     #[test]

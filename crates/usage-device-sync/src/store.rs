@@ -13,12 +13,13 @@ use usage_index::{Index, INDEX_SCHEMA_VERSION};
 
 use crate::protocol::{
     hash_bytes, identity_bytes, network_event_key, public_key_from_bytes, valid_text,
-    validate_network_reader, AuthenticatedStatus, AuthenticatedStatusRequest, NetworkManifest,
-    NetworkPackage, NetworkRow, PairingInvite,
-    PairingRequest, SignedUpload, StreamOpenReceipt, UploadEnvelope,
+    validate_network_reader, AuthenticatedDownloadRequest,
+    AuthenticatedStatus, AuthenticatedStatusRequest, NetworkManifest, NetworkPackage, NetworkRow,
+    PairingInvite, PairingRequest, PrimaryDownloadPage, SignedUpload, StreamOpenReceipt, UploadEnvelope,
 };
 
 const STATE_VERSION: i64 = 7;
+const PRIMARY_DOWNLOAD_STREAM_ID: &str = "primary-download-v1";
 const MAX_PENDING_PAIRING_REQUESTS: i64 = 32;
 const MAX_OUTBOX_ENTRIES: i64 = 4_096;
 const MAX_OUTBOX_BYTES: i64 = 512 * 1024 * 1024;
@@ -238,9 +239,9 @@ pub struct PrimarySyncConfig {
     pub bind_addr: String,
     pub advertise_host: Option<String>,
     pub allow_lan: bool,
-    #[serde(default)]
-    pub allow_secondary_read: bool,
     pub enabled: bool,
+    #[serde(default, alias = "allow_secondary_read")]
+    pub share_data_with_secondaries: bool,
 }
 
 impl PrimarySyncConfig {
@@ -663,21 +664,22 @@ impl SyncStore {
         self.index.with_network_transaction(|tx| {
             tx.execute(
                 "INSERT INTO device_sync_primary_config(
-                    config_key, primary_id, bind_addr, advertise_host, allow_lan, allow_secondary_read, enabled, updated_at_ms
+                    config_key, primary_id, bind_addr, advertise_host, allow_lan, enabled,
+                    share_data_with_secondaries, updated_at_ms
                  ) VALUES('primary', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(config_key) DO UPDATE SET
                     primary_id = excluded.primary_id,
                     bind_addr = excluded.bind_addr,
                     advertise_host = excluded.advertise_host,
                     allow_lan = excluded.allow_lan,
-                    allow_secondary_read = excluded.allow_secondary_read,
                     enabled = excluded.enabled,
+                    share_data_with_secondaries = excluded.share_data_with_secondaries,
                     updated_at_ms = excluded.updated_at_ms",
                 params![
                     config.primary_id, config.bind_addr, config.advertise_host,
                     if config.allow_lan { 1_i64 } else { 0_i64 },
-                    if config.allow_secondary_read { 1_i64 } else { 0_i64 },
-                    if config.enabled { 1_i64 } else { 0_i64 }, now_ms,
+                    if config.enabled { 1_i64 } else { 0_i64 },
+                    if config.share_data_with_secondaries { 1_i64 } else { 0_i64 }, now_ms,
                 ],
             ).map_err(sql_err)?;
             Ok::<_, SyncError>(())
@@ -697,14 +699,11 @@ impl SyncStore {
         })
     }
 
-    /// Controls the primary's read policy independently from listener
-    /// lifetime.  The default is false, so existing pairings remain
-    /// secondary-to-primary only until the primary owner opts in.
     pub fn set_primary_data_sharing(&mut self, enabled: bool, now_ms: i64) -> SyncResult<()> {
         self.index.with_network_transaction(|tx| {
             let changed = tx.execute(
                 "UPDATE device_sync_primary_config
-                    SET allow_secondary_read = ?1, updated_at_ms = ?2
+                    SET share_data_with_secondaries = ?1, updated_at_ms = ?2
                   WHERE config_key = 'primary' AND primary_id = ?3",
                 params![if enabled { 1_i64 } else { 0_i64 }, now_ms, self.primary_id],
             ).map_err(sql_err)?;
@@ -769,6 +768,149 @@ impl SyncStore {
             return Err(SyncError::Security("snapshot cursor completion generation is invalid".into()));
         }
         Ok(SnapshotCursor { last_identity, last_dirty_revision: dirty_revision as u64, complete: complete != 0, completion_generation: completion_generation.map(|generation| generation as u64) })
+    }
+
+    pub fn primary_download_cursor(&self) -> SyncResult<SnapshotCursor> {
+        let row: Option<(Option<String>, i64, i64)> = self.index.conn().query_row(
+            "SELECT last_identity, last_dirty_revision, complete
+               FROM device_sync_snapshot_cursor
+              WHERE device_id = ?1 AND stream_id = ?2 AND data_epoch = 1",
+            params![self.primary_id, PRIMARY_DOWNLOAD_STREAM_ID],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional().map_err(sql_err)?;
+        let Some((last_identity, revision, complete)) = row else { return Ok(SnapshotCursor::default()); };
+        if revision < 0 || !(0..=1).contains(&complete) {
+            return Err(SyncError::Security("primary download cursor contains invalid state".into()));
+        }
+        Ok(SnapshotCursor { last_identity, last_dirty_revision: revision as u64, complete: complete != 0, completion_generation: None })
+    }
+
+    pub fn primary_download_page(
+        &mut self,
+        request: &AuthenticatedDownloadRequest,
+        now_ms: i64,
+        days: i64,
+    ) -> SyncResult<PrimaryDownloadPage> {
+        if request.primary_id != self.primary_id {
+            return Err(SyncError::Auth("download targets another primary".into()));
+        }
+        let registered: Option<(Vec<u8>, String, String)> = self.index.conn().query_row(
+            "SELECT public_key, status, origin FROM device_registry WHERE device_id = ?1",
+            params![request.device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional().map_err(sql_err)?;
+        let Some((public_key, status, origin)) = registered else {
+            return Err(SyncError::NotPaired(request.device_id.clone()));
+        };
+        if origin != request.origin {
+            return Err(SyncError::Auth("download origin does not match paired device".into()));
+        }
+        request.verify(&public_key_from_bytes(&public_key)?)?;
+        if !request.is_fresh(now_ms) {
+            return Err(SyncError::Auth("download request is expired or from the future".into()));
+        }
+        if status != "paired" {
+            return Err(SyncError::NotPaired(request.device_id.clone()));
+        }
+
+        let sharing_enabled = self.primary_config()?.is_some_and(|config| config.share_data_with_secondaries);
+        if !sharing_enabled {
+            return Ok(PrimaryDownloadPage {
+                request_nonce: request.nonce,
+                enabled: false,
+                preparing: false,
+                package: None,
+                next_identity: request.after_identity.clone(),
+                next_dirty_revision: request.after_dirty_revision,
+                complete: true,
+            });
+        }
+
+        // Historical rows predate the durable cursor projection; initialize it
+        // in bounded batches only while the primary has opted into sharing.
+        let history_ready = self.index.ensure_sync_occurrences_page(usage_index::SYNC_SNAPSHOT_PAGE_ROWS)
+            .map_err(SyncError::from)?;
+        let page = self.index.sync_snapshot_page(
+            request.after_identity.as_deref(), request.after_dirty_revision, now_ms, days,
+            usage_index::SYNC_SNAPSHOT_PAGE_ROWS, usage_index::SYNC_SNAPSHOT_PAGE_BYTES,
+        ).map_err(SyncError::from)?;
+        let mut rows_by_identity = BTreeMap::<String, NetworkRow>::new();
+        for event in page.events {
+            let row = crate::runtime::network_row(event.event, event.occurrence_id)?;
+            rows_by_identity.insert(event.identity, row);
+        }
+        for dirty in page.dirty_events {
+            let row = crate::runtime::network_row(dirty.event, dirty.occurrence_id)?;
+            rows_by_identity.insert(dirty.identity, row);
+        }
+        let mut rows = rows_by_identity.into_values().collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.identity_material().unwrap_or("").cmp(right.identity_material().unwrap_or("")));
+        let complete = history_ready && page.events_done && page.dirty_done;
+        let package = NetworkPackage::from_rows_with_snapshot_complete(
+            self.primary_id.clone(), INDEX_SCHEMA_VERSION, page.coverage_lo_ms, page.coverage_hi_ms,
+            &rows, now_ms, complete,
+        )?;
+        Ok(PrimaryDownloadPage {
+            request_nonce: request.nonce,
+            enabled: true,
+            preparing: !history_ready,
+            package: Some(package),
+            next_identity: page.next_identity,
+            next_dirty_revision: page.next_dirty_revision,
+            complete,
+        })
+    }
+
+    /// Applies downloaded rows and their resume cursor atomically. A crash can
+    /// replay a page, but cannot advance past rows that were not committed.
+    pub fn apply_primary_download_page(&mut self, page: &PrimaryDownloadPage, now_ms: i64) -> SyncResult<()> {
+        if !page.enabled { return Ok(()); }
+        if page.preparing && page.complete { return Err(SyncError::Protocol("primary download cannot be both preparing and complete".into())); }
+        let package = page.package.as_ref().ok_or_else(|| SyncError::Protocol("enabled download page has no package".into()))?;
+        if page.next_dirty_revision > i64::MAX as u64 { return Err(SyncError::Limit("download dirty revision is too large".into())); }
+        let (manifest, rows) = package.validate()?;
+        if manifest.origin != self.primary_id || manifest.schema_version != INDEX_SCHEMA_VERSION || manifest.snapshot_complete != page.complete {
+            return Err(SyncError::Auth("primary download package does not match the paired primary or cursor".into()));
+        }
+        let current = self.primary_download_cursor()?;
+        if page.next_dirty_revision < current.last_dirty_revision
+            || matches!((&current.last_identity, &page.next_identity), (Some(old), Some(new)) if new < old)
+            || (current.last_identity.is_some() && page.next_identity.is_none())
+        {
+            return Err(SyncError::Security("primary download cursor moved backwards".into()));
+        }
+        let progressed = page.next_dirty_revision > current.last_dirty_revision || page.next_identity != current.last_identity;
+        if !progressed && !page.complete && !page.preparing {
+            return Err(SyncError::Protocol("primary download page did not advance its cursor".into()));
+        }
+
+        let primary_id = self.primary_id.clone();
+        self.index.with_network_transaction(|tx| {
+            let mut affected_ts = Vec::new();
+            for row in &rows {
+                let merged = merge_row(tx, &primary_id, &primary_id, row, now_ms)?;
+                affected_ts.extend(merged.affected_ts);
+            }
+            usage_index::recompute_network_days(tx, &affected_ts).map_err(SyncError::from)?;
+            ensure_network_rollups_finite(tx)?;
+            tx.execute(
+                "INSERT INTO device_sync_snapshot_cursor(
+                    device_id, stream_id, data_epoch, last_identity, last_dirty_revision,
+                    complete, completion_generation, updated_at_ms
+                 ) VALUES(?1, ?2, 1, ?3, ?4, ?5, NULL, ?6)
+                 ON CONFLICT(device_id, stream_id, data_epoch) DO UPDATE SET
+                    last_identity = excluded.last_identity,
+                    last_dirty_revision = excluded.last_dirty_revision,
+                    complete = excluded.complete,
+                    completion_generation = NULL,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    primary_id, PRIMARY_DOWNLOAD_STREAM_ID, page.next_identity,
+                    page.next_dirty_revision as i64, if page.complete { 1_i64 } else { 0_i64 }, now_ms,
+                ],
+            ).map_err(sql_err)?;
+            Ok::<_, SyncError>(())
+        })
     }
 
     pub fn save_secondary_config(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
@@ -1401,57 +1543,10 @@ impl SyncStore {
             highwater_receipt_hash: highwater.map(|row| row.1),
             checkpoint_generation: request.checkpoint_generation,
             checkpoint_receipt_hash,
+            primary_data_sharing: self.primary_config()?.is_some_and(|config| config.share_data_with_secondaries),
             coverage_lo_ms: coverage.map(|range| range.0),
             coverage_hi_ms: coverage.map(|range| range.1),
-            allow_secondary_read: self.primary_config()?.is_some_and(|config| config.allow_secondary_read),
             observed_at_ms,
-        })
-    }
-
-    /// Returns the primary's merged read projection to an already authorized
-    /// secondary.  The request is verified again here instead of relying on a
-    /// previous status call, so a direct pull cannot bypass pairing, revocation
-    /// or the primary owner's sharing switch.
-    pub fn primary_download_package(&self, request: &AuthenticatedStatusRequest, now_ms: i64) -> SyncResult<NetworkPackage> {
-        let status = self.authenticated_status(request, now_ms)?;
-        if status.status != "paired" {
-            return Err(match status.status.as_str() {
-                "pending" => SyncError::NotPaired("pairing request is awaiting approval".into()),
-                "paused" => SyncError::Conflict("primary paused this device".into()),
-                "revoked" => SyncError::Revoked(request.device_id.clone()),
-                _ => SyncError::NotPaired("device is not authorized".into()),
-            });
-        }
-        if !status.allow_secondary_read {
-            return Err(SyncError::Conflict("primary data sharing is disabled".into()));
-        }
-        crate::runtime::export_primary_index_snapshot(&self.index, &request.origin, 30, now_ms)
-    }
-
-    /// Merges a primary read package into the secondary's local index.  The
-    /// primary package is stored under the `linux:primary:` origin, which
-    /// keeps it out of the secondary's next upload and therefore prevents a
-    /// replication loop.
-    pub fn import_primary_package(&mut self, package: &NetworkPackage, merged_at_ms: i64) -> SyncResult<MergeOutcome> {
-        let (manifest, rows) = package.validate()?;
-        if manifest.schema_version != usage_index::INDEX_SCHEMA_VERSION || manifest.origin != "primary" {
-            return Err(SyncError::Unsupported("primary read package is not supported".into()));
-        }
-        self.index.with_network_transaction(|tx| {
-            let mut outcome = MergeOutcome::default();
-            let mut affected_ts = Vec::new();
-            for row in &rows {
-                let merged = merge_row(tx, &self.primary_id, "primary", row, merged_at_ms)?;
-                affected_ts.extend(merged.affected_ts);
-                match merged.kind {
-                    RowKind::Inserted => outcome.inserted = outcome.inserted.saturating_add(1),
-                    RowKind::Updated => outcome.updated = outcome.updated.saturating_add(1),
-                    RowKind::Deduped => outcome.deduped = outcome.deduped.saturating_add(1),
-                }
-            }
-            usage_index::recompute_network_days(tx, &affected_ts).map_err(SyncError::from)?;
-            ensure_network_rollups_finite(tx)?;
-            Ok(outcome)
         })
     }
 
@@ -2231,6 +2326,17 @@ fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, 
 
 fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
     index.with_network_transaction(|tx| {
+        // Preserve consent from the earlier primary-read setting. If both
+        // columns exist, the current setting wins, including an explicit off.
+        let (current_sharing, legacy_sharing) = primary_sharing_columns(tx)?;
+        if legacy_sharing {
+            let sql = if current_sharing {
+                "ALTER TABLE device_sync_primary_config DROP COLUMN allow_secondary_read"
+            } else {
+                "ALTER TABLE device_sync_primary_config RENAME COLUMN allow_secondary_read TO share_data_with_secondaries"
+            };
+            tx.execute_batch(sql).map_err(sql_err)?;
+        }
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS device_sync_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS device_registry(
@@ -2335,8 +2441,8 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
                  bind_addr TEXT NOT NULL,
                  advertise_host TEXT,
                  allow_lan INTEGER NOT NULL,
-                 allow_secondary_read INTEGER NOT NULL DEFAULT 0,
                  enabled INTEGER NOT NULL,
+                 share_data_with_secondaries INTEGER NOT NULL DEFAULT 0,
                  updated_at_ms INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS device_pairing_invite(
@@ -2354,6 +2460,7 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
                  FROM device_pairing_request;",
         ).map_err(sql_err)?;
         ensure_column(tx, "device_sync_outbox", "payload_revision", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(tx, "device_sync_primary_config", "share_data_with_secondaries", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(tx, "device_sync_outbox", "snapshot_next_identity", "TEXT")?;
         ensure_column(tx, "device_sync_outbox", "snapshot_dirty_revision", "INTEGER")?;
         ensure_column(tx, "device_sync_outbox", "snapshot_complete", "INTEGER")?;
@@ -2364,7 +2471,6 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
         ensure_column(tx, "device_sync_secondary_config", "last_ack_generation", "INTEGER")?;
         ensure_column(tx, "device_sync_secondary_config", "last_ack_receipt_hash", "BLOB")?;
         ensure_column(tx, "device_sync_secondary_config", "capture_enabled", "INTEGER NOT NULL DEFAULT 1")?;
-        ensure_column(tx, "device_sync_primary_config", "allow_secondary_read", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(tx, "device_receipt", "origin", "TEXT NOT NULL DEFAULT ''")?;
         ensure_column(tx, "device_receipt", "snapshot_complete", "INTEGER NOT NULL DEFAULT 0")?;
         tx.execute(
@@ -2450,8 +2556,17 @@ fn pending_device_status(conn: &Connection, request: &AuthenticatedStatusRequest
         active_stream_id: None, expected_generation: None, last_generation: None,
         highwater_generation: None, highwater_receipt_hash: None,
         checkpoint_generation: None, checkpoint_receipt_hash: None,
-        coverage_lo_ms: None, coverage_hi_ms: None, allow_secondary_read: false, observed_at_ms: now_ms,
+        primary_data_sharing: false,
+        coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: now_ms,
     })
+}
+
+fn primary_sharing_columns(conn: &Connection) -> SyncResult<(bool, bool)> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_sync_primary_config') WHERE name = 'share_data_with_secondaries'),
+                EXISTS(SELECT 1 FROM pragma_table_info('device_sync_primary_config') WHERE name = 'allow_secondary_read')",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(sql_err)
 }
 
 fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncConfig>> {
@@ -2460,24 +2575,14 @@ fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncC
         [], |row| row.get(0),
     ).map_err(sql_err)?;
     if !exists { return Ok(None); }
-    let has_allow_secondary_read: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_sync_primary_config') WHERE name = 'allow_secondary_read')",
-        [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    let row: Option<(String, String, Option<String>, i64, i64, i64)> = if has_allow_secondary_read {
-        conn.query_row(
-            "SELECT primary_id, bind_addr, advertise_host, allow_lan, allow_secondary_read, enabled
-               FROM device_sync_primary_config WHERE config_key = 'primary'",
-            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-        ).optional().map_err(sql_err)?
-    } else {
-        conn.query_row(
-            "SELECT primary_id, bind_addr, advertise_host, allow_lan, 0, enabled
-               FROM device_sync_primary_config WHERE config_key = 'primary'",
-            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-        ).optional().map_err(sql_err)?
-    };
-    let Some((primary_id, bind_addr, advertise_host, allow_lan, allow_secondary_read, enabled)) = row else { return Ok(None); };
+    let (current_sharing, legacy_sharing) = primary_sharing_columns(conn)?;
+    let sharing_column = if current_sharing { "share_data_with_secondaries" } else if legacy_sharing { "allow_secondary_read" } else { "0" };
+    let sql = format!("SELECT primary_id, bind_addr, advertise_host, allow_lan, enabled, {sharing_column}
+                       FROM device_sync_primary_config WHERE config_key = 'primary'");
+    let row: Option<(String, String, Option<String>, i64, i64, i64)> = conn.query_row(
+        &sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    ).optional().map_err(sql_err)?;
+    let Some((primary_id, bind_addr, advertise_host, allow_lan, enabled, sharing)) = row else { return Ok(None); };
     let allow_lan = match allow_lan {
         0 => false,
         1 => true,
@@ -2488,12 +2593,12 @@ fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncC
         1 => true,
         value => return Err(SyncError::Security(format!("primary enabled flag is invalid: {value}"))),
     };
-    let allow_secondary_read = match allow_secondary_read {
+    let share_data_with_secondaries = match sharing {
         0 => false,
         1 => true,
-        value => return Err(SyncError::Security(format!("primary allow_secondary_read flag is invalid: {value}"))),
+        value => return Err(SyncError::Security(format!("primary data sharing flag is invalid: {value}"))),
     };
-    let config = PrimarySyncConfig { primary_id: primary_id.clone(), bind_addr, advertise_host, allow_lan, allow_secondary_read, enabled };
+    let config = PrimarySyncConfig { primary_id: primary_id.clone(), bind_addr, advertise_host, allow_lan, enabled, share_data_with_secondaries };
     config.validate(&primary_id)?;
     Ok(Some(config))
 }
@@ -3838,6 +3943,73 @@ mod tests {
         assert_eq!(store.secondary_config().unwrap().unwrap().last_connected_at_ms, Some(42));
     }
 
+    fn legacy_primary_index(sharing: i64, current: Option<i64>) -> Index {
+        let index = Index::open_in_memory().unwrap();
+        index.conn().execute_batch(
+            "CREATE TABLE device_sync_primary_config(
+                 config_key TEXT PRIMARY KEY, primary_id TEXT NOT NULL, bind_addr TEXT NOT NULL,
+                 advertise_host TEXT, allow_lan INTEGER NOT NULL, allow_secondary_read INTEGER NOT NULL DEFAULT 0,
+                 enabled INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+             );
+             INSERT INTO event(tool, ts_ms, session, meter, in_tok, source)
+             VALUES('local', 1, 'session', 'tokens', 3, 'local');",
+        ).unwrap();
+        index.conn().execute(
+            "INSERT INTO device_sync_primary_config VALUES('primary', 'primary-1', '127.0.0.1:47821', '127.0.0.1', 0, ?1, 1, 10)",
+            [sharing],
+        ).unwrap();
+        if let Some(value) = current {
+            index.conn().execute_batch("ALTER TABLE device_sync_primary_config ADD COLUMN share_data_with_secondaries INTEGER NOT NULL DEFAULT 0").unwrap();
+            index.conn().execute("UPDATE device_sync_primary_config SET share_data_with_secondaries = ?1", [value]).unwrap();
+        }
+        index
+    }
+
+    #[test]
+    fn legacy_primary_sharing_is_read_and_migrated_without_resetting_consent() {
+        for enabled in [false, true] {
+            let index = legacy_primary_index(if enabled { 1 } else { 0 }, None);
+            assert_eq!(read_primary_config_conn(index.conn()).unwrap().unwrap().share_data_with_secondaries, enabled);
+            let mut store = SyncStore::new(index, "primary-1").unwrap();
+            assert_eq!(store.primary_config().unwrap().unwrap().share_data_with_secondaries, enabled);
+            assert_eq!(store.index().event_count().unwrap(), 1);
+            assert_eq!(primary_sharing_columns(store.index().conn()).unwrap(), (true, false));
+            store.set_primary_data_sharing(false, 20).unwrap();
+            migrate(store.index_mut(), "primary-1").unwrap();
+            assert!(!store.primary_config().unwrap().unwrap().share_data_with_secondaries);
+        }
+    }
+
+    #[test]
+    fn current_primary_sharing_off_wins_over_an_obsolete_enabled_value() {
+        let index = legacy_primary_index(1, Some(0));
+        assert!(!read_primary_config_conn(index.conn()).unwrap().unwrap().share_data_with_secondaries);
+        let store = SyncStore::new(index, "primary-1").unwrap();
+        assert!(!store.primary_config().unwrap().unwrap().share_data_with_secondaries);
+        assert_eq!(primary_sharing_columns(store.index().conn()).unwrap(), (true, false));
+        assert_eq!(store.index().event_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn corrupt_legacy_primary_sharing_does_not_become_enabled() {
+        let index = legacy_primary_index(2, None);
+        assert!(matches!(read_primary_config_conn(index.conn()), Err(SyncError::Security(_))));
+        let store = SyncStore::new(index, "primary-1").unwrap();
+        assert!(matches!(store.primary_config(), Err(SyncError::Security(_))));
+    }
+
+    #[test]
+    fn primary_config_accepts_the_legacy_json_setting() {
+        let config: PrimarySyncConfig = serde_json::from_value(serde_json::json!({
+            "primary_id": "primary-1", "bind_addr": "127.0.0.1:47821", "advertise_host": "127.0.0.1",
+            "allow_lan": false, "enabled": true, "allow_secondary_read": true,
+        })).unwrap();
+        assert!(config.share_data_with_secondaries);
+        let saved = serde_json::to_value(config).unwrap();
+        assert_eq!(saved["share_data_with_secondaries"], true);
+        assert!(saved.get("allow_secondary_read").is_none());
+    }
+
     #[test]
     fn primary_config_round_trips_and_stop_preserves_sync_history() {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
@@ -3850,18 +4022,157 @@ mod tests {
             bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()),
             allow_lan: false,
-            allow_secondary_read: false,
             enabled: true,
+            share_data_with_secondaries: false,
         };
         store.save_primary_config(&config, 10).unwrap();
         assert_eq!(store.primary_config().unwrap(), Some(config.clone()));
+        store.set_primary_data_sharing(true, 11).unwrap();
+        assert!(store.primary_config().unwrap().unwrap().share_data_with_secondaries);
         store.set_primary_enabled(false, 11).unwrap();
         let stopped = store.primary_config().unwrap().unwrap();
         assert!(!stopped.enabled);
+        assert!(stopped.share_data_with_secondaries);
         assert_eq!(stopped.primary_id, config.primary_id);
         store.clear_primary_config(12).unwrap();
         assert!(store.primary_config().unwrap().is_none());
         assert_eq!(store.index().event_count().unwrap(), 1, "stopping the listener must not clear local history");
+    }
+
+    #[test]
+    fn primary_download_is_opt_in_incremental_idempotent_and_excludes_remote_rows() {
+        let device = identity("download-secondary");
+        let (mut primary, _) = paired_store_for(&device);
+        primary.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 1).unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        for (key, source, tokens) in [("a", "local.jsonl", 3_i64), ("b", "local.jsonl", 5), ("remote", "linux:other:key", 99)] {
+            primary.index().conn().execute(
+                "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+                 VALUES('codex', ?1, 'session', 'tokens', ?2, ?3, ?4)",
+                params![now - 1_000, tokens, source, key],
+            ).unwrap();
+        }
+
+        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now).unwrap();
+        let first = primary.primary_download_page(&request, now, 30).unwrap();
+        let (manifest, rows) = first.package.as_ref().unwrap().validate().unwrap();
+        assert!(first.enabled && !first.preparing && first.complete);
+        assert_eq!(manifest.rows, 2, "only the primary's local-origin rows are shared");
+        assert_eq!(rows.len(), 2);
+        secondary.apply_primary_download_page(&first, now).unwrap();
+        assert_eq!(secondary.index().event_count().unwrap(), 2);
+        assert!(secondary.index().conn().query_row::<String, _, _>(
+            "SELECT source FROM event ORDER BY id LIMIT 1", [], |row| row.get(0),
+        ).unwrap().starts_with("linux:primary-1:"));
+
+        let a_id = primary.index().conn().query_row::<i64, _, _>("SELECT id FROM event WHERE dedupe_key = 'a'", [], |row| row.get(0)).unwrap();
+        primary.index().conn().execute("UPDATE event SET in_tok = 13 WHERE id = ?1", [a_id]).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:a', 'local.jsonl', X'', ?1, ?2, 1, ?3, ?3)",
+            params![a_id, now - 1_000, now],
+        ).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', ?1, 'session', 'tokens', 7, 'local.jsonl', 'z')",
+            params![now - 500],
+        ).unwrap();
+        let z_id = primary.index().conn().query_row::<i64, _, _>("SELECT id FROM event WHERE dedupe_key = 'z'", [], |row| row.get(0)).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:z', 'local.jsonl', X'', ?1, ?2, 2, ?3, ?3)",
+            params![z_id, now - 500, now + 1],
+        ).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO meta(key, value) VALUES('device_sync_dirty_revision', '2')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value", [],
+        ).unwrap();
+        let cursor = secondary.primary_download_cursor().unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", cursor.last_identity, cursor.last_dirty_revision, now + 1).unwrap();
+        let next = primary.primary_download_page(&request, now + 1, 30).unwrap();
+        let (manifest, rows) = next.package.as_ref().unwrap().validate().unwrap();
+        assert_eq!(manifest.rows, 2, "the next request transfers only changed/new local rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().find(|row| row.key.as_deref() == Some("a")).unwrap().counts.in_tok, Some(13.0));
+        assert!(rows.iter().any(|row| row.key.as_deref() == Some("z")));
+        secondary.apply_primary_download_page(&next, now + 1).unwrap();
+        secondary.apply_primary_download_page(&next, now + 2).unwrap();
+        assert_eq!(secondary.index().event_count().unwrap(), 3, "replaying a committed page must not duplicate rows");
+
+        let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now + 3).unwrap();
+        assert!(primary.authenticated_status(&status_request, now + 3).unwrap().primary_data_sharing);
+        primary.set_primary_data_sharing(false, now + 4).unwrap();
+        let cursor = secondary.primary_download_cursor().unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", cursor.last_identity, cursor.last_dirty_revision, now + 5).unwrap();
+        let disabled = primary.primary_download_page(&request, now + 5, 30).unwrap();
+        assert!(!disabled.enabled && !disabled.preparing && disabled.package.is_none());
+        let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now + 6).unwrap();
+        assert!(!primary.authenticated_status(&status_request, now + 6).unwrap().primary_data_sharing);
+
+        primary.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', ?1, 'session', 'tokens', 8, 'local.jsonl', 'aa')",
+            params![now - 400],
+        ).unwrap();
+        let late_id = primary.index().conn().query_row::<i64, _, _>("SELECT id FROM event WHERE dedupe_key = 'aa'", [], |row| row.get(0)).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:aa', 'local.jsonl', X'', ?1, ?2, 3, ?3, ?3)",
+            params![late_id, now - 400, now + 7],
+        ).unwrap();
+        primary.index().conn().execute(
+            "UPDATE meta SET value = '3' WHERE key = 'device_sync_dirty_revision'", [],
+        ).unwrap();
+        primary.set_primary_data_sharing(true, now + 7).unwrap();
+        let cursor = secondary.primary_download_cursor().unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", cursor.last_identity, cursor.last_dirty_revision, now + 8).unwrap();
+        let resumed = primary.primary_download_page(&request, now + 8, 30).unwrap();
+        let (manifest, rows) = resumed.package.as_ref().unwrap().validate().unwrap();
+        assert_eq!(manifest.rows, 1, "rows changed while disabled must be recovered from the local journal");
+        assert_eq!(rows[0].key.as_deref(), Some("aa"));
+        secondary.apply_primary_download_page(&resumed, now + 8).unwrap();
+        assert_eq!(secondary.index().event_count().unwrap(), 4);
+    }
+
+    #[test]
+    fn primary_download_backfill_is_bounded_and_reports_preparation_without_cursor_progress() {
+        let device = identity("download-backfill");
+        let (mut primary, _) = paired_store_for(&device);
+        primary.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 1).unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let old = now - 60 * 86_400_000;
+        for index in 0..260 {
+            primary.index().conn().execute(
+                "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+                 VALUES('codex', ?1, 'session', 'tokens', 1, 'local.jsonl', ?2)",
+                params![old + index, format!("old-{index:03}")],
+            ).unwrap();
+        }
+        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now).unwrap();
+        let first = primary.primary_download_page(&request, now, 30).unwrap();
+        assert!(first.preparing && !first.complete);
+        assert_eq!(first.package.as_ref().unwrap().validate().unwrap().0.rows, 0);
+        assert_eq!(primary.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM sync_event_identity", [], |row| row.get(0)).unwrap(), 256);
+        secondary.apply_primary_download_page(&first, now).unwrap();
+
+        let cursor = secondary.primary_download_cursor().unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", cursor.last_identity, cursor.last_dirty_revision, now + 1).unwrap();
+        let last = primary.primary_download_page(&request, now + 1, 30).unwrap();
+        assert!(!last.preparing && last.complete);
+        assert_eq!(last.package.as_ref().unwrap().validate().unwrap().0.rows, 0);
+        secondary.apply_primary_download_page(&last, now + 1).unwrap();
+        assert_eq!(primary.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM sync_event_identity", [], |row| row.get(0)).unwrap(), 260);
+        assert!(secondary.primary_download_cursor().unwrap().complete);
     }
 
     #[test]
@@ -3885,7 +4196,8 @@ mod tests {
         ).unwrap();
         store.save_primary_config(&PrimarySyncConfig {
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
-            advertise_host: Some("127.0.0.1".into()), allow_lan: false, allow_secondary_read: false, enabled: false,
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: false,
+            share_data_with_secondaries: false,
         }, 1).unwrap();
         store.index().conn().execute(
             "INSERT INTO sync_dirty(identity, source_key, event_json, event_ts_ms, revision, dirty_since_ms, updated_ms)

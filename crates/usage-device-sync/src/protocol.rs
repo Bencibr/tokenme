@@ -42,6 +42,7 @@ const IDENTITY_DOMAIN: &[u8] = b"tokenme-device-sync/identity/v1";
 const UPLOAD_DOMAIN: &[u8] = b"tokenme-device-sync/upload-signature/v1";
 const PAIRING_DOMAIN: &[u8] = b"tokenme-device-sync/pairing/v1";
 const STATUS_DOMAIN: &[u8] = b"tokenme-device-sync/status/v1";
+const DOWNLOAD_DOMAIN: &[u8] = b"tokenme-device-sync/download/v1";
 pub(crate) const MAX_AUTH_REQUEST_AGE_MS: i64 = 10 * 60 * 1000;
 pub(crate) const MAX_AUTH_REQUEST_FUTURE_SKEW_MS: i64 = 60 * 1000;
 
@@ -626,6 +627,17 @@ pub struct NetworkPackage {
     pub gzip_bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PrimaryDownloadPage {
+    pub request_nonce: [u8; 16],
+    pub enabled: bool,
+    pub preparing: bool,
+    pub package: Option<NetworkPackage>,
+    pub next_identity: Option<String>,
+    pub next_dirty_revision: u64,
+    pub complete: bool,
+}
+
 impl NetworkPackage {
     pub fn from_rows(
         origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
@@ -637,30 +649,6 @@ impl NetworkPackage {
     pub fn from_rows_with_snapshot_complete(
         origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
         window_hi_ms: i64, rows: &[NetworkRow], generated_at_ms: i64, snapshot_complete: bool,
-    ) -> SyncResult<Self> {
-        Self::from_rows_with_snapshot_complete_inner(
-            origin, schema_version, window_lo_ms, window_hi_ms, rows, generated_at_ms, snapshot_complete, true,
-        )
-    }
-
-    /// Builds a package for the primary's read projection.  Primary views may
-    /// contain rows that were previously imported from another device; those
-    /// rows are deliberately allowed here because this package is sent to a
-    /// paired secondary over the authenticated, pinned TLS channel.  The
-    /// ordinary secondary export keeps the strict re-export guard above.
-    pub(crate) fn from_rows_with_snapshot_complete_allow_remote(
-        origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
-        window_hi_ms: i64, rows: &[NetworkRow], generated_at_ms: i64, snapshot_complete: bool,
-    ) -> SyncResult<Self> {
-        Self::from_rows_with_snapshot_complete_inner(
-            origin, schema_version, window_lo_ms, window_hi_ms, rows, generated_at_ms, snapshot_complete, false,
-        )
-    }
-
-    fn from_rows_with_snapshot_complete_inner(
-        origin: impl Into<String>, schema_version: impl Into<String>, window_lo_ms: i64,
-        window_hi_ms: i64, rows: &[NetworkRow], generated_at_ms: i64, snapshot_complete: bool,
-        reject_remote: bool,
     ) -> SyncResult<Self> {
         if rows.len() > MAX_ROWS {
             return Err(SyncError::Limit(format!("rows exceed {MAX_ROWS}")));
@@ -680,7 +668,7 @@ impl NetworkPackage {
             if !identities.insert(row.identity_material()?.to_string()) {
                 return Err(SyncError::Protocol("duplicate row identity in package".into()));
             }
-            if reject_remote && row.source.starts_with("linux:") {
+            if row.source.starts_with("linux:") {
                 return Err(SyncError::Protocol("strict export cannot re-export remote source rows".into()));
             }
             let line = serde_json::to_vec(row).map_err(|e| SyncError::Protocol(format!("encode row: {e}")))?;
@@ -1056,6 +1044,82 @@ impl AuthenticatedStatusRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatedDownloadRequest {
+    pub protocol_id: String,
+    pub primary_id: String,
+    pub device_id: String,
+    pub origin: String,
+    pub nonce: [u8; 16],
+    pub issued_at_ms: i64,
+    pub after_identity: Option<String>,
+    pub after_dirty_revision: u64,
+    #[serde(with = "signature_serde")]
+    pub signature: [u8; 64],
+}
+
+impl AuthenticatedDownloadRequest {
+    pub fn new_at(
+        identity: &DeviceIdentity,
+        primary_id: impl Into<String>,
+        after_identity: Option<String>,
+        after_dirty_revision: u64,
+        issued_at_ms: i64,
+    ) -> SyncResult<Self> {
+        let mut request = Self {
+            protocol_id: PROTOCOL_ID.into(),
+            primary_id: primary_id.into(),
+            device_id: identity.device_id.clone(),
+            origin: identity.origin.clone(),
+            nonce: random_bytes::<16>()?,
+            issued_at_ms,
+            after_identity,
+            after_dirty_revision,
+            signature: [0; 64],
+        };
+        request.validate_fields()?;
+        request.signature = identity.signing_key.sign(&request.signing_bytes()).to_bytes();
+        Ok(request)
+    }
+
+    pub fn verify(&self, public_key: &VerifyingKey) -> SyncResult<()> {
+        self.validate_fields()?;
+        public_key.verify(&self.signing_bytes(), &Signature::from_bytes(&self.signature))
+            .map_err(|_| SyncError::Auth("authenticated download signature verification failed".into()))
+    }
+
+    fn validate_fields(&self) -> SyncResult<()> {
+        if self.protocol_id != PROTOCOL_ID || self.after_dirty_revision > i64::MAX as u64 {
+            return Err(SyncError::Auth("invalid authenticated download request".into()));
+        }
+        valid_text("primary_id", &self.primary_id, false)?;
+        valid_text("device_id", &self.device_id, false)?;
+        valid_text("origin", &self.origin, false)?;
+        if !origin_ok(&self.origin) { return Err(SyncError::Auth("invalid authenticated download origin".into())); }
+        if let Some(identity) = self.after_identity.as_deref() {
+            valid_text("download identity cursor", identity, false)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_fresh(&self, now_ms: i64) -> bool {
+        self.issued_at_ms > now_ms.saturating_sub(MAX_AUTH_REQUEST_AGE_MS)
+            && self.issued_at_ms <= now_ms.saturating_add(MAX_AUTH_REQUEST_FUTURE_SKEW_MS)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        let cursor_present = [u8::from(self.after_identity.is_some())];
+        identity_bytes(DOWNLOAD_DOMAIN, &[
+            self.protocol_id.as_bytes(), self.primary_id.as_bytes(), self.device_id.as_bytes(),
+            self.origin.as_bytes(), &self.nonce, &self.issued_at_ms.to_be_bytes(),
+            &cursor_present, self.after_identity.as_deref().unwrap_or("").as_bytes(),
+            &self.after_dirty_revision.to_be_bytes(),
+        ])
+    }
+}
+
+
 fn unix_now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
@@ -1080,12 +1144,10 @@ pub struct AuthenticatedStatus {
     pub checkpoint_generation: Option<u64>,
     #[serde(default, with = "option_hash_serde")]
     pub checkpoint_receipt_hash: Option<[u8; 32]>,
+    #[serde(default)]
+    pub primary_data_sharing: bool,
     pub coverage_lo_ms: Option<i64>,
     pub coverage_hi_ms: Option<i64>,
-    /// Primary policy advertised to the paired secondary.  Missing on older
-    /// responses means false, preserving the original one-way behaviour.
-    #[serde(default)]
-    pub allow_secondary_read: bool,
     pub observed_at_ms: i64,
 }
 
@@ -1233,6 +1295,22 @@ mod tests {
         assert!(matches!(request.verify(&public_key), Err(SyncError::Auth(_))));
         assert!(matches!(AuthenticatedStatusRequest::new_at_with_checkpoint(&identity, "primary-1", false, Some(0), 10), Err(SyncError::Invalid(_))));
     }
+
+
+    #[test]
+    fn authenticated_download_request_binds_both_cursors() {
+        let identity = DeviceIdentity::create("secondary-origin", "Secondary").unwrap();
+        let key = identity.signing_key.verifying_key();
+        let mut request = AuthenticatedDownloadRequest::new_at(&identity, "primary-1", Some("key:a".into()), 7, 10).unwrap();
+        request.verify(&key).unwrap();
+        request.after_identity = Some("key:b".into());
+        assert!(matches!(request.verify(&key), Err(SyncError::Auth(_))));
+
+        let mut request = AuthenticatedDownloadRequest::new_at(&identity, "primary-1", Some("key:a".into()), 7, 10).unwrap();
+        request.after_dirty_revision = 8;
+        assert!(matches!(request.verify(&key), Err(SyncError::Auth(_))));
+    }
+
 
     #[test]
     fn bounded_package_rejects_keyless_without_occurrence() {

@@ -8,11 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use usage_core::{origin_of, CallKind, Meter, UsageEvent};
+use usage_core::{CallKind, Meter, UsageEvent};
 use usage_index::Index;
 
 use crate::{
-    AuthenticatedStatus, AuthenticatedStatusRequest, DeviceIdentity, DirtyJournalInput,
+    AuthenticatedDownloadRequest, AuthenticatedStatus,
+    AuthenticatedStatusRequest, DeviceIdentity, DirtyJournalInput,
     NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, StreamOpenReceipt,
     ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
     TransportError,
@@ -61,6 +62,9 @@ pub struct SyncRuntime {
     transport: Tls13HttpsTransport,
     config: SyncRuntimeConfig,
     secondary_identity: Option<DeviceIdentity>,
+    primary_data_sharing: bool,
+    primary_download_progressed: bool,
+    primary_download_more: bool,
     occurrences_initialized: bool,
     occurrence_init_progressed: bool,
 }
@@ -73,7 +77,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, occurrences_initialized: false, occurrence_init_progressed: false }
+        Self { store, transport, config, secondary_identity: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, occurrences_initialized: false, occurrence_init_progressed: false }
     }
 
     pub fn new_secondary(
@@ -82,7 +86,7 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        Self { store, transport, config, secondary_identity: Some(identity), occurrences_initialized: false, occurrence_init_progressed: false }
+        Self { store, transport, config, secondary_identity: Some(identity), primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, occurrences_initialized: false, occurrence_init_progressed: false }
     }
 
     pub fn store(&self) -> &SyncStore { &self.store }
@@ -151,6 +155,8 @@ impl SyncRuntime {
         let mut consecutive_errors = 0_u32;
         while !stop.load(Ordering::Acquire) {
             self.occurrence_init_progressed = false;
+            self.primary_download_progressed = false;
+            self.primary_download_more = false;
             let lease_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, lease_now, self.config.lease_ttl_ms)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
@@ -182,6 +188,7 @@ impl SyncRuntime {
                     return Err(error);
                 }
             };
+            catchup_complete &= !self.primary_download_more;
             total.claimed = total.claimed.saturating_add(pass.claimed);
             total.uploaded = total.uploaded.saturating_add(pass.uploaded);
             total.acknowledged = total.acknowledged.saturating_add(pass.acknowledged);
@@ -194,6 +201,7 @@ impl SyncRuntime {
             consecutive_errors = if pass_had_error && !waiting_for_primary { consecutive_errors.saturating_add(1) } else { 0 };
             let pass_had_no_claim_with_pending = pass.claimed == 0 && pass.pending > 0;
             let pass_had_occurrence_progress = self.occurrence_init_progressed;
+            let pass_had_primary_download_progress = self.primary_download_progressed;
             total.last_error = pass.last_error;
             let renew_now = now_ms();
             if !self.store.renew_scheduler_lease(&self.config.owner, renew_now, self.config.lease_ttl_ms)? {
@@ -201,11 +209,10 @@ impl SyncRuntime {
                 return Err(SyncError::Security("sync scheduler lease was lost".into()));
             }
             if stop.load(Ordering::Acquire) { break; }
-            // A long offline catch-up must continue immediately after a page
-            // was ACKed.  A page that advances local identity setup may also
-            // continue immediately; a no-op page stays on the poll cadence.
+            // Continue bounded local or remote snapshot catch-up immediately;
+            // idle passes stay on the normal poll cadence.
             if !catchup_complete
-                && (pass.acknowledged > 0 || pass_had_occurrence_progress)
+                && (pass.acknowledged > 0 || pass_had_occurrence_progress || pass_had_primary_download_progress)
                 && !pass_had_error
                 && !pass_had_no_claim_with_pending
             {
@@ -262,11 +269,43 @@ impl SyncRuntime {
                 }
             }
         }
+        if self.secondary_identity.is_some() && self.primary_data_sharing {
+            match self.download_primary_pages(stop, now_ms) {
+                Ok(complete) => self.primary_download_more = !complete,
+                Err(error) => {
+                    let message = format!("primary data download failed: {error}");
+                    let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
+                    report.last_error = Some(message);
+                }
+            }
+        }
         let summary = self.store.outbox_summary()?;
         report.pending = summary.pending;
         report.in_flight = summary.in_flight;
         report.bytes = summary.bytes;
         Ok(report)
+    }
+
+    fn download_primary_pages(&mut self, stop: Option<&AtomicBool>, now_ms: &mut impl FnMut() -> i64) -> SyncResult<bool> {
+        let identity = self.secondary_identity.clone().ok_or_else(|| SyncError::Security("primary download requires a paired secondary identity".into()))?;
+        for _ in 0..MAX_SNAPSHOT_PAGES_PER_PASS {
+            if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) { return Ok(false); }
+            let cursor = self.store.primary_download_cursor()?;
+            let request = AuthenticatedDownloadRequest::new_at(
+                &identity, self.store.primary_id().to_string(), cursor.last_identity.clone(),
+                cursor.last_dirty_revision, now_ms(),
+            )?;
+            let page = self.transport.download_primary_page(&request)
+                .map_err(|error| SyncError::Protocol(format!("primary download request failed: {error}")))?;
+            if !page.enabled {
+                self.primary_data_sharing = false;
+                return Ok(true);
+            }
+            self.store.apply_primary_download_page(&page, now_ms())?;
+            self.primary_download_progressed = true;
+            if page.complete { return Ok(true); }
+        }
+        Ok(false)
     }
 
     fn prepare_secondary(&mut self, now_ms: &mut impl FnMut() -> i64) -> SyncResult<bool> {
@@ -299,6 +338,7 @@ impl SyncRuntime {
         )?;
         let status = self.transport.status(&request).map_err(map_secondary_status_error)?;
         self.store.mark_secondary_connected(now_ms())?;
+        self.primary_data_sharing = status.primary_data_sharing;
         match status.status.as_str() {
             "paired" => {}
             "pending" => return Err(SyncError::NotPaired("pairing request is awaiting approval".into())),
@@ -310,7 +350,6 @@ impl SyncRuntime {
             other => return Err(SyncError::Protocol(format!("primary returned unknown device status {other:?}"))),
         }
         validate_secondary_status(&config, &status, local_has_history)?;
-        let allow_secondary_read = status.allow_secondary_read;
         let receipt = match (status.active_stream_id, status.expected_generation) {
             (Some(stream_id), Some(expected_generation)) => StreamOpenReceipt {
                 primary_id: status.primary_id,
@@ -327,14 +366,6 @@ impl SyncRuntime {
             return Err(SyncError::Security("sync scheduler lease was lost before stream update".into()));
         }
         self.store.update_secondary_stream(&receipt, stream_now)?;
-        if allow_secondary_read {
-            let package = self.transport.pull(&request).map_err(map_secondary_pull_error)?;
-            let pull_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, pull_now, self.config.lease_ttl_ms)? {
-                return Err(SyncError::Security("sync scheduler lease was lost before primary read merge".into()));
-            }
-            self.store.import_primary_package(&package, pull_now)?;
-        }
         if !had_stream && !has_pending {
             let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
             let snapshot_now = now_ms();
@@ -496,13 +527,6 @@ fn map_secondary_status_error(error: TransportError) -> SyncError {
     }
 }
 
-fn map_secondary_pull_error(error: TransportError) -> SyncError {
-    match error {
-        TransportError::HttpStatus { status: 409, message } if message.contains("data sharing is disabled") => SyncError::Conflict(message),
-        error => SyncError::Protocol(format!("primary data request failed: {error}")),
-    }
-}
-
 /// Export the complete local-origin projection used by the secondary runtime.
 /// A full projection keeps keyless multiplicity deterministic across rebuilds;
 /// remote `linux:` rows are excluded so a primary never receives a re-export.
@@ -556,7 +580,7 @@ pub fn export_index_snapshots_from_snapshot(index: &Index, origin: &str, snapsho
     Ok(out)
 }
 
-fn network_row(event: UsageEvent, occurrence_id: Option<String>) -> SyncResult<NetworkRow> {
+pub(crate) fn network_row(event: UsageEvent, occurrence_id: Option<String>) -> SyncResult<NetworkRow> {
     let key = event.dedupe_key.filter(|key| !key.is_empty());
     if key.is_none() && occurrence_id.as_deref().is_none_or(str::is_empty) {
         return Err(SyncError::UnstableOccurrence);
@@ -580,37 +604,6 @@ fn network_row(event: UsageEvent, occurrence_id: Option<String>) -> SyncResult<N
     })
 }
 
-/// Builds the primary's merged view for one requesting secondary.  Rows that
-/// originated on that secondary are omitted because they are already present
-/// in its local index; this keeps the reverse flow from duplicating its own
-/// data while still returning the primary's local rows and other devices'
-/// merged rows.
-pub(crate) fn export_primary_index_snapshot(
-    index: &Index, excluded_origin: &str, days: i64, now_ms: i64,
-) -> SyncResult<NetworkPackage> {
-    if days <= 0 || days > 3650 { return Err(SyncError::Invalid("snapshot days must be in 1..=3650".into())); }
-    let day_ms = 86_400_000_i64;
-    let coverage_hi_ms = now_ms.div_euclid(day_ms).saturating_add(1).saturating_mul(day_ms);
-    let coverage_lo_ms = index.sync_initial_coverage_lo(now_ms, days).map_err(SyncError::from)?;
-    let events = index.all_events().map_err(SyncError::from)?;
-    let occurrence_ids = index.sync_occurrence_ids(&events).map_err(SyncError::from)?;
-    let mut rows_by_identity = BTreeMap::<String, NetworkRow>::new();
-    for (event, occurrence_id) in events.into_iter().zip(occurrence_ids) {
-        if event.ts_ms < coverage_lo_ms || event.ts_ms >= coverage_hi_ms || origin_of(&event.source) == excluded_origin {
-            continue;
-        }
-        let row = network_row(event, occurrence_id)?;
-        rows_by_identity.insert(row.identity_material()?.to_string(), row);
-    }
-    let mut rows = rows_by_identity.into_values().collect::<Vec<_>>();
-    rows.sort_by(|left, right| left.identity_material().unwrap_or("").cmp(right.identity_material().unwrap_or("")));
-    let generated_at_ms = rows.iter().map(|row| row.ts_ms).max().unwrap_or(now_ms);
-    NetworkPackage::from_rows_with_snapshot_complete_allow_remote(
-        "primary", usage_index::INDEX_SCHEMA_VERSION, coverage_lo_ms, coverage_hi_ms,
-        &rows, generated_at_ms, true,
-    )
-}
-
 fn current_time_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
@@ -622,6 +615,7 @@ mod tests {
     use super::*;
     use crate::{
         hash_bytes, DeviceIdentity, HttpsServerConfig, HttpsTransportConfig, NetworkCounts, NetworkPackage,
+        PrimarySyncConfig,
         NetworkRow, PairingRequest, SecondarySyncConfig, SyncStore, Tls13HttpsTransport, MAX_COMPRESSED_BYTES,
     };
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
@@ -719,6 +713,59 @@ mod tests {
         assert_eq!(config.last_ack_generation, Some(1));
         assert!(config.last_ack_receipt_hash.is_some());
         assert_eq!(runtime.store().snapshot_cursor(&config).unwrap().completion_generation, Some(1));
+    }
+
+    #[test]
+    fn secondary_runtime_downloads_primary_data_over_loopback_tls() {
+        let device = DeviceIdentity::create("runtime-downlink", "Secondary").unwrap();
+        let (mut primary, _) = paired_primary(&device);
+        let now = usage_core::report::now_ms();
+        primary.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, now).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', ?1, 'primary-session', 'tokens', 9, 'local.jsonl', 'primary-live-row')",
+            rusqlite::params![now - 1_000],
+        ).unwrap();
+
+        let (cert_der, key_der) = certificate();
+        let staging = tempfile::tempdir().unwrap();
+        let server = crate::HttpsSyncServer::bind(
+            server_config(&cert_der, &key_der, staging.path().join("staging")), primary,
+        ).unwrap();
+        let addr = server.local_addr().unwrap();
+        let server_thread = thread::spawn(move || server.run_connections(3));
+
+        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
+        let identity_dir = tempfile::tempdir().unwrap();
+        secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_id: "primary-1".into(), device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
+            certificate_pin: hash_bytes(&cert_der), certificate_der: cert_der.clone(),
+            identity_path: identity_dir.path().join("secondary-identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }, now).unwrap();
+        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
+        )).unwrap();
+        let mut runtime = SyncRuntime::new_secondary(
+            secondary, transport, SyncRuntimeConfig::new("secondary-downlink-test").unwrap(), device,
+        );
+
+        let report = runtime.run_once_with_clock(|| now + 10).unwrap();
+        assert_eq!(report.acknowledged, 1, "the initial empty upload still establishes the paired stream");
+        assert_eq!(runtime.store().index().event_count().unwrap(), 1);
+        assert_eq!(runtime.store().index().conn().query_row::<f64, _, _>(
+            "SELECT in_tok FROM event LIMIT 1", [], |row| row.get(0),
+        ).unwrap(), 9.0);
+        let config = runtime.store().secondary_config().unwrap().unwrap();
+        assert!(runtime.store().primary_download_cursor().unwrap().complete);
+        assert_eq!(config.last_error, None);
         assert!(server_thread.join().unwrap().is_ok());
     }
 
@@ -869,7 +916,8 @@ mod tests {
             data_epoch: 1, active_stream_id: Some("stream-1".into()), expected_generation: Some(3), last_generation: generation,
             highwater_generation: generation, highwater_receipt_hash: receipt_hash,
             checkpoint_generation: Some(2), checkpoint_receipt_hash: Some([7; 32]),
-            coverage_lo_ms: None, coverage_hi_ms: None, allow_secondary_read: false, observed_at_ms: 0,
+            primary_data_sharing: false,
+            coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: 0,
         };
         assert!(matches!(validate_secondary_status(&config, &status(Some(1), Some([7; 32])), true), Err(SyncError::ReconcileRequired)));
         assert!(matches!(validate_secondary_status(&config, &status(Some(2), Some([8; 32])), true), Err(SyncError::ReconcileRequired)));
@@ -892,7 +940,8 @@ mod tests {
             primary_id: "primary-1".into(), device_id: "device-1".into(), origin: "origin-1".into(), request_nonce: [0; 16], status: "paired".into(),
             data_epoch: 1, active_stream_id: Some("primary-stream".into()), expected_generation: Some(1), last_generation: None,
             highwater_generation: None, highwater_receipt_hash: None, checkpoint_generation: None, checkpoint_receipt_hash: None,
-            coverage_lo_ms: None, coverage_hi_ms: None, allow_secondary_read: false, observed_at_ms: 0,
+            primary_data_sharing: false,
+            coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: 0,
         };
         assert!(validate_secondary_status(&config, &status, false).is_ok());
         assert!(matches!(validate_secondary_status(&config, &status, true), Err(SyncError::ReconcileRequired)));
