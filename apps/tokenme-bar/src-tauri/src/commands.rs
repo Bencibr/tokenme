@@ -785,6 +785,9 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         total_timeout: std::time::Duration::from_secs(600),
         staging_quota_bytes: 512 * 1024 * 1024,
     }, store, diagnostics_host).map_err(|e| format!("cannot start sync listener: {e}"))?;
+    server.set_log_sink(|is_error, message| {
+        if is_error { crate::logging::error(message); } else { crate::logging::info(message); }
+    }).map_err(|error| format!("cannot configure sync runtime logging: {error}"))?;
     if let Some(app) = diagnostics_app {
         let diagnostics_host = server.diagnostics_host();
         server.diagnostics_host().set_control_handler(move |tool, arguments| {
@@ -2461,9 +2464,30 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
             ));
         }
     }
-    app.state::<Shared>().set_scope(scope.clone())?;
-    if let Some(channel) = app.try_state::<EngineChannel>() {
-        let _ = channel.0.send(Msg::Scope(scope));
+    let kind = match &scope {
+        MachineScope::All => "all",
+        MachineScope::Local => "local",
+        MachineScope::Origin { .. } => "origin",
+    };
+    let shared = app.state::<Shared>();
+    let channel = app.try_state::<EngineChannel>();
+    let (changed, queued) = match shared.set_scope(scope, channel.as_ref().map(|state| &state.0)) {
+        Ok(result) => result,
+        Err(error) => {
+            crate::logging::error(&format!("scope_request: scope={kind} outcome=error error={error}"));
+            return Err(error);
+        }
+    };
+    if !changed {
+        crate::logging::info(&format!("scope_request: scope={kind} outcome=unchanged"));
+        return Ok(());
+    }
+    if channel.is_none() {
+        crate::logging::error(&format!("scope_request: scope={kind} outcome=no_engine"));
+    } else if queued {
+        crate::logging::info(&format!("scope_request: scope={kind} outcome=queued"));
+    } else {
+        crate::logging::info(&format!("scope_request: scope={kind} outcome=coalesced"));
     }
     Ok(())
 }

@@ -84,7 +84,7 @@ pub enum Msg {
     Pricing(PricingMap),
     /// The panel switched the machine scope (全部/本机/远程). Cheap by design:
     /// the fold over the rollup is re-run, no ingest, no vendor probes.
-    Scope(MachineScope),
+    Scope,
 }
 
 /// Cloned into managed state so commands can poke the engine thread.
@@ -103,6 +103,7 @@ pub struct Shared {
     /// cached in the engine), so a switch applies to the very next report even
     /// if it lands while a slow pass is mid-flight.
     scope: Mutex<MachineScope>,
+    scope_refresh_queued: AtomicBool,
 }
 
 impl Shared {
@@ -113,6 +114,7 @@ impl Shared {
             settings: Mutex::new(settings),
             ingesting: Mutex::new(()),
             scope: Mutex::new(MachineScope::All),
+            scope_refresh_queued: AtomicBool::new(false),
         }
     }
 
@@ -134,10 +136,23 @@ impl Shared {
         self.scope.lock().map(|s| s.clone()).unwrap_or(MachineScope::All)
     }
 
-    pub fn set_scope(&self, scope: MachineScope) -> Result<(), String> {
+    pub fn set_scope(
+        &self,
+        scope: MachineScope,
+        tx: Option<&Sender<Msg>>,
+    ) -> Result<(bool, bool), String> {
         let mut slot = self.scope.lock().map_err(|_| "scope busy".to_string())?;
+        if *slot == scope { return Ok((false, false)); }
         *slot = scope;
-        Ok(())
+        let Some(tx) = tx else { return Ok((true, false)) };
+        if self.scope_refresh_queued.swap(true, Ordering::AcqRel) {
+            return Ok((true, false));
+        }
+        if tx.send(Msg::Scope).is_err() {
+            self.scope_refresh_queued.store(false, Ordering::Release);
+            return Err("engine channel is closed".into());
+        }
+        Ok((true, true))
     }
 
     pub fn report(&self) -> Option<Report> {
@@ -328,7 +343,7 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
             let sources =
                 index.source_statuses(&detected).unwrap_or_else(|_| fallback_sources(&detected));
             let at_sources = boot.elapsed();
-            publish_with_quota(&app, index, &sources, &pricing, &adapters, false);
+            let _ = publish_with_quota(&app, index, &sources, &pricing, &adapters, false, false);
             let ms = |d: Duration| d.as_millis();
             crate::logging::info(&format!(
                 "boot: published the index fold before the scan — restore {} ms, detect {} ms, \
@@ -457,22 +472,25 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
             }
             Work::Resummarize => {
                 crate::logging::info("pricing refreshed — re-summarizing indexed events");
-                resummarize(&app, &mut index, &adapters, &detected, &pricing);
+                resummarize(&app, &mut index, &adapters, &detected, &pricing, false);
                 // Wakes collected before the table landed are still pending:
                 // `ingest` clears `wake_roots`, this arm leaves them for the next
                 // pass, which then walks those tools' trees instead of restating
                 // a snapshot built from the old prices.
             }
-            Work::Scope(scope) => {
-                // Store first, fold second: the publish reads the scope from
-                // `Shared`, so the report the panel receives already reflects
-                // the choice — and a later pass cannot fold with a stale one.
-                if let Err(e) = app.state::<Shared>().set_scope(scope) {
-                    crate::logging::error(&format!("scope switch dropped: {e}"));
-                    continue;
-                }
-                crate::logging::info("machine scope switched — re-summarizing indexed events");
-                resummarize(&app, &mut index, &adapters, &detected, &pricing);
+            Work::Scope => {
+                let shared = app.state::<Shared>();
+                let scope = shared.scope();
+                shared.scope_refresh_queued.store(false, Ordering::Release);
+                let started = Instant::now();
+                crate::logging::info(&format!("scope_fold: phase=start scope={}", scope_kind(&scope)));
+                let published = resummarize(&app, &mut index, &adapters, &detected, &pricing, true);
+                crate::logging::info(&format!(
+                    "scope_fold: phase=finish scope={} outcome={} total_ms={}",
+                    scope_kind(&shared.scope()),
+                    if published { "published" } else { "failed" },
+                    started.elapsed().as_millis(),
+                ));
             }
             Work::Stopped => return Exit::Disconnected,
         }
@@ -483,7 +501,7 @@ enum Work {
     Ingest(&'static str),
     Resummarize,
     /// The panel picked another machine scope; fold and republish.
-    Scope(MachineScope),
+    Scope,
     /// Every sender dropped. The only way this loop can end on its own.
     Stopped,
 }
@@ -510,7 +528,7 @@ fn wait_for_work(
                     // "quit". The wakes stay collected, the table is applied, and
                     // the pass that follows publishes both.
                     Drained::Pricing => Work::Resummarize,
-                    Drained::Scope(scope) => Work::Scope(scope),
+                    Drained::Scope => Work::Scope,
                     Drained::Refresh => {
                         QUOTA_PASS_BUST.store(true, Ordering::Relaxed);
                         Work::Ingest("manual refresh")
@@ -525,7 +543,7 @@ fn wait_for_work(
                 QUOTA_PASS_BUST.store(true, Ordering::Relaxed);
                 return Work::Ingest("manual refresh");
             }
-            Ok(Msg::Scope(scope)) => return Work::Scope(scope),
+            Ok(Msg::Scope) => return Work::Scope,
             Err(RecvTimeoutError::Timeout) => return Work::Ingest("cadence timer"),
             Err(RecvTimeoutError::Disconnected) => return Work::Stopped,
         }
@@ -541,7 +559,7 @@ enum Drained {
     /// A price table landed mid-window.
     Pricing,
     /// The panel switched machine scope mid-window.
-    Scope(MachineScope),
+    Scope,
     /// Every sender dropped.
     Disconnected,
 }
@@ -568,7 +586,7 @@ fn drain_debounce(
                 *pricing = map;
                 return Drained::Pricing;
             }
-            Ok(Msg::Scope(scope)) => return Drained::Scope(scope),
+            Ok(Msg::Scope) => return Drained::Scope,
             Ok(Msg::Refresh) => {
                 usage_quota::clear_cache();
                 return Drained::Refresh;
@@ -646,6 +664,7 @@ fn ingest<R: Runtime>(
     wake_roots.clear();
     let hints = |id: &str| prepared.get(id).cloned();
     // A failed pass keeps the previous report on screen rather than blanking it.
+    let ingest_started = Instant::now();
     let report = match index.ingest_with_hints(adapters, &filter, &IngestOptions::default(), &hints)
     {
         Ok(r) => {
@@ -672,7 +691,10 @@ fn ingest<R: Runtime>(
             Some(r)
         }
         Err(e) => {
-            crate::logging::error(&format!("ingest({reason}) failed: {e}"));
+            crate::logging::error(&format!(
+                "ingest({reason}) failed total_ms={}: {e}",
+                ingest_started.elapsed().as_millis(),
+            ));
             None
         }
     };
@@ -796,12 +818,13 @@ fn resummarize<R: Runtime>(
     adapters: &[Box<dyn SourceAdapter>],
     detected: &[DetectedSource],
     pricing: &PricingMap,
-) {
-    let Some(index) = index.as_mut() else { return };
+    cache_only_quota: bool,
+) -> bool {
+    let Some(index) = index.as_mut() else { return false };
     let sources = index
         .source_statuses(detected)
         .unwrap_or_else(|_| fallback_sources(detected));
-    publish(app, index, &sources, pricing, adapters);
+    publish_with_quota(app, index, &sources, pricing, adapters, true, cache_only_quota)
 }
 
 
@@ -812,7 +835,7 @@ fn publish<R: Runtime>(
     pricing: &PricingMap,
     adapters: &[Box<dyn SourceAdapter>],
 ) {
-    publish_with_quota(app, index, sources, pricing, adapters, true)
+    let _ = publish_with_quota(app, index, sources, pricing, adapters, true, false);
 }
 
 /// The first frame: the previous run's own published report, read off disk
@@ -858,11 +881,16 @@ fn publish_with_quota<R: Runtime>(
     pricing: &PricingMap,
     adapters: &[Box<dyn SourceAdapter>],
     poll_quota: bool,
-) {
+    cache_only_quota: bool,
+) -> bool {
     // Live quota (a keychain read, a vendor CLI, or an HTTPS call) is merged in
     // here. The pass is reused for QUOTA_PASS_TTL — probing every publish made
     // a busy file-watcher cadence burn 30% CPU for numbers that had not moved.
-    let polled_quota = if poll_quota { quota_pass(app, adapters) } else { Vec::new() };
+    let (polled_quota, quota_ready) = if poll_quota {
+        quota_pass(app, adapters, cache_only_quota)
+    } else {
+        (Vec::new(), false)
+    };
     let captured = now_ms();
     let scope = app.state::<Shared>().scope();
     let opts = ReportOptions {
@@ -881,13 +909,15 @@ fn publish_with_quota<R: Runtime>(
     // scope travels into the fetch as well: the sessions' top-N is applied in
     // SQL, so it must already be the top-N of the chosen scope.
     let plan = AggregatePlan::build(opts.now_ms, opts.recent_session_limit);
+    let facts_started = Instant::now();
     let facts = match index.report_facts(&plan, &scope) {
         Ok(facts) => facts,
         Err(e) => {
             crate::logging::error(&format!(
-                "publish: facts query failed — previous report stays on screen: {e}"
+                "publish: facts query failed scope={} total_ms={} — previous report stays on screen: {e}",
+                scope_kind(&scope), facts_started.elapsed().as_millis(),
             ));
-            return;
+            return false;
         }
     };
     if facts.rebuilt {
@@ -897,12 +927,16 @@ fn publish_with_quota<R: Runtime>(
         );
     }
     let mut report = usage_core::report::summarize_facts(&facts, &opts);
+    let cycle_usage_started = Instant::now();
     if let Err(e) = index.attach_cycle_usage(&mut report.quotas, report.generated_at_ms) {
-        crate::logging::error(&format!("publish: cycle token usage failed — quota rows stay visible without the summary: {e}"));
+        crate::logging::error(&format!(
+            "publish: cycle token usage failed total_ms={} — quota rows stay visible without the summary: {e}",
+            cycle_usage_started.elapsed().as_millis(),
+        ));
     }
     // The boot publish deliberately skips the probes: until the post-scan
     // publish lands, the quota strip shows "探测中" instead of vanishing.
-    report.quotas_pending = !poll_quota;
+    report.quotas_pending = !quota_ready;
     if let Ok(mut slot) = app.state::<Shared>().report.lock() {
         *slot = Some(report.clone());
     }
@@ -923,6 +957,7 @@ fn publish_with_quota<R: Runtime>(
     // race behind "切换有很大的延迟").
     let mode = app.state::<Shared>().settings().tray_mode;
     tray::refresh(app, &report, mode);
+    true
 }
 
 /// The host-exit half of the pass gate: whether the host process test lets a
@@ -947,8 +982,12 @@ fn host_gate_open(tool: &str, auto_checkin: bool, alive: &Option<HashSet<String>
 
 /// One full quota pass: the per-window adapter probes plus the budget views
 /// (host-exit-paused or not), reused for [`QUOTA_PASS_TTL`].
-fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>]) -> Vec<QuotaView> {
-    if QUOTA_PASS_BUST.swap(false, Ordering::Relaxed) {
+fn quota_pass<R: Runtime>(
+    app: &AppHandle<R>,
+    adapters: &[Box<dyn SourceAdapter>],
+    cache_only: bool,
+) -> (Vec<QuotaView>, bool) {
+    if !cache_only && QUOTA_PASS_BUST.swap(false, Ordering::Relaxed) {
         usage_quota::clear_cache();
         if let Ok(mut slot) = QUOTA_PASS.lock() {
             *slot = None;
@@ -961,10 +1000,20 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
             // hidden the same answer serves three times as long — the probes
             // are the multi-threaded decrypt work nobody is watching.
             let ttl = if crate::panel::is_panel_hidden() { QUOTA_HIDDEN_TTL } else { QUOTA_PASS_TTL };
-            if at.elapsed() < ttl {
-                return q.clone();
+            if cache_only || at.elapsed() < ttl {
+                if cache_only {
+                    crate::logging::info(&format!(
+                        "quota poll: scope switch reused cache age_ms={}",
+                        at.elapsed().as_millis(),
+                    ));
+                }
+                return (q.clone(), true);
             }
         }
+    }
+    if cache_only {
+        crate::logging::info("quota poll: scope switch skipped vendor probes; no cached result yet");
+        return (Vec::new(), false);
     }
     let poll_started = Instant::now();
     let settings = app.state::<Shared>().settings();
@@ -1046,7 +1095,15 @@ fn quota_pass<R: Runtime>(app: &AppHandle<R>, adapters: &[Box<dyn SourceAdapter>
     if let Ok(mut slot) = QUOTA_PASS.lock() {
         *slot = Some((Instant::now(), q.clone()));
     }
-    q
+    (q, true)
+}
+
+fn scope_kind(scope: &MachineScope) -> &'static str {
+    match scope {
+        MachineScope::All => "all",
+        MachineScope::Local => "local",
+        MachineScope::Origin { .. } => "origin",
+    }
 }
 
 fn fallback_sources(detected: &[DetectedSource]) -> Vec<SourceStatus> {
@@ -1194,6 +1251,23 @@ mod tests {
         assert_eq!(shared.startup_error().as_deref(), Some("index could not be opened"));
         shared.clear_startup_error();
         assert!(shared.startup_error().is_none());
+    }
+
+    #[test]
+    fn scope_switch_burst_queues_once_and_keeps_latest_scope() {
+        let shared = Shared::new(Settings::default());
+        let (tx, rx) = mpsc::channel();
+        let remote = MachineScope::Origin { name: "remote-device".into() };
+
+        assert_eq!(shared.set_scope(MachineScope::Local, Some(&tx)), Ok((true, true)));
+        assert_eq!(shared.set_scope(remote.clone(), Some(&tx)), Ok((true, false)));
+        assert_eq!(shared.scope(), remote.clone());
+        assert!(matches!(rx.try_recv(), Ok(Msg::Scope)));
+        assert!(rx.try_recv().is_err(), "a scope burst must queue only one fold");
+
+        shared.scope_refresh_queued.store(false, Ordering::Release);
+        assert_eq!(shared.set_scope(remote, Some(&tx)), Ok((false, false)));
+        assert!(rx.try_recv().is_err(), "selecting the active scope must be a no-op");
     }
 
     /// The `auto_checkin` exemption is exactly as wide as the claim registry:
