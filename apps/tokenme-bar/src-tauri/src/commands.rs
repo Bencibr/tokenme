@@ -46,6 +46,7 @@ pub enum SyncManagementRequest {
     Status,
     Discover,
     StartPrimary { bind: Option<String>, advertise_host: Option<String>, allow_lan: bool },
+    SetPrimaryDataSharing { enabled: bool },
     StartSecondary,
     Stop,
     /// Clear a stopped primary role so this device can be paired as a
@@ -71,6 +72,7 @@ fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
         Some(SyncManagementRequest::Status) => "status",
         Some(SyncManagementRequest::Discover) => "discover",
         Some(SyncManagementRequest::StartPrimary { .. }) => "start_primary",
+        Some(SyncManagementRequest::SetPrimaryDataSharing { .. }) => "set_primary_data_sharing",
         Some(SyncManagementRequest::StartSecondary) => "start_secondary",
         Some(SyncManagementRequest::Stop) => "stop",
         Some(SyncManagementRequest::SwitchToSecondary) => "switch_to_secondary",
@@ -316,6 +318,7 @@ pub struct SyncDevicesView {
     pub primary_id: Option<String>,
     pub role: String,
     pub service_running: bool,
+    pub primary_data_sharing_enabled: bool,
     pub service_health: Option<String>,
     pub endpoint: Option<String>,
     pub certificate_pin: Option<String>,
@@ -731,6 +734,10 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let directory = sync_dir()?;
     let identity_path = directory.join("primary-identity.json");
     let identity = DeviceIdentity::load_or_create(&identity_path, "primary", "TokenMe primary").map_err(|e| format!("cannot create primary identity: {e}"))?;
+    let share_data_with_secondaries = SyncStore::read_primary_config(&index_path)
+        .map_err(|error| format!("cannot read primary sharing preference: {error}"))?
+        .filter(|config| config.primary_id == identity.device_id)
+        .is_some_and(|config| config.share_data_with_secondaries);
     let cert_path = directory.join("server-cert.pem");
     let key_path = directory.join("server-key.pem");
     let (certificate_der, private_key_der) = usage_device_sync::ensure_server_certificate(&cert_path, &key_path, "localhost").map_err(|e| format!("cannot create private sync certificate: {e}"))?;
@@ -803,6 +810,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         advertise_host: Some(host),
         allow_lan,
         enabled: true,
+        share_data_with_secondaries,
     }, current_ms()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
     let mdns = if allow_lan {
         let certificate_pin = hex_bytes(&hash_bytes(&certificate_der));
@@ -1335,10 +1343,14 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     };
     state.last_checked_at_ms = Some(current_ms());
     let pairing_pending = secondary_config.is_none() && read_pending_pairing()?.is_some();
+    let primary_data_sharing_enabled = SyncStore::read_primary_config(&index_path)
+        .map_err(|error| format!("cannot refresh primary sharing preference: {error}"))?
+        .is_some_and(|config| config.share_data_with_secondaries);
     Ok(SyncDevicesView {
         primary_id,
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
         service_running: state.service.is_some() || state.runtime.is_some(),
+        primary_data_sharing_enabled,
         service_health,
         endpoint,
         certificate_pin,
@@ -1573,6 +1585,14 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             Err("mDNS discovery must run asynchronously".into())
         }
         SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan } => start_primary(state, bind, advertise_host, allow_lan, diagnostics_app),
+        SyncManagementRequest::SetPrimaryDataSharing { enabled } => {
+            if state.role != "primary" { return Err("only the primary can change data sharing".into()); }
+            let config = SyncStore::read_primary_config(&index_path)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "primary sync is not configured".to_string())?;
+            let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
+            store.set_primary_data_sharing(enabled, current_ms()).map_err(|error| error.to_string())
+        }
         SyncManagementRequest::StartSecondary => {
             let config = SyncStore::read_secondary_config(&index_path)
                 .map_err(|error| format!("cannot read secondary sync configuration: {error}"))?
@@ -2528,6 +2548,7 @@ mod sync_tests {
             advertise_host: Some("192.168.1.20".into()),
             allow_lan: true,
             enabled: true,
+            share_data_with_secondaries: false,
         };
         let endpoint = primary_endpoint(&config).expect("configured LAN primary has an endpoint");
         assert_eq!(endpoint, "https://192.168.1.20:47821");

@@ -483,6 +483,20 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                     </button>
                   </div>
                 </div>
+                {isPrimary ? (
+                  <label className="sync-share-setting">
+                    <input
+                      type="checkbox"
+                      checked={snapshot.primary_data_sharing_enabled}
+                      disabled={commandBusy}
+                      onChange={(event) => void run({ action: "set_primary_data_sharing", enabled: event.currentTarget.checked })}
+                    />
+                    <span className="sync-share-copy">
+                      <strong>{t("sync.share.title")}</strong>
+                      <small>{t("sync.share.hint")}</small>
+                    </span>
+                  </label>
+                ) : null}
               </div>
               {isSecondary && awaitingSecondaryApproval ? <div className="sync-waiting">{t("sync.pairing.waiting_primary")}</div> : null}
               {isPrimary && pendingRequests.length ? (

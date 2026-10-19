@@ -380,6 +380,7 @@ export type SyncManagementRequest =
   | { action: "status" }
   | { action: "discover" }
   | { action: "start_primary"; bind?: string | null; advertise_host?: string | null; allow_lan: boolean }
+  | { action: "set_primary_data_sharing"; enabled: boolean }
   | { action: "start_secondary" }
   | { action: "stop" }
   | { action: "switch_to_secondary" }
@@ -430,6 +431,7 @@ export interface SyncDevicesSnapshot {
   primary_id: string | null;
   role: SyncDeviceRole | "unconfigured";
   service_running: boolean;
+  primary_data_sharing_enabled: boolean;
   service_health: string | null;
   endpoint: string | null;
   certificate_pin: string | null;

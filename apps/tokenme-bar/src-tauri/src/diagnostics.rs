@@ -2242,6 +2242,7 @@ mod tests {
             primary_id: Some("primary-1".into()),
             role: "primary".into(),
             service_running: false,
+            primary_data_sharing_enabled: false,
             service_health: Some("stopped".into()),
             endpoint: Some("https://127.0.0.1:47821".into()),
             certificate_pin: Some("a".repeat(64)),

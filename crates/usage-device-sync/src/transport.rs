@@ -28,7 +28,8 @@ use crate::diagnostics::{
     MAX_DIAGNOSTICS_BODY_BYTES, MAX_DIAGNOSTICS_RESPONSE_BYTES,
 };
 use crate::protocol::{
-    hash_bytes, verify_private_file, AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest,
+    hash_bytes, verify_private_file, AuthenticatedDownloadRequest,
+    AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest, PrimaryDownloadPage,
     SignedUpload, StreamOpenReceipt, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES,
     MAX_STRING_BYTES,
 };
@@ -54,6 +55,7 @@ const UPLOAD_PATH: &str = "/v1/upload";
 const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
 const STATUS_PATH: &str = "/v1/status";
+const DOWNLOAD_PATH: &str = "/v1/download";
 const RECOVERY_PATH: &str = "/v1/recovery";
 const DISCONNECT_PATH: &str = "/v1/disconnect";
 const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
@@ -437,6 +439,74 @@ impl Tls13HttpsTransport {
         }
         Ok(status)
     }
+
+    pub fn download_primary_page(&mut self, request: &AuthenticatedDownloadRequest) -> Result<PrimaryDownloadPage, TransportError> {
+        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode download request: {e}")))?;
+        let response = self.request(DOWNLOAD_PATH, body)?;
+        let wire: WirePrimaryDownloadPage = response.json()?;
+        if wire.request_nonce != request.nonce {
+            return Err(TransportError::Protocol("primary download response does not match request nonce".into()));
+        }
+        if wire.next_dirty_revision > i64::MAX as u64 {
+            return Err(TransportError::Protocol("primary download cursor is too large".into()));
+        }
+        if let Some(identity) = wire.next_identity.as_deref() {
+            crate::protocol::valid_text("download identity cursor", identity, false)
+                .map_err(|error| TransportError::Protocol(error.to_string()))?;
+        }
+        let identity_regressed = match (&request.after_identity, &wire.next_identity) {
+            (Some(_), None) => true,
+            (Some(old), Some(new)) => new < old,
+            _ => false,
+        };
+        if identity_regressed || wire.next_dirty_revision < request.after_dirty_revision {
+            return Err(TransportError::Protocol("primary download cursor moved backwards".into()));
+        }
+        let (package, complete) = if wire.enabled {
+            let manifest = wire.manifest_b64.ok_or_else(|| TransportError::Protocol("primary download response lacks a manifest".into()))?;
+            let gzip = wire.gzip_b64.ok_or_else(|| TransportError::Protocol("primary download response lacks package bytes".into()))?;
+            let gzip_hash = wire.gzip_sha256.ok_or_else(|| TransportError::Protocol("primary download response lacks a package hash".into()))?;
+            let manifest_bytes = base64::engine::general_purpose::STANDARD.decode(manifest)
+                .map_err(|error| TransportError::Protocol(format!("decode primary download manifest: {error}")))?;
+            let gzip_bytes = base64::engine::general_purpose::STANDARD.decode(gzip)
+                .map_err(|error| TransportError::Protocol(format!("decode primary download package: {error}")))?;
+            if hash_bytes(&gzip_bytes) != gzip_hash { return Err(TransportError::Protocol("primary download package hash mismatch".into())); }
+            let package = crate::NetworkPackage { manifest_bytes, gzip_bytes };
+            let (manifest, _) = package.validate().map_err(|error| TransportError::Protocol(error.to_string()))?;
+            if manifest.origin != request.primary_id || manifest.schema_version != usage_index::INDEX_SCHEMA_VERSION
+                || manifest.snapshot_complete != wire.complete
+            {
+                return Err(TransportError::Protocol("primary download package identity or completion marker is invalid".into()));
+            }
+            (Some(package), wire.complete)
+        } else {
+            if wire.manifest_b64.is_some() || wire.gzip_b64.is_some() || wire.gzip_sha256.is_some()
+                || wire.next_identity != request.after_identity || wire.next_dirty_revision != request.after_dirty_revision
+            {
+                return Err(TransportError::Protocol("disabled primary download response contains data or changes its cursor".into()));
+            }
+            if !wire.complete { return Err(TransportError::Protocol("disabled primary download response is incomplete".into())); }
+            if wire.preparing { return Err(TransportError::Protocol("disabled primary download response is still preparing".into())); }
+            (None, true)
+        };
+        let progressed = wire.next_identity != request.after_identity || wire.next_dirty_revision > request.after_dirty_revision;
+        if wire.preparing && complete {
+            return Err(TransportError::Protocol("primary download response cannot be both preparing and complete".into()));
+        }
+        if wire.enabled && !progressed && !complete && !wire.preparing {
+            return Err(TransportError::Protocol("primary download page did not advance its cursor".into()));
+        }
+        Ok(PrimaryDownloadPage {
+            request_nonce: wire.request_nonce,
+            enabled: wire.enabled,
+            preparing: wire.preparing,
+            package,
+            next_identity: wire.next_identity,
+            next_dirty_revision: wire.next_dirty_revision,
+            complete,
+        })
+    }
+
 
     pub fn recover(&mut self, request: &AuthenticatedStatusRequest) -> Result<StreamOpenReceipt, TransportError> {
         if !request.want_recovery { return Err(TransportError::Protocol("recovery request must set want_recovery".into())); }
@@ -1154,6 +1224,43 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WirePrimaryDownloadPage {
+    request_nonce: [u8; 16],
+    enabled: bool,
+    preparing: bool,
+    manifest_b64: Option<String>,
+    gzip_b64: Option<String>,
+    gzip_sha256: Option<[u8; 32]>,
+    next_identity: Option<String>,
+    next_dirty_revision: u64,
+    complete: bool,
+}
+
+fn encode_primary_download_page(page: PrimaryDownloadPage) -> Result<Vec<u8>, SyncError> {
+    let (manifest_b64, gzip_b64, gzip_sha256) = match (page.enabled, page.package.as_ref()) {
+        (true, Some(package)) => (
+            Some(base64::engine::general_purpose::STANDARD.encode(&package.manifest_bytes)),
+            Some(base64::engine::general_purpose::STANDARD.encode(&package.gzip_bytes)),
+            Some(hash_bytes(&package.gzip_bytes)),
+        ),
+        (false, None) => (None, None, None),
+        _ => return Err(SyncError::Protocol("primary download page sharing state is inconsistent".into())),
+    };
+    serde_json::to_vec(&WirePrimaryDownloadPage {
+        request_nonce: page.request_nonce,
+        enabled: page.enabled,
+        preparing: page.preparing,
+        manifest_b64,
+        gzip_b64,
+        gzip_sha256,
+        next_identity: page.next_identity,
+        next_dirty_revision: page.next_dirty_revision,
+        complete: page.complete,
+    }).map_err(|error| SyncError::Protocol(format!("encode primary download page: {error}")))
+}
+
 #[derive(Debug)]
 struct HttpRequestHead {
     path: String,
@@ -1386,6 +1493,9 @@ fn dispatch_request(store: &mut SyncStore, request: &HttpRequest) -> (u16, Vec<u
         (STATUS_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid status request: {e}")))
             .and_then(|status| store.authenticated_status(&status, now_ms()).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))),
+        (DOWNLOAD_PATH, "application/json") => serde_json::from_slice::<AuthenticatedDownloadRequest>(&request.body)
+            .map_err(|e| SyncError::Protocol(format!("invalid download request: {e}")))
+            .and_then(|download| store.primary_download_page(&download, now_ms(), 30).and_then(encode_primary_download_page)),
         (RECOVERY_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid recovery request: {e}")))
             .and_then(|recovery| store.recover_stream(&recovery, now_ms()).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))),
@@ -1576,7 +1686,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST is supported".into()));
     }
     let known_path = match path {
-        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
@@ -1886,8 +1996,8 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, UploadEnvelope};
-    use crate::{DiagnosticsHost, DiagnosticsRequestAuth, PairingRequest, SyncStore};
+    use crate::protocol::{AuthenticatedDownloadRequest, DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, UploadEnvelope};
+    use crate::{DiagnosticsHost, DiagnosticsRequestAuth, PairingRequest, PrimarySyncConfig, SyncStore};
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::thread;
 
@@ -1932,6 +2042,42 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn loopback_tls13_primary_download_round_trip() {
+        let cert = cert();
+        let device = DeviceIdentity::create("download-secondary", "Secondary").unwrap();
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let invite = store.create_pairing_invite("https://localhost:47821", &"11".repeat(32), i64::MAX).unwrap();
+        let pairing = PairingRequest::new(&invite, &device, "linux").unwrap();
+        let pending = store.receive_pairing_request(&pairing, 1).unwrap();
+        store.approve_pairing(&pending.request_id, 2).unwrap();
+        store.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 3).unwrap();
+        let now = now_ms();
+        store.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', ?1, 'session', 'tokens', 9, 'local.jsonl', 'primary-row')",
+            [now - 1_000],
+        ).unwrap();
+
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
+        )).unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now).unwrap();
+        let page = client.download_primary_page(&request).unwrap();
+        let (manifest, rows) = page.package.unwrap().validate().unwrap();
+        assert!(page.enabled && !page.preparing && page.complete);
+        assert_eq!(manifest.rows, 1);
+        assert_eq!(rows[0].key.as_deref(), Some("primary-row"));
         assert!(handle.join().unwrap().is_ok());
     }
 
