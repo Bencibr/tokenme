@@ -7,7 +7,7 @@
 | What it does | Where |
 | :--- | :--- |
 | Tokens, cost and cache rate for today / this week / this month / this year | Panel → Overview (swipe right for last week, last month, last year; the **Activity** tab is the year-round heatmap) |
-| Per-tool usage for every AI coding tool | Panel → Tools (27 tools, one per row, each row tinted from the app's icon) |
+| Per-tool usage for every AI coding tool | Panel → Tools (28 tools, one per row, each row tinted from the app's icon) |
 | Find the most expensive sessions | Panel → Rankings |
 | Single requests, filtered by model or project | Panel → Details |
 | Measure TTFT (time to first token) and TPS | Panel → Speed (passive measurement; Codex / Claude Code can also fire one short live probe) |

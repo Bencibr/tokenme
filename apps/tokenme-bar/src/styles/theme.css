@@ -81,6 +81,9 @@
   --cat-23: #3d7a8a;
   --cat-24: #7a5a3d;
   --cat-25: #2f5fa0;
+  /* codely 的暖灰紫；槽位为 omp（25）与 codely（26）补足 */
+  --cat-26: #7a6a2f;
+  --cat-27: #a04f5f;
 
   /* activity scale, quiet → saturated */
   --heat-1: #d8e7e4;
@@ -216,6 +219,8 @@
     --cat-23: #5cd0e0;
     --cat-24: #e0a070;
     --cat-25: #70a0f0;
+    --cat-26: #e0c060;
+    --cat-27: #f08fa0;
 
     --heat-1: #1a3f36;
     --heat-2: #215c4d;
@@ -310,6 +315,8 @@
   --cat-23: #5cd0e0;
   --cat-24: #e0a070;
   --cat-25: #70a0f0;
+  --cat-26: #e0c060;
+  --cat-27: #f08fa0;
 
   --heat-1: #1a3f36;
   --heat-2: #215c4d;

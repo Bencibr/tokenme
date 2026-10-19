@@ -7,6 +7,7 @@ members = [
     "crates/adapters/opencode",
     "crates/adapters/pi",
     "crates/adapters/cline",
+    "crates/adapters/codely",
     "crates/adapters/zcode",
     "crates/adapters/qoder",
     "crates/adapters/antigravity",
@@ -44,6 +45,7 @@ usage-adapter-codex = { path = "crates/adapters/codex" }
 usage-adapter-opencode = { path = "crates/adapters/opencode" }
 usage-adapter-pi = { path = "crates/adapters/pi" }
 usage-adapter-cline = { path = "crates/adapters/cline" }
+usage-adapter-codely = { path = "crates/adapters/codely" }
 usage-adapter-zcode = { path = "crates/adapters/zcode" }
 usage-adapter-qoder = { path = "crates/adapters/qoder" }
 usage-adapter-antigravity = { path = "crates/adapters/antigravity" }

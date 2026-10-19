@@ -144,7 +144,7 @@ $ tokenme daily --days 3
 
 ## 支持的工具与实时配额
 
-以下工具全部内置适配器——共 27 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
+以下工具全部内置适配器——共 28 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
 
 | 工具 | 实时配额 | 签到 | 兼容性测试 | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -154,6 +154,7 @@ $ tokenme daily --days 3
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/codely.png" width="20" alt=""> **Codely**（Tuanjie / Unity，含 Cowork 桌面端） | 5 小时/每周窗口 | — | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | Credits + 套餐/资源包 | ✅ | ✅ | ⏳ | ✅ |
