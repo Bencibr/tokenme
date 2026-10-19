@@ -43,8 +43,18 @@ function relTime(ms: number): string {
   return t("sync.rel.day", { n: Math.floor(hours / 24) });
 }
 
-function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recovering" | "stopped" | "disconnected" | "error"; label: string } {
-  if (snapshot.role === "secondary" && snapshot.service_running && snapshot.last_error) return { kind: "recovering", label: t("sync.state.recovering") };
+function hasRecentSecondaryContact(snapshot: SyncDevicesSnapshot): boolean {
+  if (snapshot.role !== "secondary" || snapshot.last_connected_at_ms == null) return false;
+  const age = Date.now() - snapshot.last_connected_at_ms;
+  return age >= -60_000 && age <= 60_000;
+}
+
+function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recovering" | "degraded" | "stopped" | "disconnected" | "error"; label: string } {
+  if (snapshot.role === "secondary" && snapshot.service_running && snapshot.last_error) {
+    return hasRecentSecondaryContact(snapshot)
+      ? { kind: "degraded", label: t("sync.state.degraded") }
+      : { kind: "recovering", label: t("sync.state.recovering") };
+  }
   if (snapshot.last_error || snapshot.operation_state === "error") return { kind: "error", label: t("sync.state.error") };
   if (snapshot.service_running) return { kind: "running", label: t("sync.state.running") };
   if (snapshot.operation_state === "running") return { kind: "recovering", label: t("sync.state.recovering") };
@@ -57,6 +67,9 @@ function syncErrorMessage(error: string | null): string | null {
   const normalized = error.toLowerCase();
   if (normalized.includes("connection refused") || normalized.includes("connection reset") || normalized.includes("transport i/o failed") || normalized.includes("cannot notify primary")) return t("sync.error.unreachable");
   if (normalized.includes("certificate") || normalized.includes("pin mismatch")) return t("sync.error.security");
+  if (normalized.includes("reconcile")) return t("sync.error.reconcile");
+  if (normalized.includes("primary download")) return t("sync.error.download");
+  if (normalized.includes("database") || normalized.includes("sqlite") || normalized.includes("corrupt")) return t("sync.error.database");
   if (normalized.includes("pairing invite") && normalized.includes("expired")) return t("sync.error.invite_expired");
   if (normalized.includes("invalid pairing invite")) return t("sync.error.invite_invalid");
   if (normalized.includes("address already in use")) return t("sync.error.listener");
@@ -275,14 +288,17 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const isPrimary = snapshot.role === "primary";
   const isSecondary = snapshot.role === "secondary";
-  const secondaryRecovering = isSecondary && snapshot.service_running && Boolean(snapshot.last_error);
+  const secondaryHasError = isSecondary && snapshot.service_running && Boolean(snapshot.last_error);
+  const secondaryDegraded = secondaryHasError && hasRecentSecondaryContact(snapshot);
+  const secondaryRecovering = secondaryHasError && !secondaryDegraded;
   const status = syncStatus(snapshot);
   const pendingRequests = snapshot.pairing_requests.filter((request) => request.status === "pending");
   const connectedDevices = snapshot.devices.filter((device) => device.status !== "revoked");
   const primaryDevices = connectedDevices.filter((device) => device.role === "primary");
   const secondaryDevices = connectedDevices.filter((device) => device.role === "secondary");
   const pairedPrimaryCount = primaryDevices.length || (isSecondary && snapshot.primary_id ? 1 : 0);
-  const visibleError = syncErrorMessage(error ?? snapshot.last_error);
+  const errorDetail = (error ?? snapshot.last_error)?.trim() || null;
+  const visibleError = syncErrorMessage(errorDetail);
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {
@@ -351,8 +367,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
           </div>
         </div>
         <div className="sheet-body sync-body">
-          {visibleError && !secondaryRecovering ? <div className="sheet-notice is-error" role="alert"><IconWarn size={12} /><span>{visibleError}</span></div> : null}
-          {secondaryRecovering ? <div className="sheet-notice" role="status"><IconWarn size={12} />{t("sync.recovery.hint")}</div> : null}
+          {visibleError ? <div className="sheet-notice is-error" role="alert"><IconWarn size={12} /><div className="sync-error-copy">
+            {secondaryDegraded ? <strong>{t("sync.degraded.hint")}</strong> : secondaryRecovering ? <strong>{t("sync.recovery.hint")}</strong> : null}
+            <span>{visibleError}</span>
+            {errorDetail ? <details className="sync-error-details"><summary>{t("sync.error.details")}</summary><code>{errorDetail.slice(0, 600)}</code></details> : null}
+          </div></div> : null}
           {snapshot.discovery_error ? <div className="sheet-notice" role="status"><IconWarn size={12} />{t("sync.discovery.permission_error", { message: snapshot.discovery_error })}</div> : null}
           {pendingConfirm ? <div className="sync-confirm" role="alertdialog" aria-live="assertive" aria-label={t("sync.confirm.title")}>
             <div className="sync-confirm-copy"><strong>{t("sync.confirm.title")}</strong><span>{pendingConfirm.message}</span></div>
@@ -473,7 +492,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                     <div className="meta">
                       {isPrimary
                         ? <>{snapshot.endpoint ? <span className="num">{snapshot.endpoint}</span> : null}{snapshot.endpoint ? " · " : null}{t("sync.ov.awaiting")}</>
-                        : <>{t("sync.ov.meta_sec", { n: pairedPrimaryCount })}{snapshot.last_connected_at_ms ? <> · {t("sync.last_sync", { time: relTime(snapshot.last_connected_at_ms) })}</> : null}</>}
+                        : <>{t("sync.ov.meta_sec", { n: pairedPrimaryCount })}{snapshot.last_connected_at_ms ? <> · {t("sync.last_contact", { time: relTime(snapshot.last_connected_at_ms) })}</> : null}</>}
                     </div>
                   </div>
                   <div className="role-right">
@@ -538,9 +557,9 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   <div className="sync-sect2">{t("sync.ov.paired_sect_sec")}</div>
                   {primaryDevices.length ? primaryDevices.map((device) => deviceRow(device)) : (
                     <div className="sync-dev" key={snapshot.primary_id}>
-                      <span className={`sync-dev-dot${secondaryRecovering ? " is-paused" : ""}`} aria-hidden="true" />
-                      <span className="sync-dev-name">{t("sync.role.primary")}<code>{snapshot.endpoint ?? snapshot.primary_id}</code></span>
-                      <code>{secondaryRecovering ? t("sync.state.recovering") : t("sync.state.running")}</code>
+                      <span className={`sync-dev-dot${secondaryRecovering ? " is-paused" : secondaryDegraded ? " is-error" : ""}`} aria-hidden="true" />
+                      <span className="sync-dev-name">{snapshot.primary_display_name?.trim() || snapshot.discovered_primaries.find((primary) => primary.primary_id === snapshot.primary_id)?.display_name.trim() || t("sync.role.primary")}<code>{snapshot.endpoint ?? snapshot.primary_id}</code></span>
+                      <code>{secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
                     </div>
                   )}
                 </>

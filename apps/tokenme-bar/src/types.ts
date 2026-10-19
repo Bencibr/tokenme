@@ -429,6 +429,7 @@ export interface DiscoveredPrimaryView {
 
 export interface SyncDevicesSnapshot {
   primary_id: string | null;
+  primary_display_name: string | null;
   role: SyncDeviceRole | "unconfigured";
   service_running: boolean;
   primary_data_sharing_enabled: boolean;

@@ -1639,6 +1639,7 @@ pub(crate) fn run_remote_checks(
 fn safe_sync_view(status: &SyncDevicesView) -> Value {
     json!({
         "primary_id": status.primary_id,
+        "primary_display_name": status.primary_display_name,
         "role": status.role,
         "service_running": status.service_running,
         "service_health": status.service_health,
@@ -1649,6 +1650,7 @@ fn safe_sync_view(status: &SyncDevicesView) -> Value {
         "in_flight": status.in_flight,
         "pending_bytes": status.pending_bytes,
         "has_error": status.last_error.is_some(),
+        "last_error_code": status.last_error.as_deref().map(safe_sync_error_code),
         "has_discovery_error": status.discovery_error.is_some(),
         "discovered_primaries": status.discovered_primaries.iter().map(|primary| json!({
             "service_name": primary.service_name,
@@ -1675,6 +1677,17 @@ fn safe_sync_view(status: &SyncDevicesView) -> Value {
             "snapshot_complete": device.snapshot_complete,
         })).collect::<Vec<_>>(),
     })
+}
+
+fn safe_sync_error_code(error: &str) -> &'static str {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("reconcile") { "reconcile_required" }
+    else if normalized.contains("primary download") { "primary_download" }
+    else if normalized.contains("certificate") || normalized.contains("pin mismatch") || normalized.contains("tls handshake") { "tls_or_pin" }
+    else if normalized.contains("connection refused") || normalized.contains("connection reset") || normalized.contains("no route") || normalized.contains("transport i/o") || normalized.contains("timed out") { "transport_unreachable" }
+    else if normalized.contains("database") || normalized.contains("sqlite") || normalized.contains("corrupt") { "database" }
+    else if normalized.contains("pairing") || normalized.contains("not paired") || normalized.contains("revoked") { "pairing_state" }
+    else { "request_failed" }
 }
 
 fn parse_scopes(scopes: &[String]) -> Result<BTreeSet<String>, DiagnosticsError> {

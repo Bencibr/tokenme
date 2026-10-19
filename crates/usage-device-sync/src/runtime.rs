@@ -12,7 +12,7 @@ use usage_core::{CallKind, Meter, UsageEvent};
 use usage_index::Index;
 
 use crate::{
-    AuthenticatedDownloadRequest, AuthenticatedStatus,
+    AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest, AuthenticatedStatus,
     AuthenticatedStatusRequest, DeviceIdentity, DirtyJournalInput,
     NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, StreamOpenReceipt,
     ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
@@ -62,6 +62,7 @@ pub struct SyncRuntime {
     transport: Tls13HttpsTransport,
     config: SyncRuntimeConfig,
     secondary_identity: Option<DeviceIdentity>,
+    secondary_display_name: Option<String>,
     primary_data_sharing: bool,
     primary_download_progressed: bool,
     primary_download_more: bool,
@@ -77,7 +78,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, occurrences_initialized: false, occurrence_init_progressed: false }
+        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, occurrences_initialized: false, occurrence_init_progressed: false }
     }
 
     pub fn new_secondary(
@@ -86,7 +87,19 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        Self { store, transport, config, secondary_identity: Some(identity), primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, occurrences_initialized: false, occurrence_init_progressed: false }
+        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, occurrences_initialized: false, occurrence_init_progressed: false }
+    }
+
+    pub fn new_secondary_with_display_name(
+        store: SyncStore,
+        transport: Tls13HttpsTransport,
+        config: SyncRuntimeConfig,
+        identity: DeviceIdentity,
+        display_name: impl Into<String>,
+    ) -> Self {
+        let mut runtime = Self::new_secondary(store, transport, config, identity);
+        runtime.secondary_display_name = Some(display_name.into());
+        runtime
     }
 
     pub fn store(&self) -> &SyncStore { &self.store }
@@ -339,6 +352,13 @@ impl SyncRuntime {
         let status = self.transport.status(&request).map_err(map_secondary_status_error)?;
         self.store.mark_secondary_connected(now_ms())?;
         self.primary_data_sharing = status.primary_data_sharing;
+        if let Some(name) = status.primary_display_name.as_deref() {
+            if config.primary_display_name.as_deref() != Some(name) {
+                if let Err(error) = self.store.set_secondary_primary_display_name(name, now_ms()) {
+                    eprintln!("tokenme sync: primary display-name cache failed: {error}");
+                }
+            }
+        }
         match status.status.as_str() {
             "paired" => {}
             "pending" => return Err(SyncError::NotPaired("pairing request is awaiting approval".into())),
@@ -350,6 +370,16 @@ impl SyncRuntime {
             other => return Err(SyncError::Protocol(format!("primary returned unknown device status {other:?}"))),
         }
         validate_secondary_status(&config, &status, local_has_history)?;
+        if let Some(display_name) = self.secondary_display_name.clone() {
+            if status.display_name.as_deref().is_some_and(|current| current != display_name) {
+                match AuthenticatedDisplayNameRequest::new_at(&identity, config.primary_id.clone(), display_name, now_ms()) {
+                    Ok(update) => if let Err(error) = self.transport.update_display_name(&update) {
+                        eprintln!("tokenme sync: display-name refresh failed: {error}");
+                    },
+                    Err(error) => eprintln!("tokenme sync: display-name refresh request was rejected locally: {error}"),
+                }
+            }
+        }
         let receipt = match (status.active_stream_id, status.expected_generation) {
             (Some(stream_id), Some(expected_generation)) => StreamOpenReceipt {
                 primary_id: status.primary_id,
@@ -684,11 +714,11 @@ mod tests {
         let staging = tempfile::tempdir().unwrap();
         let server = crate::HttpsSyncServer::bind(server_config(&cert_der, &key_der, staging.path().join("staging")), primary).unwrap();
         let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections(3));
+        let server_thread = thread::spawn(move || server.run_connections(5));
         let identity_dir = tempfile::tempdir().unwrap();
         let identity_path = identity_dir.path().join("secondary-identity.json");
         secondary.save_secondary_config(&SecondarySyncConfig {
-            primary_id: "primary-1".into(), device_id: device.device_id.clone(), origin: device.origin.clone(),
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
             certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(), identity_path,
             stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
@@ -698,7 +728,9 @@ mod tests {
         let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
         )).unwrap();
-        let mut runtime = SyncRuntime::new_secondary(secondary, transport, SyncRuntimeConfig::new("secondary-test-owner").unwrap(), device);
+        let mut runtime = SyncRuntime::new_secondary_with_display_name(
+            secondary, transport, SyncRuntimeConfig::new("secondary-test-owner").unwrap(), device.clone(), "Current host",
+        );
         let first_now = usage_core::report::now_ms();
         let report = runtime.run_once_with_clock(|| first_now).unwrap();
         assert_eq!(report.acknowledged, 1, "an empty initial snapshot still needs a signed completion marker");
@@ -707,12 +739,17 @@ mod tests {
         assert_eq!(second.acknowledged, 0, "idle polling at a different time must remain outbox-free");
         assert_eq!(runtime.store().outbox_summary().unwrap().pending, 0);
         let config = runtime.store().secondary_config().unwrap().unwrap();
+        let primary_name = usage_index::hostname();
+        assert_eq!(config.primary_display_name.as_deref(), Some(primary_name.as_str()));
         assert!(config.stream_id.is_some());
         assert_eq!(config.data_epoch, Some(1));
         assert!(config.last_connected_at_ms.is_some());
         assert_eq!(config.last_ack_generation, Some(1));
         assert!(config.last_ack_receipt_hash.is_some());
         assert_eq!(runtime.store().snapshot_cursor(&config).unwrap().completion_generation, Some(1));
+        let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, first_now + 10_000).unwrap();
+        assert_eq!(runtime.transport.status(&status_request).unwrap().display_name.as_deref(), Some("Current host"));
+        assert!(server_thread.join().unwrap().is_ok());
     }
 
     #[test]
@@ -742,7 +779,7 @@ mod tests {
         let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
         let identity_dir = tempfile::tempdir().unwrap();
         secondary.save_secondary_config(&SecondarySyncConfig {
-            primary_id: "primary-1".into(), device_id: device.device_id.clone(), origin: device.origin.clone(),
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
             certificate_pin: hash_bytes(&cert_der), certificate_der: cert_der.clone(),
             identity_path: identity_dir.path().join("secondary-identity.json"),
@@ -782,7 +819,7 @@ mod tests {
         let identity_path = identity_dir.path().join("secondary-identity.json");
         let first_now = usage_core::report::now_ms();
         secondary.save_secondary_config(&SecondarySyncConfig {
-            primary_id: "primary-1".into(), device_id: device.device_id.clone(), origin: device.origin.clone(),
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
             certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(), identity_path,
             stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
@@ -905,7 +942,7 @@ mod tests {
     #[test]
     fn remote_highwater_rollback_or_same_generation_hash_change_requires_reconcile() {
         let mut config = SecondarySyncConfig {
-            primary_id: "primary-1".into(), device_id: "device-1".into(), origin: "origin-1".into(),
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: "device-1".into(), origin: "origin-1".into(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1], certificate_pin: hash_bytes(&[1]),
             identity_path: std::path::PathBuf::from("identity.json"), stream_id: Some("stream-1".into()), data_epoch: Some(1), expected_generation: Some(3), enabled: true, capture_enabled: true,
             last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
@@ -916,7 +953,7 @@ mod tests {
             data_epoch: 1, active_stream_id: Some("stream-1".into()), expected_generation: Some(3), last_generation: generation,
             highwater_generation: generation, highwater_receipt_hash: receipt_hash,
             checkpoint_generation: Some(2), checkpoint_receipt_hash: Some([7; 32]),
-            primary_data_sharing: false,
+            display_name: None, primary_display_name: None, primary_data_sharing: false,
             coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: 0,
         };
         assert!(matches!(validate_secondary_status(&config, &status(Some(1), Some([7; 32])), true), Err(SyncError::ReconcileRequired)));
@@ -930,7 +967,7 @@ mod tests {
     #[test]
     fn first_pairing_adopts_primary_stream_without_local_history() {
         let config = SecondarySyncConfig {
-            primary_id: "primary-1".into(), device_id: "device-1".into(), origin: "origin-1".into(),
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: "device-1".into(), origin: "origin-1".into(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1], certificate_pin: hash_bytes(&[1]),
             identity_path: std::path::PathBuf::from("identity.json"), stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
             last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
@@ -940,7 +977,7 @@ mod tests {
             primary_id: "primary-1".into(), device_id: "device-1".into(), origin: "origin-1".into(), request_nonce: [0; 16], status: "paired".into(),
             data_epoch: 1, active_stream_id: Some("primary-stream".into()), expected_generation: Some(1), last_generation: None,
             highwater_generation: None, highwater_receipt_hash: None, checkpoint_generation: None, checkpoint_receipt_hash: None,
-            primary_data_sharing: false,
+            display_name: None, primary_display_name: None, primary_data_sharing: false,
             coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: 0,
         };
         assert!(validate_secondary_status(&config, &status, false).is_ok());

@@ -32,7 +32,7 @@ pub use diagnostics::{
 pub use protocol::{
     hash_bytes, identity_bytes, DeviceIdentity, NetworkCall, NetworkCounts, NetworkManifest,
     NetworkPackage, NetworkRow, PairingInvite, PairingRequest, PrimaryDownloadPage, SignedUpload, StreamOpenReceipt,
-    AuthenticatedDownloadRequest, AuthenticatedStatus, AuthenticatedStatusRequest,
+    AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest, AuthenticatedStatus, AuthenticatedStatusRequest,
     PairingInviteDetails, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES, MAX_LINE_BYTES, MAX_MANIFEST_BYTES,
     MAX_ROWS, MAX_STRING_BYTES, PROTOCOL_ID, SYNC_FORMAT,
 };

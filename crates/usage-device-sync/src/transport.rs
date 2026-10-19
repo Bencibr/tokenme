@@ -28,7 +28,7 @@ use crate::diagnostics::{
     MAX_DIAGNOSTICS_BODY_BYTES, MAX_DIAGNOSTICS_RESPONSE_BYTES,
 };
 use crate::protocol::{
-    hash_bytes, verify_private_file, AuthenticatedDownloadRequest,
+    hash_bytes, verify_private_file, AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest,
     AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest, PrimaryDownloadPage,
     SignedUpload, StreamOpenReceipt, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES,
     MAX_STRING_BYTES,
@@ -39,7 +39,9 @@ const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_RESPONSE_BYTES: usize = MAX_DIAGNOSTICS_RESPONSE_BYTES;
 const DEFAULT_BODY_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(test)]
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
 const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_STAGING_QUOTA_BYTES: usize = 512 * 1024 * 1024;
 const MAX_GLOBAL_CONCURRENT: usize = 4;
@@ -56,6 +58,7 @@ const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
 const STATUS_PATH: &str = "/v1/status";
 const DOWNLOAD_PATH: &str = "/v1/download";
+const DISPLAY_NAME_PATH: &str = "/v1/device/display-name";
 const RECOVERY_PATH: &str = "/v1/recovery";
 const DISCONNECT_PATH: &str = "/v1/disconnect";
 const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
@@ -424,6 +427,15 @@ impl Tls13HttpsTransport {
     /// The primary still requires the normal signed pairing request and an
     /// explicit approval after this method returns.
     pub fn request_pairing_invite(&mut self, primary_id: &str, endpoint: &str) -> Result<(PairingInvite, Vec<u8>), TransportError> {
+        let (invite, certificate_der, _) = self.request_pairing_invite_with_primary_name(primary_id, endpoint)?;
+        Ok((invite, certificate_der))
+    }
+
+    pub fn request_pairing_invite_with_primary_name(
+        &mut self,
+        primary_id: &str,
+        endpoint: &str,
+    ) -> Result<(PairingInvite, Vec<u8>, Option<String>), TransportError> {
         let body = serde_json::to_vec(&WirePairingInviteRequest { primary_id: primary_id.to_string(), endpoint: endpoint.to_string() })
             .map_err(|e| TransportError::Protocol(format!("encode discovery pairing request: {e}")))?;
         let response = self.request(PAIRING_INVITE_PATH, body)?;
@@ -507,6 +519,12 @@ impl Tls13HttpsTransport {
         })
     }
 
+    pub fn update_display_name(&mut self, request: &AuthenticatedDisplayNameRequest) -> Result<(), TransportError> {
+        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode display-name update: {e}")))?;
+        let response = self.request(DISPLAY_NAME_PATH, body)?;
+        response.json::<serde_json::Value>()?;
+        Ok(())
+    }
 
     pub fn recover(&mut self, request: &AuthenticatedStatusRequest) -> Result<StreamOpenReceipt, TransportError> {
         if !request.want_recovery { return Err(TransportError::Protocol("recovery request must set want_recovery".into())); }
@@ -1372,6 +1390,7 @@ fn encode_upload_prefix(upload: &SignedUpload) -> Result<Vec<u8>, TransportError
     Ok(body)
 }
 
+#[cfg(test)]
 fn encode_upload(upload: &SignedUpload) -> Result<Vec<u8>, TransportError> {
     let mut body = encode_upload_prefix(upload)?;
     body.extend_from_slice(&upload.gzip_bytes);
@@ -1427,19 +1446,22 @@ struct WirePairingInvite {
     expires_at_ms: i64,
     secret_b64: String,
     certificate_der_b64: String,
+    #[serde(default)]
+    primary_display_name: Option<String>,
 }
 
 impl WirePairingInvite {
-    fn from_invite(invite: &PairingInvite, certificate_der: &[u8]) -> Self {
+    fn from_invite(invite: &PairingInvite, certificate_der: &[u8], primary_display_name: String) -> Self {
         let b64 = base64::engine::general_purpose::STANDARD;
         Self {
             invite_id: invite.invite_id.clone(), endpoint: invite.endpoint.clone(),
             certificate_pin: invite.certificate_pin.clone(), expires_at_ms: invite.expires_at_ms,
             secret_b64: b64.encode(&invite.secret), certificate_der_b64: b64.encode(certificate_der),
+            primary_display_name: Some(primary_display_name),
         }
     }
 
-    fn into_invite(self) -> Result<(PairingInvite, Vec<u8>), TransportError> {
+    fn into_invite(self) -> Result<(PairingInvite, Vec<u8>, Option<String>), TransportError> {
         let b64 = base64::engine::general_purpose::STANDARD;
         let secret = b64.decode(self.secret_b64).map_err(|e| TransportError::Protocol(format!("pairing invite secret encoding: {e}")))?;
         let certificate_der = b64.decode(self.certificate_der_b64).map_err(|e| TransportError::Protocol(format!("pairing certificate encoding: {e}")))?;
@@ -1449,9 +1471,12 @@ impl WirePairingInvite {
         }
         crate::protocol::valid_text("invite_id", &self.invite_id, false).map_err(|e| TransportError::Protocol(e.to_string()))?;
         crate::protocol::valid_text("endpoint", &self.endpoint, false).map_err(|e| TransportError::Protocol(e.to_string()))?;
+        if let Some(name) = self.primary_display_name.as_deref() {
+            crate::protocol::valid_text("primary_display_name", name, false).map_err(|e| TransportError::Protocol(e.to_string()))?;
+        }
         parse_endpoint(&self.endpoint)?;
         crate::protocol::validate_certificate_pin(&self.certificate_pin).map_err(|e| TransportError::Protocol(e.to_string()))?;
-        Ok((PairingInvite { invite_id: self.invite_id, endpoint: self.endpoint, certificate_pin: self.certificate_pin, expires_at_ms: self.expires_at_ms, secret }, certificate_der))
+        Ok((PairingInvite { invite_id: self.invite_id, endpoint: self.endpoint, certificate_pin: self.certificate_pin, expires_at_ms: self.expires_at_ms, secret }, certificate_der, self.primary_display_name))
     }
 }
 
@@ -1477,7 +1502,7 @@ fn issue_pairing_invite(store: &mut SyncStore, request: WirePairingInviteRequest
     }
     let pin = hex_bytes(&hash_bytes(certificate_der));
     let invite = store.create_pairing_invite(request.endpoint, pin, now_ms().saturating_add(DISCOVERY_INVITE_TTL_MS))?;
-    serde_json::to_vec(&WirePairingInvite::from_invite(&invite, certificate_der)).map_err(|e| SyncError::Protocol(format!("encode discovery pairing response: {e}")))
+    serde_json::to_vec(&WirePairingInvite::from_invite(&invite, certificate_der, usage_index::hostname())).map_err(|e| SyncError::Protocol(format!("encode discovery pairing response: {e}")))
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -1496,6 +1521,9 @@ fn dispatch_request(store: &mut SyncStore, request: &HttpRequest) -> (u16, Vec<u
         (DOWNLOAD_PATH, "application/json") => serde_json::from_slice::<AuthenticatedDownloadRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid download request: {e}")))
             .and_then(|download| store.primary_download_page(&download, now_ms(), 30).and_then(encode_primary_download_page)),
+        (DISPLAY_NAME_PATH, "application/json") => serde_json::from_slice::<AuthenticatedDisplayNameRequest>(&request.body)
+            .map_err(|e| SyncError::Protocol(format!("invalid display-name update: {e}")))
+            .and_then(|update| store.update_display_name(&update, now_ms()).and_then(|_| serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string())))),
         (RECOVERY_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid recovery request: {e}")))
             .and_then(|recovery| store.recover_stream(&recovery, now_ms()).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))),
@@ -1686,7 +1714,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST is supported".into()));
     }
     let known_path = match path {
-        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
