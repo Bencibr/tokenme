@@ -245,3 +245,40 @@ export function IconMonitorDown(p: IconProps) {
     </Svg>
   );
 }
+
+/** A compact OS mark for paired-device rows. */
+export function IconDevicePlatform({ os, ...p }: IconProps & { os: string }) {
+  const platform = os.toLowerCase();
+  if (platform.includes("windows")) {
+    return (
+      <Svg {...p}>
+        <path d="m3 5.2 7.5-1.1v7H3z" />
+        <path d="m12 3.9 9-1.3v8.5h-9z" />
+        <path d="M3 12.9h7.5v7L3 18.8z" />
+        <path d="m12 12.9 9 .1v8.4l-9-1.3z" />
+      </Svg>
+    );
+  }
+  if (platform.includes("mac") || platform.includes("darwin")) {
+    return (
+      <Svg {...p}>
+        <path d="M14.8 8c-1.1 0-1.8.6-2.8.6S10.2 8 9.2 8c-2.3 0-4.4 1.9-4.4 5.1 0 3.6 2.2 7.5 4.4 7.5.9 0 1.4-.6 2.8-.6s1.9.6 2.8.6c2.2 0 4.4-3.8 4.4-7.5 0-3.2-2.1-5.1-4.4-5.1z" />
+        <path d="M12.6 6.8c.1-1.9 1.5-3.2 3.4-3.4.1 1.7-1.2 3.2-3.4 3.4z" />
+      </Svg>
+    );
+  }
+  if (platform.includes("linux")) {
+    return (
+      <Svg {...p}>
+        <path d="M12 3.5c-2.4 0-4.2 2.1-4.2 5v4.4c-2.1 1.1-3.4 3.1-3.4 5.2 0 1 1 1.5 1.9.9l2-1.2h7.4l2 1.2c.9.6 1.9.1 1.9-.9 0-2.1-1.3-4.1-3.4-5.2V8.5c0-2.9-1.8-5-4.2-5z" />
+        <path d="M9.5 8.5h.01m4.98 0h.01m-4.7 3 2.2 1.2 2.2-1.2m-4.5 5.8-.8 2m5.1-2 .8 2" />
+      </Svg>
+    );
+  }
+  return (
+    <Svg {...p}>
+      <rect width="18" height="13" x="3" y="3" rx="1.5" />
+      <path d="M9 20h6m-3-4v4" />
+    </Svg>
+  );
+}

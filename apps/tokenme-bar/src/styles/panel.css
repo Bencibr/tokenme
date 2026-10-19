@@ -4021,6 +4021,17 @@
 .sync-dev-name {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-dev-platform {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
 }
 
 .sync-dev-name code {

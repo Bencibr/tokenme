@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DiscoveredPrimaryView, SyncDevicesSnapshot, SyncManagementRequest } from "../types";
 import { bridge } from "../lib/bridge";
 import { t } from "../lib/i18n";
-import { IconBack, IconCheck, IconClose, IconMonitorDown, IconRadioTower, IconWarn } from "./Icons";
+import { IconBack, IconCheck, IconClose, IconDevicePlatform, IconMonitorDown, IconRadioTower, IconWarn } from "./Icons";
 
 async function copyText(value: string): Promise<boolean> {
   try {
@@ -328,14 +328,18 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     }
   };
 
-  const deviceRow = (device: (typeof snapshot.devices)[number]) => (
-    <div className="sync-dev" key={device.device_id}>
-      <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : ""}`} aria-hidden="true" />
-      <span className="sync-dev-name">{device.display_name}</span>
-      {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : null}
-      <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "revoke", device_id: device.device_id }, message: t("sync.revoke.confirm", { name: device.display_name }) })}>{t("sync.disconnect")}</button>
-    </div>
-  );
+  const deviceRow = (device: (typeof snapshot.devices)[number]) => {
+    const hostName = device.origin.trim() || device.display_name.trim() || device.device_id;
+    return (
+      <div className="sync-dev" key={device.device_id}>
+        <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : ""}`} aria-hidden="true" />
+        <span className="sync-dev-platform" role="img" aria-label={device.os || "unknown system"} title={device.os || "unknown system"}><IconDevicePlatform os={device.os} size={14} /></span>
+        <span className="sync-dev-name" title={hostName}>{hostName}</span>
+        {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : null}
+        <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "revoke", device_id: device.device_id }, message: t("sync.revoke.confirm", { name: hostName }) })}>{t("sync.disconnect")}</button>
+      </div>
+    );
+  };
 
   return (
     <div className="sheet-backdrop" onClick={onClose}>
