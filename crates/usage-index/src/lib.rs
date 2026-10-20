@@ -1024,13 +1024,10 @@ impl Index {
             .map_err(sql_err)?;
         }
         ensure_sync_dirty_columns(&conn)?;
-        // Additive sync identity rows are a projection of event.  Old repair
-        // paths may delete local events without knowing this newer table; trim
-        // only orphan mappings, never the stable occurrence registry.
-        conn.execute(
-            "DELETE FROM sync_event_identity WHERE NOT EXISTS(SELECT 1 FROM event WHERE event.id = sync_event_identity.event_id)",
-            [],
-        ).map_err(sql_err)?;
+        // Additive sync identities are reconciled below only when a one-shot
+        // compatibility repair actually changed event rows. Running this
+        // orphan scan on every open duplicated that repair work and cost 3.6s
+        // on the 457k-row identity projection.
         let index_id: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key = 'index_id'", [], |r| r.get(0))
             .optional()
