@@ -89,7 +89,8 @@ function syncScreenFor(snapshot: SyncDevicesSnapshot): Screen {
 }
 
 export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDevicesSnapshot; onSnapshot: (next: SyncDevicesSnapshot) => void; onClose: () => void }) {
-  const [busy, setBusy] = useState(false);
+  const [mutationBusy, setMutationBusy] = useState(false);
+  const [pollingBusy, setPollingBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [discovering, setDiscovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +103,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [inviteOpen, setInviteOpen] = useState(false);
   const [pollGeneration, setPollGeneration] = useState(0);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmation | null>(null);
+  const [secondaryConnectingElapsed, setSecondaryConnectingElapsed] = useState(false);
   // Optimistic override for the primary's share switch: the panel-side write
   // can sit seconds behind the ingest engine's lock on the usage index, so the
   // toggle flips locally at click speed and reconciles when the write lands.
@@ -110,7 +112,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const discoveryInFlight = useRef(false);
   const manualDiscoveryRequested = useRef(false);
   const operationGeneration = useRef(0);
-  const operationInFlight = useRef<"initial" | "mutation" | "discover" | "poll" | null>(null);
+  const mutationInFlight = useRef(false);
+  const pollingInFlight = useRef(false);
   const mounted = useRef(false);
 
   useEffect(() => {
@@ -130,11 +133,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   }, [onClose]);
 
   const run = async (request: SyncManagementRequest, onSuccess?: (next: SyncDevicesSnapshot) => void) => {
-    if (!mounted.current || operationInFlight.current) return;
+    if (!mounted.current || mutationInFlight.current) return;
     setPendingConfirm(null);
     const generation = ++operationGeneration.current;
-    operationInFlight.current = "mutation";
-    setBusy(true);
+    mutationInFlight.current = true;
+    setMutationBusy(true);
     setError(null);
     setPollGeneration((value) => value + 1);
     try {
@@ -154,8 +157,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     } catch (e) {
       if (mounted.current && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (operationInFlight.current === "mutation" && generation === operationGeneration.current) operationInFlight.current = null;
-      if (mounted.current && generation === operationGeneration.current) setBusy(false);
+      if (generation === operationGeneration.current) mutationInFlight.current = false;
+      if (mounted.current && generation === operationGeneration.current) setMutationBusy(false);
     }
   };
 
@@ -183,11 +186,10 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   };
 
   const discover = useCallback(async () => {
-    if (!mounted.current || operationInFlight.current) return;
+    if (!mounted.current || mutationInFlight.current || discoveryInFlight.current) return;
     manualDiscoveryRequested.current = true;
     discoveryInFlight.current = true;
     const generation = ++operationGeneration.current;
-    operationInFlight.current = "discover";
     setDiscovering(true);
     setError(null);
     try {
@@ -200,7 +202,6 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       if (mounted.current && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       discoveryInFlight.current = false;
-      if (operationInFlight.current === "discover" && generation === operationGeneration.current) operationInFlight.current = null;
       if (mounted.current) setDiscovering(false);
     }
   }, [onSnapshot]);
@@ -210,9 +211,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     // Defer even the local status read by one task so the newly mounted sheet
     // gets a paint before any synchronous Tauri command work starts.
     const statusTimer = window.setTimeout(() => {
-      if (!alive || operationInFlight.current) return;
+      if (!alive || mutationInFlight.current) return;
       const generation = ++operationGeneration.current;
-      operationInFlight.current = "initial";
       void bridge.syncDevices().then((next) => {
         if (!alive || generation !== operationGeneration.current) return;
         setError(null);
@@ -220,7 +220,6 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       }).catch((e) => {
         if (alive && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
       }).finally(() => {
-        if (operationInFlight.current === "initial" && generation === operationGeneration.current) operationInFlight.current = null;
         if (alive && generation === operationGeneration.current) setInitializing(false);
       });
     }, 0);
@@ -241,7 +240,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     let timer: number | undefined;
     const attempt = () => {
       if (!alive || !mounted.current) return;
-      if (operationInFlight.current) {
+      if (mutationInFlight.current || discoveryInFlight.current) {
         timer = window.setTimeout(attempt, 50);
         return;
       }
@@ -277,6 +276,17 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     }
   }, [pickedRole, snapshot.role, snapshot.service_running]);
 
+  useEffect(() => {
+    if (snapshot.role !== "secondary" || !snapshot.service_running || snapshot.stream_id) {
+      setSecondaryConnectingElapsed(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setSecondaryConnectingElapsed(true);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [snapshot.role, snapshot.service_running, Boolean(snapshot.stream_id)]);
+
   const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
   // A primary start runs in a background worker; the sheet stays on the
   // overview and polls until the listener either serves or reports an error.
@@ -286,11 +296,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // approved but unreachable, and the error box plus the recovering state tell
   // that story instead of a stale waiting banner.
   const awaitingApprovalError = snapshot.last_error?.toLowerCase().includes("awaiting approval") ?? false;
-  const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id && (!snapshot.last_error || awaitingApprovalError);
+  const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id && (awaitingApprovalError || (!snapshot.last_error && secondaryConnectingElapsed));
   const secondaryServiceMayChange = snapshot.role === "secondary" && snapshot.service_running;
   const primaryDeviceStateMayChange = snapshot.role === "primary" && snapshot.devices.some((device) => device.role === "secondary" && device.status === "paired");
   const shouldPoll = primaryStarting || snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
-  const commandBusy = busy || initializing || discovering;
+  const commandBusy = mutationBusy || initializing || discovering;
+  const cancelBusy = mutationBusy;
 
   // Keep the overview live while pairing decisions are outstanding or a
   // secondary is retrying a temporarily unavailable primary.
@@ -301,33 +312,38 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     let timer: number | undefined;
     const poll = async () => {
       if (!alive) return;
-      const maxAttempts = snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange ? Number.POSITIVE_INFINITY : 12;
+      const maxAttempts = primaryStarting || snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange ? Number.POSITIVE_INFINITY : 12;
       if (attempts >= maxAttempts) return;
-      if (operationInFlight.current) {
+      if (mutationInFlight.current || pollingInFlight.current || discoveryInFlight.current) {
         timer = window.setTimeout(() => void poll(), 500);
         return;
       }
       attempts += 1;
-      let retryDelay = 5000;
+      const baseDelay = primaryStarting ? 1000 : 5000;
+      let retryDelay = baseDelay;
       const generation = ++operationGeneration.current;
-      operationInFlight.current = "poll";
-      setBusy(true);
+      pollingInFlight.current = true;
+      setPollingBusy(true);
       try {
         const next = await bridge.syncDevices({ action: "status" });
-        if (alive && mounted.current && generation === operationGeneration.current) { onSnapshot(next); setError(null); }
+        attempts = 0;
+        if (alive && mounted.current && generation === operationGeneration.current) {
+          onSnapshot(next);
+          setError(null);
+        }
       } catch (e) {
-        retryDelay = Math.min(30000, 5000 * 2 ** Math.max(0, attempts - 1));
+        retryDelay = Math.min(30000, baseDelay * 2 ** Math.max(0, attempts - 1));
         if (alive && mounted.current && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
       } finally {
-        if (operationInFlight.current === "poll" && generation === operationGeneration.current) operationInFlight.current = null;
-        if (alive && mounted.current && generation === operationGeneration.current) setBusy(false);
+        pollingInFlight.current = false;
+        if (alive && mounted.current) setPollingBusy(false);
       }
       if (alive && generation === operationGeneration.current && attempts < maxAttempts) timer = window.setTimeout(() => void poll(), retryDelay);
     };
     const pollInterval = primaryStarting ? 1000 : 5000;
     timer = window.setTimeout(() => void poll(), pollInterval);
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [onSnapshot, pollGeneration, primaryDeviceStateMayChange, secondaryServiceMayChange, shouldPoll, snapshot.pairing_pending]);
+  }, [onSnapshot, pollGeneration, primaryDeviceStateMayChange, primaryStarting, secondaryServiceMayChange, shouldPoll, snapshot.pairing_pending]);
 
   // The fast-accepted start leaves role empty until the worker finishes, but
   // the card it is bringing up is the primary's — without `primaryStarting`
@@ -431,7 +447,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   return (
     <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet sheet-srv" role="dialog" aria-modal="true" aria-label={t("sync.title")} onClick={(event) => event.stopPropagation()}>
+      <div className="sheet sheet-srv" role="dialog" aria-modal="true" aria-busy={pollingBusy} aria-label={t("sync.title")} onClick={(event) => event.stopPropagation()}>
         <div className="sheet-hd">
           <div className="sheet-hd-main"><h2 className="sec-label">{t("sync.title")}</h2></div>
           <div className="sheet-actions">
@@ -447,7 +463,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
           {snapshot.discovery_error ? <div className="sheet-notice" role="status"><IconWarn size={12} />{t("sync.discovery.permission_error", { message: snapshot.discovery_error })}</div> : null}
           {pendingConfirm ? <div className="sync-confirm" role="alertdialog" aria-live="assertive" aria-label={t("sync.confirm.title")}>
             <div className="sync-confirm-copy"><strong>{t("sync.confirm.title")}</strong><span>{pendingConfirm.message}</span></div>
-            <div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy} onClick={() => { const { request } = pendingConfirm; setPendingConfirm(null); void run(request); }}>{t("sync.confirm.accept")}</button><button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setPendingConfirm(null)}>{t("sync.confirm.cancel")}</button></div>
+            <div className="sync-actions"><button type="button" className="btn-accent" disabled={commandBusy} onClick={() => { const { request } = pendingConfirm; setPendingConfirm(null); void run(request); }}>{t("sync.confirm.accept")}</button><button type="button" className="btn-quiet" disabled={cancelBusy} onClick={() => setPendingConfirm(null)}>{t("sync.confirm.cancel")}</button></div>
           </div> : null}
 
           {screen === "setup" ? (
