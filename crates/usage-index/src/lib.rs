@@ -1060,6 +1060,11 @@ impl Index {
         // deliberately not a SCHEMA_VERSION bump: the `sync:` memos in meta
         // survive a wipe and would strand every merged bundle as "already
         // imported" (see that constant).
+        // Any repair below rewrote or removed event rows; the identity and
+        // dirty-journal reconciliation at the end of setup only has work to do
+        // when one actually fired. The scans otherwise touch half a million
+        // rows on every cold open of a large index.
+        let mut repairs_applied = 0usize;
         const REPAIR_CUMULATIVE_RESCAN: &str = "repair:cumulative-rescan-1";
         let repaired: Option<String> = conn
             .query_row(
@@ -1070,6 +1075,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if repaired.is_none() {
+            repairs_applied += 1;
             conn.execute(
                 "DELETE FROM file_state WHERE tool IN \
                  ('dsh', 'hermes', 'funide', 'joycode', 'claude', 'atomcode')",
@@ -1101,6 +1107,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if reseeded.is_none() {
+            repairs_applied += 1;
             conn.execute(
                 "DELETE FROM call WHERE event_id IN \
                  (SELECT id FROM event WHERE tool = 'antigravity' AND source NOT LIKE 'linux:%')",
@@ -1151,6 +1158,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if ide_split.is_none() {
+            repairs_applied += 1;
             // New-key twins go first: a build that already re-read a store
             // under the prefixed loader holds `antigravity*#<session>#<id>`
             // beside the old spelling, and re-keying the old spelling would
@@ -1211,6 +1219,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if split.is_none() {
+            repairs_applied += 1;
             // instr, not a slash-pinned LIKE: Windows source keys carry
             // backslashes, and the split happened on those machines too.
             // The new-key twins go first: a build that already re-read the CN
@@ -1268,6 +1277,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if dsh_proj.is_none() {
+            repairs_applied += 1;
             const DSH_PROJ_ROWS: &str =
                 "(SELECT id FROM event WHERE tool = 'dsh' AND dedupe_key LIKE '%#proj' \
                  AND source NOT LIKE 'linux:%')";
@@ -1312,6 +1322,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if trae_key.is_none() {
+            repairs_applied += 1;
             const TRAE_LOCAL_ROWS: &str = "(SELECT id FROM event \
                  WHERE tool IN ('trae', 'trae_cn') AND source NOT LIKE 'linux:%')";
             conn.execute(&format!("DELETE FROM call WHERE event_id IN ({TRAE_LOCAL_ROWS})"), [])
@@ -1343,6 +1354,7 @@ impl Index {
             "SELECT value FROM meta WHERE key = ?1", params![REPAIR_WORKBUDDY_SPLIT], |r| r.get(0),
         ).optional().map_err(sql_err)?;
         if buddy_split.is_none() {
+            repairs_applied += 1;
             let tx = conn.unchecked_transaction().map_err(sql_err)?;
             const CN_STORE: &str = "source NOT LIKE 'linux:%' AND instr(replace(source, char(92), '/'), '/.workbuddy/') > 0";
             let twins = format!(
@@ -1376,6 +1388,7 @@ impl Index {
             "SELECT value FROM meta WHERE key = ?1", params![REPAIR_QODER_SPLIT], |r| r.get(0),
         ).optional().map_err(sql_err)?;
         if qoder_split.is_none() {
+            repairs_applied += 1;
             let tx = conn.unchecked_transaction().map_err(sql_err)?;
             let cn_path = |col: &str| format!(
                 "{col} NOT LIKE 'linux:%' AND (instr(lower(replace({col}, char(92), '/')), '/.qoder-cn/') > 0 \
@@ -1404,11 +1417,16 @@ impl Index {
         // All compatibility repairs above may have removed or re-keyed event
         // rows.  Reconcile the additive identity projection after those
         // mutations, rather than waiting for the next ingest to encounter a
-        // UNIQUE(identity) error.
-        prune_stale_sync_event_identities(&conn)?;
-        // The same repairs can strand a retained dirty row whose event is
-        // gone.  Nobody can package it again, so it would pin prune forever
-        // and every later snapshot page would fail on the missing event.
+        // UNIQUE(identity) error. The reconciliation scans every projected
+        // row, so it runs only when a repair actually fired — a steady-state
+        // open of a large index must not pay seconds for cleanup it does not
+        // need (4.3 s warm on 457k identities, measured).
+        if repairs_applied > 0 {
+            prune_stale_sync_event_identities(&conn)?;
+        }
+        // This query is indexed by event_id and remains cheap in steady state;
+        // unlike identity reconciliation it must run on every open to prevent
+        // a deleted event from pinning the dirty journal indefinitely.
         prune_dangling_sync_dirty(&conn)?;
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
