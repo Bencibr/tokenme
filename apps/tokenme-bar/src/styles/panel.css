@@ -1250,6 +1250,8 @@
 .role-state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
 .role-state-running { color: var(--accent-ink); }
 .role-state-running::before { background: var(--accent-ink); }
+.role-state-degraded { color: var(--bad); }
+.role-state-degraded::before { background: var(--bad); }
 .role-state-recovering { color: #b47b1d; }
 .role-state-recovering::before { background: #b47b1d; }
 .role-state-error { color: #c25b4e; }
@@ -4108,6 +4110,10 @@
   background: var(--ink-3);
 }
 
+.sync-dev-dot.is-error {
+  background: var(--bad);
+}
+
 .sync-dev-name {
   flex: 1;
   min-width: 0;
@@ -4144,6 +4150,34 @@
   margin: 2px 0 10px;
   color: var(--ink-3);
   font-size: 11.5px;
+}
+
+.sync-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 2px 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.sync-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sync-progress-row span {
+  color: var(--ink-2);
+}
+
+.sync-progress-row code {
+  flex: none;
+  color: var(--ink-3);
+  font-size: 11px;
 }
 
 .sync-credbox {
@@ -4503,6 +4537,38 @@
 .sheet-notice.is-error span {
   min-width: 0;
   line-height: 1.45;
+}
+
+.sync-error-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.sync-error-copy strong {
+  font-weight: 600;
+}
+
+.sync-error-details {
+  margin-top: 3px;
+  color: var(--ink-2);
+}
+
+.sync-error-details summary {
+  cursor: pointer;
+  font-size: 10.5px;
+}
+
+.sync-error-details code {
+  display: block;
+  max-height: 90px;
+  margin-top: 4px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--ink-2);
+  font-size: 10px;
 }
 
 /* list */

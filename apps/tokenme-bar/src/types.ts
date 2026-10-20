@@ -429,6 +429,7 @@ export interface DiscoveredPrimaryView {
 
 export interface SyncDevicesSnapshot {
   primary_id: string | null;
+  primary_display_name: string | null;
   role: SyncDeviceRole | "unconfigured";
   service_running: boolean;
   primary_data_sharing_enabled: boolean;
@@ -437,6 +438,12 @@ export interface SyncDevicesSnapshot {
   certificate_pin: string | null;
   stream_id: string | null;
   data_epoch: number | null;
+  /** Secondary only: initial upload snapshot completion. `null` before a
+   *  stream exists, `false` while snapshot pages are still being ACKed. */
+  upload_complete: boolean | null;
+  /** Secondary only: primary-data downlink completion. `null` until the
+   *  primary shares its first page, `false` while the backfill runs. */
+  download_complete: boolean | null;
   pending: number;
   in_flight: number;
   pending_bytes: number;
