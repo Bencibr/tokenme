@@ -1,0 +1,13 @@
+{
+  "nowMs": 1792404000000,
+  "endpoints": { "quota": { "status": 200, "body": { "windowId": "daily", "usedPercent": 25, "resetsAtMs": 1792440000000 } } },
+  "sources": {
+    "sessions": {
+      "records": [
+        { "occurrence_id": "request-1", "model": "model-a", "ts_ms": 1792400000000, "input": 120, "cache_creation": 0, "cache_read": 0, "output": 80 },
+        { "occurrence_id": "request-2", "model": "model-b", "ts_ms": 1792400300000, "input": 300, "cache_creation": 0, "cache_read": 0, "output": 50 }
+      ],
+      "next_cursor": "2"
+    }
+  }
+}

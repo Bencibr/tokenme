@@ -1,0 +1,512 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tokenme:review:policy:0.5",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "plugin",
+        "global",
+        "override"
+      ],
+      "properties": {
+        "kind": {
+          "const": "quota_percent_low"
+        },
+        "plugin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "cooldown_ms",
+            "channels",
+            "thresholds_remaining_percent"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cooldown_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 604800000
+            },
+            "channels": {
+              "type": "array",
+              "maxItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "const": "system"
+              }
+            },
+            "thresholds_remaining_percent": {
+              "type": "array",
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        },
+        "global": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cooldown_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 604800000
+            },
+            "channels": {
+              "type": "array",
+              "maxItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "const": "system"
+              }
+            },
+            "thresholds_remaining_percent": {
+              "type": "array",
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        },
+        "override": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "values"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "inherit"
+                },
+                "values": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {}
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "values"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "override"
+                },
+                "values": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "cooldown_ms": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 604800000
+                    },
+                    "channels": {
+                      "type": "array",
+                      "maxItems": 1,
+                      "uniqueItems": true,
+                      "items": {
+                        "const": "system"
+                      }
+                    },
+                    "thresholds_remaining_percent": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "plugin",
+        "global",
+        "override"
+      ],
+      "properties": {
+        "kind": {
+          "const": "usage_threshold"
+        },
+        "plugin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "cooldown_ms",
+            "channels",
+            "metric",
+            "thresholds_tokens",
+            "timezone"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cooldown_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 604800000
+            },
+            "channels": {
+              "type": "array",
+              "maxItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "const": "system"
+              }
+            },
+            "metric": {
+              "const": "observed_tokens"
+            },
+            "thresholds_tokens": {
+              "type": "array",
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        },
+        "global": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cooldown_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 604800000
+            },
+            "channels": {
+              "type": "array",
+              "maxItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "const": "system"
+              }
+            },
+            "metric": {
+              "const": "observed_tokens"
+            },
+            "thresholds_tokens": {
+              "type": "array",
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        },
+        "override": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "values"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "inherit"
+                },
+                "values": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {}
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "values"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "override"
+                },
+                "values": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "cooldown_ms": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 604800000
+                    },
+                    "channels": {
+                      "type": "array",
+                      "maxItems": 1,
+                      "uniqueItems": true,
+                      "items": {
+                        "const": "system"
+                      }
+                    },
+                    "metric": {
+                      "const": "observed_tokens"
+                    },
+                    "thresholds_tokens": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "timezone": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "plugin",
+        "global",
+        "override"
+      ],
+      "properties": {
+        "kind": {
+          "const": "checkin_result"
+        },
+        "plugin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "cooldown_ms",
+            "channels",
+            "states"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cooldown_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 604800000
+            },
+            "channels": {
+              "type": "array",
+              "maxItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "const": "system"
+              }
+            },
+            "states": {
+              "type": "array",
+              "maxItems": 6,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "claimed",
+                  "already_claimed",
+                  "login_required",
+                  "outcome_unknown",
+                  "failed",
+                  "not_available"
+                ]
+              }
+            }
+          }
+        },
+        "global": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cooldown_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 604800000
+            },
+            "channels": {
+              "type": "array",
+              "maxItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "const": "system"
+              }
+            },
+            "states": {
+              "type": "array",
+              "maxItems": 6,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "claimed",
+                  "already_claimed",
+                  "login_required",
+                  "outcome_unknown",
+                  "failed",
+                  "not_available"
+                ]
+              }
+            }
+          }
+        },
+        "override": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "values"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "inherit"
+                },
+                "values": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {}
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "values"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "override"
+                },
+                "values": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "cooldown_ms": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 604800000
+                    },
+                    "channels": {
+                      "type": "array",
+                      "maxItems": 1,
+                      "uniqueItems": true,
+                      "items": {
+                        "const": "system"
+                      }
+                    },
+                    "states": {
+                      "type": "array",
+                      "maxItems": 6,
+                      "uniqueItems": true,
+                      "items": {
+                        "enum": [
+                          "claimed",
+                          "already_claimed",
+                          "login_required",
+                          "outcome_unknown",
+                          "failed",
+                          "not_available"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

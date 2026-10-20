@@ -1,0 +1,17 @@
+package tokenme:plugin@0.1.0;
+
+interface host {
+    record http-response {
+        status: u16,
+        body: string,
+    }
+    now-ms: func() -> u64;
+    http: func(endpoint-id: string) -> result<http-response, string>;
+    read-source: func(source-id: string, cursor: option<string>) -> result<string, string>;
+    log: func(event: string, fields-json: string) -> result<_, string>;
+}
+
+world adapter {
+    import host;
+    export execute: func(task-id: string, input-json: string) -> result<string, string>;
+}

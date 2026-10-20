@@ -1,0 +1,6 @@
+{
+  "tool.name": "Example IDE",
+  "settings.quota": "读取配额",
+  "settings.usage": "采集用量",
+  "log.quotaParsed": "识别到 {windows} 个配额窗口。"
+}

@@ -1,0 +1,16 @@
+[package]
+name = "tokenme-reference-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tokenme-plugin-sdk-reference = { path = "../sdk" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc", "std"] }

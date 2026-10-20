@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "toolchain", "sourceTreeSha256", "moduleSha256", "sdk", "sdkVersion"],
+  "properties": {
+    "schema": {"const": "tokenme.build/0.1"},
+    "toolchain": {"type": "object", "additionalProperties": false, "required": ["rustc", "target", "wasmtime", "witBindgen", "hostApi", "world", "pythonMinimum", "jsonschema"], "properties": {
+      "rustc": {"const": "1.98.1"}, "target": {"const": "wasm32-wasip2"}, "wasmtime": {"const": "49.0.0"}, "witBindgen": {"const": "0.63.0"}, "hostApi": {"const": "tokenme.plugin/0.1"}, "world": {"const": "tokenme:plugin/adapter@0.1.0"}, "pythonMinimum": {"const": "3.11"}, "jsonschema": {"const": "4.25.1"}
+    }},
+    "sourceTreeSha256": {"$ref": "#/$defs/hash"}, "moduleSha256": {"$ref": "#/$defs/hash"},
+    "sdk": {"const": "tokenme-plugin-sdk-reference"}, "sdkVersion": {"const": "0.1.0"},
+    "metadataOnlyVariant": {"const": true}, "derivedFromPackageSha256": {"$ref": "#/$defs/hash"}
+  },
+  "dependentRequired": {"metadataOnlyVariant": ["derivedFromPackageSha256"], "derivedFromPackageSha256": ["metadataOnlyVariant"]},
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

@@ -1,0 +1,10 @@
+{
+  "rustc": "1.98.1",
+  "target": "wasm32-wasip2",
+  "wasmtime": "49.0.0",
+  "witBindgen": "0.63.0",
+  "hostApi": "tokenme.plugin/0.1",
+  "world": "tokenme:plugin/adapter@0.1.0",
+  "pythonMinimum": "3.11",
+  "jsonschema": "4.25.1"
+}

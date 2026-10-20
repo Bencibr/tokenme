@@ -1,0 +1,22 @@
+{
+  "tool.name": "Example IDE",
+  "tool.description": "用于 TokenMe 插件协议草案的合成示例。",
+  "settings.usage": "采集用量",
+  "settings.quota": "读取配额",
+  "settings.checkin": "自动签到",
+  "settings.checkin.description": "全局设置同样允许时，执行注册的每日任务。",
+  "settings.estimation": "Token 与燃值预估",
+  "settings.notifications": "配额通知",
+  "settings.threshold": "配额使用达到此比例时通知",
+  "metric.actualTokens": "实际采集 Token",
+  "metric.estimatedTokens": "预估 Token",
+  "metric.estimatedValue": "燃值预估",
+  "action.checkin": "立即签到",
+  "view.quota": "配额",
+  "view.usage": "用量",
+  "view.models": "模型用量",
+  "notification.quotaLow.title": "Example IDE 配额提醒",
+  "notification.quotaLow.summary": "配额已使用：{usedPercent}%",
+  "log.quotaParsed": "识别到 {windows} 个配额窗口。",
+  "error.quotaResponseInvalid": "配额响应与预期格式不符。"
+}

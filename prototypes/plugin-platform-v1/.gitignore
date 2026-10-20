@@ -1,0 +1,6 @@
+/target/
+/dist/
+/sandbox/
+/artifacts/
+/.tools/
+__pycache__/

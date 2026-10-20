@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tokenme:review:scope:0.5",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "tool_ref",
+        "origin_device_ref"
+      ],
+      "properties": {
+        "kind": {
+          "const": "tool"
+        },
+        "tool_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "origin_device_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "tool_ref",
+        "account_ref",
+        "origin_device_ref"
+      ],
+      "properties": {
+        "kind": {
+          "const": "account"
+        },
+        "tool_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "account_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "origin_device_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "tool_ref",
+        "account_ref",
+        "source_ref",
+        "origin_device_ref"
+      ],
+      "properties": {
+        "kind": {
+          "const": "source"
+        },
+        "tool_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "account_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "source_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "origin_device_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    }
+  ]
+}

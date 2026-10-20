@@ -1,0 +1,12 @@
+[package]
+name = "tokenme-plugin-reference-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokenme-plugin-sdk-reference = { path = "../sdk" }
+serde_json.workspace = true
+sha2 = "=0.10.9"
+wasmtime = { version = "=49.0.0", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "=49.0.0", default-features = false, features = ["p2"] }

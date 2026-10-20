@@ -1,0 +1,17 @@
+{
+  "schema": "tokenme.reference-scenarios/0.1",
+  "cases": [
+    {"id": "replay", "task": "collect-usage", "fixture": "fixtures/happy.json", "repeat": 2, "exitCode": 0,
+      "assertions": {"/status": "ok", "/summary/observed_tokens": 550, "/summary/occurrences": 2, "/summary/duplicates": 2, "/summary/by_model": {"model-a": 200, "model-b": 350}, "/results/0/next_cursor": "2"}},
+    {"id": "happy", "task": "read-quota", "fixture": "fixtures/happy.json", "exitCode": 0,
+      "assertions": {"/status": "ok", "/results/0/windows/0/used_percent": 25, "/summary/observed_tokens": 0}},
+    {"id": "denied", "task": "read-quota", "fixture": "fixtures/happy.json", "denyHttp": true, "exitCode": 1,
+      "assertions": {"/error_code": "PERMISSION.DENIED", "/summary/observed_tokens": 0}},
+    {"id": "malformed", "task": "read-quota", "fixture": "fixtures/malformed-quota.json", "exitCode": 1,
+      "assertions": {"/error_code": "PARSE.SCHEMA_MISMATCH"}, "forbiddenLogText": ["DO_NOT_LOG_REFERENCE_SECRET"]},
+    {"id": "disabled", "task": "read-quota", "fixture": "fixtures/happy.json", "disabled": true, "exitCode": 0,
+      "assertions": {"/status": "gated", "/summary/observed_tokens": 0}, "absentEvents": ["http.begin", "source.read"]},
+    {"id": "fuel", "task": "read-quota", "fixture": "fixtures/happy.json", "fuel": 1000, "exitCode": 1,
+      "assertions": {"/error_code": "RUNTIME.BUDGET_EXCEEDED"}}
+  ]
+}

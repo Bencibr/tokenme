@@ -1,0 +1,123 @@
+{
+  "schema": "tokenme.audit-excerpts/0.1",
+  "scope": "design_counterexamples_not_runtime_poc",
+  "documents": {
+    "IMPLEMENTATION_SPEC.md": {
+      "original_sha256": "a334a08357fb08bcc87e8dcd63ef26176058fdf0b34da8f98ac5bdeb154b11bf",
+      "excerpt_sha256": "3b949e527af3d3aa9155d5210cb44937e0ca26e4dd8669be2b7ae9499e8a7d01",
+      "lines": [
+        {
+          "original_line": 298,
+          "fixture_line": 8
+        },
+        {
+          "original_line": 299,
+          "fixture_line": 11
+        },
+        {
+          "original_line": 307,
+          "fixture_line": 14
+        }
+      ]
+    },
+    "LANGUAGE_AND_SDK.md": {
+      "original_sha256": "36746c2cbb965402602af7385d6f0994e067c6b911399d4839d990213fc58d0e",
+      "excerpt_sha256": "00cdbd4a7ee906ac3e5c50b2192c2d0eb249a808a14eb9efa3a3146f8021f01a",
+      "lines": [
+        {
+          "original_line": 73,
+          "fixture_line": 8
+        }
+      ]
+    },
+    "PLAN.md": {
+      "original_sha256": "50f787e50714b1da907738717ec0fb4f411e6462893307b9b42604240f8fc74a",
+      "excerpt_sha256": "44d3291986136d2fb1e7f8fdaaf5cdb6e885dd355cdd94ea8599cbc705c81a30",
+      "lines": [
+        {
+          "original_line": 319,
+          "fixture_line": 8
+        }
+      ]
+    },
+    "PRODUCTION_CONTRACTS.md": {
+      "original_sha256": "43dce4843d936ff468fd734415a40881ba0fa5e3d7bd1dd57be77f56271ec971",
+      "excerpt_sha256": "b49c423f0daafe0b7187d1d5d740a335a154b5b844154bb680592da8a259f3a5",
+      "lines": [
+        {
+          "original_line": 11,
+          "fixture_line": 8
+        },
+        {
+          "original_line": 47,
+          "fixture_line": 11
+        },
+        {
+          "original_line": 52,
+          "fixture_line": 14
+        },
+        {
+          "original_line": 55,
+          "fixture_line": 17
+        },
+        {
+          "original_line": 61,
+          "fixture_line": 20
+        },
+        {
+          "original_line": 78,
+          "fixture_line": 23
+        },
+        {
+          "original_line": 81,
+          "fixture_line": 26
+        },
+        {
+          "original_line": 85,
+          "fixture_line": 29
+        },
+        {
+          "original_line": 92,
+          "fixture_line": 32
+        },
+        {
+          "original_line": 94,
+          "fixture_line": 35
+        },
+        {
+          "original_line": 98,
+          "fixture_line": 38
+        },
+        {
+          "original_line": 102,
+          "fixture_line": 41
+        },
+        {
+          "original_line": 119,
+          "fixture_line": 44
+        },
+        {
+          "original_line": 152,
+          "fixture_line": 47
+        },
+        {
+          "original_line": 166,
+          "fixture_line": 50
+        },
+        {
+          "original_line": 182,
+          "fixture_line": 53
+        },
+        {
+          "original_line": 197,
+          "fixture_line": 56
+        },
+        {
+          "original_line": 201,
+          "fixture_line": 59
+        }
+      ]
+    }
+  },
+  "excerpt_digest_encoding": "UTF-8 with LF line endings"
+}

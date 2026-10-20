@@ -1,0 +1,22 @@
+{
+  "tool.name": "Example IDE",
+  "tool.description": "A synthetic example for the TokenMe plugin protocol draft.",
+  "settings.usage": "Collect usage",
+  "settings.quota": "Read quota",
+  "settings.checkin": "Automatic check-in",
+  "settings.checkin.description": "Run the registered daily task when the global setting also allows it.",
+  "settings.estimation": "Token and value estimates",
+  "settings.notifications": "Quota notifications",
+  "settings.threshold": "Notify when quota used reaches",
+  "metric.actualTokens": "Observed tokens",
+  "metric.estimatedTokens": "Estimated tokens",
+  "metric.estimatedValue": "Estimated value",
+  "action.checkin": "Check in now",
+  "view.quota": "Quota",
+  "view.usage": "Usage",
+  "view.models": "Usage by model",
+  "notification.quotaLow.title": "Example IDE quota reminder",
+  "notification.quotaLow.summary": "Quota used: {usedPercent}%",
+  "log.quotaParsed": "Parsed {windows} quota windows.",
+  "error.quotaResponseInvalid": "The quota response does not match the expected format."
+}

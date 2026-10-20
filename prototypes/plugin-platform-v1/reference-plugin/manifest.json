@@ -1,0 +1,26 @@
+{
+  "manifestVersion": "1.0.0-alpha.1",
+  "id": "org.example.tokenme.reference",
+  "version": "0.1.0",
+  "hostApi": "tokenme.plugin/0.1",
+  "runtime": {
+    "kind": "wasm-component",
+    "world": "tokenme:plugin/adapter@0.1.0",
+    "entrypoint": "dist/plugin.wasm"
+  },
+  "tool": { "id": "example_ide", "nameKey": "tool.name", "icon": "assets/icon.svg", "accent": "#2563EB" },
+  "locales": { "en": "i18n/en.json", "zh-CN": "i18n/zh-CN.json" },
+  "defaultLocale": "en",
+  "permissions": { "endpoints": ["quota"], "sources": ["sessions"] },
+  "endpoints": [ { "id": "quota", "method": "GET", "origin": "https://api.example.invalid", "path": "/v1/quota" } ],
+  "sources": [ { "id": "sessions", "kind": "jsonl" } ],
+  "settings": [
+    { "key": "quota.enabled", "type": "boolean", "default": true, "labelKey": "settings.quota" },
+    { "key": "usage.enabled", "type": "boolean", "default": true, "labelKey": "settings.usage" }
+  ],
+  "tasks": [
+    { "id": "read-quota", "capability": "quota.read", "enabledSetting": "quota.enabled", "endpoints": ["quota"], "sources": [], "effect": "remote-read", "timeoutMs": 5000 },
+    { "id": "collect-usage", "capability": "usage.collect", "enabledSetting": "usage.enabled", "endpoints": [], "sources": ["sessions"], "effect": "local-read", "timeoutMs": 5000 }
+  ],
+  "diagnostics": { "events": [ { "code": "quota.parsed", "messageKey": "log.quotaParsed", "fields": { "windows": "integer" } } ] }
+}

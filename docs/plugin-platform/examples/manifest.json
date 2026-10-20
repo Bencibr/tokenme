@@ -1,0 +1,326 @@
+{
+  "manifestVersion": "1.0.0-draft.1",
+  "id": "org.example.tokenme.example-ide",
+  "version": "0.1.0",
+  "publisher": {
+    "id": "org.example",
+    "name": "Example Publisher"
+  },
+  "hostApi": "^1.0.0-alpha.1",
+  "runtime": {
+    "kind": "wasm-component",
+    "entrypoint": "dist/plugin.wasm"
+  },
+  "build": {
+    "sourceLanguage": "rust",
+    "sdk": "usage-plugin-sdk",
+    "sdkVersion": "0.1.0-draft.1",
+    "sourceRevision": "synthetic-example"
+  },
+  "hosts": ["desktop", "cli", "collector"],
+  "platforms": ["windows-x64", "macos-arm64", "linux-x64"],
+  "defaultLocale": "en",
+  "locales": {
+    "en": "i18n/en.json",
+    "zh-CN": "i18n/zh-CN.json"
+  },
+  "tools": [
+    {
+      "id": "example_ide",
+      "nameKey": "tool.name",
+      "descriptionKey": "tool.description",
+      "brand": {
+        "icon": "assets/icon.svg",
+        "light": { "accent": "#2563EB", "surface": "#EFF6FF" },
+        "dark": { "accent": "#93C5FD", "surface": "#172554" }
+      }
+    }
+  ],
+  "capabilities": [
+    { "id": "source.detect", "handler": "detect" },
+    { "id": "usage.collect", "handler": "collectUsage" },
+    { "id": "quota.read", "handler": "readQuota" },
+    { "id": "checkin.run", "handler": "runCheckin" },
+    { "id": "metric.estimate.tokens", "handler": "estimateTokens" },
+    { "id": "metric.estimate.value", "handler": "estimateValue" }
+  ],
+  "sources": [
+    {
+      "id": "sessions",
+      "kind": "jsonl",
+      "roots": {
+        "windows-x64": "${userHome}/.example-ide/sessions",
+        "macos-arm64": "${userHome}/.example-ide/sessions",
+        "linux-x64": "${userHome}/.example-ide/sessions"
+      },
+      "include": "**/*.jsonl",
+      "handler": "collectUsage"
+    }
+  ],
+  "endpoints": [
+    {
+      "id": "quota",
+      "origin": "https://api.example.invalid",
+      "method": "GET",
+      "path": "/v1/account/quota",
+      "credentialRef": "account",
+      "authentication": "bearer",
+      "responseHandler": "parseQuota"
+    },
+    {
+      "id": "checkin-status",
+      "origin": "https://api.example.invalid",
+      "method": "GET",
+      "path": "/v1/account/checkin-status",
+      "credentialRef": "account",
+      "authentication": "bearer",
+      "responseHandler": "parseCheckinStatus"
+    },
+    {
+      "id": "checkin",
+      "origin": "https://api.example.invalid",
+      "method": "POST",
+      "path": "/v1/account/checkin",
+      "credentialRef": "account",
+      "authentication": "bearer",
+      "responseHandler": "parseCheckin"
+    }
+  ],
+  "permissions": {
+    "sources": [
+      { "id": "sessions", "access": "read" }
+    ],
+    "endpoints": ["quota", "checkin-status", "checkin"],
+    "credentials": [
+      { "id": "account", "access": "use-for-bound-http" }
+    ],
+    "storage": { "scope": "plugin-tool-account" },
+    "notifications": true
+  },
+  "settings": [
+    {
+      "key": "usage.enabled",
+      "type": "boolean",
+      "default": true,
+      "scope": "device",
+      "labelKey": "settings.usage",
+      "controls": ["task:collect-usage"]
+    },
+    {
+      "key": "quota.enabled",
+      "type": "boolean",
+      "default": true,
+      "scope": "device",
+      "labelKey": "settings.quota",
+      "controls": ["task:read-quota"]
+    },
+    {
+      "key": "checkin.enabled",
+      "type": "boolean",
+      "default": false,
+      "scope": "device",
+      "labelKey": "settings.checkin",
+      "descriptionKey": "settings.checkin.description",
+      "controls": ["task:daily-checkin"]
+    },
+    {
+      "key": "estimation.enabled",
+      "type": "boolean",
+      "default": true,
+      "scope": "device",
+      "labelKey": "settings.estimation",
+      "controls": ["task:estimate-tokens", "task:estimate-value"]
+    },
+    {
+      "key": "notifications.enabled",
+      "type": "boolean",
+      "default": true,
+      "scope": "device",
+      "labelKey": "settings.notifications",
+      "controls": ["notification:quota-low"]
+    },
+    {
+      "key": "notifications.threshold",
+      "type": "number",
+      "default": 80,
+      "minimum": 1,
+      "maximum": 100,
+      "unit": "percent",
+      "scope": "device",
+      "labelKey": "settings.threshold",
+      "controls": ["notification:quota-low"]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "collect-usage",
+      "tool": "example_ide",
+      "capability": "usage.collect",
+      "handler": "collectUsage",
+      "sources": ["sessions"],
+      "enabledSetting": "usage.enabled",
+      "hostGates": ["plugin.enabled", "host.collection_allowed"],
+      "schedule": { "kind": "interval", "seconds": 60 },
+      "effect": "local-read",
+      "concurrency": "tool-account-source",
+      "timeoutMs": 10000,
+      "retry": { "mode": "next-scheduled-pass" },
+      "emits": ["usage.accepted"]
+    },
+    {
+      "id": "read-quota",
+      "tool": "example_ide",
+      "capability": "quota.read",
+      "handler": "readQuota",
+      "endpoints": ["quota"],
+      "enabledSetting": "quota.enabled",
+      "hostGates": ["plugin.enabled", "host.quota_polling"],
+      "schedule": { "kind": "interval", "seconds": 300 },
+      "effect": "remote-read",
+      "concurrency": "tool-account",
+      "timeoutMs": 5000,
+      "retry": { "mode": "bounded-backoff", "maxAttempts": 2 },
+      "emits": ["quota.changed"]
+    },
+    {
+      "id": "daily-checkin",
+      "tool": "example_ide",
+      "capability": "checkin.run",
+      "handler": "runCheckin",
+      "endpoints": ["checkin-status", "checkin"],
+      "enabledSetting": "checkin.enabled",
+      "hostGates": ["plugin.enabled", "host.auto_checkin"],
+      "schedule": {
+        "kind": "calendar",
+        "cron": "5 10 * * *",
+        "timezone": "Asia/Shanghai",
+        "missed": "reconcile-current-period"
+      },
+      "effect": "remote-write",
+      "concurrency": "tool-account-action-vendor-period",
+      "timeoutMs": 10000,
+      "retry": { "mode": "reconcile-before-retry", "statusEndpoint": "checkin-status" },
+      "emits": ["checkin.completed"]
+    },
+    {
+      "id": "estimate-tokens",
+      "tool": "example_ide",
+      "capability": "metric.estimate.tokens",
+      "handler": "estimateTokens",
+      "enabledSetting": "estimation.enabled",
+      "hostGates": ["plugin.enabled"],
+      "schedule": {
+        "kind": "event",
+        "events": ["usage.accepted", "quota.changed"],
+        "debounceMs": 500
+      },
+      "effect": "derive-only",
+      "concurrency": "tool-account-window",
+      "timeoutMs": 5000,
+      "retry": { "mode": "next-input-revision" },
+      "emits": ["tokens.estimated"]
+    },
+    {
+      "id": "estimate-value",
+      "tool": "example_ide",
+      "capability": "metric.estimate.value",
+      "handler": "estimateValue",
+      "enabledSetting": "estimation.enabled",
+      "hostGates": ["plugin.enabled"],
+      "schedule": {
+        "kind": "event",
+        "events": ["usage.accepted", "tokens.estimated"],
+        "debounceMs": 500
+      },
+      "effect": "derive-only",
+      "concurrency": "tool-account-window",
+      "timeoutMs": 5000,
+      "retry": { "mode": "next-input-revision" },
+      "emits": ["value.estimated"]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "usage.actual.tokens",
+      "labelKey": "metric.actualTokens",
+      "unit": "token",
+      "measurement": "observed",
+      "aggregation": "sum-accepted-occurrences",
+      "summarySlot": "tokens.actual"
+    },
+    {
+      "id": "estimates.tokens",
+      "labelKey": "metric.estimatedTokens",
+      "unit": "token",
+      "measurement": "estimated",
+      "aggregation": "latest-per-window",
+      "summarySlot": "tokens.estimated"
+    },
+    {
+      "id": "estimates.value",
+      "labelKey": "metric.estimatedValue",
+      "unit": "money",
+      "measurement": "estimated",
+      "aggregation": "sum-compatible-currency-scope",
+      "summarySlot": "value.estimated"
+    }
+  ],
+  "actions": [
+    {
+      "id": "checkin-now",
+      "labelKey": "action.checkin",
+      "task": "daily-checkin",
+      "trigger": "explicit-user-action",
+      "mayBypassAutomaticScheduleGate": true
+    }
+  ],
+  "views": [
+    { "id": "quota-card", "kind": "quota", "tool": "example_ide", "titleKey": "view.quota", "binding": "quota.current" },
+    { "id": "usage-card", "kind": "metric", "tool": "example_ide", "titleKey": "view.usage", "binding": "usage.actual.tokens" },
+    { "id": "models", "kind": "model-table", "tool": "example_ide", "titleKey": "view.models", "binding": "usage.by_model" },
+    { "id": "checkin-button", "kind": "action", "tool": "example_ide", "action": "checkin-now" }
+  ],
+  "events": [
+    { "id": "usage.accepted", "schema": "tokenme.usage-accepted/v1" },
+    { "id": "quota.changed", "schema": "tokenme.quota-changed/v1" },
+    { "id": "checkin.completed", "schema": "tokenme.checkin-result/v1" },
+    { "id": "tokens.estimated", "schema": "tokenme.estimate-result/v1" },
+    { "id": "value.estimated", "schema": "tokenme.estimate-result/v1" }
+  ],
+  "diagnostics": {
+    "events": [
+      {
+        "code": "quota.parsed",
+        "level": "INFO",
+        "messageKey": "log.quotaParsed",
+        "fields": {
+          "windows": { "type": "integer", "minimum": 0, "maximum": 1000 }
+        }
+      }
+    ],
+    "errors": [
+      {
+        "code": "quota_response_invalid",
+        "messageKey": "error.quotaResponseInvalid",
+        "retryable": false,
+        "suggestedAction": "check-plugin-update"
+      }
+    ]
+  },
+  "notifications": [
+    {
+      "id": "quota-low",
+      "event": "quota.changed",
+      "enabledSetting": "notifications.enabled",
+      "condition": {
+        "field": "usedPercent",
+        "operator": "gte",
+        "thresholdSetting": "notifications.threshold"
+      },
+      "titleKey": "notification.quotaLow.title",
+      "summaryKey": "notification.quotaLow.summary",
+      "dedupeScope": "tool-account-window-threshold",
+      "delivery": "host-policy"
+    }
+  ]
+}

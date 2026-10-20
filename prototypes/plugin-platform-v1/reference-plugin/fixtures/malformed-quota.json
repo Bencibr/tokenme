@@ -1,0 +1,5 @@
+{
+  "nowMs": 1792404000000,
+  "endpoints": { "quota": { "status": 200, "body": { "secret": "DO_NOT_LOG_REFERENCE_SECRET" } } },
+  "sources": {}
+}

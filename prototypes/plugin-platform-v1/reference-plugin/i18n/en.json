@@ -1,0 +1,6 @@
+{
+  "tool.name": "Example IDE",
+  "settings.quota": "Read quota",
+  "settings.usage": "Collect usage",
+  "log.quotaParsed": "Parsed {windows} quota windows."
+}
