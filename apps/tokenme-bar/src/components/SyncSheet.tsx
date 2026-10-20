@@ -56,6 +56,12 @@ function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recover
       : { kind: "recovering", label: t("sync.state.recovering") };
   }
   if (snapshot.last_error || snapshot.operation_state === "error") return { kind: "error", label: t("sync.state.error") };
+  // A fast-accepted start reports operation_state "running" while no service
+  // exists yet — without this the retry line claims a connection that was
+  // never lost, on a machine that is not even a secondary.
+  if (snapshot.primary_starting && !snapshot.service_running) {
+    return { kind: "recovering", label: t("sync.state.starting") };
+  }
   if (snapshot.service_running) return { kind: "running", label: t("sync.state.running") };
   if (snapshot.operation_state === "running") return { kind: "recovering", label: t("sync.state.recovering") };
   return { kind: "stopped", label: t("sync.state.stopped") };
@@ -323,7 +329,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [onSnapshot, pollGeneration, primaryDeviceStateMayChange, secondaryServiceMayChange, shouldPoll, snapshot.pairing_pending]);
 
-  const isPrimary = snapshot.role === "primary";
+  // The fast-accepted start leaves role empty until the worker finishes, but
+  // the card it is bringing up is the primary's — without `primaryStarting`
+  // here the badge reads 从端 with the secondary's paired-count line for the
+  // whole starting window.
+  const isPrimary = snapshot.role === "primary" || primaryStarting;
   const isSecondary = snapshot.role === "secondary";
   const secondaryHasError = isSecondary && snapshot.service_running && Boolean(snapshot.last_error);
   const secondaryDegraded = secondaryHasError && hasRecentSecondaryContact(snapshot);

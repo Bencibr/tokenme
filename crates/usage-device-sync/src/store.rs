@@ -544,6 +544,32 @@ impl SyncStore {
         Ok(store)
     }
 
+    /// `open` minus the index-side maintenance writes (journal release,
+    /// capture mirror refresh). For paths that must answer at UI speed while
+    /// the ingest engine holds long write transactions on the usage index;
+    /// `maintain` converges the skipped work once the listener is up.
+    pub fn open_deferred(path: impl Into<PathBuf>, primary_id: impl Into<String>) -> SyncResult<Self> {
+        let path = path.into();
+        let mut index = Index::open_preserving_corruption(&path).map_err(SyncError::from)?;
+        let state_path = sync_state_path(&path)?;
+        let mut state = Connection::open(&state_path).map_err(sql_err)?;
+        state.busy_timeout(std::time::Duration::from_secs(5)).map_err(sql_err)?;
+        let primary_id = primary_id.into();
+        validate_identifier("primary_id", &primary_id)?;
+        index.mark_device_sync_state().map_err(SyncError::from)?;
+        migrate(&mut index)?;
+        migrate_state(&mut state, &primary_id)?;
+        Ok(Self { index, state, primary_id })
+    }
+
+    /// The maintenance `open` performs eagerly: release journal revisions no
+    /// paired consumer will ever ACK, and refresh the ingest-time capture
+    /// mirror. `open_deferred` callers run this in the background.
+    pub fn maintain(&mut self) -> SyncResult<()> {
+        self.release_dirty_without_consumer()?;
+        self.write_capture_mirror()
+    }
+
     /// The journal is only meaningful while a sync consumer exists.  A primary
     /// whose devices were all revoked (or an upgraded index whose old capture
     /// predates download ACKs) must not keep pinning prune forever.
@@ -814,29 +840,7 @@ impl SyncStore {
 
     pub fn save_primary_config(&mut self, config: &PrimarySyncConfig, now_ms: i64) -> SyncResult<()> {
         config.validate(&self.primary_id)?;
-        Self::state_tx(&mut self.state, |tx| {
-            tx.execute(
-                "INSERT INTO device_sync_primary_config(
-                    config_key, primary_id, bind_addr, advertise_host, allow_lan, enabled,
-                    share_data_with_secondaries, updated_at_ms
-                 ) VALUES('primary', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(config_key) DO UPDATE SET
-                    primary_id = excluded.primary_id,
-                    bind_addr = excluded.bind_addr,
-                    advertise_host = excluded.advertise_host,
-                    allow_lan = excluded.allow_lan,
-                    enabled = excluded.enabled,
-                    share_data_with_secondaries = excluded.share_data_with_secondaries,
-                    updated_at_ms = excluded.updated_at_ms",
-                params![
-                    config.primary_id, config.bind_addr, config.advertise_host,
-                    if config.allow_lan { 1_i64 } else { 0_i64 },
-                    if config.enabled { 1_i64 } else { 0_i64 },
-                    if config.share_data_with_secondaries { 1_i64 } else { 0_i64 }, now_ms,
-                ],
-            ).map_err(sql_err)?;
-            Ok::<_, SyncError>(())
-        })
+        Self::state_tx(&mut self.state, |tx| upsert_primary_config_tx(tx, config, now_ms))
     }
 
     pub fn set_primary_enabled(&mut self, enabled: bool, now_ms: i64) -> SyncResult<()> {
@@ -889,6 +893,52 @@ impl SyncStore {
                 params![if enabled { 1_i64 } else { 0_i64 }, now_ms, primary_id],
             ).map_err(sql_err)?;
             if changed != 1 { return Err(SyncError::NotFound("primary sync configuration".into())); }
+            Ok(())
+        })
+    }
+
+    /// State-only persist for the primary start path: the role is recorded in
+    /// sync_state.db without opening the usage index, so the start cannot wait
+    /// out an ingest write transaction just to write its own config row. The
+    /// capture mirror refresh this upsert would imply is the background
+    /// `maintain` pass's concern.
+    pub fn write_primary_config_state(
+        path: impl AsRef<std::path::Path>,
+        primary_id: &str,
+        config: &PrimarySyncConfig,
+        now_ms: i64,
+    ) -> SyncResult<()> {
+        validate_identifier("primary_id", primary_id)?;
+        config.validate(primary_id)?;
+        let state_path = sync_state_path(path.as_ref())?;
+        let mut state = Connection::open(&state_path).map_err(sql_err)?;
+        state.busy_timeout(std::time::Duration::from_millis(500)).map_err(sql_err)?;
+        migrate_state(&mut state, primary_id)?;
+        Self::state_tx(&mut state, |tx| upsert_primary_config_tx(tx, config, now_ms))
+    }
+
+    /// State-only teardown for the secondary's stop button: deletes the
+    /// binding row from sync_state.db without ever opening the usage index,
+    /// so the stop cannot queue behind the ingest engine's write lock. The
+    /// index-side bookkeeping (disconnect notice, outbox retirement, journal
+    /// release, capture mirror) stays with `queue_secondary_disconnect`,
+    /// which the caller runs on a background thread with the captured config.
+    pub fn clear_secondary_config_state(
+        path: impl AsRef<std::path::Path>,
+        primary_id: &str,
+        device_id: &str,
+    ) -> SyncResult<()> {
+        validate_identifier("primary_id", primary_id)?;
+        validate_identifier("device_id", device_id)?;
+        let state_path = sync_state_path(path.as_ref())?;
+        let mut state = Connection::open(&state_path).map_err(sql_err)?;
+        state.busy_timeout(std::time::Duration::from_millis(500)).map_err(sql_err)?;
+        migrate_state(&mut state, primary_id)?;
+        Self::state_tx(&mut state, |tx| {
+            tx.execute(
+                "DELETE FROM device_sync_secondary_config WHERE config_key = 'secondary' AND device_id = ?1",
+                params![device_id],
+            ).map_err(sql_err)?;
             Ok(())
         })
     }
@@ -1382,6 +1432,21 @@ impl SyncStore {
             [], |row| row.get(0),
         ).optional().map_err(sql_err)?;
         Ok(value.as_deref() == Some(self.primary_id.as_str()))
+    }
+
+    /// Read-only twin of `secondary_disconnect_requested` for the panel's
+    /// status poll: answers from the index `meta` table without opening a
+    /// writable store, so a polling snapshot never queues behind the ingest
+    /// engine's write transactions. A missing index has no request pending.
+    pub fn read_secondary_disconnect_requested(path: impl AsRef<std::path::Path>, primary_id: &str) -> SyncResult<bool> {
+        let path = path.as_ref();
+        if !path.exists() { return Ok(false); }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let value: Option<String> = conn.query_row(
+            "SELECT value FROM meta WHERE key = 'device_sync_disconnect_requested'",
+            [], |row| row.get(0),
+        ).optional().map_err(sql_err)?;
+        Ok(value.as_deref() == Some(primary_id))
     }
 
     /// Remove the active secondary binding while leaving local usage history and
@@ -2899,7 +2964,78 @@ fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, 
     Ok::<_, SyncError>(())
 }
 
+/// Tables the index side of the device-sync schema owns. `migrate`'s DDL and
+/// `index_schema_complete` must describe the same set: a table present in the
+/// DDL but missing here would let the fast path skip its creation on an old
+/// database, so additions go in both places.
+const DEVICE_INDEX_TABLES: &[&str] = &[
+    "device_stream", "device_receipt", "device_package_marker", "device_package_tombstone",
+    "device_highwater", "device_sync_conflict", "device_sync_outbox", "device_sync_snapshot_cursor",
+    "device_sync_journal", "device_sync_outbox_sequence", "device_sync_scheduler_lease",
+    "device_sync_recovery",
+];
+
+/// Read-only probe for the device tables and added columns `migrate` ensures.
+/// A complete schema means the DDL batch would be a no-op, so the caller can
+/// skip taking the index write transaction entirely — that transaction is what
+/// made every `SyncStore::open` queue for seconds behind the ingest engine.
+fn index_schema_complete(conn: &Connection) -> bool {
+    let mut tables: i64 = 0;
+    if let Ok(value) = conn.query_row(
+        &format!(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ({})",
+            DEVICE_INDEX_TABLES.iter().map(|name| format!("'{name}'")).collect::<Vec<_>>().join(","),
+        ),
+        [], |row| row.get(0),
+    ) { tables = value; }
+    if tables != DEVICE_INDEX_TABLES.len() as i64 { return false; }
+    let has_column = |table: &str, column: &str| -> bool {
+        let mut stmt = match conn.prepare(&format!("PRAGMA table_info({table})")) { Ok(stmt) => stmt, Err(_) => return false };
+        let names = match stmt.query_map([], |row| row.get::<_, String>(1)) {
+            Ok(rows) => rows.filter_map(Result::ok).collect::<Vec<_>>(),
+            Err(_) => return false,
+        };
+        names.iter().any(|name| name == column)
+    };
+    has_column("device_sync_outbox", "payload_revision")
+        && has_column("device_sync_outbox", "snapshot_next_identity")
+        && has_column("device_sync_outbox", "snapshot_dirty_revision")
+        && has_column("device_sync_outbox", "snapshot_complete")
+        && has_column("device_sync_snapshot_cursor", "completion_generation")
+        && has_column("device_sync_journal", "payload_revision")
+        && has_column("device_sync_journal", "dirty_revision")
+        && has_column("device_receipt", "origin")
+        && has_column("device_receipt", "snapshot_complete")
+}
+
+/// The one upsert behind `save_primary_config` and its state-only static
+/// twin, so the instance write and the panel's direct write cannot drift.
+fn upsert_primary_config_tx(tx: &rusqlite::Transaction<'_>, config: &PrimarySyncConfig, now_ms: i64) -> SyncResult<()> {
+    tx.execute(
+        "INSERT INTO device_sync_primary_config(
+            config_key, primary_id, bind_addr, advertise_host, allow_lan, enabled,
+            share_data_with_secondaries, updated_at_ms
+         ) VALUES('primary', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(config_key) DO UPDATE SET
+            primary_id = excluded.primary_id,
+            bind_addr = excluded.bind_addr,
+            advertise_host = excluded.advertise_host,
+            allow_lan = excluded.allow_lan,
+            enabled = excluded.enabled,
+            share_data_with_secondaries = excluded.share_data_with_secondaries,
+            updated_at_ms = excluded.updated_at_ms",
+        params![
+            config.primary_id, config.bind_addr, config.advertise_host,
+            if config.allow_lan { 1_i64 } else { 0_i64 },
+            if config.enabled { 1_i64 } else { 0_i64 },
+            if config.share_data_with_secondaries { 1_i64 } else { 0_i64 }, now_ms,
+        ],
+    ).map_err(sql_err)?;
+    Ok(())
+}
+
 fn migrate(index: &mut Index) -> SyncResult<()> {
+    if index_schema_complete(index.conn()) { return Ok(()); }
     index.with_network_transaction(|tx| {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS device_stream(
@@ -5302,6 +5438,127 @@ mod tests {
         SyncStore::clear_primary_config_state(dir.path().join("index.db"), "primary-1").unwrap();
         assert!(SyncStore::read_primary_config(dir.path().join("index.db")).unwrap().is_none(), "the config row is gone from sync_state.db");
         assert!(!dir.path().join("index.db").exists(), "the usage index is never created by the stop path");
+    }
+
+    #[test]
+    fn secondary_stop_clears_state_without_the_usage_index() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut store = SyncStore::open(dir.path().join("index.db"), "primary-1").unwrap();
+            store.save_secondary_config(&crate::SecondarySyncConfig {
+                primary_id: "primary-1".into(), primary_display_name: Some("primary-1".into()),
+                device_id: "device-1".into(), origin: "SP-DESGIN".into(),
+                endpoint: "https://127.0.0.1:47821".into(), server_name: "localhost".into(),
+                certificate_der: vec![0x00; 8], certificate_pin: crate::protocol::hash_bytes(&[0x00; 8]),
+                identity_path: dir.path().join("secondary-identity.json"),
+                stream_id: None, data_epoch: None, expected_generation: None,
+                enabled: true, capture_enabled: true,
+                last_error: None, last_manifest_hash: None, last_gzip_hash: None,
+                last_connected_at_ms: None, last_ack_generation: None, last_ack_receipt_hash: None,
+            }, 1).unwrap();
+        }
+        for sidecar in ["index.db", "index.db-wal", "index.db-shm", "index.device-sync-state"] {
+            std::fs::remove_file(dir.path().join(sidecar)).ok();
+        }
+        // The secondary stop's state-only seam mirrors the primary's: the
+        // binding row goes away without the usage index ever being opened.
+        SyncStore::clear_secondary_config_state(dir.path().join("index.db"), "primary-1", "device-1").unwrap();
+        assert!(SyncStore::read_secondary_config(dir.path().join("index.db")).unwrap().is_none(), "the binding row is gone from sync_state.db");
+        assert!(!dir.path().join("index.db").exists(), "the usage index is never created by the secondary stop path");
+    }
+
+    #[test]
+    fn primary_start_persists_its_config_without_the_usage_index() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut store = SyncStore::open(dir.path().join("index.db"), "primary-1").unwrap();
+            store.save_primary_config(&PrimarySyncConfig {
+                primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+                advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+                share_data_with_secondaries: false,
+            }, 1).unwrap();
+        }
+        for sidecar in ["index.db", "index.db-wal", "index.db-shm", "index.device-sync-state"] {
+            std::fs::remove_file(dir.path().join(sidecar)).ok();
+        }
+        // The start path records the actually-bound listener through the same
+        // state-only seam: it must never open the usage index, or starting the
+        // primary queues behind the ingest engine's write lock.
+        SyncStore::write_primary_config_state(dir.path().join("index.db"), "primary-1", &PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47822".into(),
+            advertise_host: Some("192.168.101.66".into()), allow_lan: true, enabled: true,
+            share_data_with_secondaries: true,
+        }, 2).unwrap();
+        let config = SyncStore::read_primary_config(dir.path().join("index.db")).unwrap().unwrap();
+        assert_eq!(config.bind_addr, "127.0.0.1:47822", "the upsert replaces the remembered endpoint");
+        assert!(config.allow_lan && config.share_data_with_secondaries);
+        assert!(!dir.path().join("index.db").exists(), "the usage index is never created by the start's persist path");
+    }
+
+    #[test]
+    fn deferred_open_leaves_index_maintenance_to_maintain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let mirror = |store: &SyncStore| -> String {
+            store.index().conn().query_row(
+                "SELECT value FROM meta WHERE key = 'device_sync_capture_enabled'", [], |row| row.get(0),
+            ).unwrap()
+        };
+        let mut store = SyncStore::open(&path, "primary-1").unwrap();
+        store.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 1).unwrap();
+        let fresh = mirror(&store);
+        assert_eq!(fresh, "0", "with no paired device the mirror starts disabled");
+        // Pair a device straight into the state registry, the way an approved
+        // request would: the next full open would refresh the mirror to 1, and
+        // that refresh is an index write transaction the UI path must not pay
+        // for.
+        drop(store);
+        let state = rusqlite::Connection::open(sync_state_path(&path).unwrap()).unwrap();
+        state.execute(
+            "INSERT INTO device_registry(device_id, origin, display_name, os, public_key, status, data_epoch, created_at_ms)
+             VALUES('device-1', 'SP-DESGIN', 'SP-DESGIN', 'windows', X'00', 'paired', 1, 1)", [],
+        ).unwrap();
+        drop(state);
+
+        let mut deferred = SyncStore::open_deferred(&path, "primary-1").unwrap();
+        assert_eq!(mirror(&deferred), fresh, "open_deferred keeps the stale mirror instead of writing the index");
+        deferred.maintain().unwrap();
+        assert_ne!(mirror(&deferred), fresh, "maintain converges the mirror once the caller can afford the write");
+    }
+
+    #[test]
+    fn migrate_recreates_a_dropped_device_table_through_the_read_only_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let store = SyncStore::open(&path, "primary-1").unwrap();
+            store.index().conn().execute("DROP TABLE device_receipt", []).unwrap();
+        }
+        let store = SyncStore::open(&path, "primary-1").unwrap();
+        let exists: i64 = store.index().conn().query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'device_receipt'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(exists, 1, "the probe sees the hole and the DDL batch refills it");
+    }
+
+    #[test]
+    fn read_secondary_disconnect_requested_answers_without_a_writable_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let store = SyncStore::open(&path, "primary-1").unwrap();
+            store.index().conn().execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_disconnect_requested', 'primary-1')", [],
+            ).unwrap();
+        }
+        assert!(SyncStore::read_secondary_disconnect_requested(&path, "primary-1").unwrap(), "the flag answers for its own primary");
+        assert!(!SyncStore::read_secondary_disconnect_requested(&path, "primary-2").unwrap(), "another primary's flag is not this secondary's business");
+        assert!(!dir.path().join("missing.db").exists(), "sanity: the absent path is really absent");
+        assert!(!SyncStore::read_secondary_disconnect_requested(dir.path().join("missing.db"), "primary-1").unwrap(), "a missing index has no disconnect pending");
     }
 
     #[test]

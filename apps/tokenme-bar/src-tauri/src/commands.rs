@@ -782,7 +782,11 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
     let existing_primary_id = SyncStore::read_status(&index_path).map_err(|error| format!("cannot read sync role: {error}"))?.primary_id;
     let current_primary_id = existing_primary_id.unwrap_or_else(|| identity.device_id.clone());
-    let mut store = SyncStore::open(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
+    // Deferred open: no journal release, no capture mirror write — those are
+    // index write transactions that queue for seconds behind the ingest
+    // engine, and the start's banner must not wait for them. The background
+    // start_converge pass performs them once the listener is up.
+    let mut store = SyncStore::open_deferred(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
     stage("store_open", started);
     if current_primary_id != identity.device_id {
         store.rotate_primary_id(identity.device_id.clone(), current_ms()).map_err(|e| format!("cannot switch sync role: {e}"))?;
@@ -828,21 +832,46 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let diagnostics = server.diagnostics_handle();
     let address = server.local_addr().map_err(|e| e.to_string())?;
     let endpoint = format!("https://{endpoint_host}:{}", address.port());
-    let mut persisted = SyncStore::open(&index_path, identity.device_id.clone()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
-    // Pin the readable downlink origin (this machine's hostname) before the
-    // listener can serve a page, so secondaries see a name, not a device id.
-    persisted.pin_primary_export_origin(&usage_index::hostname()).map_err(|e| format!("cannot pin the primary export origin: {e}"))?;
-    persisted.save_primary_config(&PrimarySyncConfig {
-        primary_id: identity.device_id.clone(),
-        // Persist the port actually bound; `:0` is valid for tests and must
-        // not come back as an unusable endpoint after an app restart.
-        bind_addr: address.to_string(),
-        advertise_host: Some(host),
-        allow_lan,
-        enabled: true,
-        share_data_with_secondaries,
-    }, current_ms()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
+    // The role row lives in sync_state.db: persist it without opening the
+    // usage index, so a start cannot wait out the ingest engine's write lock
+    // just to record its own config. `:0` is valid for tests and must not
+    // come back as an unusable endpoint after an app restart.
+    SyncStore::write_primary_config_state(
+        &index_path,
+        &identity.device_id,
+        &PrimarySyncConfig {
+            primary_id: identity.device_id.clone(),
+            bind_addr: address.to_string(),
+            advertise_host: Some(host),
+            allow_lan,
+            enabled: true,
+            share_data_with_secondaries,
+        },
+        current_ms(),
+    ).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
     stage("persist_config", started);
+    // Index-side convergence the start no longer waits for: the readable
+    // downlink origin pin (this machine's hostname, so secondaries see a name,
+    // not a device id) plus the journal release and capture mirror refresh a
+    // full open performs. Secondaries cannot attach before pairing, so a pin
+    // landing seconds after the banner clears still precedes every reader.
+    {
+        let converge_path = index_path.clone();
+        let converge_primary = identity.device_id.clone();
+        thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = (|| {
+                let mut store = match SyncStore::open(&converge_path, converge_primary) {
+                    Ok(store) => store,
+                    Err(error) => return Err(format!("cannot open sync store: {error}")),
+                };
+                store.pin_primary_export_origin(&usage_index::hostname())
+                    .map_err(|error| format!("cannot pin the primary export origin: {error}"))?;
+                Ok(())
+            })();
+            log_sync_action("start_converge", started, outcome.as_ref().err().map(String::as_str));
+        });
+    }
     let mdns = if allow_lan {
         let certificate_pin = hex_bytes(&hash_bytes(&certificate_der));
         match register_mdns_primary(&identity.device_id, &certificate_pin, &endpoint) {
@@ -1261,9 +1290,9 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let mut secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| format!("cannot read secondary sync configuration: {error}"))?;
     let primary_config = SyncStore::read_primary_config(&index_path).map_err(|error| format!("cannot read primary sync configuration: {error}"))?;
     if let Some(config) = secondary_config.clone() {
-        let pending_disconnect = SyncStore::open(&index_path, config.primary_id.clone())
-            .map_err(|error| format!("cannot open secondary sync state: {error}"))?
-            .secondary_disconnect_requested()
+        // Read-only probe: a polling snapshot must never open a writable
+        // store, or every status tick queues behind the ingest write lock.
+        let pending_disconnect = SyncStore::read_secondary_disconnect_requested(&index_path, &config.primary_id)
             .map_err(|error| format!("cannot read pending secondary disconnect: {error}"))?;
         if pending_disconnect {
             stop_service(state);
@@ -1276,7 +1305,14 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         }
     }
     let pending_pairing = if secondary_config.is_none() { read_pending_pairing()? } else { None };
-    let restore_secondary = secondary_config.is_some()
+    // The start worker persists its config before it registers the service,
+    // so a status poll in that window would see a role row with no service
+    // and try to start a listener/runtime a second time — against the port
+    // the worker already bound. `primary_starting` marks that window for both
+    // restore paths: a primary being started must not resurrect a secondary
+    // binding either.
+    let restore_secondary = !state.primary_starting
+        && secondary_config.is_some()
         && (state.role.is_empty() || (state.role == "secondary" && state.runtime.is_none()));
     if restore_secondary {
         if let Some(config) = &secondary_config {
@@ -1310,9 +1346,13 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
             }
         }
     }
-    let restore_primary = primary_config.is_some()
-        && (state.role.is_empty() || (state.role == "primary" && state.service.is_none()));
-    if restore_primary {
+    // The start worker persists its config before it registers the service,
+    // so a status poll in that window would see a role row with no service
+    // and try to start the listener a second time — against the port the
+    // worker already bound. `primary_starting` marks that window.
+    let restore_primary = !state.primary_starting
+        && primary_config.is_some()
+        && (state.role.is_empty() || (state.role == "primary" && state.service.is_none()));    if restore_primary {
         if let Some(config) = &primary_config {
             state.role = "primary".into();
             state.primary_id = Some(config.primary_id.clone());
@@ -1661,8 +1701,30 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             stop_service(state);
             if was_secondary {
                 if let Some(config) = secondary_config {
-                    let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
-                    store.request_secondary_disconnect(current_ms()).map_err(|error| error.to_string())?;
+                    // State-only teardown, same seam as the primary's stop: the
+                    // binding row disappears from sync_state.db in milliseconds
+                    // while the ingest engine may hold the index write lock. The
+                    // index-side bookkeeping — the disconnect notice that revokes
+                    // this device on the primary, outbox retirement, journal
+                    // release, capture mirror — runs on a background thread with
+                    // the config captured here, because queue_secondary_disconnect
+                    // reads the row this delete removes.
+                    SyncStore::clear_secondary_config_state(&index_path, &config.primary_id, &config.device_id)
+                        .map_err(|error| error.to_string())?;
+                    let converge_path = index_path.clone();
+                    thread::spawn(move || {
+                        let started = Instant::now();
+                        let outcome = (|| {
+                            let mut store = match SyncStore::open(&converge_path, config.primary_id.clone()) {
+                                Ok(store) => store,
+                                Err(error) => return Err(format!("cannot open sync store: {error}")),
+                            };
+                            store.queue_secondary_disconnect(&config, current_ms())
+                                .map_err(|error| format!("cannot queue the disconnect notice: {error}"))?;
+                            Ok(())
+                        })();
+                        log_sync_action("stop_converge", started, outcome.as_ref().err().map(String::as_str));
+                    });
                 }
                 clear_secondary_state(state);
             } else {
