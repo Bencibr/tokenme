@@ -579,9 +579,11 @@ pub(crate) fn persist_sync_event_identity(
     Ok(())
 }
 
-/// Sync's durable event mirror is opt-in.  The table is created by the
-/// device-sync migration, so a normal/unpaired index keeps the old ingest
-/// footprint and never serializes every event just in case pairing happens.
+/// Sync's durable event mirror is opt-in.  Device pairing/configuration state
+/// lives in the dedicated `sync_state.db` (the device-sync split), so the
+/// capture switch is mirrored into this index's `meta` table by SyncStore on
+/// every config/pairing change; ingest reads only the mirror and never has to
+/// open the state database.
 ///
 /// Both roles consume the journal: a secondary uploads it, and a primary's
 /// downlink change feed serves revisions past each paired device's cursor
@@ -589,49 +591,11 @@ pub(crate) fn persist_sync_event_identity(
 /// behind the cursor).  Journal only while a consumer exists, otherwise every
 /// dirty row would pin its event against prune with nobody left to ACK it.
 pub(crate) fn sync_dirty_enabled(tx: &Transaction<'_>) -> Result<bool> {
-    let table_exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_secondary_config')",
-        [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    if !table_exists {
-        return Ok(false);
-    }
-    // `enabled` is the network scheduler switch.  Once a secondary is paired,
-    // capture must remain on while that switch is false, otherwise stop/resume
-    // can lose changes made before the old identity cursor.  The fallback keeps
-    // hand-built/older test tables compatible until the additive store
-    // migration has added `capture_enabled`.
-    let has_capture_enabled = {
-        let mut statement = tx.prepare("PRAGMA table_info(device_sync_secondary_config)").map_err(sql_err)?;
-        let names = statement.query_map([], |row| row.get::<_, String>(1)).map_err(sql_err)?;
-        names.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?.iter().any(|name| name == "capture_enabled")
-    };
-    let column = if has_capture_enabled { "capture_enabled" } else { "enabled" };
-    let secondary_capture: Option<i64> = tx.query_row(
-        &format!("SELECT {column} FROM device_sync_secondary_config WHERE config_key = 'secondary'"),
+    let mirror: Option<String> = tx.query_row(
+        "SELECT value FROM meta WHERE key = 'device_sync_capture_enabled'",
         [], |row| row.get(0),
     ).optional().map_err(sql_err)?;
-    if secondary_capture.is_some() {
-        return Ok(secondary_capture == Some(1));
-    }
-    let primary_configured: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_primary_config')",
-        [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    if !primary_configured {
-        return Ok(false);
-    }
-    let configured: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM device_sync_primary_config WHERE config_key = 'primary')",
-        [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    if !configured {
-        return Ok(false);
-    }
-    let paired: i64 = tx.query_row(
-        "SELECT count(*) FROM device_registry WHERE status = 'paired'", [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    Ok(paired > 0)
+    Ok(mirror.as_deref() == Some("1"))
 }
 
 pub(crate) fn mark_sync_dirty(
@@ -2513,12 +2477,11 @@ mod tests {
     #[test]
     fn primary_journals_only_while_a_paired_device_can_consume_the_change_feed() {
         let mut idx = Index::open_in_memory().unwrap();
+        // Pairing/configuration state lives in the dedicated sync_state.db; the
+        // capture switch reaches ingest through the meta mirror SyncStore
+        // maintains. A mirror of "1" stands in for a paired consumer here.
         idx.conn.execute_batch(
-            "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, capture_enabled INTEGER);
-             CREATE TABLE device_sync_primary_config(config_key TEXT PRIMARY KEY);
-             CREATE TABLE device_registry(device_id TEXT PRIMARY KEY, status TEXT NOT NULL);
-             INSERT INTO device_sync_primary_config(config_key) VALUES('primary');
-             INSERT INTO device_registry(device_id, status) VALUES('device-1', 'paired');
+            "INSERT INTO meta(key, value) VALUES('device_sync_capture_enabled', '1');
              INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, source, dedupe_key)
              VALUES(1, 'codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'local-row');",
         ).unwrap();
@@ -2529,7 +2492,7 @@ mod tests {
             "a paired device pulls the downlink change feed");
 
         idx.conn.execute_batch(
-            "UPDATE device_registry SET status = 'revoked' WHERE device_id = 'device-1';
+            "UPDATE meta SET value = '0' WHERE key = 'device_sync_capture_enabled';
              INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, source, dedupe_key)
              VALUES(2, 'codex', 12, 'session', 'tokens', 1, 'local.jsonl', 'other-row');",
         ).unwrap();

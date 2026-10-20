@@ -129,11 +129,7 @@ fn dirty_mirror_is_opt_in_and_keyless_state_starts_only_after_pairing_gate() {
     assert_eq!(idx.conn().query_row::<i64, _, _>("SELECT count(*) FROM sync_occurrence", [], |row| row.get(0)).unwrap(), 0);
 
     idx.conn().execute(
-        "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL)",
-        [],
-    ).unwrap();
-    idx.conn().execute(
-        "INSERT INTO device_sync_secondary_config(config_key, enabled) VALUES('secondary', 1)",
+        "INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_capture_enabled', '1')",
         [],
     ).unwrap();
     use std::io::Write;
@@ -180,11 +176,7 @@ fn sync_snapshot_pages_bound_rows_and_follow_stable_identity_cursor() {
     let adapter = Mock::new("mocka", dir.path());
     let mut idx = Index::open_in_memory().unwrap();
     idx.conn().execute(
-        "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL)",
-        [],
-    ).unwrap();
-    idx.conn().execute(
-        "INSERT INTO device_sync_secondary_config(config_key, enabled) VALUES('secondary', 1)",
+        "INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_capture_enabled', '1')",
         [],
     ).unwrap();
     idx.conn().execute(
@@ -231,11 +223,7 @@ fn sync_identity_initialization_is_bounded_and_restart_stable() {
     idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
     assert_eq!(idx.event_count().unwrap(), 4096);
     idx.conn().execute(
-        "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL)",
-        [],
-    ).unwrap();
-    idx.conn().execute(
-        "INSERT INTO device_sync_secondary_config(config_key, enabled) VALUES('secondary', 1)",
+        "INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_capture_enabled', '1')",
         [],
     ).unwrap();
 
@@ -264,11 +252,7 @@ fn sync_dirty_page_does_not_wait_for_historical_identities() {
     let adapter = Mock::new("mocka", dir.path());
     let mut idx = Index::open_in_memory().unwrap();
     idx.conn().execute(
-        "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL)",
-        [],
-    ).unwrap();
-    idx.conn().execute(
-        "INSERT INTO device_sync_secondary_config(config_key, enabled) VALUES('secondary', 1)",
+        "INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_capture_enabled', '1')",
         [],
     ).unwrap();
     idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
@@ -292,11 +276,7 @@ fn dirty_rows_that_fill_a_page_defer_events_to_the_next_page() {
     let adapter = Mock::new("mocka", dir.path());
     let mut idx = Index::open_in_memory().unwrap();
     idx.conn().execute(
-        "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL)",
-        [],
-    ).unwrap();
-    idx.conn().execute(
-        "INSERT INTO device_sync_secondary_config(config_key, enabled) VALUES('secondary', 1)",
+        "INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_capture_enabled', '1')",
         [],
     ).unwrap();
     idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
@@ -320,11 +300,7 @@ fn late_offline_growth_is_dirty_and_prune_waits_for_ack() {
     let adapter = Mock::new("mocka", dir.path());
     let mut idx = Index::open_in_memory().unwrap();
     idx.conn().execute(
-        "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, enabled INTEGER NOT NULL)",
-        [],
-    ).unwrap();
-    idx.conn().execute(
-        "INSERT INTO device_sync_secondary_config(config_key, enabled) VALUES('secondary', 1)",
+        "INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_capture_enabled', '1')",
         [],
     ).unwrap();
     idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();

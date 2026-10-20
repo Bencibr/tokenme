@@ -266,12 +266,12 @@ mod tests {
         let request_id = request(&mut store, &identity, 2);
         store.approve_pairing(&request_id, 3).unwrap();
         config.primary_id = "primary-2".into();
-        store.index().conn().execute_batch("CREATE TRIGGER fail_secondary BEFORE INSERT ON device_sync_secondary_config BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+        store.state.execute_batch("CREATE TRIGGER fail_secondary BEFORE INSERT ON device_sync_secondary_config BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
         assert!(store.transition_to_secondary(&config, 4).is_err());
         assert_eq!(store.primary_id(), "primary-1");
         assert!(store.primary_config().unwrap().is_some());
         assert_eq!(store.device(&identity.device_id).unwrap().unwrap().status, DeviceStatus::Paired);
-        store.index().conn().execute_batch("DROP TRIGGER fail_secondary").unwrap();
+        store.state.execute_batch("DROP TRIGGER fail_secondary").unwrap();
         store.transition_to_secondary(&config, 5).unwrap();
         assert_eq!(store.primary_id(), "primary-2");
         assert!(store.primary_config().unwrap().is_none());
