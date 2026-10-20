@@ -524,6 +524,16 @@ pub struct SyncStore {
     primary_id: String,
 }
 
+/// Opens a read-only SQLite connection with a short busy timeout. Read-only
+/// probes on `sync_state.db` or the usage index must not fail instantly with
+/// `DatabaseBusy` just because a concurrent writer holds the lock for a couple
+/// of milliseconds.
+fn open_read_only(path: impl AsRef<std::path::Path>) -> SyncResult<Connection> {
+    let conn = Connection::open_with_flags(path.as_ref(), OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+    conn.busy_timeout(std::time::Duration::from_millis(250)).map_err(sql_err)?;
+    Ok(conn)
+}
+
 impl SyncStore {
     pub fn new(index: Index, primary_id: impl Into<String>) -> SyncResult<Self> {
         Self::new_with_state(index, Connection::open_in_memory().map_err(sql_err)?, primary_id)
@@ -696,7 +706,8 @@ impl SyncStore {
         if metadata.file_type().is_symlink() {
             return Err(SyncError::Security(format!("sync state is a symlink: {}", path.display())));
         }
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let conn = open_read_only(&path)?;
+        conn.busy_timeout(std::time::Duration::from_millis(250)).map_err(sql_err)?;
         let has_state: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_meta')",
@@ -712,7 +723,7 @@ impl SyncStore {
             .optional()
             .map_err(sql_err)?;
         let index = if index_path.exists() {
-            Connection::open_with_flags(index_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?
+            open_read_only(index_path)?
         } else {
             Connection::open_in_memory().map_err(sql_err)?
         };
@@ -766,7 +777,7 @@ impl SyncStore {
         if metadata.file_type().is_symlink() {
             return Err(SyncError::Security(format!("sync state is a symlink: {}", path.display())));
         }
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let conn = open_read_only(&path)?;
         read_secondary_config_conn(&conn)
     }
 
@@ -780,7 +791,7 @@ impl SyncStore {
         if metadata.file_type().is_symlink() {
             return Err(SyncError::Security(format!("sync state is a symlink: {}", path.display())));
         }
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let conn = open_read_only(&path)?;
         read_primary_config_conn(&conn)
     }
 
@@ -793,7 +804,7 @@ impl SyncStore {
         let data_epoch = config.data_epoch? as i64;
         // Snapshot cursors live in the index: they commit atomically with the
         // event rows they cover. This stays a read-only open.
-        let conn = Connection::open_with_flags(path.as_ref(), OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+        let conn = open_read_only(path.as_ref()).ok()?;
         conn.query_row(
             "SELECT complete FROM device_sync_snapshot_cursor WHERE device_id = ?1 AND stream_id = ?2 AND data_epoch = ?3",
             params![config.device_id, stream_id, data_epoch],
@@ -806,7 +817,7 @@ impl SyncStore {
     /// backfill is still paging down.
     pub fn read_download_cursor_complete(path: impl AsRef<std::path::Path>, primary_id: &str) -> Option<bool> {
         // Snapshot cursors live in the index (see read_upload_cursor_complete).
-        let conn = Connection::open_with_flags(path.as_ref(), OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+        let conn = open_read_only(path.as_ref()).ok()?;
         conn.query_row(
             &format!("SELECT complete FROM device_sync_snapshot_cursor WHERE device_id = ?1 AND stream_id = '{PRIMARY_DOWNLOAD_STREAM_ID}' AND data_epoch = 1"),
             params![primary_id],
@@ -1369,13 +1380,13 @@ impl SyncStore {
         if std::fs::symlink_metadata(path).map_err(|error| SyncError::Io(path.to_path_buf(), error))?.file_type().is_symlink() {
             return Err(SyncError::Security("sync index is a symlink".into()));
         }
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let conn = open_read_only(path)?;
         read_disconnect_notices_conn(&conn, now_ms)
     }
 
     pub fn read_retained_identity_path(path: impl AsRef<std::path::Path>, primary_id: &str) -> SyncResult<Option<PathBuf>> {
         if !path.as_ref().exists() { return Ok(None); }
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let conn = open_read_only(path)?;
         let value: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = ?1", params![format!("device_sync_identity:{primary_id}")], |row| row.get(0)).optional().map_err(sql_err)?;
         Ok(value.map(PathBuf::from))
     }
@@ -1441,7 +1452,7 @@ impl SyncStore {
     pub fn read_secondary_disconnect_requested(path: impl AsRef<std::path::Path>, primary_id: &str) -> SyncResult<bool> {
         let path = path.as_ref();
         if !path.exists() { return Ok(false); }
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let conn = open_read_only(path)?;
         let value: Option<String> = conn.query_row(
             "SELECT value FROM meta WHERE key = 'device_sync_disconnect_requested'",
             [], |row| row.get(0),
@@ -2533,7 +2544,7 @@ impl SyncStore {
     }
 
     pub fn read_outbox_summary(path: impl AsRef<std::path::Path>) -> SyncResult<OutboxSummary> {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_err)?;
+        let conn = open_read_only(path)?;
         let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'device_sync_outbox')", [], |row| row.get(0)).map_err(sql_err)?;
         if !exists { return Ok(OutboxSummary::default()); }
         outbox_summary_conn(&conn)
