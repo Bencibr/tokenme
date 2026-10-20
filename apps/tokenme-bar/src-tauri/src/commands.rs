@@ -1399,18 +1399,29 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     })
 }
 
-/// Restore an explicitly enabled sync role before the WebView asks for its
-/// first snapshot. A disabled config is an intentional user stop and must not
-/// be treated as an autostart request.
+/// Restore an explicitly enabled sync role at boot. A disabled config is an
+/// intentional user stop and must not be treated as an autostart request.
+/// The restore snapshot can wait behind the ingest engine's index.db write
+/// lock for the whole of `store_open`/`persist_config` (23 s measured while
+/// it still ran on the main thread during setup), so the snapshot must never
+/// run inline here: kick the same locked-state restore the recovery loop
+/// performs onto a worker and return immediately. `ensure_sync_recovery_loop`
+/// is started first so its periodic tick re-arms anything the one-shot misses;
+/// `start_primary`/`start_secondary_runtime` are idempotent behind the
+/// control-state mutex, and a webview `sync_devices` read simply queues on
+/// that mutex until the restore finishes, so overlap is a wait, not a race.
 pub fn restore_sync_on_launch(app: &tauri::AppHandle) {
     ensure_sync_recovery_loop(app);
     let Some(control) = app.try_state::<SyncControl>() else { return; };
-    let Ok(mut state) = control.state.lock() else { return; };
-    if let Err(error) = sync_snapshot(&mut state, Some(app.clone()), true) {
-        state.last_error = Some(error);
-        state.phase = SyncPhase::Error;
-        return;
-    }
+    let state_ref = Arc::clone(&control.state);
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(mut state) = state_ref.lock() else { return; };
+        if let Err(error) = sync_snapshot(&mut state, Some(worker_app), true) {
+            state.last_error = Some(error);
+            state.phase = SyncPhase::Error;
+        }
+    });
 }
 
 fn rearm_pending_pairing_retry(state: &mut SyncControlState) {
@@ -1619,8 +1630,9 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             let config = SyncStore::read_primary_config(&index_path)
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "primary sync is not configured".to_string())?;
-            let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
-            store.set_primary_data_sharing(enabled, current_ms()).map_err(|error| error.to_string())
+            // State-only write: never opens the usage index, so the toggle
+            // cannot queue behind the ingest engine's write lock.
+            SyncStore::write_primary_data_sharing(&index_path, &config.primary_id, enabled, current_ms()).map_err(|error| error.to_string())
         }
         SyncManagementRequest::StartSecondary => {
             let config = SyncStore::read_secondary_config(&index_path)

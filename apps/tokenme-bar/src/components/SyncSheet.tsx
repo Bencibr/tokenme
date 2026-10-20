@@ -96,6 +96,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [inviteOpen, setInviteOpen] = useState(false);
   const [pollGeneration, setPollGeneration] = useState(0);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmation | null>(null);
+  // Optimistic override for the primary's share switch: the panel-side write
+  // can sit seconds behind the ingest engine's lock on the usage index, so the
+  // toggle flips locally at click speed and reconciles when the write lands.
+  const [shareOverride, setShareOverride] = useState<boolean | null>(null);
+  const shareBusy = useRef(false);
   const discoveryInFlight = useRef(false);
   const manualDiscoveryRequested = useRef(false);
   const operationGeneration = useRef(0);
@@ -146,6 +151,29 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       if (operationInFlight.current === "mutation" && generation === operationGeneration.current) operationInFlight.current = null;
       if (mounted.current && generation === operationGeneration.current) setBusy(false);
     }
+  };
+
+  // The share switch must never wait on the sync worker: flip locally now,
+  // persist in the background, and roll back only if the write actually fails.
+  const toggleSharing = (on: boolean) => {
+    if (!mounted.current || shareBusy.current) return;
+    shareBusy.current = true;
+    setShareOverride(on);
+    setError(null);
+    void bridge.syncDevices({ action: "set_primary_data_sharing", enabled: on })
+      .then((next) => {
+        if (!mounted.current) return;
+        setError(null);
+        onSnapshot(next);
+      })
+      .catch((e) => {
+        if (!mounted.current) return;
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (mounted.current) setShareOverride(null);
+        shareBusy.current = false;
+      });
   };
 
   const discover = useCallback(async () => {
@@ -547,9 +575,9 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   <label className="sync-share-setting">
                     <input
                       type="checkbox"
-                      checked={snapshot.primary_data_sharing_enabled}
+                      checked={shareOverride ?? snapshot.primary_data_sharing_enabled}
                       disabled={commandBusy}
-                      onChange={(event) => void run({ action: "set_primary_data_sharing", enabled: event.currentTarget.checked })}
+                      onChange={(event) => toggleSharing(event.currentTarget.checked)}
                     />
                     <span className="sync-share-copy">
                       <strong>{t("sync.share.title")}</strong>
