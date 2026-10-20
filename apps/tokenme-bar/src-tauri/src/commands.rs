@@ -1943,6 +1943,7 @@ pub struct PanelSettings {
     pub quota_display_mode: QuotaDisplayMode,
     pub show_cycle_tokens: bool,
     pub ttft_enabled: bool,
+    pub performance_monitoring: bool,
     pub hide_unused_tools: bool,
     pub hide_unused_quota: bool,
     pub hide_unused_estimation: bool,
@@ -2045,6 +2046,7 @@ pub async fn get_panel_settings(app: AppHandle) -> Result<PanelSettings, String>
         quota_display_mode: settings.quota_display_mode,
         show_cycle_tokens: settings.show_cycle_tokens,
         ttft_enabled: settings.ttft_enabled,
+        performance_monitoring: settings.performance_monitoring,
         hide_unused_tools: settings.hide_unused_tools,
         hide_unused_quota: settings.hide_unused_quota,
         hide_unused_estimation: settings.hide_unused_estimation,
@@ -2315,6 +2317,24 @@ pub fn set_ttft_enabled(app: AppHandle, on: bool) -> Result<(), String> {
     next.ttft_enabled = on;
     if let Err(error) = next.clone().save() {
         let _ = ttft.set_enabled(previous);
+        return Err(error.to_string());
+    }
+    *settings = next;
+    Ok(())
+}
+
+/// Start or stop opt-in process-family sampling; the logger writes samples to panel.log.
+#[tauri::command]
+pub fn set_performance_monitoring(app: AppHandle, on: bool) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
+    let previous = settings.performance_monitoring;
+    if previous == on { return Ok(()); }
+    crate::performance::set_enabled(on).map_err(|error| error.to_string())?;
+    let mut next = settings.clone();
+    next.performance_monitoring = on;
+    if let Err(error) = next.clone().save() {
+        let _ = crate::performance::set_enabled(previous);
         return Err(error.to_string());
     }
     *settings = next;

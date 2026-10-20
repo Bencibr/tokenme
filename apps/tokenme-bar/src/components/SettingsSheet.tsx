@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BubbleSkin, DiagnosticsResponse, McpClientConfig, NotifyState, NotifyTierKey, PanelSettings, ProbeTool, QuotaDisplayMode, SyncDevicesSnapshot, ThemeKey, UpdateStatus } from "../types";
-import { bridge, isMac, isWindows } from "../lib/bridge";
+import { bridge, inTauri, isMac, isWindows } from "../lib/bridge";
 import { CONTACT_EMAIL, RELEASE_PAGE_URL } from "../lib/about";
 import { t } from "../lib/i18n";
 import { toolDisplay } from "../lib/format";
@@ -130,6 +130,8 @@ export function SettingsSheet({
   const [quotaModeError, setQuotaModeError] = useState(false);
   const [ttftBusy, setTtftBusy] = useState(false);
   const [ttftError, setTtftError] = useState(false);
+  const [performanceBusy, setPerformanceBusy] = useState(false);
+  const [performanceError, setPerformanceError] = useState(false);
   const [mcpSync, setMcpSync] = useState<SyncDevicesSnapshot | null>(null);
   const [mcpStatus, setMcpStatus] = useState<DiagnosticsResponse | null>(null);
   const [mcpConfig, setMcpConfig] = useState<McpClientConfig | null>(null);
@@ -287,6 +289,20 @@ export function SettingsSheet({
       setTtftError(true);
     } finally {
       setTtftBusy(false);
+    }
+  };
+
+  const setPerformanceMonitoring = async (on: boolean) => {
+    if (performanceBusy || settings?.performance_monitoring === on) return;
+    setPerformanceBusy(true);
+    setPerformanceError(false);
+    try {
+      await bridge.setPerformanceMonitoring(on);
+      patch((s) => ({ ...s, performance_monitoring: on }));
+    } catch {
+      setPerformanceError(true);
+    } finally {
+      setPerformanceBusy(false);
     }
   };
 
@@ -851,6 +867,14 @@ export function SettingsSheet({
           <>
             {switchRow(t("set.autostart"), null, settings.autostart, setAutostart)}
             {switchRow(t("set.autoupdate"), t("set.autoupdate.hint"), settings.auto_update_check, setAutoUpdateCheck)}
+            {switchRow(
+              t("set.performance"),
+              t("set.performance.hint"),
+              settings.performance_monitoring,
+              (on) => void setPerformanceMonitoring(on),
+              performanceBusy || !inTauri,
+            )}
+            {performanceError ? <p className="sheet-hint" role="alert">{t("set.performance.failed")}</p> : null}
             {/* The footer already signs the sheet "TokenMe v…" on every tab;
                 a version row here said it twice. The build number — the one
                 thing the footer doesn't carry — lives in the check row. */}
