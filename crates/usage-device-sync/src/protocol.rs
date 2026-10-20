@@ -42,6 +42,7 @@ const IDENTITY_DOMAIN: &[u8] = b"tokenme-device-sync/identity/v1";
 const UPLOAD_DOMAIN: &[u8] = b"tokenme-device-sync/upload-signature/v1";
 const PAIRING_DOMAIN: &[u8] = b"tokenme-device-sync/pairing/v1";
 const STATUS_DOMAIN: &[u8] = b"tokenme-device-sync/status/v1";
+const DISPLAY_NAME_DOMAIN: &[u8] = b"tokenme-device-sync/display-name/v1";
 const DOWNLOAD_DOMAIN: &[u8] = b"tokenme-device-sync/download/v1";
 pub(crate) const MAX_AUTH_REQUEST_AGE_MS: i64 = 10 * 60 * 1000;
 pub(crate) const MAX_AUTH_REQUEST_FUTURE_SKEW_MS: i64 = 60 * 1000;
@@ -828,6 +829,7 @@ pub struct PairingInviteDetails {
     pub invite: PairingInvite,
     pub primary_id: Option<String>,
     pub server_name: Option<String>,
+    pub primary_display_name: Option<String>,
     pub certificate_der: Option<Vec<u8>>,
 }
 
@@ -858,6 +860,22 @@ impl PairingInvite {
             return Err(SyncError::Limit("invite certificate is missing or too large".into()));
         }
         Ok(format!("{}&primary={}&name={}&cert={}", self.url(), primary_id, server_name, hex(certificate_der)))
+    }
+
+    /// Includes the primary's human-readable host name without changing the
+    /// TLS server name (`name`), which is often `localhost` for pinned certs.
+    pub fn url_with_primary_name(
+        &self,
+        primary_id: &str,
+        server_name: &str,
+        certificate_der: &[u8],
+        primary_display_name: &str,
+    ) -> SyncResult<String> {
+        valid_text("primary_display_name", primary_display_name, false)?;
+        let mut url = self.url_with_certificate(primary_id, server_name, certificate_der)?;
+        url.push_str("&primary_name=");
+        url.push_str(&hex(primary_display_name.as_bytes()));
+        Ok(url)
     }
 
     pub fn parse_url(value: &str) -> SyncResult<PairingInviteDetails> {
@@ -892,9 +910,19 @@ impl PairingInvite {
         if let Some(primary_id) = &primary_id { valid_text("primary_id", primary_id, false)?; }
         let server_name = fields.get("name").map(|value| value.to_string());
         if let Some(server_name) = &server_name { valid_text("server_name", server_name, false)?; }
+        let primary_display_name = fields.get("primary_name").map(|value| {
+            if value.len() > MAX_STRING_BYTES.saturating_mul(2) {
+                return Err(SyncError::Limit("primary display name exceeds the invite limit".into()));
+            }
+            let bytes = decode_hex(value, "primary display name")?;
+            let name = String::from_utf8(bytes)
+                .map_err(|_| SyncError::Invalid("primary display name is not UTF-8".into()))?;
+            valid_text("primary_display_name", &name, false)?;
+            Ok(name)
+        }).transpose()?;
         let certificate_der = fields.get("cert").map(|value| decode_hex(value, "invite certificate")).transpose()?
             .map(|der| { if der.len() > MAX_MANIFEST_BYTES { Err(SyncError::Limit("invite certificate is too large".into())) } else { Ok(der) } }).transpose()?;
-        Ok(PairingInviteDetails { invite, primary_id, server_name, certificate_der })
+        Ok(PairingInviteDetails { invite, primary_id, server_name, primary_display_name, certificate_der })
     }
 
     pub fn secret_hash(&self) -> [u8; 32] { hash_bytes(&self.secret) }
@@ -1119,6 +1147,66 @@ impl AuthenticatedDownloadRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatedDisplayNameRequest {
+    pub protocol_id: String,
+    pub primary_id: String,
+    pub device_id: String,
+    pub origin: String,
+    pub display_name: String,
+    pub nonce: [u8; 16],
+    pub issued_at_ms: i64,
+    #[serde(with = "signature_serde")]
+    pub signature: [u8; 64],
+}
+
+impl AuthenticatedDisplayNameRequest {
+    pub fn new_at(
+        identity: &DeviceIdentity,
+        primary_id: impl Into<String>,
+        display_name: impl Into<String>,
+        issued_at_ms: i64,
+    ) -> SyncResult<Self> {
+        let display_name = display_name.into();
+        valid_text("display_name", &display_name, false)?;
+        let mut request = Self {
+            protocol_id: PROTOCOL_ID.into(),
+            primary_id: primary_id.into(),
+            device_id: identity.device_id.clone(),
+            origin: identity.origin.clone(),
+            display_name,
+            nonce: random_bytes::<16>()?,
+            issued_at_ms,
+            signature: [0; 64],
+        };
+        request.signature = identity.signing_key.sign(&request.signing_bytes()).to_bytes();
+        Ok(request)
+    }
+
+    pub fn verify(&self, public_key: &VerifyingKey) -> SyncResult<()> {
+        if self.protocol_id != PROTOCOL_ID || self.primary_id.is_empty() || self.device_id.is_empty()
+            || self.origin.is_empty() || !origin_ok(&self.origin)
+        {
+            return Err(SyncError::Auth("invalid authenticated display-name request".into()));
+        }
+        valid_text("display_name", &self.display_name, false)?;
+        public_key.verify(&self.signing_bytes(), &Signature::from_bytes(&self.signature))
+            .map_err(|_| SyncError::Auth("authenticated display-name signature verification failed".into()))
+    }
+
+    pub(crate) fn is_fresh(&self, now_ms: i64) -> bool {
+        self.issued_at_ms > now_ms.saturating_sub(MAX_AUTH_REQUEST_AGE_MS)
+            && self.issued_at_ms <= now_ms.saturating_add(MAX_AUTH_REQUEST_FUTURE_SKEW_MS)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        identity_bytes(DISPLAY_NAME_DOMAIN, &[
+            self.protocol_id.as_bytes(), self.primary_id.as_bytes(), self.device_id.as_bytes(),
+            self.origin.as_bytes(), self.display_name.as_bytes(), &self.nonce, &self.issued_at_ms.to_be_bytes(),
+        ])
+    }
+}
 
 fn unix_now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
@@ -1144,6 +1232,11 @@ pub struct AuthenticatedStatus {
     pub checkpoint_generation: Option<u64>,
     #[serde(default, with = "option_hash_serde")]
     pub checkpoint_receipt_hash: Option<[u8; 32]>,
+    // Older primaries omit this; its presence gates the optional update endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_display_name: Option<String>,
     #[serde(default)]
     pub primary_data_sharing: bool,
     pub coverage_lo_ms: Option<i64>,
@@ -1296,6 +1389,15 @@ mod tests {
         assert!(matches!(AuthenticatedStatusRequest::new_at_with_checkpoint(&identity, "primary-1", false, Some(0), 10), Err(SyncError::Invalid(_))));
     }
 
+    #[test]
+    fn authenticated_display_name_request_binds_the_name_to_the_identity() {
+        let identity = DeviceIdentity::create("stable-origin", "Old name").unwrap();
+        let public_key = identity.signing_key.verifying_key();
+        let mut request = AuthenticatedDisplayNameRequest::new_at(&identity, "primary-1", "New name", 10).unwrap();
+        request.verify(&public_key).unwrap();
+        request.display_name = "forged name".into();
+        assert!(matches!(request.verify(&public_key), Err(SyncError::Auth(_))));
+    }
 
     #[test]
     fn authenticated_download_request_binds_both_cursors() {
@@ -1311,6 +1413,20 @@ mod tests {
         assert!(matches!(request.verify(&key), Err(SyncError::Auth(_))));
     }
 
+    #[test]
+    fn authenticated_status_accepts_older_primary_without_display_names() {
+        let request_nonce = [0u8; 16];
+        let status: AuthenticatedStatus = serde_json::from_value(serde_json::json!({
+            "primary_id": "primary-1", "device_id": "device-1", "origin": "stable-origin",
+            "request_nonce": request_nonce, "status": "paired", "data_epoch": 1,
+            "active_stream_id": null, "expected_generation": null, "last_generation": null,
+            "highwater_generation": null, "highwater_receipt_hash": null,
+            "checkpoint_generation": null, "checkpoint_receipt_hash": null,
+            "coverage_lo_ms": null, "coverage_hi_ms": null, "observed_at_ms": 10
+        })).unwrap();
+        assert_eq!(status.display_name, None);
+        assert_eq!(status.primary_display_name, None);
+    }
 
     #[test]
     fn bounded_package_rejects_keyless_without_occurrence() {
@@ -1377,5 +1493,35 @@ mod tests {
         let mut remote = row(Some("k"));
         remote.source = "linux:malformed-without-key".into();
         assert!(matches!(NetworkPackage::from_rows("a", "4", 0, 100, &[remote], 1), Err(SyncError::Protocol(message)) if message.contains("re-export")));
+    }
+
+    #[test]
+    fn package_sums_survive_the_json_round_trip_bit_exactly() {
+        // Credits meters carry 17-significant-digit decimals (Qoder). Without
+        // serde_json's `float_roundtrip` the receiving parse lands 1 ulp off
+        // and the recomputed sums disagree with the manifest — the sync-killing
+        // "manifest sums mismatch" seen on a real 256-row page. This total is
+        // the exact value that misparsed in the field.
+        let values = [
+            55.883975737371436f64, 0.16658642857142855, 0.16647642857142858, 0.14730298382857143,
+            0.05871714285714285, 0.06676714285714286, 0.07775214285714284, 0.2392317705142857, 0.2906989285714286,
+        ];
+        for value in values {
+            let text = serde_json::to_string(&value).unwrap();
+            let parsed: f64 = serde_json::from_str(&text).unwrap();
+            assert_eq!(parsed.to_bits(), value.to_bits(), "serde_json parse of {text} must be bit-exact");
+        }
+        let rows = (0..256)
+            .map(|index| {
+                let mut r = row(Some(&format!("float-{index}")));
+                r.counts.credits = Some(values[index % values.len()]);
+                r
+            })
+            .collect::<Vec<_>>();
+        let package = NetworkPackage::from_rows("a", "4", 0, 100, &rows, 1).unwrap();
+        let (manifest, parsed) = package.validate().unwrap();
+        assert_eq!(manifest.rows, 256);
+        let total: f64 = parsed.iter().map(|r| r.counts.credits.unwrap()).sum();
+        assert_eq!(total.to_bits(), manifest.sums.credits.to_bits(), "the manifest sum must stay bit-identical through the JSON round trip");
     }
 }

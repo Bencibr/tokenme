@@ -12,7 +12,7 @@ export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 
 /** Last answers, handed back to the QA stubs so a scripted state machine can
  *  branch on the current snapshot instead of re-deriving it. */
-let syncCurrent: SyncDevicesSnapshot = { primary_id: null, role: "unconfigured", service_running: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [] };
+let syncCurrent: SyncDevicesSnapshot = { primary_id: null, primary_display_name: null, role: "unconfigured", service_running: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [] };
 let diagCurrent: DiagnosticsResponse = { enabled: false, lan_control_enabled: false, lan_control_expires_at_ms: null, sessions: [], retained_operations: 0, last_operation: null };
 
 /** The dismiss control is a Windows tray-panel affordance; macOS uses the
@@ -176,7 +176,7 @@ export const bridge: Bridge = {
     if (!inTauri) {
       const stub = window.__TOKENME_SYNC_STUB__;
       if (stub) { syncCurrent = await stub(request ?? null, syncCurrent); return syncCurrent; }
-      return { primary_id: null, role: "unconfigured", service_running: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, operation_state: "idle", last_checked_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] };
+      return { primary_id: null, primary_display_name: null, role: "unconfigured", service_running: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, operation_state: "idle", last_checked_at_ms: null, discovered_primaries: [], devices: [], pairing_requests: [] };
     }
     syncCurrent = await invoke<SyncDevicesSnapshot>("sync_devices", { request: request ?? null });
     return syncCurrent;
@@ -351,6 +351,11 @@ export const bridge: Bridge = {
   async setTtftEnabled(on: boolean): Promise<void> {
     if (!inTauri) { browserSettings.ttft_enabled = on; return; }
     await invoke<void>("set_ttft_enabled", { on });
+  },
+
+  async setPerformanceMonitoring(on: boolean): Promise<void> {
+    if (!inTauri) { browserSettings.performance_monitoring = on; return; }
+    await invoke<void>("set_performance_monitoring", { on });
   },
 
   onTtftUpdated(handler) {
@@ -640,6 +645,7 @@ const browserSettings: PanelSettings = {
   quota_display_mode: "used",
   show_cycle_tokens: false,
   ttft_enabled: false,
+  performance_monitoring: false,
   hide_unused_tools: true,
   hide_unused_quota: false,
   hide_unused_estimation: false,

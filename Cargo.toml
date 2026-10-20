@@ -62,7 +62,11 @@ usage-adapter-minimaxcode = { path = "crates/adapters/minimaxcode" }
 usage-adapter-all = { path = "crates/adapters/all" }
 
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` keeps f64 parses bit-exact. Without it serde_json's fast
+# path can land 1 ulp off on 17-significant-digit decimals (Qoder credits),
+# and the receiving side's recomputed package sums then disagree with the
+# manifest — a sync-killing mismatch that is invisible everywhere else.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 ureq = { version = "2", features = ["json"] }

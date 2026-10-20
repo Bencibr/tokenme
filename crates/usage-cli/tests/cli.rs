@@ -388,7 +388,7 @@ fn sync_run_ingests_and_uploads_a_codex_append_using_only_the_db_sidecar() {
     device.save(&identity_path).unwrap();
     let mut secondary = SyncStore::open(&db, "primary-cli").unwrap();
     secondary.save_secondary_config(&SecondarySyncConfig {
-        primary_id: "primary-cli".into(), device_id: device.device_id.clone(), origin: device.origin.clone(),
+        primary_id: "primary-cli".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
         endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
         certificate_der: cert_der.clone(), certificate_pin: pin, identity_path: identity_path.clone(),
         stream_id: Some(stream.stream_id.clone()), data_epoch: Some(stream.data_epoch),

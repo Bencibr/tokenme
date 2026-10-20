@@ -82,7 +82,7 @@ const [page, setPage] = useState<PageKey>(() => {
   const [serversLoaded, setServersLoaded] = useState(false);
   const [serversOpen, setServersOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
-  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, role: "unconfigured", service_running: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [] });
+  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, primary_display_name: null, role: "unconfigured", service_running: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [] });
   // The sheet's own close guard (a running install must not be dismissed) —
   // Escape asks through this ref instead of closing the sheet blind.
   const serverCloseRef = useRef<() => void>(() => {});
@@ -335,7 +335,11 @@ const [page, setPage] = useState<PageKey>(() => {
     const mins = Number(new URLSearchParams(location.search).get("stale"));
     return Number.isFinite(mins) && mins > 0 ? mins : null;
   }, []);
-  const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected);
+  const hasIndexedUsage = !!report && (
+    report.all_time.total_tokens > 0 || report.all_time.cost > 0 || report.all_time.credits > 0 ||
+    report.all_time.requests > 0 || report.all_time.sessions > 0
+  );
+  const isEmpty = !!report && report.sources.length > 0 && report.sources.every((s) => !s.detected) && !hasIndexedUsage;
 
   // Cold-start telemetry, stage 2 — and the handover. The native boot note covers
   // the wait for this panel's first pixels, and it has to stay until there are
@@ -529,7 +533,18 @@ const [page, setPage] = useState<PageKey>(() => {
 
         <main className="scroll" tabIndex={-1} ref={scroll}>
           {isEmpty ? (
-            <EmptyState sources={report.sources} onRefresh={() => void refresh()} />
+            loading ? (
+              /* The rescan hides everything and shows just the spinner; when
+                 the fresh report lands the same test renders the hero again —
+                 empty or not. */
+              <div className="empty">
+                <div className="empty-rescan">
+                  <Loading size={34} label={t("empty.scanning")} />
+                </div>
+              </div>
+            ) : (
+              <EmptyState onRefresh={() => void refresh()} />
+            )
           ) : (
             /* `key` remounts the page, which is what the entry animation needs. */
             <div className="page" key={page}>
