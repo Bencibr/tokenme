@@ -19,7 +19,9 @@ pub const BOOTSTRAP_WINDOW_LOGICAL: f64 = 144.0;
 pub const BOOTSTRAP_WINDOW_LOGICAL: f64 = 144.0;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+#[cfg(target_os = "windows")]
+use tauri::Emitter;
+use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 #[cfg(target_os = "windows")]
 pub fn configure(app: &AppHandle) -> tauri::Result<()> {
@@ -227,20 +229,6 @@ pub fn contains_point(app: &AppHandle, x: i32, y: i32) -> bool {
             && y >= rect.top
             && y < rect.bottom
     }
-}
-
-/// macOS: the pet's window frame, in screen points, when it is on screen.
-/// The click-away/focus-dismissal paths use this to treat a click on the pet
-/// as the pet's own business rather than as a click elsewhere.
-#[cfg(target_os = "macos")]
-pub fn visible_frame(app: &tauri::AppHandle) -> Option<(f64, f64, f64, f64)> {
-    let window = app.get_webview_window(LABEL)?;
-    if !window.is_visible().unwrap_or(false) {
-        return None;
-    }
-    let pos = window.outer_position().ok()?;
-    let size = window.outer_size().ok()?;
-    Some((pos.x as f64, pos.y as f64, size.width as f64, size.height as f64))
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

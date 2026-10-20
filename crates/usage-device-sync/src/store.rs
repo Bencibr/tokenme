@@ -16,13 +16,18 @@ use crate::protocol::{
     validate_network_reader, AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest,
     AuthenticatedStatus, AuthenticatedStatusRequest, NetworkManifest, NetworkPackage, NetworkRow,
     PairingInvite, PairingRequest, PrimaryDownloadPage, SignedUpload, StreamOpenReceipt, UploadEnvelope,
+    DISCONNECT_PURPOSE, STATUS_PURPOSE,
 };
 
 const STATE_VERSION: i64 = 7;
+/// Local cursor namespace for the primary→secondary snapshot downlink. It is
+/// not a sync stream and never travels on the wire: the name and the fixed
+/// epoch only key this secondary's own snapshot progress, so changing the wire
+/// protocol does not orphan it.
 const PRIMARY_DOWNLOAD_STREAM_ID: &str = "primary-download-v1";
 const MAX_PENDING_PAIRING_REQUESTS: i64 = 32;
 const MAX_OUTBOX_ENTRIES: i64 = 4_096;
-const MAX_OUTBOX_BYTES: i64 = 512 * 1024 * 1024;
+const MAX_OUTBOX_BYTES: i64 = 1024 * 1024 * 1024;
 const OUTBOX_BACKOFF_MAX_MS: i64 = 15 * 60 * 1000;
 const RECEIPT_DOMAIN: &[u8] = b"tokenme-device-sync/receipt/v1";
 const TOKENS_SCHEMA: &str = "tokens/v1";
@@ -504,7 +509,28 @@ impl SyncStore {
         // crash during the first migration must make the normal Index opener
         // preserve the database rather than quarantine it as disposable cache.
         migrate(&mut index, &primary_id)?;
-        Ok(Self { index, primary_id })
+        let mut store = Self { index, primary_id };
+        store.release_dirty_without_consumer()?;
+        Ok(store)
+    }
+
+    /// The journal is only meaningful while a sync consumer exists.  A primary
+    /// whose devices were all revoked (or an upgraded index whose old capture
+    /// predates download ACKs) must not keep pinning prune forever.
+    fn release_dirty_without_consumer(&mut self) -> SyncResult<()> {
+        self.index.with_network_transaction(|tx| {
+            let secondary: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM device_sync_secondary_config WHERE config_key = 'secondary')",
+                [], |row| row.get(0),
+            ).map_err(sql_err)?;
+            if secondary { return Ok(()); }
+            let primary: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM device_sync_primary_config WHERE config_key = 'primary')",
+                [], |row| row.get(0),
+            ).map_err(sql_err)?;
+            if !primary { return Ok(()); }
+            release_acked_dirty_tx(tx)
+        })
     }
 
     pub fn open(path: impl Into<PathBuf>, primary_id: impl Into<String>) -> SyncResult<Self> {
@@ -534,7 +560,12 @@ impl SyncStore {
         let new_primary_id = new_primary_id.into();
         validate_identifier("primary_id", &new_primary_id)?;
         if new_primary_id == self.primary_id { return Ok(()); }
-        self.index.with_network_transaction(|tx| rotate_primary_id_tx(tx, &new_primary_id, now_ms))?;
+        self.index.with_network_transaction(|tx| {
+            rotate_primary_id_tx(tx, &new_primary_id, now_ms)?;
+            // This role starts as a primary with no paired devices: the old
+            // journal's download consumers were wiped with the registry.
+            release_acked_dirty_tx(tx)
+        })?;
         self.primary_id = new_primary_id;
         Ok(())
     }
@@ -840,6 +871,29 @@ impl SyncStore {
             return Err(SyncError::NotPaired(request.device_id.clone()));
         }
 
+        // The persisted download cursor is this device's ACK for the dirty
+        // change feed: every revision at or below it was merged into its
+        // index.  Record it before serving, then release the journal floor.
+        let cursor = i64::try_from(request.after_dirty_revision)
+            .map_err(|_| SyncError::Limit("download dirty revision is too large".into()))?;
+        self.index.with_network_transaction(|tx| {
+            let (served, ack): (i64, i64) = tx.query_row(
+                "SELECT download_dirty_served, download_dirty_ack FROM device_registry WHERE device_id = ?1",
+                params![request.device_id], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(sql_err)?;
+            // A cursor can only name revisions this primary really served.
+            // A device whose cursor predates these columns bootstraps once.
+            if cursor > served && !(served == 0 && ack == 0) {
+                return Err(SyncError::Security("download cursor exceeds the served dirty revision".into()));
+            }
+            let effective = cursor.max(0);
+            tx.execute(
+                "UPDATE device_registry SET download_dirty_served = ?2, download_dirty_ack = ?3 WHERE device_id = ?1",
+                params![request.device_id, served.max(effective), ack.max(effective)],
+            ).map_err(sql_err)?;
+            release_acked_dirty_tx(tx)
+        })?;
+
         let sharing_enabled = self.primary_config()?.is_some_and(|config| config.share_data_with_secondaries);
         if !sharing_enabled {
             return Ok(PrimaryDownloadPage {
@@ -884,6 +938,15 @@ impl SyncStore {
             let coverage_lo_ms = coverage_hi_ms.saturating_sub(days.saturating_mul(day_ms));
             (Vec::new(), false, request.after_identity.clone(), request.after_dirty_revision, coverage_lo_ms, coverage_hi_ms)
         };
+        let served = i64::try_from(next_dirty_revision)
+            .map_err(|_| SyncError::Limit("download dirty revision is too large".into()))?;
+        self.index.with_network_transaction(|tx| {
+            tx.execute(
+                "UPDATE device_registry SET download_dirty_served = MAX(download_dirty_served, ?2) WHERE device_id = ?1",
+                params![request.device_id, served],
+            ).map_err(sql_err)?;
+            Ok::<_, SyncError>(())
+        })?;
         let package = NetworkPackage::from_rows_with_snapshot_complete(
             self.primary_export_origin(), INDEX_SCHEMA_VERSION, coverage_lo_ms, coverage_hi_ms,
             &rows, now_ms, complete,
@@ -1063,6 +1126,12 @@ impl SyncStore {
                 params![config.device_id],
             ).map_err(sql_err)?;
             tx.execute("DELETE FROM device_sync_secondary_config WHERE config_key = 'secondary' AND device_id = ?1", params![config.device_id]).map_err(sql_err)?;
+            // An explicit disconnect ends the sync promise.  No upload
+            // consumer will ACK these revisions, and a later pairing starts
+            // from a fresh snapshot; keeping them would let an unreachable
+            // primary pin local history against prune forever.
+            tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?;
+            tx.execute("DELETE FROM meta WHERE key = 'device_sync_dirty_json_bytes'", []).map_err(sql_err)?;
             tx.execute("DELETE FROM meta WHERE key = 'device_sync_disconnect_requested'", []).map_err(sql_err)?;
             tx.execute(
                 "INSERT INTO meta(key, value) VALUES('device_sync_last_unpaired_at_ms', ?1)
@@ -1102,6 +1171,21 @@ impl SyncStore {
                 let retired: i64 = tx.query_row("SELECT count(*) FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired'", params![device_id], |row| row.get(0)).map_err(sql_err)?;
                 tx.execute("DELETE FROM device_sync_journal WHERE device_id = ?1 AND outbox_id IN (SELECT id FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired')", params![device_id]).map_err(sql_err)?;
                 tx.execute("DELETE FROM device_sync_outbox WHERE device_id = ?1 AND state = 'retired'", params![device_id]).map_err(sql_err)?;
+                // A late notice can succeed after the user has already bound a
+                // new primary.  sync_dirty is not device-scoped, so clearing it
+                // here would drop the *new* binding's unsent changes.  Only
+                // release the journal when no upload consumer exists at all.
+                let has_binding: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM device_sync_secondary_config WHERE config_key = 'secondary')",
+                    [], |row| row.get(0),
+                ).map_err(sql_err)?;
+                if !has_binding {
+                    // These rows protected unsent changes from prune; with no
+                    // upload consumer left they would pin local events against
+                    // retention forever.
+                    tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?;
+                    tx.execute("DELETE FROM meta WHERE key = 'device_sync_dirty_json_bytes'", []).map_err(sql_err)?;
+                }
                 let audit = serde_json::json!({ "completed_at_ms": now_ms, "retired_packages": retired }).to_string();
                 tx.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![format!("device_sync_disconnect_done:{device_id}"), audit]).map_err(sql_err)?;
                 tx.execute("DELETE FROM meta WHERE key = ?1", params![key]).map_err(sql_err)?;
@@ -1141,6 +1225,10 @@ impl SyncStore {
                 "DELETE FROM device_sync_secondary_config WHERE config_key = 'secondary' AND primary_id = ?1",
                 params![self.primary_id],
             ).map_err(sql_err)?;
+            // No upload consumer remains; a fresh pairing takes a full
+            // snapshot from the event table instead of replaying this journal.
+            tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?;
+            tx.execute("DELETE FROM meta WHERE key = 'device_sync_dirty_json_bytes'", []).map_err(sql_err)?;
             tx.execute(
                 "DELETE FROM meta WHERE key = 'device_sync_disconnect_requested' AND value = ?1",
                 params![self.primary_id],
@@ -1204,6 +1292,18 @@ impl SyncStore {
     }
 
     pub fn update_secondary_stream(&mut self, receipt: &StreamOpenReceipt, now_ms: i64) -> SyncResult<()> {
+        self.write_secondary_stream(receipt, now_ms, false)
+    }
+
+    /// A recovery starts the upload sequence over at generation 1, so the
+    /// outbox, journal payloads, counters, snapshot cursor and ACK checkpoint
+    /// of the previous stream must go even when the primary idempotently
+    /// reissues the same empty stream.
+    pub fn adopt_recovered_stream(&mut self, receipt: &StreamOpenReceipt, now_ms: i64) -> SyncResult<()> {
+        self.write_secondary_stream(receipt, now_ms, true)
+    }
+
+    fn write_secondary_stream(&mut self, receipt: &StreamOpenReceipt, now_ms: i64, force_reset: bool) -> SyncResult<()> {
         if receipt.primary_id != self.primary_id { return Err(SyncError::Auth("stream receipt targets another primary".into())); }
         if receipt.data_epoch == 0 || receipt.expected_generation == 0 { return Err(SyncError::Invalid("stream receipt counters start at 1".into())); }
         self.index.with_network_transaction(|tx| {
@@ -1212,16 +1312,30 @@ impl SyncStore {
                 params![self.primary_id, receipt.device_id], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional().map_err(sql_err)?;
             let Some((stream_id, epoch)) = current else { return Err(SyncError::NotFound("secondary sync configuration".into())); };
-            let changed = stream_id.as_deref() != Some(receipt.stream_id.as_str()) || epoch != Some(receipt.data_epoch as i64);
+            let reset = force_reset || stream_id.as_deref() != Some(receipt.stream_id.as_str()) || epoch != Some(receipt.data_epoch as i64);
+            if reset {
+                // Packages signed for a stream or epoch the primary no longer
+                // accepts can never be ACKed; a retry loop on them hides the
+                // recovery instead of completing it.
+                tx.execute("DELETE FROM device_sync_journal WHERE device_id = ?1", params![receipt.device_id]).map_err(sql_err)?;
+                tx.execute("DELETE FROM device_sync_outbox WHERE device_id = ?1", params![receipt.device_id]).map_err(sql_err)?;
+                tx.execute("DELETE FROM device_sync_outbox_sequence WHERE device_id = ?1", params![receipt.device_id]).map_err(sql_err)?;
+                tx.execute(
+                    "DELETE FROM device_sync_snapshot_cursor WHERE device_id = ?1 AND stream_id <> ?2",
+                    params![receipt.device_id, PRIMARY_DOWNLOAD_STREAM_ID],
+                ).map_err(sql_err)?;
+            }
             tx.execute(
                 "UPDATE device_sync_secondary_config
                  SET stream_id = ?1, data_epoch = ?2, expected_generation = ?3,
                      last_error = NULL,
                      last_manifest_hash = CASE WHEN ?4 THEN NULL ELSE last_manifest_hash END,
                      last_gzip_hash = CASE WHEN ?4 THEN NULL ELSE last_gzip_hash END,
+                     last_ack_generation = CASE WHEN ?4 THEN NULL ELSE last_ack_generation END,
+                     last_ack_receipt_hash = CASE WHEN ?4 THEN NULL ELSE last_ack_receipt_hash END,
                      updated_at_ms = ?5
                  WHERE config_key = 'secondary' AND primary_id = ?6 AND device_id = ?7",
-                params![receipt.stream_id, receipt.data_epoch as i64, receipt.expected_generation as i64, changed, now_ms, self.primary_id, receipt.device_id],
+                params![receipt.stream_id, receipt.data_epoch as i64, receipt.expected_generation as i64, reset, now_ms, self.primary_id, receipt.device_id],
             ).map_err(sql_err)?;
             Ok(())
         })
@@ -1511,11 +1625,18 @@ impl SyncStore {
             let new_epoch = epoch.checked_add(1).ok_or_else(|| SyncError::Invalid("data epoch overflow".into()))?;
             tx.execute("UPDATE device_registry SET status = 'revoked', data_epoch = ?2, revoked_at_ms = ?3 WHERE device_id = ?1", params![device_id, new_epoch, now_ms]).map_err(sql_err)?;
             tx.execute("UPDATE device_stream SET active = 0 WHERE device_id = ?1", params![device_id]).map_err(sql_err)?;
+            // The revoked device can no longer ACK its share of the change
+            // feed; with no paired consumer left the journal must not pin
+            // local events against prune.
+            release_acked_dirty_tx(tx)?;
             Ok(new_epoch as u64)
         })
     }
 
     pub fn disconnect_device(&mut self, request: &AuthenticatedStatusRequest, now_ms: i64) -> SyncResult<()> {
+        if request.purpose != DISCONNECT_PURPOSE {
+            return Err(SyncError::Auth("a status request cannot act as a disconnect notice".into()));
+        }
         if request.primary_id != self.primary_id {
             return Err(SyncError::Auth("disconnect targets another primary".into()));
         }
@@ -1542,6 +1663,7 @@ impl SyncStore {
                 tx.execute("UPDATE device_stream SET active = 0 WHERE device_id = ?1", params![request.device_id]).map_err(sql_err)?;
             }
             tx.execute("UPDATE device_pairing_request SET status = 'rejected' WHERE device_id = ?1 AND status IN ('pending', 'expired')", params![request.device_id]).map_err(sql_err)?;
+            release_acked_dirty_tx(tx)?;
             Ok(())
         })
     }
@@ -1583,6 +1705,9 @@ impl SyncStore {
     }
 
     pub fn authenticated_status(&self, request: &AuthenticatedStatusRequest, observed_at_ms: i64) -> SyncResult<AuthenticatedStatus> {
+        if request.purpose != STATUS_PURPOSE {
+            return Err(SyncError::Auth("status request has the wrong purpose".into()));
+        }
         if request.primary_id != self.primary_id {
             return Err(SyncError::Auth("status targets another primary".into()));
         }
@@ -1716,6 +1841,9 @@ impl SyncStore {
     }
 
     pub fn recover_stream(&mut self, request: &AuthenticatedStatusRequest, now_ms: i64) -> SyncResult<StreamOpenReceipt> {
+        if request.purpose != STATUS_PURPOSE {
+            return Err(SyncError::Auth("recovery request has the wrong purpose".into()));
+        }
         if !request.want_recovery {
             return Err(SyncError::Invalid("recovery request flag is required".into()));
         }
@@ -1745,7 +1873,9 @@ impl SyncStore {
             ).optional().map_err(sql_err)?;
             let Some((status, current_epoch)) = current else { return Err(SyncError::NotPaired(request.device_id.clone())); };
             if status == "revoked" { return Err(SyncError::Revoked(request.device_id.clone())); }
-            if status != "paired" { return Err(SyncError::NotPaired(request.device_id.clone())); }
+            // `reconcile_required` is exactly the state this endpoint exists to
+            // repair; rejecting it made the only recovery path unreachable.
+            if status != "paired" && status != "reconcile_required" { return Err(SyncError::NotPaired(request.device_id.clone())); }
             let existing: Option<(String, i64, i64)> = tx.query_row(
                 "SELECT stream_id, data_epoch, expected_generation FROM device_sync_recovery WHERE device_id = ?1 AND nonce = ?2",
                 params![request.device_id, request.nonce.as_slice()],
@@ -1755,7 +1885,45 @@ impl SyncStore {
                 if epoch as u64 != current_epoch as u64 {
                     return Err(SyncError::EpochStale);
                 }
-                return Ok(StreamOpenReceipt { primary_id: self.primary_id.clone(), device_id: request.device_id.clone(), stream_id, data_epoch: epoch as u64, expected_generation: expected_generation as u64 });
+                let active: bool = tx.query_row(
+                    "SELECT active FROM device_stream WHERE device_id = ?1 AND stream_id = ?2",
+                    params![request.device_id, stream_id], |row| row.get::<_, i64>(0),
+                ).optional().map_err(sql_err)?.is_some_and(|active| active == 1);
+                // A later recovery supersedes an earlier challenge stream.  A
+                // retry that replays the older nonce must not be answered with
+                // a frozen receipt; fall through to the active stream below.
+                if active {
+                    tx.execute(
+                        "UPDATE device_registry SET status = 'paired' WHERE device_id = ?1 AND status = 'reconcile_required'",
+                        params![request.device_id],
+                    ).map_err(sql_err)?;
+                    return Ok(StreamOpenReceipt { primary_id: self.primary_id.clone(), device_id: request.device_id.clone(), stream_id, data_epoch: epoch as u64, expected_generation: expected_generation as u64 });
+                }
+            }
+            // A retry that lost its first response must not mint a second
+            // stream while the previous recovery stream is still empty and
+            // inside the challenge window: every lost response would freeze a
+            // stream nobody ever used.
+            let reusable: Option<(String, i64, i64, i64)> = tx.query_row(
+                "SELECT stream_id, data_epoch, expected_generation, opened_at_ms FROM device_stream
+                  WHERE device_id = ?1 AND active = 1 AND last_generation = 0",
+                params![request.device_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).optional().map_err(sql_err)?;
+            if let Some((stream_id, epoch, expected_generation, opened_at_ms)) = reusable {
+                if epoch == current_epoch && expected_generation == 1
+                    && opened_at_ms >= now_ms.saturating_sub(10 * 60 * 1000)
+                {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO device_sync_recovery(device_id, nonce, stream_id, data_epoch, expected_generation, issued_at_ms, expires_at_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![request.device_id, request.nonce.as_slice(), stream_id, epoch, 1, now_ms, now_ms.saturating_add(10 * 60 * 1000)],
+                    ).map_err(sql_err)?;
+                    tx.execute(
+                        "UPDATE device_registry SET status = 'paired' WHERE device_id = ?1 AND status = 'reconcile_required'",
+                        params![request.device_id],
+                    ).map_err(sql_err)?;
+                    return Ok(StreamOpenReceipt { primary_id: self.primary_id.clone(), device_id: request.device_id.clone(), stream_id, data_epoch: epoch as u64, expected_generation: 1 });
+                }
             }
             let active_challenges: i64 = tx.query_row(
                 "SELECT count(*) FROM device_sync_recovery WHERE device_id = ?1 AND expires_at_ms > ?2",
@@ -1769,10 +1937,16 @@ impl SyncStore {
             let Some((stored_key, status, epoch)) = row else { return Err(SyncError::NotPaired(request.device_id.clone())); };
             if stored_key.as_slice() != key.as_slice() { return Err(SyncError::Auth("recovery public key mismatch".into())); }
             if status == "revoked" { return Err(SyncError::Revoked(request.device_id.clone())); }
-            if status != "paired" { return Err(SyncError::NotPaired(request.device_id.clone())); }
+            if status != "paired" && status != "reconcile_required" { return Err(SyncError::NotPaired(request.device_id.clone())); }
             let stream_id = random_id("str-")?;
             tx.execute("UPDATE device_stream SET active = 0 WHERE device_id = ?1 AND active = 1", params![request.device_id]).map_err(sql_err)?;
             tx.execute("INSERT INTO device_stream(device_id, stream_id, data_epoch, expected_generation, last_generation, active, opened_at_ms) VALUES(?1, ?2, ?3, 1, 0, 1, ?4)", params![request.device_id, stream_id, epoch, now_ms]).map_err(sql_err)?;
+            // The new stream is the repair; leaving the registry in
+            // `reconcile_required` would reject the very uploads it unlocks.
+            tx.execute(
+                "UPDATE device_registry SET status = 'paired' WHERE device_id = ?1 AND status = 'reconcile_required'",
+                params![request.device_id],
+            ).map_err(sql_err)?;
             tx.execute("INSERT INTO device_sync_recovery(device_id, nonce, stream_id, data_epoch, expected_generation, issued_at_ms, expires_at_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![request.device_id, request.nonce.as_slice(), stream_id, epoch, 1, now_ms, now_ms.saturating_add(10 * 60 * 1000)]).map_err(sql_err)?;
             Ok(StreamOpenReceipt { primary_id: self.primary_id.clone(), device_id: request.device_id.clone(), stream_id, data_epoch: epoch as u64, expected_generation: 1 })
         })
@@ -2312,19 +2486,10 @@ fn enqueue_outbox_tx_with_cursor(
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![envelope.device_id, envelope.origin, identity, kind, row_json, outbox_id, revision as i64, dirty_revision, now_ms],
         ).map_err(sql_err)?;
-        // The immutable journal row is now the durable copy for this exact
-        // revision. A newer dirty revision is intentionally retained.
-        let legacy_json_bytes: i64 = tx.query_row(
-            "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty WHERE identity = ?1 AND revision <= ?2",
-            params![identity, dirty_revision], |row| row.get(0),
-        ).map_err(sql_err)?;
-        tx.execute(
-            "DELETE FROM sync_dirty WHERE identity = ?1 AND revision <= ?2",
-            params![identity, dirty_revision],
-        ).map_err(sql_err)?;
-        if legacy_json_bytes > 0 {
-            adjust_dirty_json_bytes_tx(tx, -legacy_json_bytes)?;
-        }
+        // The dirty row stays as the retention hold until this package is
+        // ACKed.  The journal row is the immutable payload copy; deleting the
+        // dirty row here would let prune remove the only local event while the
+        // package is still unsent (and a later disconnect drops the package).
     }
     let after_bytes: i64 = tx.query_row(
         "SELECT COALESCE((SELECT sum(length(manifest_bytes) + length(gzip_bytes) + length(signature)) FROM device_sync_outbox), 0)
@@ -2384,17 +2549,9 @@ fn rotate_primary_id_tx(tx: &Transaction<'_>, new_primary_id: &str, now_ms: i64)
     ] {
         tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
     }
-    // Keep the retained local dirty journal's byte accounting valid
-    // after the old role's outbox is isolated.
-    let dirty_json_bytes: i64 = tx.query_row(
-        "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty",
-        [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![dirty_json_bytes.to_string()],
-    ).map_err(sql_err)?;
+    // The journal survives a role switch: a transition to secondary uploads it
+    // (including changes older than the initial coverage window), and the
+    // caller decides when a resulting role has nobody left to consume it.
     tx.execute(
         "INSERT INTO device_sync_meta(key, value) VALUES('primary_id', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2406,6 +2563,37 @@ fn rotate_primary_id_tx(tx: &Transaction<'_>, new_primary_id: &str, now_ms: i64)
         params![now_ms.to_string()],
     ).map_err(sql_err)?;
     Ok::<_, SyncError>(())
+}
+
+/// Drops every dirty revision all paired downlink consumers have confirmed.
+/// The floor is the minimum persisted download cursor; revisions above it may
+/// still be needed by a device that has not pulled them yet.  With no paired
+/// device there is no consumer at all and the journal cannot be ACKed, so it
+/// must not keep pinning local events against prune.
+fn release_acked_dirty_tx(tx: &Transaction<'_>) -> SyncResult<()> {
+    let paired: i64 = tx.query_row(
+        "SELECT count(*) FROM device_registry WHERE status = 'paired'", [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    let removed = if paired == 0 {
+        tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?
+    } else {
+        let floor: i64 = tx.query_row(
+            "SELECT COALESCE(MIN(download_dirty_ack), 0) FROM device_registry WHERE status = 'paired'",
+            [], |row| row.get(0),
+        ).map_err(sql_err)?;
+        tx.execute("DELETE FROM sync_dirty WHERE revision <= ?1", params![floor]).map_err(sql_err)?
+    };
+    if removed > 0 {
+        let bytes: i64 = tx.query_row(
+            "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty", [], |row| row.get(0),
+        ).map_err(sql_err)?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![bytes.to_string()],
+        ).map_err(sql_err)?;
+    }
+    Ok(())
 }
 
 fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
@@ -2583,6 +2771,12 @@ fn migrate(index: &mut Index, primary_id: &str) -> SyncResult<()> {
         ensure_column(tx, "device_sync_secondary_config", "last_ack_receipt_hash", "BLOB")?;
         ensure_column(tx, "device_sync_secondary_config", "capture_enabled", "INTEGER NOT NULL DEFAULT 1")?;
         ensure_column(tx, "device_sync_secondary_config", "primary_display_name", "TEXT")?;
+        // A primary's downlink is a journal consumer: each request carries the
+        // secondary's persisted dirty cursor, which ACKs every revision at or
+        // below it.  `served` bounds the claim to pages this primary really
+        // produced (0/0 lets a pre-upgrade cursor bootstrap once).
+        ensure_column(tx, "device_registry", "download_dirty_served", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(tx, "device_registry", "download_dirty_ack", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(tx, "device_receipt", "origin", "TEXT NOT NULL DEFAULT ''")?;
         ensure_column(tx, "device_receipt", "snapshot_complete", "INTEGER NOT NULL DEFAULT 0")?;
         tx.execute(
@@ -3493,7 +3687,9 @@ mod tests {
     fn authenticated_disconnect_revokes_the_device_and_is_idempotent() {
         let device = identity("explicit-disconnect");
         let (mut store, stream) = paired_store_for(&device);
-        let request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, 10).unwrap();
+        let status = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, 10).unwrap();
+        assert!(matches!(store.disconnect_device(&status, 20), Err(SyncError::Auth(_))));
+        let request = AuthenticatedStatusRequest::new_disconnect_at(&device, "primary-1", 10).unwrap();
         store.disconnect_device(&request, 20).unwrap();
         let record = store.device(&device.device_id).unwrap().unwrap();
         assert_eq!(record.status, DeviceStatus::Revoked);
@@ -3701,6 +3897,110 @@ mod tests {
         store.import_network_strict(&signed, 20).unwrap();
         store.purge_receipt(&device.device_id, &stream.stream_id, 1).unwrap();
         assert!(matches!(store.import_network_strict(&signed, 21), Err(SyncError::ReconcileRequired)));
+    }
+
+    #[test]
+    fn recovery_reuses_an_empty_stream_and_never_answers_with_a_frozen_one() {
+        let device = identity("recovery-reuse");
+        let (mut store, stream) = paired_store_for(&device);
+        let request_a = AuthenticatedStatusRequest::new_at(&device, "primary-1", true, 20).unwrap();
+        let first = store.recover_stream(&request_a, 20).unwrap();
+        assert_eq!(first.stream_id, stream.stream_id, "an empty unused stream is reused instead of being frozen");
+        let pkg = package("recovery-reuse", "reuse-1", NetworkCounts::all_zero(), vec![]);
+        store.import_network_strict(&upload(&device, &first, pkg, 1), 21).unwrap();
+        store.index().conn().execute(
+            "UPDATE device_registry SET status = 'reconcile_required' WHERE device_id = ?1",
+            params![device.device_id],
+        ).unwrap();
+
+        let request_b = AuthenticatedStatusRequest::new_at(&device, "primary-1", true, 22).unwrap();
+        let second = store.recover_stream(&request_b, 22).unwrap();
+        assert_ne!(second.stream_id, stream.stream_id, "a used stream is frozen and replaced");
+        assert_eq!(store.device(&device.device_id).unwrap().unwrap().status, DeviceStatus::Paired);
+        assert_eq!(store.recover_stream(&request_b, 23).unwrap(), second, "the same nonce is idempotent");
+
+        let replay = store.recover_stream(&request_a, 24).unwrap();
+        assert_eq!(replay.stream_id, second.stream_id, "an older nonce must not resurrect its frozen stream");
+        let mapped: String = store.index().conn().query_row(
+            "SELECT stream_id FROM device_sync_recovery WHERE device_id = ?1 AND nonce = ?2",
+            params![device.device_id, request_a.nonce.as_slice()], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(mapped, second.stream_id, "the replayed nonce follows the superseding stream");
+    }
+
+    #[test]
+    fn adopting_a_recovered_stream_drops_old_stream_artifacts_but_keeps_the_download_cursor() {
+        let device = identity("recovery-reset");
+        let config = SecondarySyncConfig {
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(),
+            certificate_der: vec![1, 2, 3], certificate_pin: hash_bytes(&[1, 2, 3]), identity_path: PathBuf::from("identity.json"),
+            stream_id: Some("str-old".into()), data_epoch: Some(1), expected_generation: Some(7), enabled: true, capture_enabled: true,
+            last_error: Some("reconciliation is required".into()),
+            last_manifest_hash: Some([1; 32]), last_gzip_hash: Some([2; 32]),
+            last_connected_at_ms: None, last_ack_generation: Some(6), last_ack_receipt_hash: Some([3; 32]),
+        };
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        store.save_secondary_config(&config, 1).unwrap();
+        let device_id = device.device_id.clone();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_outbox(device_id, primary_id, origin, stream_id, data_epoch, generation, payload_revision,
+                 manifest_bytes, gzip_sha256, signature, gzip_bytes, state, attempts, next_attempt_ms, created_at_ms)
+             VALUES(?1, 'primary-1', 'laptop', 'str-old', 1, 7, 9, X'01', X'02', X'03', X'04', 'pending', 0, 0, 1)",
+            params![device_id],
+        ).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_journal(device_id, origin, identity, kind, row_json, outbox_id, payload_revision, dirty_revision, created_at_ms)
+             VALUES(?1, 'laptop', 'key:k', 'event_snapshot', X'01', 1, 9, 9, 1)",
+            params![device_id],
+        ).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_outbox_sequence(device_id, stream_id, data_epoch, last_generation, last_revision)
+             VALUES(?1, 'str-old', 1, 7, 9)",
+            params![device_id],
+        ).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_snapshot_cursor(device_id, stream_id, data_epoch, last_identity, last_dirty_revision, complete, updated_at_ms)
+             VALUES(?1, 'str-old', 1, 'key:k', 9, 1, 1)",
+            params![device_id],
+        ).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_snapshot_cursor(device_id, stream_id, data_epoch, last_identity, last_dirty_revision, complete, updated_at_ms)
+             VALUES('primary-1', 'primary-download-v1', 1, 'key:p', 4, 1, 1)",
+            [],
+        ).unwrap();
+        let receipt = StreamOpenReceipt {
+            primary_id: "primary-1".into(), device_id: device.device_id.clone(),
+            stream_id: "str-new".into(), data_epoch: 1, expected_generation: 1,
+        };
+
+        store.update_secondary_stream(&receipt, 2).unwrap();
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_outbox", [], |r| r.get(0)).unwrap(), 0,
+            "a changed stream invalidates every package signed for the old one");
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_snapshot_cursor WHERE stream_id = 'primary-download-v1'", [], |r| r.get(0)).unwrap(), 1,
+            "the primary data download cursor is a different stream and must survive");
+
+        store.index().conn().execute(
+            "INSERT INTO device_sync_outbox(device_id, primary_id, origin, stream_id, data_epoch, generation, payload_revision,
+                 manifest_bytes, gzip_sha256, signature, gzip_bytes, state, attempts, next_attempt_ms, created_at_ms)
+             VALUES(?1, 'primary-1', 'laptop', 'str-new', 1, 1, 1, X'01', X'02', X'03', X'04', 'in_flight', 0, 0, 1)",
+            params![device_id],
+        ).unwrap();
+        store.update_secondary_stream(&receipt, 3).unwrap();
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_outbox", [], |r| r.get(0)).unwrap(), 1,
+            "the same stream keeps its outbox across ordinary status polls");
+        store.adopt_recovered_stream(&receipt, 4).unwrap();
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_outbox", [], |r| r.get(0)).unwrap(), 0,
+            "an explicit recovery always restarts the upload from generation 1");
+
+        let config = store.secondary_config().unwrap().unwrap();
+        assert_eq!((config.stream_id.as_deref(), config.data_epoch, config.expected_generation), (Some("str-new"), Some(1), Some(1)));
+        assert_eq!((config.last_ack_generation, config.last_ack_receipt_hash), (None, None));
+        assert_eq!((config.last_manifest_hash, config.last_gzip_hash), (None, None));
+        assert_eq!(config.last_error, None);
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_journal", [], |r| r.get(0)).unwrap(), 0);
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_outbox_sequence", [], |r| r.get(0)).unwrap(), 0);
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_snapshot_cursor WHERE device_id = ?1", params![device.device_id], |r| r.get(0)).unwrap(), 0);
     }
 
     #[test]
@@ -4011,6 +4311,95 @@ mod tests {
     }
 
     #[test]
+    fn unacked_package_holds_its_old_event_against_prune_until_ack() {
+        let device = identity("retention");
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let certificate_der = vec![1u8, 2, 3];
+        let config = SecondarySyncConfig {
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
+            certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
+            stream_id: Some("retention-stream".into()), data_epoch: Some(1), expected_generation: Some(1), enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        };
+        store.save_secondary_config(&config, 1).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'retention-key')",
+            [],
+        ).unwrap();
+        let event_id = store.index().conn().last_insert_rowid();
+        store.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:retention-key', 'local.jsonl', X'', ?1, 10, 7, 1, 1)",
+            params![event_id],
+        ).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO meta(key, value) VALUES('device_sync_dirty_revision', '7')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        ).unwrap();
+        let row = NetworkRow {
+            key: Some("retention-key".into()), occurrence_id: None, tool: "codex".into(), ts_ms: 10,
+            session: "session".into(), project: None, model: None, meter: "tokens".into(), source: "local.jsonl".into(),
+            counts: NetworkCounts { in_tok: Some(1.0), ..NetworkCounts::all_zero() }, calls: vec![],
+        };
+        let package = NetworkPackage::from_rows(&device.origin, INDEX_SCHEMA_VERSION, 0, 100, &[row.clone()], 10).unwrap();
+        let journal = [DirtyJournalInput { identity: "key:retention-key".into(), revision: 7, kind: "event".into(), row }];
+        let (id, _) = store.enqueue_snapshot_auto(&config, package, &journal, &device.signing_key, 2).unwrap().unwrap();
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |r| r.get(0)).unwrap(), 1,
+            "packaging must not drop the retention hold before the ACK");
+        assert_eq!(store.index_mut().prune(2_000).unwrap(), 0, "an old event in an un-ACKed package must survive prune");
+        assert_eq!(store.index().event_count().unwrap(), 1);
+
+        store.acquire_scheduler_lease("retention-owner", 2, 10_000).unwrap();
+        let entry = store.claim_outbox("retention-owner", 3, 1).unwrap().pop().unwrap();
+        let receipt = ImportReceipt::new(
+            "primary-1", &device.device_id, &device.origin, "retention-stream", 1, 1,
+            hash_bytes(&entry.manifest_bytes), entry.gzip_sha256, 1, MergeOutcome::default(), 4,
+        );
+        store.ack_outbox("retention-owner", id, &receipt, 4).unwrap();
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |r| r.get(0)).unwrap(), 0);
+        assert_eq!(store.index_mut().prune(2_000).unwrap(), 1, "after the ACK the event is ordinary retention data");
+    }
+
+    #[test]
+    fn late_disconnect_notice_does_not_clear_a_newer_bindings_journal() {
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let certificate_der = vec![1u8, 2, 3];
+        let make_config = |device_id: &str, origin: &str| SecondarySyncConfig {
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device_id.into(), origin: origin.into(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
+            certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        };
+        store.save_secondary_config(&make_config("device-old", "old-laptop"), 1).unwrap();
+        store.queue_secondary_disconnect(&make_config("device-old", "old-laptop"), 2).unwrap();
+        store.save_secondary_config(&make_config("device-new", "new-laptop"), 3).unwrap();
+        store.index().conn().execute_batch(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:new-change', 'local.jsonl', X'', 10, 8, 3, 3);
+             INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', '0')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+        ).unwrap();
+
+        store.finish_disconnect_notice("device-old", 4, None).unwrap();
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |r| r.get(0)).unwrap(), 1,
+            "a notice that outlived a re-pair must not wipe the new binding's unsent changes");
+        assert!(store.index().conn().query_row::<Option<String>, _, _>(
+            "SELECT value FROM meta WHERE key = 'device_sync_dirty_json_bytes'", [], |r| r.get(0),
+        ).unwrap().is_some());
+
+        store.queue_secondary_disconnect(&make_config("device-new", "new-laptop"), 5).unwrap();
+        store.finish_disconnect_notice("device-new", 6, None).unwrap();
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |r| r.get(0)).unwrap(), 0,
+            "with no binding left the journal has no consumer and must be released");
+    }
+
+    #[test]
     fn ack_checks_origin_manifest_and_receipt_hash_without_registry_on_sender() {
         let device = identity("sender-only");
         let mut sender = SyncStore::open_in_memory("primary-1").unwrap();
@@ -4296,6 +4685,114 @@ mod tests {
         assert_eq!(secondary.index().event_count().unwrap(), 4);
     }
 
+    fn dirty_journal_count(store: &SyncStore) -> i64 {
+        store.index().conn().query_row("SELECT count(*) FROM sync_dirty", [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn primary_download_dirty_ack_releases_the_journal_only_at_the_minimum_paired_cursor() {
+        let first_device = identity("download-ack-a");
+        let (mut primary, _) = paired_store_for(&first_device);
+        primary.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 1).unwrap();
+        let second_device = identity("download-ack-b");
+        let invite = primary.create_pairing_invite("https://lan:47821", "1111111111111111111111111111111111111111111111111111111111111111", 10_000).unwrap();
+        let pairing = PairingRequest::new(&invite, &second_device, "linux").unwrap();
+        let pairing = primary.receive_pairing_request(&pairing, 2).unwrap();
+        primary.approve_pairing(&pairing.request_id, 3).unwrap();
+
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let day = 86_400_000_i64;
+        for (key, ts) in [("a", now - 10 * day), ("b", now - day)] {
+            primary.index().conn().execute(
+                "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+                 VALUES('codex', ?1, 'session', 'tokens', 3, 'local.jsonl', ?2)",
+                params![ts, key],
+            ).unwrap();
+        }
+        let request = AuthenticatedDownloadRequest::new_at(&first_device, "primary-1", None, 0, now).unwrap();
+        let page = primary.primary_download_page(&request, now, 30).unwrap();
+        let (manifest, rows) = page.package.as_ref().unwrap().validate().unwrap();
+        assert_eq!((manifest.rows, rows.len()), (2, 2));
+        assert!(page.complete);
+        assert_eq!(page.next_identity.as_deref(), Some("key:b"));
+
+        // `a` sorts behind the identity cursor, so only the dirty change feed
+        // can deliver the update the primary just made.
+        let a_id = primary.index().conn().query_row::<i64, _, _>("SELECT id FROM event WHERE dedupe_key = 'a'", [], |row| row.get(0)).unwrap();
+        primary.index().conn().execute("UPDATE event SET in_tok = 13 WHERE id = ?1", [a_id]).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:a', 'local.jsonl', X'', ?1, ?2, 1, ?3, ?3)",
+            params![a_id, now - 10 * day, now + 1],
+        ).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO meta(key, value) VALUES('device_sync_dirty_revision', '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value", [],
+        ).unwrap();
+        let cutoff = now - 5 * day;
+        assert_eq!(primary.index_mut().prune(cutoff).unwrap(), 0, "the un-ACKed journal row pins its event against prune");
+
+        let cursor = (Some("key:b".to_string()), 0);
+        let request = AuthenticatedDownloadRequest::new_at(&first_device, "primary-1", cursor.0.clone(), cursor.1, now + 2).unwrap();
+        let page = primary.primary_download_page(&request, now + 2, 30).unwrap();
+        let (_, rows) = page.package.as_ref().unwrap().validate().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key.as_deref(), Some("a"));
+        assert_eq!(rows[0].counts.in_tok, Some(13.0));
+        assert_eq!(page.next_dirty_revision, 1);
+        let request = AuthenticatedDownloadRequest::new_at(&second_device, "primary-1", cursor.0.clone(), cursor.1, now + 3).unwrap();
+        primary.primary_download_page(&request, now + 3, 30).unwrap();
+
+        // One device acknowledging is not enough while the other still needs it.
+        let request = AuthenticatedDownloadRequest::new_at(&first_device, "primary-1", cursor.0.clone(), 1, now + 4).unwrap();
+        primary.primary_download_page(&request, now + 4, 30).unwrap();
+        assert_eq!(dirty_journal_count(&primary), 1);
+        assert_eq!(primary.index_mut().prune(cutoff).unwrap(), 0);
+
+        // The second device's ACK closes the floor and releases the journal.
+        let request = AuthenticatedDownloadRequest::new_at(&second_device, "primary-1", cursor.0, 1, now + 5).unwrap();
+        primary.primary_download_page(&request, now + 5, 30).unwrap();
+        assert_eq!(dirty_journal_count(&primary), 0);
+        assert_eq!(primary.index_mut().prune(cutoff).unwrap(), 1);
+    }
+
+    #[test]
+    fn primary_download_rejects_a_dirty_cursor_the_primary_never_served() {
+        let device = identity("download-ack-guard");
+        let (mut primary, _) = paired_store_for(&device);
+        primary.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 1).unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        primary.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', ?1, 'session', 'tokens', 3, 'local.jsonl', 'guard')",
+            params![now - 1_000],
+        ).unwrap();
+        let id = primary.index().conn().query_row::<i64, _, _>("SELECT id FROM event WHERE dedupe_key = 'guard'", [], |row| row.get(0)).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:guard', 'local.jsonl', X'', ?1, ?2, 3, ?3, ?3)",
+            params![id, now - 1_000, now + 1],
+        ).unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now).unwrap();
+        let page = primary.primary_download_page(&request, now, 30).unwrap();
+        assert_eq!(page.next_dirty_revision, 3);
+        assert_eq!(dirty_journal_count(&primary), 1, "serving a page does not acknowledge it");
+        let bogus = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 999, now + 1).unwrap();
+        assert!(matches!(primary.primary_download_page(&bogus, now + 1, 30), Err(SyncError::Security(message)) if message.contains("served")));
+        assert_eq!(dirty_journal_count(&primary), 1);
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 3, now + 2).unwrap();
+        assert!(primary.primary_download_page(&request, now + 2, 30).unwrap().complete);
+        assert_eq!(dirty_journal_count(&primary), 0);
+    }
+
     #[test]
     fn primary_download_backfill_is_bounded_and_reports_preparation_without_cursor_progress() {
         let device = identity("download-backfill");
@@ -4461,9 +4958,12 @@ mod tests {
         assert_eq!(store.primary_id(), "primary-2");
         assert!(store.primary_config().unwrap().is_none());
         assert_eq!(store.index().event_count().unwrap(), 1);
-        assert_eq!(store.index().conn().query_row::<String, _, _>(
+        assert_eq!(store.index().conn().query_row::<i64, _, _>(
+            "SELECT count(*) FROM sync_dirty", [], |row| row.get(0),
+        ).unwrap(), 0, "the old binding's journal has no consumer after a role switch");
+        assert!(store.index().conn().query_row::<Option<String>, _, _>(
             "SELECT value FROM meta WHERE key = 'device_sync_dirty_json_bytes'", [], |row| row.get(0),
-        ).unwrap(), "12");
+        ).unwrap().as_deref().map_or(true, |bytes| bytes == "0"), "the byte counter goes with the rows it measured");
         assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_registry", [], |row| row.get(0)).unwrap(), 0);
     }
 

@@ -540,15 +540,13 @@ fn on_tray_event(tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent) {
     tauri_plugin_positioner::on_tray_event(&app, &event);
 
     match event {
+        #[cfg(target_os = "windows")]
         TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Down,
             rect,
             ..
-        } => {
-            #[cfg(target_os = "windows")]
-            panel::remember_tray_rect(&rect);
-        }
+        } => panel::remember_tray_rect(&rect),
         // Right-click is served by the native context menu attached above.
         TrayIconEvent::Click {
             button: MouseButton::Left,

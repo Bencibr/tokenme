@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::{verify_server_cert_signed_by_trust_anchor, verify_server_name};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig, ServerConnection, SignatureScheme, StreamOwned};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,8 +32,8 @@ use crate::diagnostics::{
 use crate::protocol::{
     hash_bytes, verify_private_file, AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest,
     AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest, PrimaryDownloadPage,
-    SignedUpload, StreamOpenReceipt, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES,
-    MAX_STRING_BYTES,
+    SignedUpload, StreamOpenReceipt, UploadEnvelope, MAX_AUTH_REQUEST_AGE_MS,
+    MAX_AUTH_REQUEST_FUTURE_SKEW_MS, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES, MAX_STRING_BYTES,
 };
 use crate::{ImportReceipt, PairingRequestState, SyncError, SyncStore};
 
@@ -52,7 +54,29 @@ const PAIRING_WINDOW: Duration = Duration::from_secs(60);
 const DISCOVERY_INVITE_TTL_MS: i64 = 5 * 60 * 1000;
 const MAX_TRACKED_PAIRING_IPS: usize = 1024;
 const UPLOAD_MAGIC: &[u8; 8] = b"TMSYNC01";
-const UPLOAD_WIRE_VERSION: u8 = 1;
+const UPLOAD_WIRE_VERSION: u8 = 2;
+/// The HTTP wire contract. A peer that cannot name this major version is
+/// rejected before its request body is consumed, so an upgraded primary and a
+/// stale secondary fail with an actionable 426 instead of importing half a
+/// package under different semantics.
+const WIRE_VERSION_MAJOR: u16 = 2;
+const WIRE_VERSION_MINOR: u16 = 0;
+const WIRE_VERSION_HEADER: &str = "x-tokenme-wire-version";
+const WIRE_REJECT_DRAIN_BYTES: usize = 128 * 1024;
+const BUSY_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+const DOWNLOAD_MAGIC: &[u8; 8] = b"TMPAGE01";
+const DOWNLOAD_PAGE_VERSION: u8 = 1;
+const DOWNLOAD_FLAG_ENABLED: u8 = 1;
+const DOWNLOAD_FLAG_PREPARING: u8 = 2;
+const DOWNLOAD_FLAG_COMPLETE: u8 = 4;
+// Sized for the fastest legitimate cadence, not for a single device: a busy
+// secondary mints ~60 nonces per minute (status plus snapshot pages) inside an
+// ~11-minute retention window, so 16k entries leave room for dozens of secondaries.
+const MAX_REPLAY_ENTRIES: usize = 16_384;
+// A nonce is accepted for one endpoint once. Keep it at least as long as the
+// signed request it belongs to can still pass the freshness check.
+const REPLAY_RETENTION_MS: i64 =
+    MAX_AUTH_REQUEST_AGE_MS + MAX_AUTH_REQUEST_FUTURE_SKEW_MS + 60_000;
 const UPLOAD_PATH: &str = "/v1/upload";
 const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
@@ -86,6 +110,8 @@ pub enum TransportError {
     HttpStatus { status: u16, message: String },
     #[error("transport response is invalid: {0}")]
     Protocol(String),
+    #[error("sync peer requires a protocol upgrade: {0}")]
+    Unsupported(String),
     #[error("transport body exceeds configured limit")]
     Limit,
     #[error("sync service is temporarily busy")]
@@ -128,6 +154,7 @@ fn transport_error_code(error: &TransportError) -> &'static str {
         TransportError::Cancelled => "cancelled",
         TransportError::HttpStatus { .. } => "http_status",
         TransportError::Protocol(_) => "protocol",
+        TransportError::Unsupported(_) => "wire_version",
         TransportError::Limit => "limit",
         TransportError::Busy => "busy",
         TransportError::PeerRejected(_) => "peer_rejected",
@@ -455,68 +482,11 @@ impl Tls13HttpsTransport {
     pub fn download_primary_page(&mut self, request: &AuthenticatedDownloadRequest) -> Result<PrimaryDownloadPage, TransportError> {
         let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode download request: {e}")))?;
         let response = self.request(DOWNLOAD_PATH, body)?;
-        let wire: WirePrimaryDownloadPage = response.json()?;
-        if wire.request_nonce != request.nonce {
-            return Err(TransportError::Protocol("primary download response does not match request nonce".into()));
+        if response.status != 200 {
+            response.json::<serde_json::Value>()?;
+            return Err(TransportError::Protocol("primary download was accepted without a page body".into()));
         }
-        if wire.next_dirty_revision > i64::MAX as u64 {
-            return Err(TransportError::Protocol("primary download cursor is too large".into()));
-        }
-        if let Some(identity) = wire.next_identity.as_deref() {
-            crate::protocol::valid_text("download identity cursor", identity, false)
-                .map_err(|error| TransportError::Protocol(error.to_string()))?;
-        }
-        let identity_regressed = match (&request.after_identity, &wire.next_identity) {
-            (Some(_), None) => true,
-            (Some(old), Some(new)) => new < old,
-            _ => false,
-        };
-        if identity_regressed || wire.next_dirty_revision < request.after_dirty_revision {
-            return Err(TransportError::Protocol("primary download cursor moved backwards".into()));
-        }
-        let (package, complete) = if wire.enabled {
-            let manifest = wire.manifest_b64.ok_or_else(|| TransportError::Protocol("primary download response lacks a manifest".into()))?;
-            let gzip = wire.gzip_b64.ok_or_else(|| TransportError::Protocol("primary download response lacks package bytes".into()))?;
-            let gzip_hash = wire.gzip_sha256.ok_or_else(|| TransportError::Protocol("primary download response lacks a package hash".into()))?;
-            let manifest_bytes = base64::engine::general_purpose::STANDARD.decode(manifest)
-                .map_err(|error| TransportError::Protocol(format!("decode primary download manifest: {error}")))?;
-            let gzip_bytes = base64::engine::general_purpose::STANDARD.decode(gzip)
-                .map_err(|error| TransportError::Protocol(format!("decode primary download package: {error}")))?;
-            if hash_bytes(&gzip_bytes) != gzip_hash { return Err(TransportError::Protocol("primary download package hash mismatch".into())); }
-            let package = crate::NetworkPackage { manifest_bytes, gzip_bytes };
-            let (manifest, _) = package.validate().map_err(|error| TransportError::Protocol(error.to_string()))?;
-            if manifest.origin.is_empty() || !usage_core::origin_ok(&manifest.origin) || manifest.schema_version != usage_index::INDEX_SCHEMA_VERSION
-                || manifest.snapshot_complete != wire.complete
-            {
-                return Err(TransportError::Protocol("primary download package identity or completion marker is invalid".into()));
-            }
-            (Some(package), wire.complete)
-        } else {
-            if wire.manifest_b64.is_some() || wire.gzip_b64.is_some() || wire.gzip_sha256.is_some()
-                || wire.next_identity != request.after_identity || wire.next_dirty_revision != request.after_dirty_revision
-            {
-                return Err(TransportError::Protocol("disabled primary download response contains data or changes its cursor".into()));
-            }
-            if !wire.complete { return Err(TransportError::Protocol("disabled primary download response is incomplete".into())); }
-            if wire.preparing { return Err(TransportError::Protocol("disabled primary download response is still preparing".into())); }
-            (None, true)
-        };
-        let progressed = wire.next_identity != request.after_identity || wire.next_dirty_revision > request.after_dirty_revision;
-        if wire.preparing && complete {
-            return Err(TransportError::Protocol("primary download response cannot be both preparing and complete".into()));
-        }
-        if wire.enabled && !progressed && !complete && !wire.preparing {
-            return Err(TransportError::Protocol("primary download page did not advance its cursor".into()));
-        }
-        Ok(PrimaryDownloadPage {
-            request_nonce: wire.request_nonce,
-            enabled: wire.enabled,
-            preparing: wire.preparing,
-            package,
-            next_identity: wire.next_identity,
-            next_dirty_revision: wire.next_dirty_revision,
-            complete,
-        })
+        decode_primary_download_page(&response.body, request)
     }
 
     pub fn update_display_name(&mut self, request: &AuthenticatedDisplayNameRequest) -> Result<(), TransportError> {
@@ -581,7 +551,7 @@ impl Tls13HttpsTransport {
         self.check_cancelled()?;
         let content_type = if path == UPLOAD_PATH { "application/octet-stream" } else { "application/json" };
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{WIRE_VERSION_HEADER}: {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}\r\nConnection: close\r\n\r\n",
             self.config.server_name, body.len()
         );
         stream.write_all(request.as_bytes()).map_err(|error| self.map_io(error))?;
@@ -596,7 +566,7 @@ impl Tls13HttpsTransport {
         let (mut stream, _socket) = self.connect()?;
         self.check_cancelled()?;
         let request = format!(
-            "POST {UPLOAD_PATH} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {body_len}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+            "POST {UPLOAD_PATH} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {body_len}\r\n{WIRE_VERSION_HEADER}: {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
             self.config.server_name
         );
         stream.write_all(request.as_bytes()).map_err(|error| self.map_io(error))?;
@@ -731,6 +701,7 @@ struct ServerContext {
     active_sockets: Mutex<BTreeMap<u64, TcpStream>>,
     next_socket_id: AtomicU64,
     log_sink: Mutex<Option<Arc<dyn Fn(bool, &str) + Send + Sync>>>,
+    replay: Mutex<NonceReplayCache>,
 }
 
 struct ActiveSocketGuard<'a> {
@@ -770,6 +741,86 @@ impl PairingRateLimiter {
         }
         bucket.push(now);
         true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonceClaim {
+    Fresh,
+    Replay,
+    Full,
+}
+
+/// One signed request may be answered once. Requests are scoped by endpoint
+/// because the status/recovery handshake deliberately reuses one nonce across
+/// two paths; recovery keeps its own durable replay record in the store.
+#[derive(Default)]
+struct NonceReplayCache {
+    claims: BTreeMap<([u8; 16], &'static str), i64>,
+}
+
+impl NonceReplayCache {
+    fn claim(&mut self, scope: &'static str, nonce: [u8; 16], now_ms: i64) -> NonceClaim {
+        let cutoff = now_ms.saturating_sub(REPLAY_RETENTION_MS);
+        self.claims.retain(|_, claimed_at| *claimed_at > cutoff);
+        let key = (nonce, scope);
+        if self.claims.contains_key(&key) {
+            return NonceClaim::Replay;
+        }
+        if self.claims.len() >= MAX_REPLAY_ENTRIES {
+            return NonceClaim::Full;
+        }
+        self.claims.insert(key, now_ms);
+        NonceClaim::Fresh
+    }
+
+    fn release(&mut self, scope: &'static str, nonce: [u8; 16]) {
+        self.claims.remove(&(nonce, scope));
+    }
+}
+
+const NONCE_SCOPE_STATUS: &str = "status";
+const NONCE_SCOPE_DOWNLOAD: &str = "download";
+const NONCE_SCOPE_DISPLAY_NAME: &str = "display-name";
+const NONCE_SCOPE_DISCONNECT: &str = "disconnect";
+
+fn claim_request_nonce(
+    replay: &Mutex<NonceReplayCache>,
+    scope: &'static str,
+    nonce: [u8; 16],
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let mut cache = replay.lock().map_err(|_| SyncError::Security("sync replay cache lock poisoned".into()))?;
+    match cache.claim(scope, nonce, now_ms) {
+        NonceClaim::Fresh => Ok(()),
+        NonceClaim::Replay => Err(SyncError::Auth("signed request was already answered".into())),
+        NonceClaim::Full => Err(SyncError::Limit("sync request replay cache is full".into())),
+    }
+}
+
+fn release_request_nonce(replay: &Mutex<NonceReplayCache>, scope: &'static str, nonce: [u8; 16]) {
+    if let Ok(mut cache) = replay.lock() {
+        cache.release(scope, nonce);
+    }
+}
+
+/// Claims the nonce before the side effect and releases it only when the
+/// action failed; a rejected or unauthenticated request cannot exhaust the
+/// cache, while a retry after a transient failure stays possible.
+fn with_claimed_nonce<T>(
+    replay: &Mutex<NonceReplayCache>,
+    scope: &'static str,
+    nonce: [u8; 16],
+    now_ms: i64,
+    action: impl FnOnce() -> Result<T, SyncError>,
+) -> Result<T, SyncError> {
+    claim_request_nonce(replay, scope, nonce, now_ms)?;
+    match action() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            release_request_nonce(replay, scope, nonce);
+            Err(error)
+        }
     }
 }
 
@@ -859,24 +910,23 @@ impl HttpsSyncServer {
     /// diagnostics data.  The host handle is shared with the caller, so the
     /// panel/runtime can append trace events and update check results while
     /// the HTTPS server is running without exposing arbitrary host access.
+    /// Bind the caller-selected address exactly. A port owned by another
+    /// process is a configuration error, not an invitation to pick a random
+    /// port the pairing invite never advertised.
     pub fn bind_with_host(config: HttpsServerConfig, store: SyncStore, host: DiagnosticsHost) -> Result<Self, TransportError> {
-        Self::bind_with_host_options(config, store, host, false)
-    }
-
-    /// Desktop services can recover from a port occupied by another process.
-    /// Keep the bind interface and TLS identity, then publish the actual port.
-    pub fn bind_with_host_fallback(config: HttpsServerConfig, store: SyncStore, host: DiagnosticsHost) -> Result<Self, TransportError> {
-        Self::bind_with_host_options(config, store, host, true)
-    }
-
-    fn bind_with_host_options(config: HttpsServerConfig, store: SyncStore, host: DiagnosticsHost, fallback: bool) -> Result<Self, TransportError> {
         config.validate()?;
         crate::protocol::ensure_private_dir(&config.staging_dir).map_err(TransportError::State)?;
         let tls_config = server_config(&config)?;
-        let listener = match TcpListener::bind(config.bind_addr) {
-            Err(error) if fallback && error.kind() == io::ErrorKind::AddrInUse => TcpListener::bind(SocketAddr::new(config.bind_addr.ip(), 0)),
-            result => result,
-        }.map_err(TransportError::from)?;
+        let listener = TcpListener::bind(config.bind_addr).map_err(|error| {
+            if error.kind() == io::ErrorKind::AddrInUse {
+                TransportError::Config(format!(
+                    "sync port {} is already in use; stop the other TokenMe sync service or choose a different port",
+                    config.bind_addr.port(),
+                ))
+            } else {
+                TransportError::from(error)
+            }
+        })?;
         listener.set_nonblocking(false).map_err(TransportError::from)?;
         let diagnostics = DiagnosticsService::new_with_host(store.primary_id(), host).map_err(TransportError::Diagnostics)?;
         let context = ServerContext {
@@ -891,6 +941,7 @@ impl HttpsSyncServer {
             active_sockets: Mutex::new(BTreeMap::new()),
             next_socket_id: AtomicU64::new(1),
             log_sink: Mutex::new(None),
+            replay: Mutex::new(NonceReplayCache::default()),
         };
         Ok(Self { listener, context: Arc::new(context) })
     }
@@ -1127,10 +1178,21 @@ impl ServerContext {
         let connection = ServerConnection::new(self.tls_config.clone()).map_err(|e| TransportError::Tls(e.to_string()))?;
         let mut tls = StreamOwned::new(connection, stream);
         let head = read_request_head(&mut tls, self.config.max_body_bytes, deadline, &self.cancel)?;
+        if head.known_path.is_some() && head.wire_version.is_none_or(|(major, _)| major != WIRE_VERSION_MAJOR) {
+            self.reject_wire_version(&mut tls, &head)?;
+            return Ok(());
+        }
         let (status, response) = if head.known_path.is_none() {
             (404, serde_json::to_vec(&WireError { message: "unknown sync endpoint".into() }).unwrap_or_else(|_| b"{\"message\":\"not found\"}".to_vec()))
         } else if head.path == UPLOAD_PATH {
-            let metadata = read_upload_metadata(&mut tls, head.content_length, self.config.max_body_bytes, deadline, &self.cancel)?;
+            let metadata = match read_upload_metadata(&mut tls, head.content_length, self.config.max_body_bytes, deadline, &self.cancel) {
+                Ok(metadata) => metadata,
+                Err(TransportError::Unsupported(message)) => {
+                    self.respond_and_close(&mut tls, 426, &message, 0)?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
             let authorize_started = Instant::now();
             let authorized = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))
                 .and_then(|store| store.authorize_upload_metadata(&metadata.envelope, &metadata.signature).map_err(TransportError::State));
@@ -1223,13 +1285,52 @@ impl ServerContext {
             }
         } else {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
-            let request = HttpRequest { path: head.path, content_type: head.content_type, body };
+            let request = HttpRequest { path: head.path.clone(), content_type: head.content_type, body };
             let mut store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
-            dispatch_request(&mut store, &request)
+            dispatch_request(&mut store, &request, &self.replay)
         };
-        write_response(&mut tls, status, &response, self.config.max_body_bytes)?;
+        let content_type = if status == 200 && head.path == DOWNLOAD_PATH { "application/octet-stream" } else { "application/json" };
+        write_response(&mut tls, status, content_type, &response, self.config.max_body_bytes)?;
         tls.conn.send_close_notify();
         let _ = tls.flush();
+        let _ = tls.get_mut().shutdown(Shutdown::Both);
+        Ok(())
+    }
+
+    fn reject_wire_version(&self, tls: &mut StreamOwned<ServerConnection, TcpStream>, head: &HttpRequestHead) -> Result<(), TransportError> {
+        let detail = match head.wire_version {
+            Some((major, minor)) => format!("peer announced sync protocol {major}.{minor}"),
+            None => "peer did not announce a sync protocol version".into(),
+        };
+        let message = format!(
+            "this TokenMe requires sync protocol {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}; {detail}. Update TokenMe on the other machine."
+        );
+        self.log_event(false, &format!("sync: action=connection outcome=wire_rejected {detail}"));
+        self.respond_and_close(tls, 426, &message, WIRE_REJECT_DRAIN_BYTES)
+    }
+
+    /// Answer, then drain a bounded amount of the already-sent body before
+    /// closing: closing with unread bytes makes the kernel send RST, which can
+    /// discard the response the client is waiting for.
+    fn respond_and_close(&self, tls: &mut StreamOwned<ServerConnection, TcpStream>, status: u16, message: &str, drain_bytes: usize) -> Result<(), TransportError> {
+        let body = serde_json::to_vec(&WireError { message: message.to_string() })
+            .map_err(|error| TransportError::Protocol(format!("encode rejection: {error}")))?;
+        write_response(tls, status, "application/json", &body, MAX_RESPONSE_BYTES)?;
+        tls.conn.send_close_notify();
+        let _ = tls.flush();
+        if drain_bytes > 0 {
+            let _ = tls.get_mut().set_read_timeout(Some(BUSY_DRAIN_TIMEOUT));
+            let drain_until = Instant::now().checked_add(BUSY_DRAIN_TIMEOUT).unwrap_or_else(Instant::now);
+            let mut remaining = drain_bytes;
+            let mut sink = [0u8; 16 * 1024];
+            while remaining > 0 && Instant::now() < drain_until {
+                let take = sink.len().min(remaining);
+                match tls.get_mut().read(&mut sink[..take]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => remaining -= n,
+                }
+            }
+        }
         let _ = tls.get_mut().shutdown(Shutdown::Both);
         Ok(())
     }
@@ -1242,41 +1343,169 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WirePrimaryDownloadPage {
-    request_nonce: [u8; 16],
-    enabled: bool,
-    preparing: bool,
-    manifest_b64: Option<String>,
-    gzip_b64: Option<String>,
-    gzip_sha256: Option<[u8; 32]>,
-    next_identity: Option<String>,
-    next_dirty_revision: u64,
-    complete: bool,
-}
-
+/// Binary downlink framing. The page carries a complete immutable package, so
+/// base64-in-JSON would inflate every page by a third before decompression and
+/// blur the difference between the control answer and the payload. Fields are
+/// length-prefixed with an explicit absent marker; the decoder rejects any
+/// trailing byte so a framing change cannot be silently truncated.
 fn encode_primary_download_page(page: PrimaryDownloadPage) -> Result<Vec<u8>, SyncError> {
-    let (manifest_b64, gzip_b64, gzip_sha256) = match (page.enabled, page.package.as_ref()) {
-        (true, Some(package)) => (
-            Some(base64::engine::general_purpose::STANDARD.encode(&package.manifest_bytes)),
-            Some(base64::engine::general_purpose::STANDARD.encode(&package.gzip_bytes)),
-            Some(hash_bytes(&package.gzip_bytes)),
-        ),
-        (false, None) => (None, None, None),
+    if page.preparing && page.complete {
+        return Err(SyncError::Protocol("primary download page cannot be both preparing and complete".into()));
+    }
+    let package = match (page.enabled, page.package.as_ref()) {
+        (true, Some(package)) => Some(package),
+        (false, None) => None,
         _ => return Err(SyncError::Protocol("primary download page sharing state is inconsistent".into())),
     };
-    serde_json::to_vec(&WirePrimaryDownloadPage {
-        request_nonce: page.request_nonce,
-        enabled: page.enabled,
-        preparing: page.preparing,
-        manifest_b64,
-        gzip_b64,
-        gzip_sha256,
-        next_identity: page.next_identity,
-        next_dirty_revision: page.next_dirty_revision,
-        complete: page.complete,
-    }).map_err(|error| SyncError::Protocol(format!("encode primary download page: {error}")))
+    let mut body = Vec::with_capacity(96 + package.map_or(0, |package| package.manifest_bytes.len() + package.gzip_bytes.len()));
+    body.extend_from_slice(DOWNLOAD_MAGIC);
+    body.push(DOWNLOAD_PAGE_VERSION);
+    let flags = (if page.enabled { DOWNLOAD_FLAG_ENABLED } else { 0 })
+        | (if page.preparing { DOWNLOAD_FLAG_PREPARING } else { 0 })
+        | (if page.complete { DOWNLOAD_FLAG_COMPLETE } else { 0 });
+    body.push(flags);
+    body.extend_from_slice(&page.request_nonce);
+    body.extend_from_slice(&page.next_dirty_revision.to_be_bytes());
+    body.extend_from_slice(&package.map_or([0u8; 32], |package| hash_bytes(&package.gzip_bytes)));
+    match page.next_identity.as_deref() {
+        Some(identity) => {
+            if identity.is_empty() || identity.len() > MAX_STRING_BYTES {
+                return Err(SyncError::Protocol("primary download identity cursor is invalid".into()));
+            }
+            let len = u32::try_from(identity.len()).map_err(|_| SyncError::Limit("download identity is too large".into()))?;
+            body.extend_from_slice(&len.to_be_bytes());
+            body.extend_from_slice(identity.as_bytes());
+        }
+        None => body.extend_from_slice(&u32::MAX.to_be_bytes()),
+    }
+    match package {
+        Some(package) => {
+            let manifest_len = u32::try_from(package.manifest_bytes.len())
+                .map_err(|_| SyncError::Limit("download manifest is too large".into()))?;
+            body.extend_from_slice(&manifest_len.to_be_bytes());
+            body.extend_from_slice(&package.manifest_bytes);
+            body.extend_from_slice(&(package.gzip_bytes.len() as u64).to_be_bytes());
+            body.extend_from_slice(&package.gzip_bytes);
+        }
+        None => {
+            body.extend_from_slice(&u32::MAX.to_be_bytes());
+            body.extend_from_slice(&u64::MAX.to_be_bytes());
+        }
+    }
+    Ok(body)
+}
+
+fn decode_primary_download_page(body: &[u8], request: &AuthenticatedDownloadRequest) -> Result<PrimaryDownloadPage, TransportError> {
+    let mut offset = 0usize;
+    let mut take = |len: usize| -> Result<&[u8], TransportError> {
+        let end = offset.checked_add(len).ok_or(TransportError::Limit)?;
+        let slice = body.get(offset..end).ok_or_else(|| TransportError::Protocol("primary download page is truncated".into()))?;
+        offset = end;
+        Ok(slice)
+    };
+    if take(8)? != DOWNLOAD_MAGIC {
+        return Err(TransportError::Protocol("primary download page has an unknown magic".into()));
+    }
+    let version = take(1)?[0];
+    if version != DOWNLOAD_PAGE_VERSION {
+        return Err(TransportError::Unsupported(format!(
+            "peer sent download page version {version}; this build requires {DOWNLOAD_PAGE_VERSION} — update TokenMe on the other machine"
+        )));
+    }
+    let flags = take(1)?[0];
+    if flags & !(DOWNLOAD_FLAG_ENABLED | DOWNLOAD_FLAG_PREPARING | DOWNLOAD_FLAG_COMPLETE) != 0 {
+        return Err(TransportError::Protocol("primary download page has unknown flags".into()));
+    }
+    let enabled = flags & DOWNLOAD_FLAG_ENABLED != 0;
+    let preparing = flags & DOWNLOAD_FLAG_PREPARING != 0;
+    let complete = flags & DOWNLOAD_FLAG_COMPLETE != 0;
+    let request_nonce: [u8; 16] = take(16)?.try_into().map_err(|_| TransportError::Protocol("primary download nonce is invalid".into()))?;
+    if request_nonce != request.nonce {
+        return Err(TransportError::Protocol("primary download response does not match request nonce".into()));
+    }
+    let next_dirty_revision = u64::from_be_bytes(take(8)?.try_into().map_err(|_| TransportError::Protocol("primary download cursor is invalid".into()))?);
+    if next_dirty_revision > i64::MAX as u64 {
+        return Err(TransportError::Protocol("primary download cursor is too large".into()));
+    }
+    let gzip_sha256: [u8; 32] = take(32)?.try_into().map_err(|_| TransportError::Protocol("primary download package hash is invalid".into()))?;
+    let identity_len = u32::from_be_bytes(take(4)?.try_into().map_err(|_| TransportError::Protocol("primary download identity length is invalid".into()))?);
+    let next_identity = if identity_len == u32::MAX {
+        None
+    } else {
+        let len = usize::try_from(identity_len).map_err(|_| TransportError::Limit)?;
+        if len > MAX_STRING_BYTES { return Err(TransportError::Limit); }
+        let identity = std::str::from_utf8(take(len)?).map_err(|_| TransportError::Protocol("primary download identity is not UTF-8".into()))?;
+        crate::protocol::valid_text("download identity cursor", identity, false)
+            .map_err(|error| TransportError::Protocol(error.to_string()))?;
+        Some(identity.to_string())
+    };
+    let manifest_len = u32::from_be_bytes(take(4)?.try_into().map_err(|_| TransportError::Protocol("primary download manifest length is invalid".into()))?);
+    let manifest_bytes = if manifest_len == u32::MAX {
+        None
+    } else {
+        let len = usize::try_from(manifest_len).map_err(|_| TransportError::Limit)?;
+        if len == 0 || len > MAX_MANIFEST_BYTES { return Err(TransportError::Limit); }
+        Some(take(len)?.to_vec())
+    };
+    let gzip_len = u64::from_be_bytes(take(8)?.try_into().map_err(|_| TransportError::Protocol("primary download package length is invalid".into()))?);
+    let gzip_bytes = if gzip_len == u64::MAX {
+        None
+    } else {
+        let len = usize::try_from(gzip_len).map_err(|_| TransportError::Limit)?;
+        if len > MAX_COMPRESSED_BYTES { return Err(TransportError::Limit); }
+        Some(take(len)?.to_vec())
+    };
+    if offset != body.len() {
+        return Err(TransportError::Protocol("primary download page has trailing bytes".into()));
+    }
+    let identity_regressed = match (&request.after_identity, &next_identity) {
+        (Some(_), None) => true,
+        (Some(old), Some(new)) => new < old,
+        _ => false,
+    };
+    if identity_regressed || next_dirty_revision < request.after_dirty_revision {
+        return Err(TransportError::Protocol("primary download cursor moved backwards".into()));
+    }
+    let package = match (enabled, manifest_bytes, gzip_bytes) {
+        (true, Some(manifest_bytes), Some(gzip_bytes)) => {
+            if hash_bytes(&gzip_bytes) != gzip_sha256 {
+                return Err(TransportError::Protocol("primary download package hash mismatch".into()));
+            }
+            let package = crate::NetworkPackage { manifest_bytes, gzip_bytes };
+            let (manifest, _) = package.validate().map_err(|error| TransportError::Protocol(error.to_string()))?;
+            if manifest.origin.is_empty() || !usage_core::origin_ok(&manifest.origin) || manifest.schema_version != usage_index::INDEX_SCHEMA_VERSION
+                || manifest.snapshot_complete != complete
+            {
+                return Err(TransportError::Protocol("primary download package identity or completion marker is invalid".into()));
+            }
+            Some(package)
+        }
+        (false, None, None) => {
+            if gzip_sha256 != [0u8; 32] || next_identity != request.after_identity || next_dirty_revision != request.after_dirty_revision {
+                return Err(TransportError::Protocol("disabled primary download response contains data or changes its cursor".into()));
+            }
+            if !complete { return Err(TransportError::Protocol("disabled primary download response is incomplete".into())); }
+            if preparing { return Err(TransportError::Protocol("disabled primary download response is still preparing".into())); }
+            None
+        }
+        _ => return Err(TransportError::Protocol("primary download page mixes package and cursor state".into())),
+    };
+    if preparing && complete {
+        return Err(TransportError::Protocol("primary download response cannot be both preparing and complete".into()));
+    }
+    let progressed = next_identity != request.after_identity || next_dirty_revision > request.after_dirty_revision;
+    if enabled && !progressed && !complete && !preparing {
+        return Err(TransportError::Protocol("primary download page did not advance its cursor".into()));
+    }
+    Ok(PrimaryDownloadPage {
+        request_nonce,
+        enabled,
+        preparing,
+        package,
+        next_identity,
+        next_dirty_revision,
+        complete,
+    })
 }
 
 #[derive(Debug)]
@@ -1286,6 +1515,7 @@ struct HttpRequestHead {
     content_length: usize,
     known_path: Option<()>,
     expect_continue: bool,
+    wire_version: Option<(u16, u16)>,
 }
 
 struct LimitedReader<'a, R> {
@@ -1339,6 +1569,7 @@ struct HttpResponse {
 struct HttpResponseHead {
     status: u16,
     content_length: Option<usize>,
+    wire_version: Option<(u16, u16)>,
 }
 
 impl HttpResponse {
@@ -1509,27 +1740,36 @@ fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn dispatch_request(store: &mut SyncStore, request: &HttpRequest) -> (u16, Vec<u8>) {
+fn dispatch_request(store: &mut SyncStore, request: &HttpRequest, replay: &Mutex<NonceReplayCache>) -> (u16, Vec<u8>) {
+    let now = now_ms();
     let result: Result<Vec<u8>, SyncError> = match (request.path.as_str(), request.content_type.as_str()) {
         (PAIRING_PATH, "application/json") => serde_json::from_slice::<WirePairingRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid pairing JSON: {e}")))
             .and_then(|wire| wire.into_request().map_err(|e| SyncError::Protocol(e.to_string())))
-            .and_then(|pairing| store.receive_pairing_request(&pairing, now_ms()).map(|state| serde_json::to_vec(&state).map_err(|e| SyncError::Protocol(e.to_string())).unwrap_or_default())),
+            .and_then(|pairing| store.receive_pairing_request(&pairing, now).map(|state| serde_json::to_vec(&state).map_err(|e| SyncError::Protocol(e.to_string())).unwrap_or_default())),
         (STATUS_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid status request: {e}")))
-            .and_then(|status| store.authenticated_status(&status, now_ms()).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))),
+            .and_then(|status| with_claimed_nonce(replay, NONCE_SCOPE_STATUS, status.nonce, now, || {
+                store.authenticated_status(&status, now).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))
+            })),
         (DOWNLOAD_PATH, "application/json") => serde_json::from_slice::<AuthenticatedDownloadRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid download request: {e}")))
-            .and_then(|download| store.primary_download_page(&download, now_ms(), 30).and_then(encode_primary_download_page)),
+            .and_then(|download| with_claimed_nonce(replay, NONCE_SCOPE_DOWNLOAD, download.nonce, now, || {
+                store.primary_download_page(&download, now, 30).and_then(encode_primary_download_page)
+            })),
         (DISPLAY_NAME_PATH, "application/json") => serde_json::from_slice::<AuthenticatedDisplayNameRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid display-name update: {e}")))
-            .and_then(|update| store.update_display_name(&update, now_ms()).and_then(|_| serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string())))),
+            .and_then(|update| with_claimed_nonce(replay, NONCE_SCOPE_DISPLAY_NAME, update.nonce, now, || {
+                store.update_display_name(&update, now).and_then(|_| serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string())))
+            })),
         (RECOVERY_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid recovery request: {e}")))
-            .and_then(|recovery| store.recover_stream(&recovery, now_ms()).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))),
+            .and_then(|recovery| store.recover_stream(&recovery, now).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))),
         (DISCONNECT_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid disconnect request: {e}")))
-            .and_then(|disconnect| store.disconnect_device(&disconnect, now_ms()).and_then(|_| serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string())))),
+            .and_then(|disconnect| with_claimed_nonce(replay, NONCE_SCOPE_DISCONNECT, disconnect.nonce, now, || {
+                store.disconnect_device(&disconnect, now).and_then(|_| serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string())))
+            })),
         _ => Err(SyncError::NotFound("HTTP path".into())),
     };
     match result {
@@ -1586,13 +1826,33 @@ impl ServerCertVerifier for PinOnlyVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: UnixTime,
+        now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if hash_bytes(end_entity.as_ref()) == self.expected { Ok(ServerCertVerified::assertion()) }
-        else { Err(rustls::Error::General("server certificate pin mismatch".into())) }
+        if hash_bytes(end_entity.as_ref()) != self.expected {
+            return Err(rustls::Error::General("server certificate pin mismatch".into()));
+        }
+        // Pin equality alone accepts any self-signed leaf, including one whose
+        // validity window has passed or that names another host. The pin is the
+        // trust anchor, so verify the leaf's own chain, validity and name.
+        let parsed = ParsedCertificate::try_from(end_entity)
+            .map_err(|error| rustls::Error::General(format!("pinned server certificate is unreadable: {error}")))?;
+        let mut roots = RootCertStore::empty();
+        roots.add(end_entity.clone())
+            .map_err(|error| rustls::Error::General(format!("pinned server certificate is not a trust anchor: {error}")))?;
+        verify_server_cert_signed_by_trust_anchor(
+            &parsed,
+            &roots,
+            intermediates,
+            now,
+            rustls::crypto::ring::default_provider().signature_verification_algorithms.all,
+        )
+        .map_err(|error| rustls::Error::General(format!("pinned server certificate failed validation: {error}")))?;
+        verify_server_name(&parsed, server_name)
+            .map_err(|error| rustls::Error::General(format!("pinned server certificate does not name the endpoint: {error}")))?;
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
@@ -1722,6 +1982,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
     let mut content_type = None;
     let mut host = None;
     let mut expect_continue = false;
+    let mut wire_version = None;
     for header in request.headers.iter() {
         let name = header.name;
         let value = std::str::from_utf8(header.value).map_err(|_| TransportError::Protocol("HTTP header value is not UTF-8".into()))?;
@@ -1743,6 +2004,9 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
                 return Err(TransportError::Protocol("unsupported Expect header".into()));
             }
             expect_continue = true;
+        } else if name.eq_ignore_ascii_case(WIRE_VERSION_HEADER) {
+            if wire_version.is_some() { return Err(TransportError::Protocol("duplicate wire version header".into())); }
+            wire_version = Some(parse_wire_version(value.trim())?);
         }
     }
     if transfer_encoding || host.is_none() {
@@ -1764,7 +2028,18 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         if content_type != expected { return Err(TransportError::Protocol(format!("unexpected content-type for {path}"))); }
     }
     if Instant::now() >= deadline { return Err(TransportError::Timeout); }
-    Ok(HttpRequestHead { path: path.to_string(), content_type, content_length: length, known_path, expect_continue })
+    Ok(HttpRequestHead { path: path.to_string(), content_type, content_length: length, known_path, expect_continue, wire_version })
+}
+
+fn parse_wire_version(value: &str) -> Result<(u16, u16), TransportError> {
+    let (major, minor) = value.split_once('.').ok_or_else(|| TransportError::Protocol("wire version header is not major.minor".into()))?;
+    let component = |text: &str| -> Result<u16, TransportError> {
+        if text.is_empty() || text.len() > 5 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(TransportError::Protocol("wire version header is invalid".into()));
+        }
+        text.parse::<u16>().map_err(|_| TransportError::Protocol("wire version header is invalid".into()))
+    };
+    Ok((component(major)?, component(minor)?))
 }
 
 fn read_body<S: Read>(stream: &mut S, length: usize, deadline: Instant, cancel: &AtomicBool) -> Result<Vec<u8>, TransportError> {
@@ -1782,7 +2057,12 @@ fn read_upload_metadata<S: Read>(stream: &mut S, body_len: usize, max_body: usiz
     if &magic != UPLOAD_MAGIC { return Err(TransportError::Protocol("unsupported upload wire magic".into())); }
     let mut version = [0u8; 1];
     reader.read_exact(&mut version)?;
-    if version[0] != UPLOAD_WIRE_VERSION { return Err(TransportError::Protocol("unsupported upload wire version".into())); }
+    if version[0] != UPLOAD_WIRE_VERSION {
+        return Err(TransportError::Unsupported(format!(
+            "peer sent upload body version {}; this build requires {UPLOAD_WIRE_VERSION}. Update TokenMe on the other machine.",
+            version[0],
+        )));
+    }
     let protocol_id = String::from_utf8(read_wire_field(&mut reader, MAX_STRING_BYTES, "protocol_id")?)
         .map_err(|_| TransportError::Protocol("protocol_id is not UTF-8".into()))?;
     let primary_id = String::from_utf8(read_wire_field(&mut reader, MAX_STRING_BYTES, "primary_id")?)
@@ -1875,6 +2155,7 @@ fn read_response_head<S: Read>(stream: &mut S) -> Result<HttpResponseHead, Trans
     let status = response.code.ok_or_else(|| TransportError::Protocol("missing HTTP status".into()))?;
     let mut content_length = None;
     let mut transfer_encoding = false;
+    let mut wire_version = None;
     for header in response.headers.iter() {
         if header.name.eq_ignore_ascii_case("content-length") {
             if content_length.is_some() { return Err(TransportError::Protocol("duplicate response content-length header".into())); }
@@ -1882,13 +2163,16 @@ fn read_response_head<S: Read>(stream: &mut S) -> Result<HttpResponseHead, Trans
             content_length = Some(value.trim().parse::<usize>().map_err(|_| TransportError::Protocol("invalid response content-length".into()))?);
         } else if header.name.eq_ignore_ascii_case("transfer-encoding") {
             transfer_encoding = true;
+        } else if header.name.eq_ignore_ascii_case(WIRE_VERSION_HEADER) {
+            let value = std::str::from_utf8(header.value).map_err(|_| TransportError::Protocol("invalid response wire version".into()))?;
+            wire_version = Some(parse_wire_version(value.trim())?);
         }
     }
     if transfer_encoding { return Err(TransportError::Protocol("chunked responses are not supported".into())); }
     if status == 100 && content_length.unwrap_or(0) != 0 {
         return Err(TransportError::Protocol("100 Continue response must not contain a body".into()));
     }
-    Ok(HttpResponseHead { status, content_length })
+    Ok(HttpResponseHead { status, content_length, wire_version })
 }
 
 fn read_response_body<S: Read>(stream: &mut S, head: HttpResponseHead, max_response: usize) -> Result<HttpResponse, TransportError> {
@@ -1896,13 +2180,32 @@ fn read_response_body<S: Read>(stream: &mut S, head: HttpResponseHead, max_respo
     if length > max_response { return Err(TransportError::Limit); }
     let mut body = vec![0u8; length];
     stream.read_exact(&mut body).map_err(TransportError::from)?;
+    validate_response_wire(head.status, head.wire_version, &body)?;
     Ok(HttpResponse { status: head.status, body })
 }
 
-fn write_response<S: Write>(stream: &mut S, status: u16, body: &[u8], max_body: usize) -> Result<(), TransportError> {
+fn validate_response_wire(status: u16, wire_version: Option<(u16, u16)>, body: &[u8]) -> Result<(), TransportError> {
+    if status == 100 { return Ok(()); }
+    if status == 426 {
+        let message = serde_json::from_slice::<WireError>(body).map(|error| error.message)
+            .unwrap_or_else(|_| "update TokenMe on the other machine".into());
+        return Err(TransportError::Unsupported(message));
+    }
+    match wire_version {
+        Some((major, _)) if major == WIRE_VERSION_MAJOR => Ok(()),
+        Some((major, minor)) => Err(TransportError::Unsupported(format!(
+            "peer speaks sync protocol {major}.{minor}; this build requires {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR} — update TokenMe on the other machine"
+        ))),
+        None => Err(TransportError::Unsupported(format!(
+            "peer did not announce sync protocol {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}; update TokenMe on the other machine"
+        ))),
+    }
+}
+
+fn write_response<S: Write>(stream: &mut S, status: u16, content_type: &str, body: &[u8], max_body: usize) -> Result<(), TransportError> {
     if body.len() > max_body { return Err(TransportError::Limit); }
     let reason = match status { 200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 408 => "Request Timeout", 409 => "Conflict", 413 => "Payload Too Large", 426 => "Upgrade Required", 429 => "Too Many Requests", 503 => "Service Unavailable", _ => "Error" };
-    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).map_err(TransportError::from)?;
+    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{WIRE_VERSION_HEADER}: {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).map_err(TransportError::from)?;
     stream.write_all(body).map_err(TransportError::from)?;
     stream.flush().map_err(TransportError::from)
 }
@@ -2044,6 +2347,30 @@ mod tests {
 
     fn server_config(cert: &CertFixture) -> HttpsServerConfig {
         HttpsServerConfig { bind_addr: "127.0.0.1:0".parse().unwrap(), certificate_der: cert.cert_der.clone(), private_key_der: cert.key_der.clone(), allow_lan: false, allowed_peer_ips: vec![], max_body_bytes: DEFAULT_BODY_BYTES, max_concurrent: 1, staging_dir: std::env::temp_dir().join(format!("tokenme-sync-test-{}-{}", std::process::id(), now_ms())), idle_timeout: DEFAULT_IDLE_TIMEOUT, total_timeout: DEFAULT_TOTAL_TIMEOUT, staging_quota_bytes: DEFAULT_STAGING_QUOTA_BYTES }
+    }
+
+    fn raw_tls_request(cert: &CertFixture, addr: SocketAddr, request: &[u8]) -> String {
+        let transport = HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der.clone());
+        let config = client_config(&transport).unwrap();
+        let name = ServerName::try_from("localhost").unwrap().to_owned();
+        let connection = ClientConnection::new(Arc::new(config), name).unwrap();
+        let tcp = TcpStream::connect(addr).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut stream = StreamOwned::new(connection, tcp);
+        stream.write_all(request).unwrap();
+        stream.flush().unwrap();
+        let mut response = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    response.extend_from_slice(&buffer[..read]);
+                    if response.len() > 64 * 1024 { break; }
+                }
+            }
+        }
+        String::from_utf8_lossy(&response).into_owned()
     }
 
     fn package(device: &DeviceIdentity) -> (SyncStore, SignedUpload) {
@@ -2264,6 +2591,104 @@ mod tests {
     }
 
     #[test]
+    fn known_path_without_wire_version_is_rejected_before_its_body_is_read() {
+        let cert = cert();
+        let store = SyncStore::open_in_memory("primary-1").unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        // Announce a body but never send it: the 426 must not wait for it.
+        let response = raw_tls_request(&cert, addr, b"POST /v1/status HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n");
+        assert!(response.starts_with("HTTP/1.1 426"), "{response}");
+        assert!(response.to_ascii_lowercase().contains("requires sync protocol 2.0"), "{response}");
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn a_known_path_with_a_foreign_wire_major_is_rejected_with_the_peer_version() {
+        let cert = cert();
+        let store = SyncStore::open_in_memory("primary-1").unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let response = raw_tls_request(&cert, addr, b"POST /v1/status HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 0\r\nx-tokenme-wire-version: 3.1\r\nConnection: close\r\n\r\n");
+        assert!(response.starts_with("HTTP/1.1 426"), "{response}");
+        assert!(response.contains("peer announced sync protocol 3.1"), "{response}");
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn response_wire_version_mismatch_becomes_an_actionable_upgrade_error() {
+        let body = br#"{"message":"update TokenMe on the other machine"}"#;
+        assert!(validate_response_wire(200, Some((WIRE_VERSION_MAJOR, 0)), body).is_ok());
+        assert!(matches!(validate_response_wire(200, Some((3, 0)), body), Err(TransportError::Unsupported(message)) if message.contains("3.0")));
+        assert!(matches!(validate_response_wire(200, None, body), Err(TransportError::Unsupported(message)) if message.contains("did not announce")));
+        assert!(matches!(validate_response_wire(426, None, body), Err(TransportError::Unsupported(message)) if message.contains("other machine")));
+    }
+
+    #[test]
+    fn a_signed_request_nonce_is_answered_only_once() {
+        let cert = cert();
+        let device = DeviceIdentity::create("replay-secondary", "Replay").unwrap();
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let invite = store.create_pairing_invite("https://localhost:47821", &"22".repeat(32), i64::MAX).unwrap();
+        let pairing = PairingRequest::new(&invite, &device, "linux").unwrap();
+        let pending = store.receive_pairing_request(&pairing, 1).unwrap();
+        store.approve_pairing(&pending.request_id, 2).unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(3));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        let request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
+        assert_eq!(client.status(&request).unwrap().status, "paired");
+        let replay = client.status(&request).unwrap_err();
+        assert!(matches!(replay, TransportError::HttpStatus { status: 401, .. }), "{replay:?}");
+        let next = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
+        assert_eq!(client.status(&next).unwrap().status, "paired");
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn nonce_cache_releases_failed_actions_but_never_admits_a_replay() {
+        let mut cache = NonceReplayCache::default();
+        let nonce = [7u8; 16];
+        assert_eq!(cache.claim("status", nonce, 1_000), NonceClaim::Fresh);
+        assert_eq!(cache.claim("status", nonce, 1_000), NonceClaim::Replay);
+        // The same bytes are a different request on another endpoint.
+        assert_eq!(cache.claim("download", nonce, 1_000), NonceClaim::Fresh);
+        cache.release("status", nonce);
+        assert_eq!(cache.claim("status", nonce, 1_000), NonceClaim::Fresh);
+        // Entries age out after the signed-request freshness window.
+        assert_eq!(cache.claim("download", [8u8; 16], 1_000 + REPLAY_RETENTION_MS + 1), NonceClaim::Fresh);
+        assert_eq!(cache.claim("status", nonce, 1_000 + REPLAY_RETENTION_MS + 1), NonceClaim::Fresh);
+    }
+
+    #[test]
+    fn download_page_wire_is_binary_and_rejects_trailing_or_future_frames() {
+        let device = DeviceIdentity::create("download-wire", "Wire").unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now_ms()).unwrap();
+        let row = NetworkRow { key: Some("key:p".into()), occurrence_id: None, tool: "codex".into(), ts_ms: 10, session: "s".into(), project: None, model: None, meter: "tokens".into(), source: "local".into(), counts: NetworkCounts::all_zero(), calls: vec![] };
+        let package = NetworkPackage::from_rows_with_snapshot_complete(device.origin.clone(), usage_index::INDEX_SCHEMA_VERSION, 0, 100, &[row], 4, true).unwrap();
+        let page = PrimaryDownloadPage { request_nonce: request.nonce, enabled: true, preparing: false, package: Some(package.clone()), next_identity: Some("key:p".into()), next_dirty_revision: 4, complete: true };
+        let encoded = encode_primary_download_page(page).unwrap();
+        assert!(encoded.starts_with(DOWNLOAD_MAGIC));
+        assert_ne!(encoded.first(), Some(&b'{'));
+        assert!(encoded.windows(package.gzip_bytes.len()).any(|window| window == package.gzip_bytes.as_slice()));
+        let decoded = decode_primary_download_page(&encoded, &request).unwrap();
+        assert!(decoded.enabled && decoded.complete && !decoded.preparing);
+        assert_eq!(decoded.request_nonce, request.nonce);
+        assert_eq!(decoded.next_identity.as_deref(), Some("key:p"));
+        assert_eq!(decoded.next_dirty_revision, 4);
+        assert_eq!(decoded.package, Some(package));
+        let mut future = encoded.clone();
+        future[8] = DOWNLOAD_PAGE_VERSION + 1;
+        assert!(matches!(decode_primary_download_page(&future, &request), Err(TransportError::Unsupported(_))));
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(matches!(decode_primary_download_page(&trailing, &request), Err(TransportError::Protocol(message)) if message.contains("trailing")));
+    }
+
+    #[test]
     fn bad_connection_does_not_stop_the_following_valid_upload() {
         let cert = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
@@ -2319,7 +2744,7 @@ mod tests {
             let head = read_request_head(&mut stream, DEFAULT_BODY_BYTES, deadline, &cancel).unwrap();
             assert!(head.expect_continue);
             let _metadata = read_upload_metadata(&mut stream, head.content_length, DEFAULT_BODY_BYTES, deadline, &cancel).unwrap();
-            write_response(&mut stream, 403, br#"{"message":"device is not authorized"}"#, MAX_RESPONSE_BYTES).unwrap();
+            write_response(&mut stream, 403, "application/json", br#"{"message":"device is not authorized"}"#, MAX_RESPONSE_BYTES).unwrap();
             let mut extra = [0u8; 8192];
             let received = match stream.read(&mut extra) {
                 Ok(bytes) => bytes as u64,
@@ -2498,6 +2923,26 @@ mod tests {
     }
 
     #[test]
+    fn pin_verifier_checks_validity_and_name_not_only_the_leaf_hash() {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let name = ServerName::try_from("localhost").unwrap().to_owned();
+        let verify = |params: CertificateParams, now: UnixTime| {
+            let cert = params.self_signed(&key).unwrap();
+            let verifier = PinOnlyVerifier { expected: hash_bytes(cert.der()) };
+            verifier.verify_server_cert(&CertificateDer::from(cert.der().to_vec()), &[], &name, &[], now)
+        };
+        assert!(verify(CertificateParams::new(vec!["localhost".into()]).unwrap(), UnixTime::now()).is_ok());
+        let wrong_name = CertificateParams::new(vec!["other.example".into()]).unwrap();
+        let Err(error) = verify(wrong_name, UnixTime::now()) else { panic!("a pinned certificate for another host must be rejected") };
+        assert!(error.to_string().contains("does not name the endpoint"), "{error}");
+        let mut expired = CertificateParams::new(vec!["localhost".into()]).unwrap();
+        expired.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        expired.not_after = rcgen::date_time_ymd(2020, 2, 1);
+        let Err(error) = verify(expired, UnixTime::now()) else { panic!("a pinned certificate outside its validity window must be rejected") };
+        assert!(error.to_string().contains("failed validation"), "{error}");
+    }
+
+    #[test]
     fn pin_mismatch_happens_before_http_request() {
         let actual = cert();
         let expected = cert();
@@ -2649,7 +3094,7 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
         )).unwrap();
-        let request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
+        let request = AuthenticatedStatusRequest::new_disconnect_at(&device, "primary-1", now_ms()).unwrap();
         client.disconnect(&request).unwrap();
         let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
         assert_eq!(client.status(&status_request).unwrap().status, "revoked");

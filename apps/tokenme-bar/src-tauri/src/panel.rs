@@ -34,6 +34,7 @@ const WIDTH: f64 = 400.0;
 const HEIGHT: f64 = 660.0;
 /// The panel never shrinks below this, even on a tiny work area: the header,
 /// a few rows and the status bar stay usable, and the page scrolls for the rest.
+#[cfg(any(test, target_os = "windows"))]
 const MIN_HEIGHT: f64 = 420.0;
 /// Breathing room between the tray/taskbar and the panel edge.
 const GAP: f64 = 8.0;
@@ -93,12 +94,14 @@ pub(crate) fn remember_tray_rect(rect: &Rect) {
     }
 }
 
+#[cfg(any(test, target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ScreenArea {
     monitor: Bounds,
     work: Bounds,
 }
 
+#[cfg(any(test, target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrayEdge {
     Top,
@@ -183,6 +186,7 @@ pub(crate) struct PanelScreenshot {
 /// Convert the top-down BGRA buffer returned by GDI into a lossless PNG.  A
 /// BMP leaves orientation and channel order to every MCP consumer; PNG makes
 /// both explicit and keeps text sharp when the remote client scales it.
+#[cfg(any(test, target_os = "windows"))]
 fn encode_panel_png(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let expected = usize::try_from(width)
         .ok()
@@ -1638,6 +1642,7 @@ fn top_right_origin(area: Bounds, width: f64) -> (f64, f64) {
     )
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn clamp_in_bounds(x: f64, y: f64, size: (f64, f64), bounds: Bounds, margin: f64) -> (f64, f64) {
     let min_x = bounds.left + margin;
     let min_y = bounds.top + margin;
@@ -1646,6 +1651,7 @@ fn clamp_in_bounds(x: f64, y: f64, size: (f64, f64), bounds: Bounds, margin: f64
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn edge_for_tray(tray: Bounds, area: ScreenArea) -> TrayEdge {
     // A normal taskbar makes the tray rectangle fall outside the work area.
     if tray.top >= area.work.bottom {
@@ -1677,6 +1683,7 @@ fn edge_for_tray(tray: Bounds, area: ScreenArea) -> TrayEdge {
         .unwrap_or(TrayEdge::Bottom)
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn windows_anchor_point(tray: Bounds, area: ScreenArea, size: (f64, f64)) -> (f64, f64) {
     let edge = edge_for_tray(tray, area);
     let tray_center_x = (tray.left + tray.right) / 2.0;
@@ -1792,6 +1799,7 @@ fn anchor_windows(window: &WebviewWindow, rect: Option<&Rect>) -> bool {
 /// anchoring gap (never below [`MIN_HEIGHT`] — the page scrolls for the rest).
 /// Division and multiplication use the same scale, so even a stale scale
 /// factor cannot push the physical result past the work area.
+#[cfg(any(test, target_os = "windows"))]
 fn panel_height_for_work_area(work_height: f64, scale: f64) -> f64 {
     let max_height = ((work_height - 2.0 * GAP) / scale).max(MIN_HEIGHT);
     HEIGHT.min(max_height)
@@ -1844,14 +1852,6 @@ fn rect_size(rect: &Rect) -> (f64, f64) {
     match rect.size {
         Size::Physical(s) => (s.width as f64, s.height as f64),
         Size::Logical(s) => (s.width, s.height),
-    }
-}
-
-/// Pulls the panel back onto a connected monitor without moving it if it fits.
-fn clamp(window: &WebviewWindow) {
-    if let Ok(pos) = window.outer_position() {
-        let (x, y) = clamp_point(window, pos.x as f64, pos.y as f64);
-        let _ = window.set_position(PhysicalPosition::new(x, y));
     }
 }
 
@@ -2514,36 +2514,6 @@ fn observe_context_switches(app: &AppHandle) {
             let observer: id = &*block as *const _ as id;
             let _: id = msg_send![center, addObserverForName: ns_name object: nil queue: nil usingBlock: observer];
         }
-    }
-}
-
-/// Whether the current cursor sits inside the pet's on-screen frame.
-#[cfg(target_os = "macos")]
-fn cursor_on_pet(app: &AppHandle) -> bool {
-    use tauri_nspanel::cocoa::base::id;
-    use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
-    unsafe {
-        // [NSEvent mouseLocation] is a CLASS method: it is called on the
-        // class object itself, and its point is in bottom-left screen
-        // coordinates while the pet's frame is top-left (tauri). The frame's
-        // own bottom edge converts directly: point.y is measured from the
-        // MAIN screen's bottom, so compare inside the frame's AppKit-space
-        // rect instead of translating through a screen height (a secondary
-        // display makes that wrong — this machine's panel lives on one).
-        let point: tauri_nspanel::cocoa::foundation::NSPoint =
-            msg_send![class!(NSEvent), mouseLocation];
-        let Some((x, y, w, h)) = crate::bubble::visible_frame(app) else { return false };
-        let main: id = msg_send![class!(NSScreen), mainScreen];
-        let frame: tauri_nspanel::cocoa::foundation::NSRect = msg_send![main, frame];
-        let screen_h = frame.size.height;
-        // The window's top-left tauri y maps to AppKit top y = screen_h - y.
-        let ak_top = screen_h - y;
-        let ak_bottom = ak_top - h;
-        crate::logging::info(&format!(
-            "panel: cursor_on_pet probe — cursor ({:.0},{:.0}) frame ak_top {:.0} ak_bottom {:.0}",
-            point.x, point.y, ak_top, ak_bottom
-        ));
-        point.x >= x && point.x <= x + w && point.y >= ak_bottom && point.y <= ak_top
     }
 }
 

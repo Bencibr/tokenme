@@ -192,7 +192,7 @@ pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit, tool_id: &str) -> Re
                 let Ok(row) = row else { break };
                 let Some((idx, blob)) = row else { continue };
                 audit.rows += 1;
-                let decoded = match decode_generation(idx, &blob, None) {
+                let decoded = match decode_generation(idx, &blob) {
                     Ok(decoded) => decoded,
                     Err(skip) => {
                         let (reason, offset) = describe(&skip);

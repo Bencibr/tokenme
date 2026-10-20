@@ -3482,7 +3482,6 @@
 
 .sync-operation-success .sync-operation-dot { background: var(--accent); }
 .sync-operation-error .sync-operation-dot { background: var(--bad); }
-.sync-operation-offline .sync-operation-dot,
 .sync-operation-cancelled .sync-operation-dot { background: var(--warn); }
 .sync-poll-status { justify-content: space-between; }
 .sync-manual-discovery { margin: 2px 0 6px; }

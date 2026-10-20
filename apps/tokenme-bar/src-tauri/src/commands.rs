@@ -168,6 +168,7 @@ struct SyncControlState {
     last_error: Option<String>,
     discovery_error: Option<String>,
     phase: SyncPhase,
+    primary_starting: bool,
     last_checked_at_ms: Option<i64>,
     discovered_primaries: Vec<DiscoveredPrimaryView>,
     pending_pairing_attempted: bool,
@@ -178,7 +179,7 @@ struct SyncControlState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SyncPhase { Idle, Running, Success, Error, Cancelled, Offline }
+enum SyncPhase { Idle, Running, Success, Error, Cancelled }
 
 impl Default for SyncPhase {
     fn default() -> Self { Self::Idle }
@@ -192,7 +193,6 @@ impl SyncPhase {
             Self::Success => "success",
             Self::Error => "error",
             Self::Cancelled => "cancelled",
-            Self::Offline => "offline",
         }
     }
 }
@@ -327,6 +327,7 @@ pub struct SyncDevicesView {
     pub primary_display_name: Option<String>,
     pub role: String,
     pub service_running: bool,
+    pub primary_starting: bool,
     pub primary_data_sharing_enabled: bool,
     pub service_health: Option<String>,
     pub endpoint: Option<String>,
@@ -534,6 +535,7 @@ fn clear_primary_state(state: &mut SyncControlState) {
     state.invite_expires_at_ms = None;
     state.last_error = None;
     state.discovery_error = None;
+    state.primary_starting = false;
     state.phase = SyncPhase::Idle;
 }
 
@@ -734,7 +736,10 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
 }
 
 fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_host: Option<String>, allow_lan: bool, diagnostics_app: Option<AppHandle>) -> Result<(), String> {
+    let started = Instant::now();
+    let stage = |name: &str, at: Instant| crate::logging::info(&format!("sync: action=start_primary stage={name} elapsed_ms={}", at.elapsed().as_millis()));
     let index_path = sync_index_path()?;
+    stage("path", started);
     reap_service(state);
     if state.service.is_some() { return Ok(()); }
     if state.runtime.is_some() {
@@ -752,6 +757,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let directory = sync_dir()?;
     let identity_path = directory.join("primary-identity.json");
     let identity = DeviceIdentity::load_or_create(&identity_path, "primary", "TokenMe primary").map_err(|e| format!("cannot create primary identity: {e}"))?;
+    stage("identity", started);
     let share_data_with_secondaries = SyncStore::read_primary_config(&index_path)
         .map_err(|error| format!("cannot read primary sharing preference: {error}"))?
         .filter(|config| config.primary_id == identity.device_id)
@@ -759,6 +765,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let cert_path = directory.join("server-cert.pem");
     let key_path = directory.join("server-key.pem");
     let (certificate_der, private_key_der) = usage_device_sync::ensure_server_certificate(&cert_path, &key_path, "localhost").map_err(|e| format!("cannot create private sync certificate: {e}"))?;
+    stage("cert", started);
     let bind_text = bind.unwrap_or_else(|| DEFAULT_PRIMARY_BIND.into());
     let bind_addr: std::net::SocketAddr = bind_text.parse().map_err(|e| format!("sync bind address is invalid: {e}"))?;
     if allow_lan && bind_addr.ip().is_loopback() {
@@ -776,6 +783,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let existing_primary_id = SyncStore::read_status(&index_path).map_err(|error| format!("cannot read sync role: {error}"))?.primary_id;
     let current_primary_id = existing_primary_id.unwrap_or_else(|| identity.device_id.clone());
     let mut store = SyncStore::open(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
+    stage("store_open", started);
     if current_primary_id != identity.device_id {
         store.rotate_primary_id(identity.device_id.clone(), current_ms()).map_err(|e| format!("cannot switch sync role: {e}"))?;
         if let Some(config) = &secondary_config {
@@ -794,7 +802,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         diagnostics_host.set_check_runner(move |checks| crate::diagnostics::run_remote_checks(app.clone(), checks))
             .map_err(|e| format!("cannot configure diagnostics check runner: {e}"))?;
     }
-    let server = usage_device_sync::HttpsSyncServer::bind_with_host_fallback(HttpsServerConfig {
+    let server = usage_device_sync::HttpsSyncServer::bind_with_host(HttpsServerConfig {
         bind_addr,
         certificate_der: certificate_der.clone(),
         private_key_der,
@@ -807,6 +815,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         total_timeout: std::time::Duration::from_secs(600),
         staging_quota_bytes: 512 * 1024 * 1024,
     }, store, diagnostics_host).map_err(|e| format!("cannot start sync listener: {e}"))?;
+    stage("listener_bind", started);
     server.set_log_sink(|is_error, message| {
         if is_error { crate::logging::error(message); } else { crate::logging::info(message); }
     }).map_err(|error| format!("cannot configure sync runtime logging: {error}"))?;
@@ -833,6 +842,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         enabled: true,
         share_data_with_secondaries,
     }, current_ms()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
+    stage("persist_config", started);
     let mdns = if allow_lan {
         let certificate_pin = hex_bytes(&hash_bytes(&certificate_der));
         match register_mdns_primary(&identity.device_id, &certificate_pin, &endpoint) {
@@ -1125,13 +1135,6 @@ fn merge_discovered_primary(results: &mut Vec<DiscoveredPrimaryView>, candidate:
     results.push(candidate);
 }
 
-fn mdns_address_is_routable(address: &std::net::IpAddr) -> bool {
-    match address {
-        std::net::IpAddr::V4(address) => !address.is_loopback() && !address.is_unspecified() && !address.is_link_local(),
-        std::net::IpAddr::V6(address) => !address.is_loopback() && !address.is_unspecified() && !address.is_unicast_link_local(),
-    }
-}
-
 fn apply_discovery_result(state: &mut SyncControlState, result: Result<Vec<DiscoveredPrimaryView>, String>, started: Instant) {
     // A new discovery attempt supersedes a failed pairing attempt; do not
     // carry that stale error back into the discovery sheet snapshot.
@@ -1340,10 +1343,6 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     }
     if state.role == "secondary" {
         state.last_error = secondary_config.as_ref().and_then(|config| config.last_error.clone());
-    } else if state.role == "secondary" && state.last_error.is_none() && secondary_config.as_ref().is_some_and(|config| !config.enabled) {
-        state.phase = SyncPhase::Offline;
-    } else if state.role == "primary" && state.service.is_none() && primary_config.as_ref().is_some_and(|config| !config.enabled) {
-        state.phase = SyncPhase::Offline;
     }
     let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
     let primary_id = state.primary_id.clone().or(snapshot.primary_id.clone()).or_else(|| secondary_config.as_ref().map(|config| config.primary_id.clone()));
@@ -1374,6 +1373,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         primary_display_name: secondary_config.as_ref().and_then(|config| config.primary_display_name.clone()),
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
         service_running: state.service.is_some() || state.runtime.is_some(),
+        primary_starting: state.primary_starting,
         primary_data_sharing_enabled,
         service_health,
         endpoint,
@@ -1819,6 +1819,60 @@ pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>
         eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
         log_sync_action(action, started, result.as_ref().err().map(String::as_str));
         return result;
+    }
+    if matches!(request.as_ref(), Some(SyncManagementRequest::StartPrimary { .. })) {
+        // The full start waits behind ingest write locks for minutes on a busy
+        // index. Accept immediately, flip to a visible starting state, and let
+        // the blocking work finish in a worker; the sheet's existing poll
+        // loop and the recovery thread publish the final state.
+        {
+            let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+            if state.primary_starting {
+                let error = Err("primary sync is already starting".into());
+                crate::logging::sync_event(action, false, Some("operation_busy"));
+                log_sync_action(action, started, error.as_ref().err().map(String::as_str));
+                return error;
+            }
+            state.primary_starting = true;
+            state.last_error = None;
+            state.phase = SyncPhase::Running;
+        }
+        let state_ref = Arc::clone(&control.state);
+        let worker_app = app.clone();
+        let start_request = match request.as_ref() {
+            Some(SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan }) => SyncManagementRequest::StartPrimary {
+                bind: bind.clone(), advertise_host: advertise_host.clone(), allow_lan: *allow_lan,
+            },
+            _ => unreachable!("guarded above"),
+        };
+        let initial_view = {
+            let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+            sync_snapshot(&mut state, Some(app.clone()), false)
+        }?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let started_worker = Instant::now();
+            let outcome = (|| {
+                let mut state = state_ref.lock().map_err(|_| "sync management state is busy".to_string())?;
+                let result = run_sync_action(&mut state, start_request, Some(worker_app.clone()));
+                let view = sync_snapshot(&mut state, Some(worker_app.clone()), false);
+                result?;
+                view.map(|_| ())
+            })();
+            let error = outcome.as_ref().err().cloned();
+            if let Ok(mut state) = state_ref.lock() {
+                state.primary_starting = false;
+                if let Some(message) = &error {
+                    state.last_error = Some(message.clone());
+                    state.phase = SyncPhase::Error;
+                }
+            }
+            crate::logging::sync_event("start_primary_worker", outcome.is_ok(), outcome.as_ref().err().map(|_| "handler_failed"));
+            log_sync_action("start_primary_worker", started_worker, outcome.as_ref().err().map(String::as_str));
+            eprintln!("tokenme sync: action=start_primary_worker total_ms={}", started_worker.elapsed().as_millis());
+        });
+        crate::logging::sync_event(action, true, None);
+        log_sync_action(action, started, None);
+        return Ok(initial_view);
     }
     let state_ref = Arc::clone(&control.state);
     let worker_app = app.clone();
@@ -2435,13 +2489,6 @@ pub fn show_panel(app: AppHandle) {
     }
 }
 
-/// The panel's own visibility, as the hide/show paths record it.
-fn panel_hidden(app: &AppHandle) -> bool {
-    app.get_webview_window(crate::panel::LABEL)
-        .and_then(|w| w.is_visible().ok())
-        != Some(true)
-}
-
 /// Dismisses the panel while keeping the native and Rust visibility state in
 /// sync, so the next tray click opens it again.
 #[tauri::command]
@@ -2569,7 +2616,7 @@ mod sync_tests {
         assert!(std::sync::Arc::ptr_eq(&control.interrupt, &control.state.lock().unwrap().interrupt));
     }
 
-    use super::{advertised_endpoint_host, clear_primary_state, mdns_address_is_routable, merge_discovered_primary, pairing_invite_needs_renewal, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, SyncPhase, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
+    use super::{advertised_endpoint_host, clear_primary_state, merge_discovered_primary, pairing_invite_needs_renewal, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, SyncPhase, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
 
@@ -2613,14 +2660,6 @@ mod sync_tests {
         merge_discovered_primary(&mut results, DiscoveredPrimaryView { service_name: "two".into(), primary_id: "same".into(), display_name: "Two".into(), endpoint: "https://192.168.1.3:47821".into(), certificate_pin: "b".repeat(64), identity_conflict: false });
         assert_eq!(results.len(), 1);
         assert!(results[0].identity_conflict);
-    }
-
-    #[test]
-    fn mdns_discovery_ignores_loopback_and_link_local_addresses() {
-        assert!(!mdns_address_is_routable(&"127.0.0.1".parse().unwrap()));
-        assert!(!mdns_address_is_routable(&"fe80::1".parse().unwrap()));
-        assert!(mdns_address_is_routable(&"192.168.101.66".parse().unwrap()));
-        assert!(mdns_address_is_routable(&"2001:db8::66".parse().unwrap()));
     }
 
     #[test]

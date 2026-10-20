@@ -45,10 +45,6 @@ const LOCAL_MCP_PATH: &str = "/mcp";
 const LOCAL_MCP_PORT: u16 = 47822;
 const LOCAL_MCP_MAX_HEADER_BYTES: usize = 64 * 1024;
 const LOCAL_MCP_MAX_BODY_BYTES: usize = 256 * 1024;
-/// A copied HTTP MCP credential remains usable for one day. It is still
-/// revoked immediately when MCP is disabled or TokenMe exits, so the longer
-/// lifetime only avoids forcing another copy during a normal workday.
-const LOCAL_MCP_TOKEN_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const LOCAL_MCP_MAX_AUTH_BYTES: usize = 256;
 const LOCAL_MCP_MAX_CONNECTIONS: usize = 4;
 const LOCAL_MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -672,15 +668,6 @@ impl DiagnosticsState {
         })
     }
 
-    pub(crate) fn revoke_session(&self, session_id: &str) -> Result<(), DiagnosticsError> {
-        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        let Some(session) = state.sessions.get_mut(session_id) else {
-            return Err(DiagnosticsError::new(CODE_SESSION_NOT_FOUND, "diagnostics session is not active"));
-        };
-        session.revoked = Some(CODE_SESSION_REVOKED);
-        Ok(())
-    }
-
     pub(crate) fn create_session(&self, request: SessionRequest) -> Result<SessionView, DiagnosticsError> {
         let now = now_ms();
         let persistent_local_mcp = request.origin.starts_with("mcp-http");
@@ -863,7 +850,7 @@ fn run_local_mcp_http(listener: TcpListener, app: AppHandle, stop: Arc<AtomicBoo
         }
         handlers = active_handlers;
         match listener.accept() {
-            Ok((mut stream, _peer)) if handlers.len() >= LOCAL_MCP_MAX_CONNECTIONS => {
+            Ok((stream, _peer)) if handlers.len() >= LOCAL_MCP_MAX_CONNECTIONS => {
                 let _ = stream.set_nonblocking(false);
                 let mut stream = stream;
                 let _ = stream.set_write_timeout(Some(LOCAL_MCP_REQUEST_TIMEOUT));
@@ -1754,13 +1741,6 @@ fn optional_string<'a>(params: &'a serde_json::Map<String, Value>, name: &str) -
     }
 }
 
-fn optional_bool(params: &serde_json::Map<String, Value>, name: &str) -> Result<Option<bool>, DiagnosticsError> {
-    match params.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => value.as_bool().map(Some).ok_or_else(invalid_params),
-    }
-}
-
 fn optional_number(params: &serde_json::Map<String, Value>, name: &str) -> Result<Option<i64>, DiagnosticsError> {
     match params.get(name) {
         None | Some(Value::Null) => Ok(None),
@@ -1999,7 +1979,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_session_lifecycle_exports_and_revokes_bounded_config() {
+    fn panel_session_lifecycle_exports_bounded_config() {
         let state = state();
         let session = state.create_session_for_panel(
             "target-device".into(),
@@ -2013,8 +1993,6 @@ mod tests {
         let json = serde_json::to_string(&serde_json::json!({ "schema": "tokenme-diagnostics-local/v1", "session": session.clone() })).unwrap();
         assert!(json.contains("tokenme-diagnostics-local/v1"));
         assert!(!json.contains("password"));
-        state.revoke_session(&session.session_id).unwrap();
-        assert!(state.snapshot().sessions.is_empty());
     }
 
     #[test]
@@ -2042,7 +2020,6 @@ mod tests {
     fn local_mcp_bearer_is_high_entropy_read_only_and_revoked_on_disable() {
         let state = state();
         let token = new_local_mcp_token();
-        assert_eq!(LOCAL_MCP_TOKEN_TTL_MS, 24 * 60 * 60 * 1000);
         assert!(token.starts_with("tm_"));
         assert!(token.len() >= 40);
         assert_ne!(token, new_local_mcp_token());
@@ -2255,6 +2232,7 @@ mod tests {
             primary_id: Some("primary-1".into()),
             role: "primary".into(),
             service_running: false,
+            primary_starting: false,
             primary_data_sharing_enabled: false,
             service_health: Some("stopped".into()),
             endpoint: Some("https://127.0.0.1:47821".into()),
@@ -2270,7 +2248,7 @@ mod tests {
             last_error: None,
             discovery_error: None,
             last_connected_at_ms: None,
-            operation_state: "offline".into(),
+            operation_state: "idle".into(),
             last_checked_at_ms: None,
             invite_url: None,
             invite_expires_at_ms: None,

@@ -292,7 +292,6 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
 
     // An index that cannot be opened is not a quiet day either: every pass would
     // return without publishing and the webview would sit on "indexing" forever.
-    let shared = app.state::<Shared>();
     let mut index = match Index::open_recovering_corruption(index_path()) {
         Ok((index, true)) => {
             crate::logging::error(

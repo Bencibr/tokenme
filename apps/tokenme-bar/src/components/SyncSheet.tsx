@@ -49,7 +49,7 @@ function hasRecentSecondaryContact(snapshot: SyncDevicesSnapshot): boolean {
   return age >= -60_000 && age <= 60_000;
 }
 
-function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recovering" | "degraded" | "stopped" | "disconnected" | "error"; label: string } {
+function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recovering" | "degraded" | "stopped" | "error"; label: string } {
   if (snapshot.role === "secondary" && snapshot.service_running && snapshot.last_error) {
     return hasRecentSecondaryContact(snapshot)
       ? { kind: "degraded", label: t("sync.state.degraded") }
@@ -58,7 +58,6 @@ function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recover
   if (snapshot.last_error || snapshot.operation_state === "error") return { kind: "error", label: t("sync.state.error") };
   if (snapshot.service_running) return { kind: "running", label: t("sync.state.running") };
   if (snapshot.operation_state === "running") return { kind: "recovering", label: t("sync.state.recovering") };
-  if (snapshot.operation_state === "offline") return { kind: "disconnected", label: t("sync.state.disconnected") };
   return { kind: "stopped", label: t("sync.state.stopped") };
 }
 
@@ -72,13 +71,14 @@ function syncErrorMessage(error: string | null): string | null {
   if (normalized.includes("database") || normalized.includes("sqlite") || normalized.includes("corrupt")) return t("sync.error.database");
   if (normalized.includes("pairing invite") && normalized.includes("expired")) return t("sync.error.invite_expired");
   if (normalized.includes("invalid pairing invite")) return t("sync.error.invite_invalid");
-  if (normalized.includes("address already in use")) return t("sync.error.listener");
+  if (normalized.includes("already in use")) return t("sync.error.listener");
+  if (normalized.includes("sync protocol") || normalized.includes("update tokenme on the other machine")) return t("sync.error.version");
   return t("sync.error.generic");
 }
 
 function syncScreenFor(snapshot: SyncDevicesSnapshot): Screen {
-  if (snapshot.role === "unconfigured") return "setup";
-  if (!snapshot.service_running) return "setup";
+  if (snapshot.role === "unconfigured" && !snapshot.primary_starting) return "setup";
+  if (!snapshot.service_running && !snapshot.primary_starting) return "setup";
   return "overview";
 }
 
@@ -227,7 +227,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     const wasRunning = previousServiceRunning.current;
     previousRole.current = snapshot.role;
     previousServiceRunning.current = snapshot.service_running;
-    const roleSelection = snapshot.role === "unconfigured" || !snapshot.service_running;
+    const roleSelection = (snapshot.role === "unconfigured" || !snapshot.service_running) && !snapshot.primary_starting;
     const enteredRoleSelection = roleSelection && (wasRole !== snapshot.role || wasRunning !== snapshot.service_running);
     const enteredRunningState = !roleSelection && (wasRole !== snapshot.role || wasRunning !== snapshot.service_running);
     if (enteredRoleSelection) {
@@ -244,6 +244,9 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   }, [pickedRole, snapshot.role, snapshot.service_running]);
 
   const hasPendingRequest = snapshot.pairing_requests.some((request) => request.status === "pending");
+  // A primary start runs in a background worker; the sheet stays on the
+  // overview and polls until the listener either serves or reports an error.
+  const primaryStarting = snapshot.primary_starting && !snapshot.service_running;
   // "Waiting for the primary" is honest only while the request is genuinely
   // pending approval. Once the runtime records any other error the pairing is
   // approved but unreachable, and the error box plus the recovering state tell
@@ -252,7 +255,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id && (!snapshot.last_error || awaitingApprovalError);
   const secondaryServiceMayChange = snapshot.role === "secondary" && snapshot.service_running;
   const primaryDeviceStateMayChange = snapshot.role === "primary" && snapshot.devices.some((device) => device.role === "secondary" && device.status === "paired");
-  const shouldPoll = snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
+  const shouldPoll = primaryStarting || snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
   const commandBusy = busy || initializing || discovering;
 
   // Keep the overview live while pairing decisions are outstanding or a
@@ -287,7 +290,8 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       }
       if (alive && generation === operationGeneration.current && attempts < maxAttempts) timer = window.setTimeout(() => void poll(), retryDelay);
     };
-    timer = window.setTimeout(() => void poll(), 5000);
+    const pollInterval = primaryStarting ? 1000 : 5000;
+    timer = window.setTimeout(() => void poll(), pollInterval);
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [onSnapshot, pollGeneration, primaryDeviceStateMayChange, secondaryServiceMayChange, shouldPoll, snapshot.pairing_pending]);
 
@@ -377,7 +381,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
         <span className="sync-dev-name" title={hostName}>{hostName}</span>
         {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : null}
         {device.role === "secondary" && device.status === "paired" && deviceMeta ? <span className="sync-dev-when">{deviceMeta}</span> : null}
-        <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "revoke", device_id: device.device_id }, message: t("sync.revoke.confirm", { name: hostName }) })}>{t("sync.disconnect")}</button>
+        <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
+          request: { action: "revoke", device_id: device.device_id },
+          message: isSecondary && uploadQueued > 0
+            ? t("sync.revoke.pending_confirm", { name: hostName, count: uploadQueued })
+            : t("sync.revoke.confirm", { name: hostName }),
+        })}>{t("sync.disconnect")}</button>
       </div>
     );
   };
@@ -507,8 +516,9 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             </>
           ) : null}
 
-          {screen === "overview" && snapshot.role !== "unconfigured" && snapshot.service_running ? (
+          {screen === "overview" && (snapshot.role !== "unconfigured" || snapshot.primary_starting) && (snapshot.service_running || snapshot.primary_starting) ? (
             <>
+              {primaryStarting ? <div className="sync-waiting" role="status">{t("sync.primary.starting")}</div> : null}
               <div className="rolecard">
                 <div className="role-row">
                   <div>
@@ -522,7 +532,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   </div>
                   <div className="role-right">
                     <span className={`role-state role-state-${status.kind}`} aria-live="polite">{status.label}</span>
-                    <button type="button" className="stopbtn" disabled={commandBusy || !snapshot.service_running} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
+                    <button type="button" className="stopbtn" disabled={commandBusy || !snapshot.service_running} onClick={() => {
+                      if (isSecondary && uploadQueued > 0) {
+                        setPendingConfirm({ request: { action: "stop" }, message: t("sync.stop.pending_confirm", { count: uploadQueued }) });
+                        return;
+                      }
+                      void run({ action: "stop" });
+                    }} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>
                   </div>
