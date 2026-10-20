@@ -1523,27 +1523,17 @@ impl Index {
         E: From<Error>,
         F: FnOnce(&rusqlite::Transaction<'_>) -> std::result::Result<T, E>,
     {
-        self.conn
-            .execute_batch("PRAGMA synchronous=FULL;")
-            .map_err(|e| E::from(sql_err(e)))?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| E::from(sql_err(e)))?;
-        let result = match f(&tx) {
+        match f(&tx) {
             Ok(value) => tx.commit().map(|()| value).map_err(|e| E::from(sql_err(e))),
             Err(error) => {
                 let _ = tx.rollback();
                 Err(error)
             }
-        };
-        // Restore the reporting connection's normal local-ingest durability.
-        if let Err(error) = self.conn.execute_batch("PRAGMA synchronous=NORMAL;") {
-            if result.is_ok() {
-                return Err(E::from(sql_err(error)));
-            }
         }
-        result
     }
 
     pub fn meta_value(&self, key: &str) -> Result<Option<String>> {
@@ -2440,10 +2430,13 @@ mod tests {
 
     #[test]
     fn memory_index_starts_empty_and_versioned() {
-        let idx = Index::open_in_memory().unwrap();
+        let mut idx = Index::open_in_memory().unwrap();
         assert_eq!(idx.event_count().unwrap(), 0);
         assert_eq!(idx.meta_value("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION));
         assert!(idx.meta_value("index_id").unwrap().is_some());
+        assert_eq!(idx.conn.query_row::<i64, _, _>("PRAGMA synchronous", [], |row| row.get(0)).unwrap(), 1);
+        idx.with_network_transaction(|_| Ok::<_, Error>(())).unwrap();
+        assert_eq!(idx.conn.query_row::<i64, _, _>("PRAGMA synchronous", [], |row| row.get(0)).unwrap(), 1);
     }
 
     #[test]
