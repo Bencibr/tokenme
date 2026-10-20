@@ -1673,8 +1673,30 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
                 cancel_pending_pairing(&index_path)?;
                 clear_pending_pairing()?;
                 if let Some(config) = primary_config {
-                    let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
-                    store.clear_primary_config(current_ms()).map_err(|error| error.to_string())?;
+                    // State-only teardown: never opens the usage index, so the
+                    // stop button cannot queue behind the ingest write lock.
+                    // The index-side convergence (unpaired timestamp, capture
+                    // mirror, journal release) runs on a background thread and
+                    // re-converges via the recovery loop if the lock wins.
+                    SyncStore::clear_primary_config_state(&index_path, &config.primary_id).map_err(|error| error.to_string())?;
+                    let converge_path = index_path.clone();
+                    let converge_primary = config.primary_id.clone();
+                    thread::spawn(move || {
+                        let started = Instant::now();
+                        let outcome = (|| {
+                            let mut store = match SyncStore::open(&converge_path, converge_primary.clone()) {
+                                Ok(store) => store,
+                                Err(error) => return Err(format!("cannot open sync store: {error}")),
+                            };
+                            store.index().conn().execute(
+                                "INSERT INTO meta(key, value) VALUES('device_sync_last_primary_unpaired_at_ms', ?1)
+                                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                                [current_ms().to_string()],
+                            ).map_err(|error| format!("cannot record the unpaired timestamp: {error}"))?;
+                            Ok(())
+                        })();
+                        log_sync_action("stop_converge", started, outcome.as_ref().err().map(String::as_str));
+                    });
                 }
                 clear_primary_state(state);
             }

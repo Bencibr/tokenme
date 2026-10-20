@@ -917,6 +917,26 @@ impl SyncStore {
         self.write_capture_mirror()
     }
 
+    /// State-only teardown for the panel's stop button: deletes the primary
+    /// config from sync_state.db without ever opening the usage index, so the
+    /// stop cannot queue behind the ingest engine's write lock. The index-side
+    /// convergence (unpaired timestamp, capture mirror, journal release) is the
+    /// caller's background concern — the next full-store open performs it.
+    pub fn clear_primary_config_state(path: impl AsRef<std::path::Path>, primary_id: &str) -> SyncResult<()> {
+        validate_identifier("primary_id", primary_id)?;
+        let state_path = sync_state_path(path.as_ref())?;
+        let mut state = Connection::open(&state_path).map_err(sql_err)?;
+        state.busy_timeout(std::time::Duration::from_millis(500)).map_err(sql_err)?;
+        Self::state_tx(&mut state, |tx| {
+            tx.execute(
+                "DELETE FROM device_sync_primary_config
+                  WHERE config_key = 'primary' AND primary_id = ?1",
+                params![primary_id],
+            ).map_err(sql_err)?;
+            Ok(())
+        })
+    }
+
     pub fn secondary_has_history(&self, config: &SecondarySyncConfig) -> SyncResult<bool> {
         if config.last_ack_generation.is_some()
             || config.last_ack_receipt_hash.is_some()
@@ -5261,6 +5281,27 @@ mod tests {
 
         let missing = SyncStore::write_primary_data_sharing(dir.path().join("elsewhere.db"), "primary-9", true, 3);
         assert!(matches!(missing, Err(SyncError::NotFound(_)) | Err(SyncError::Security(_))), "a foreign primary id is refused, not silently applied: {missing:?}");
+    }
+
+    #[test]
+    fn primary_stop_clears_state_without_the_usage_index() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut store = SyncStore::open(dir.path().join("index.db"), "primary-1").unwrap();
+            store.save_primary_config(&PrimarySyncConfig {
+                primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+                advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+                share_data_with_secondaries: true,
+            }, 1).unwrap();
+        }
+        for sidecar in ["index.db", "index.db-wal", "index.db-shm", "index.device-sync-state"] {
+            std::fs::remove_file(dir.path().join(sidecar)).ok();
+        }
+        // The stop button's state-only teardown must succeed with the usage
+        // index gone: it never opens that file.
+        SyncStore::clear_primary_config_state(dir.path().join("index.db"), "primary-1").unwrap();
+        assert!(SyncStore::read_primary_config(dir.path().join("index.db")).unwrap().is_none(), "the config row is gone from sync_state.db");
+        assert!(!dir.path().join("index.db").exists(), "the usage index is never created by the stop path");
     }
 
     #[test]
