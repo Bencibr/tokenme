@@ -1946,15 +1946,15 @@ fn resolve_connect_addr(host: &str, port: u16, deadline: Instant, cancel: &Atomi
 }
 
 fn connect_tcp_with_deadline(addr: &SocketAddr, deadline: Instant, cancel: &AtomicBool) -> Result<TcpStream, TransportError> {
-    loop {
-        if cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
-        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TransportError::Timeout)?;
-        let attempt_timeout = remaining.min(CONNECT_POLL_SLICE);
-        match TcpStream::connect_timeout(addr, attempt_timeout) {
-            Ok(stream) => return Ok(stream),
-            Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => continue,
-            Err(error) => {
-                return if cancel.load(AtomicOrdering::Acquire) { Err(TransportError::Cancelled) } else { Err(TransportError::from(error)) };
+    if cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
+    let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TransportError::Timeout)?;
+    match TcpStream::connect_timeout(addr, remaining) {
+        Ok(stream) => Ok(stream),
+        Err(error) => {
+            if cancel.load(AtomicOrdering::Acquire) {
+                Err(TransportError::Cancelled)
+            } else {
+                Err(TransportError::from(error))
             }
         }
     }
@@ -2956,6 +2956,17 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(config).unwrap();
         assert!(matches!(client.upload(&upload), Err(TransportError::PinMismatch)));
         assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn tcp_connect_attempt_uses_the_full_remaining_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = thread::spawn(move || listener.accept().unwrap());
+        let deadline = Instant::now() + CONNECT_POLL_SLICE + Duration::from_millis(50);
+        let stream = connect_tcp_with_deadline(&addr, deadline, &AtomicBool::new(false)).unwrap();
+        drop(stream);
+        accept.join().unwrap();
     }
 
     #[test]
