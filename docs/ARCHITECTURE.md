@@ -13,7 +13,7 @@
 | `crates/usage-core` | 共享契约：`UsageEvent`/`TokenCounts`、计价（models.dev 优先级）、报表聚合（内存 `summarize` 与 rollup 折叠 `summarize_facts` 逐字共享 `merge_quotas`）、预算、`MachineScope` |
 | `crates/usage-index` | SQLite 增量索引：文件游标、去重、摄取租约、保留期、watcher；维护 `event_rollup` 缓存表并承载报表读路径（`report_facts`）；同步协议 `export_sync`/`import_sync` |
 | `crates/usage-quota` | 实时厂商配额探针（一个 provider 一个文件），共享一个 5 分钟 TTL、每工具一份缓存文件；每日签到与令牌续期也在这里；`copilot` 与 `gemini` 是纯探针，没有用量适配器 |
-| `crates/adapters/<tool>` | 20 个工具族 crate，注册表共 27 个工具；7 个兄弟产品复用既有 crate 的解析器（crow5、mimocode 寄在 `opencode`，cola、omp 寄在 `pi`，qoder_cn 寄在 `qoder`，workbuddy_cn 寄在 `workbuddy`，trae_cn 寄在 `trae`） |
+| `crates/adapters/<tool>` | 20 个工具族 crate，注册表共 28 个工具；8 个兄弟产品复用既有 crate 的解析器（crow5、mimocode、opendesign 寄在 `opencode`，cola、omp 寄在 `pi`，qoder_cn 寄在 `qoder`，workbuddy_cn 寄在 `workbuddy`，trae_cn 寄在 `trae`） |
 | `crates/adapters/all` | 注册表：`TOOL_IDS`、`detect_all`、`builtin_adapters`，外加编译期交叉核对——四个源码家的版本号与编译版本一致、`latest.json` 自洽（可以滞后，不许串版）、面板 `TOOL_ORDER` 不漏工具、CHANGELOG 每个已发布版本有分节 |
 | `crates/usage-cli` | `tokenme` CLI：`detect` / `daily` / `weekly` / `monthly` / `report` / `sessions` / `quota` / `index --rebuild|--prune|--force` / `export` / `import` / `budget` / `pricing` / `icons`，外加 `dsh-doctor`、`codex-doctor`、`workbuddy-login` |
 | `apps/tokenme-bar` | Tauri 2 菜单栏面板（前端 `src/`，Rust 在 `src-tauri/`）：概览/工具/排行/明细/速度五页，服务器与设置浮层，托盘，桌宠 |

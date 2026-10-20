@@ -54,6 +54,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("kimicode", &["Kimi"]),
     ("minimaxcode", &["MiniMax Code"]),
     ("omp", &[]),
+    ("opendesign", &["Open Design"]),
 ];
 
 /// PNGs shipped with the panel, consulted only when the bundle lookup above
@@ -82,6 +83,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     // OpenCode is a CLI, but the vendor ships an official mark (their own
     // apple-touch icon) — shipped, not scraped from an unrelated bundle.
     ("opencode", include_bytes!("../assets/opencode.png")),
+    // Open Design: the vendor's own apple-touch icon, for the same reason.
+    ("opendesign", include_bytes!("../assets/opendesign.png")),
     // FunIDE: the 256-px layer of the installed exe's own icon resource.
     ("funide", include_bytes!("../assets/funide.png")),
     // AtomCode: the logo the vendor's own coding-plan page serves (og:image).

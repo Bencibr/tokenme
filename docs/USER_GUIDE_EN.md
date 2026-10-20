@@ -7,7 +7,7 @@
 | What it does | Where |
 | :--- | :--- |
 | Tokens, cost and cache rate for today / this week / this month / this year | Panel → Overview (swipe right for last week, last month, last year; the **Activity** tab is the year-round heatmap) |
-| Per-tool usage for every AI coding tool | Panel → Tools (27 tools, one per row, each row tinted from the app's icon) |
+| Per-tool usage for every AI coding tool | Panel → Tools (28 tools, one per row, each row tinted from the app's icon) |
 | Find the most expensive sessions | Panel → Rankings |
 | Single requests, filtered by model or project | Panel → Details |
 | Measure TTFT (time to first token) and TPS | Panel → Speed (passive measurement; Codex / Claude Code can also fire one short live probe) |
@@ -91,6 +91,8 @@ Refresh cadence controls index re-scanning; vendor quota answers are cached for 
 
 TokenMe reads only the official OpenCode Go provider's quota: `OPENCODE_API_KEY` first, then the `provider.<id>.options.apiKey` of any provider in `opencode.json` (tried in order: `$XDG_CONFIG_HOME/opencode/opencode.json`, `~/.config/opencode/opencode.json`, and on macOS also `~/Library/Application Support/opencode/opencode.json`; that provider's `options.baseURL` must be `https://opencode.ai/zen/go/v1`), falling back to `~/.local/share/opencode/auth.json`. A custom proxy address is never taken for official quota credentials. The OpenCode row shows three windows — 5 hours, 7 days and monthly. If the row never appears, check, in order: Advanced → Check quotas automatically, the OpenCode switch under Quota checks by tool, and the quota poll lines in `panel.log`.
 
+**Open Design** quota comes from the desktop app's own sign-in: the `vela_ctrl_…` control key in `profiles.prod` of `~/.amr/config.json` (`OPEN_DESIGN_HOME` moves the directory), read-only, for the Design Plan's 5-hour and 7-day windows. The runtime key `sk-amr-…` only authorises model requests and is refused by the control plane; the wallet balance is not a window and is not drawn. An expired sign-in makes the row disappear; signing in to Open Design again restores it.
+
 ### 3.6 Automatic token renewal
 
 Three tools keep a short-lived login on disk — MiniMax Code (about an hour), Kimi Code (the vendor's 15-minute schedule) and Cline (the gateway token, one hour) — and tokenme renews each in place as it expires: the refresh token in the tool's own credential file is exchanged for a fresh pair, written back atomically in that tool's own format. The write-back is what makes the renewal safe — a rotation that never lands on disk is a rotation already spent, and the tool's own next refresh would find its login dead. Each probe renews only the login it is actually reading; a static API key is read, never written. A failed exchange changes nothing, and the row keeps its last real number for up to six hours (the probe cache's grace). Every other probe reads credentials and never writes them — the WorkBuddy credential tokenme does store comes from `tokenme workbuddy-login`, a command you ran, not from a probe.
@@ -157,6 +159,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Claude Code | Tokens | `~/.claude/projects/**/*.jsonl` |
 | Codex | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | Tokens | `~/.local/share/opencode/opencode.db` |
+| Open Design | Tokens | `~/.amr/opencode-sessions/<id>/data/opencode/opencode-.db` (one store per sandbox, all read; `OPEN_DESIGN_DATA_DIR` moves the root) |
 | Pi | Tokens | `~/.pi/agent/sessions/**` |
 | Oh My Pi | Tokens | `~/.omp/agent/sessions/**` (`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` to move it) |
 | Cline | Tokens | `~/.cline/data/sessions/**` (the desktop app writes a sub-agent's transcript inside its parent session dir and its meta into a sibling `<session>__agent_<uuid>/`; each is attributed to the session's own workspace) |

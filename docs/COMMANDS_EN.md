@@ -70,6 +70,8 @@ Answers are cached under one shared 5-minute TTL (`crates/usage-quota/src/lib.rs
 
 OpenCode quota uses only the official Go endpoint. The key lookup order is `OPENCODE_API_KEY`; then `provider.<id>.options.apiKey` in `opencode.json` — tried at `$XDG_CONFIG_HOME/opencode/opencode.json` (when set), `~/.config/opencode/opencode.json`, and on macOS also `~/Library/Application Support/opencode/opencode.json`, counting only provider blocks whose `baseURL` is `https://opencode.ai/zen/go/v1`; then the API entries in `~/.local/share/opencode/auth.json`. Custom provider URLs are ignored for this quota. The result has rolling 5-hour, weekly and monthly windows.
 
+Open Design quota reads `profiles.prod` from `~/.amr/config.json` (`OPEN_DESIGN_HOME` moves it): the `vela_ctrl_…` control key calls `/api/v1/workspaces/current` and then `/api/v1/workspaces/<id>/billing/preflight` for the Design Plan's 5-hour and 7-day windows. The `sk-amr-…` runtime key cannot read the control plane, and the wallet balance is not a window, so neither enters the result.
+
 Most probes only read credentials. Exactly three write a rotated one back, each into the tool's own store, atomically: **MiniMax Code** (exchanges the refresh token in its `auth.json` when the stored access token is within 2 minutes of expiry, under the vendor's own lock), **Kimi Code** (exchanges it only after `/usages` declines the stored token), and **Cline** (rotates its gateway token ahead of expiry). Every other probe writes nothing — the WorkBuddy credential on disk comes from `tokenme workbuddy-login`, a command you ran, not from a probe.
 
 ## dsh-doctor

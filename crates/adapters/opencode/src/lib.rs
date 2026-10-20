@@ -4,7 +4,7 @@
 //! `OPENCODE_DATA_DIR`. Assistant rows in `message.data` carry
 //! `tokens.{input,output,reasoning,cache.{read,write}}`, `cost` and `modelID`.
 //!
-//! Two more products on this machine store their usage in exactly that shape, so
+//! More products on this machine store their usage in exactly that shape, so
 //! they are registered here as siblings sharing this parser rather than being
 //! given a copy of it:
 //!
@@ -12,9 +12,12 @@
 //!   carries the app version, so the file is resolved by globbing (see
 //!   [`paths::db_path_for`]).
 //! - Mimocode — `~/.local/share/mimocode`, `MIMOCODE_DATA_DIR`.
+//! - Open Design — `~/.amr/opencode-sessions/<id>/data/opencode/`,
+//!   `OPEN_DESIGN_DATA_DIR`; its desktop app embeds OpenCode and gives every run
+//!   its own sandbox, so all sandboxes are read (see [`paths::Layout`]).
 //!
-//! Neither fork documents an env override of its own, so the variables above are
-//! tokenme's, following `OPENCODE_DATA_DIR`.
+//! None of these products documents an env override of its own, so the variables
+//! above are tokenme's, following `OPENCODE_DATA_DIR`.
 //!
 //! Owned by the `codex-opencode-adapters` workstream; the `TOOL_ID` and
 //! `OpenCodeAdapter` surfaces are frozen.
@@ -40,6 +43,11 @@ pub struct Crow5Adapter;
 /// Mimocode's assistant rows are OpenCode rows; only [`paths::MIMOCODE`] differs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MimocodeAdapter;
+
+/// Open Design's embedded OpenCode runtime; only [`paths::OPEN_DESIGN`] differs,
+/// and its stores live one level deeper than the other products'.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OpenDesignAdapter;
 
 /// The one implementation of the dialect, parameterised by product coordinates.
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +92,25 @@ impl ProductAdapter {
     }
 }
 
+/// The file names a multi-store product read, with repeats collapsed. Open
+/// Design names every sandbox's store `opencode-.db`, so the alternative — the
+/// same name six times — would say less than the count it replaces.
+fn store_labels(files: &[std::path::PathBuf]) -> String {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for file in files {
+        let label = paths::file_label(file);
+        match counts.iter_mut().find(|(known, _)| *known == label) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((label, 1)),
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(label, count)| if count > 1 { format!("{label} ×{count}") } else { label })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl SourceAdapter for ProductAdapter {
     fn id(&self) -> &'static str {
         self.0.id
@@ -119,7 +146,7 @@ impl SourceAdapter for ProductAdapter {
             // skipped over, because that set is decided from the directory.
             (n, k) if n > 0 && self.0.multi_db && k > 1 => Some(format!(
                 "{n} messages in {k} stores ({}){suffix}",
-                files.iter().map(|f| paths::file_label(f)).collect::<Vec<_>>().join(", ")
+                store_labels(&files)
             )),
             (n, _) if n > 0 && self.0.multi_db => {
                 Some(format!("{n} messages in {}{suffix}", paths::file_label(&files[0])))
@@ -192,6 +219,7 @@ macro_rules! dialect_adapter {
 dialect_adapter!(OpenCodeAdapter => paths::OPENCODE);
 dialect_adapter!(Crow5Adapter => paths::CROW5);
 dialect_adapter!(MimocodeAdapter => paths::MIMOCODE);
+dialect_adapter!(OpenDesignAdapter => paths::OPEN_DESIGN);
 
 #[cfg(test)]
 mod tests {
@@ -207,8 +235,11 @@ mod tests {
         assert_eq!(Crow5Adapter.display_name(), "Crow5");
         assert_eq!(MimocodeAdapter.id(), "mimocode");
         assert_eq!(MimocodeAdapter.display_name(), "Mimocode");
+        assert_eq!(OpenDesignAdapter.id(), "opendesign");
+        assert_eq!(OpenDesignAdapter.display_name(), "Open Design");
         // Same dialect, so the same contract the indexer keys on.
         assert_eq!(Crow5Adapter.semantics(), MimocodeAdapter.semantics());
         assert_eq!(OpenCodeAdapter.semantics(), Crow5Adapter.semantics());
+        assert_eq!(OpenDesignAdapter.semantics(), OpenCodeAdapter.semantics());
     }
 }

@@ -70,6 +70,8 @@ tokenme quota
 
 OpenCode 配额只认官方 Go 端点。密钥查找顺序：`OPENCODE_API_KEY`；其次 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`，且该 provider 的 `baseURL` 必须是 `https://opencode.ai/zen/go/v1` 才算数）；最后是 `~/.local/share/opencode/auth.json` 里的 API 条目。自定义 provider 地址不作为此配额的凭据。结果包含滚动 5 小时、周与月三个窗口。
 
+Open Design 配额读 `~/.amr/config.json` 的 `profiles.prod`（`OPEN_DESIGN_HOME` 可改）：控制密钥 `vela_ctrl_…` 依次请求 `/api/v1/workspaces/current` 与 `/api/v1/workspaces/<id>/billing/preflight`，得到 Design Plan 的 5 小时与 7 天额度。运行时密钥 `sk-amr-…` 不能读控制面；钱包余额不是窗口，不进入结果。
+
 大多数探测只读凭据。恰好三家会把轮换后的令牌原子性写回各自的存储：**MiniMax Code**（存住的 access token 距过期不足 2 分钟时，用 `auth.json` 里的 refresh token 换新，遵守厂商自己的锁）、**Kimi Code**（只在 `/usages` 拒绝存量令牌后才换新）、**Cline**（在 gateway 令牌到期前轮换）。其余探测一律不写——磁盘上的 WorkBuddy 凭据来自你亲自跑过的 `tokenme workbuddy-login`，不是探测写的。
 
 ## dsh-doctor

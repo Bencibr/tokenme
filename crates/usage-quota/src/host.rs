@@ -32,6 +32,9 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
     ("cline", &["Cline", "cline", "cline-app", "code-sidecar"]),
     ("codex", &["codex", "Codex"]),
     ("opencode", &["opencode", "OpenCode"]),
+    // Open Design's desktop app is one Electron process tree named after the
+    // product; `vela` is the CLI runtime it spawns and outlives some exits.
+    ("opendesign", &["Open Design", "Open Design Helper", "vela"]),
     ("claude", &["claude", "Claude"]),
     ("joycode", &["JoyCode"]),
     ("agnes", &["AgnesCode", "agnesd"]),
@@ -194,6 +197,23 @@ mod tests {
         assert!(!any_host_running("opencode", &alive));
         alive.insert("OpenCode".to_string());
         assert!(any_host_running("opencode", &alive));
+    }
+
+    /// Open Design's window is the Electron tree, but the bundled `vela` CLI is
+    /// what keeps talking after the window closes on some exits — either keeps
+    /// the probe alive.
+    #[test]
+    fn open_design_follows_its_app_or_its_cli_runtime() {
+        let mut alive: HashSet<String> = HashSet::new();
+        assert!(!any_host_running("opendesign", &alive));
+        alive.insert("Open Design.exe".to_string());
+        assert!(any_host_running("opendesign", &alive));
+        alive.clear();
+        alive.insert("vela.exe".to_string());
+        assert!(any_host_running("opendesign", &alive));
+        alive.clear();
+        alive.insert("opencode.exe".to_string());
+        assert!(!any_host_running("opendesign", &alive), "the embedded runtime alone is not the host");
     }
 
     #[test]

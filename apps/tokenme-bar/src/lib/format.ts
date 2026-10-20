@@ -3,7 +3,7 @@ import { lang, t } from "./i18n";
 
 const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** Fixed 14-slot categorical ramp; index order is the order tools appear. */
+/** Fixed categorical ramp; index order is the order tools appear. */
 const TOOL_ORDER = [
   "claude",
   "codex",
@@ -31,6 +31,7 @@ const TOOL_ORDER = [
   "kimicode",
   "minimaxcode",
   "omp",
+  "opendesign",
 ];
 
 const DISPLAY: Record<string, string> = {
@@ -63,6 +64,7 @@ const DISPLAY: Record<string, string> = {
   kimicode: "Kimi Code",
   minimaxcode: "MiniMax Code",
   omp: "Oh My Pi",
+  opendesign: "Open Design",
   gemini: "Gemini CLI",
   cursor: "Cursor",
 };

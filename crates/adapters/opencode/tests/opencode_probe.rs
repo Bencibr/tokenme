@@ -5,7 +5,7 @@ use std::sync::Mutex;
 mod common;
 
 use common::*;
-use usage_adapter_opencode::{Crow5Adapter, MimocodeAdapter, OpenCodeAdapter};
+use usage_adapter_opencode::{Crow5Adapter, MimocodeAdapter, OpenCodeAdapter, OpenDesignAdapter};
 use usage_core::{DateFilter, FileKind, SourceAdapter};
 
 /// `set_var` is process-global, so this binary runs its tests one at a time.
@@ -139,6 +139,53 @@ fn mimocode_is_detected_by_its_stable_file_name() {
     std::env::set_var("OPENCODE_DATA_DIR", &dir);
     assert!(a.probe().is_none(), "opencode.db is not mimocode.db");
     std::env::remove_var("OPENCODE_DATA_DIR");
+}
+
+/// Open Design's embedded OpenCode runtime keeps one store per run, so the
+/// product's history is the union of every sandbox — and every event carries the
+/// product's own id, never OpenCode's.
+#[test]
+fn open_design_reads_one_store_per_session_sandbox() {
+    let _g = DIR_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("opencode-sessions");
+    for (run, rows) in [("run-a", 2), ("run-b", 3)] {
+        let dir = root.join(run).join("data").join("opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = db_named(&dir, "opencode-.db", true);
+        seed_messages(&db, rows);
+    }
+    std::env::set_var("OPEN_DESIGN_DATA_DIR", &root);
+
+    let det = OpenDesignAdapter.probe().expect("opendesign detected");
+    assert_eq!((det.id.as_str(), det.display.as_str()), ("opendesign", "Open Design"));
+    assert_eq!(det.roots, vec![root.clone()]);
+    assert!(
+        det.hint.as_deref().is_some_and(|h| h.starts_with("5 messages in 2 stores")),
+        "the hint counts both sandboxes: {:?}",
+        det.hint
+    );
+
+    let files = OpenDesignAdapter.discover(&DateFilter::default());
+    assert_eq!(files.len(), 2, "one source per sandbox: {files:?}");
+    let mut events = 0;
+    for file in &files {
+        let out = OpenDesignAdapter
+            .read(file, usage_core::ReadCursor(0))
+            .expect("read is infallible by contract");
+        events += out.events.len();
+        assert!(
+            out.events.iter().all(|e| e.tool == "opendesign"),
+            "Open Design's stores must not be billed to opencode"
+        );
+    }
+    assert_eq!(events, 5);
+
+    // Siblings do not see each other's installs.
+    std::env::set_var("OPENCODE_DATA_DIR", &root);
+    assert!(OpenCodeAdapter.probe().is_none(), "opencode.db is not a sandbox store");
+    std::env::remove_var("OPENCODE_DATA_DIR");
+    std::env::remove_var("OPEN_DESIGN_DATA_DIR");
 }
 
 /// One project, one session and `n` billable assistant rows in a database that

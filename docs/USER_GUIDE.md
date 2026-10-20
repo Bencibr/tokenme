@@ -7,7 +7,7 @@
 | 能做什么 | 在哪用 |
 | :--- | :--- |
 | 看今天/本周/本月/今年的 token、费用、缓存率 | 面板 → 概览（右滑翻上周、上月、去年；「活动」页签是全年热力图） |
-| 看每款 AI 编程工具的用量明细 | 面板 → 工具（27 款，一行一个，行配色取自应用图标） |
+| 看每款 AI 编程工具的用量明细 | 面板 → 工具（28 款，一行一个，行配色取自应用图标） |
 | 找出最贵的会话 | 面板 → 排行 |
 | 按模型、项目查单次请求 | 面板 → 明细 |
 | 测 TTFT（首 token 延迟）与 TPS | 面板 → 速度（被动测量；Codex / Claude Code 可主动发起一次短请求实测） |
@@ -91,6 +91,8 @@ macOS 由 `scripts/build-macos.sh` 构建，Windows 由 `apps/tokenme-bar` 下�
 
 TokenMe 只读取官方 OpenCode Go provider 的配额：优先 `OPENCODE_API_KEY`，其次 `opencode.json` 里的 `provider.<id>.options.apiKey`（依次尝试 `$XDG_CONFIG_HOME/opencode/opencode.json`、`~/.config/opencode/opencode.json`，macOS 上还有 `~/Library/Application Support/opencode/opencode.json`；该 provider 的 `options.baseURL` 必须是 `https://opencode.ai/zen/go/v1`），最后回退 `~/.local/share/opencode/auth.json`。自定义代理地址不会被当作官方配额凭据。OpenCode 行显示 5 小时、7 天与月度三个窗口。行没出现时，依次检查 高级 → 自动探测配额、逐工具探测的 OpenCode 开关，以及 `panel.log` 的 quota poll 记录。
 
+**Open Design** 的配额读自桌面应用自己的登录：`~/.amr/config.json` 的 `profiles.prod` 里那枚 `vela_ctrl_…` 控制密钥（`OPEN_DESIGN_HOME` 可改目录），只读 Design Plan 的 5 小时与 7 天两个窗口。运行时密钥 `sk-amr-…` 只用于模型请求，控制面不接受它；钱包余额不是窗口，面板不画。登录过期时行会消失，重新登录 Open Design 即恢复。
+
 ### 3.6 令牌自动续期
 
 MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline（gateway 令牌一小时）三家把短时效令牌存在磁盘上，tokenme 在其过期时就地续期：拿同一份凭据文件里的 refresh token 去换新对，再按该工具自己的格式原子性写回原处。写回是安全性的前提——没有落盘的轮换等于已被消耗的轮换，工具自己下次刷新就会发现登录死了。每个探测只续自己正在读的那份登录；静态 API key 只读不写。换取失败则什么都不改，该行最多保留六小时（探测缓存的宽限）的最后真实数字。其余所有探测只读凭据、绝不写回——tokenme 存的那份 WorkBuddy 凭据来自你亲自跑过的 `tokenme workbuddy-login`，不是探测写的。
@@ -157,6 +159,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Claude Code | Tokens | `~/.claude/projects/**/*.jsonl` |
 | Codex | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | Tokens | `~/.local/share/opencode/opencode.db` |
+| Open Design | Tokens | `~/.amr/opencode-sessions/<id>/data/opencode/opencode-.db`（每个沙箱一份，全部读取；`OPEN_DESIGN_DATA_DIR` 可改根目录） |
 | Pi | Tokens | `~/.pi/agent/sessions/**` |
 | Oh My Pi | Tokens | `~/.omp/agent/sessions/**`（`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` 可改） |
 | Cline | Tokens | `~/.cline/data/sessions/**`（桌面版把子代理的转录写在父会话目录内、元数据写在旁边的 `<session>__agent_<uuid>/`，各自归到自己的工作区） |

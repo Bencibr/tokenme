@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <b>One menu bar dashboard for 27 AI coding tools — token usage, spend, and remaining quota from a local, read-only index. Stop checking each vendor's console.</b>
+  <b>One menu bar dashboard for 28 AI coding tools — token usage, spend, and remaining quota from a local, read-only index. Stop checking each vendor's console.</b>
 </p>
 
 <p align="center">
@@ -144,13 +144,14 @@ $ tokenme daily --days 3
 
 ## Supported tools & live quota
 
-Every tool below ships as a built-in adapter — 27 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
+Every tool below ships as a built-in adapter — 28 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
 
 | Tool | Live quota | Check-in | Fixtures | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | official 5-hour / cycle windows | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT rate windows | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | OpenCode Go, three dollar windows (official provider only) | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/opendesign.png" width="20" alt=""> **Open Design** | Design Plan 5-hour / 7-day allowance | — | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | account window limits | — | ✅ | ✅ | ✅ |
@@ -180,7 +181,7 @@ Every tool below ships as a built-in adapter — 27 of them, indexed straight fr
 >
 > **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
 
-OpenCode quota supports the official provider only. TokenMe reads `OPENCODE_API_KEY`, `provider.<id>.options.apiKey` from `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json` when `baseURL` is `https://opencode.ai/zen/go/v1`, and finally API entries in `~/.local/share/opencode/auth.json`. Custom proxy providers are ignored.
+OpenCode quota supports the official provider only. TokenMe reads `OPENCODE_API_KEY`, `provider.<id>.options.apiKey` from `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json` when `baseURL` is `https://opencode.ai/zen/go/v1`, and finally API entries in `~/.local/share/opencode/auth.json`. Custom proxy providers are ignored. Open Design quota reads `profiles.prod.controlKey` (`vela_ctrl_…`, `OPEN_DESIGN_HOME` moves the directory) from the desktop app's `~/.amr/config.json` and reports the Design Plan's 5-hour / 7-day windows; the `sk-amr-…` runtime key and the wallet balance are not used.
 >
 > Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 
