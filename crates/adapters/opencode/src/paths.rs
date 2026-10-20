@@ -13,6 +13,18 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags};
 
+/// How a product lays its stores out under a data directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Layout {
+    /// The data directory itself holds the store file(s).
+    Flat,
+    /// Every child directory is one run's sandbox, and the store sits under
+    /// these segments inside it. Open Design's bundled OpenCode runtime keeps a
+    /// fresh `opencode-sessions/<id>/data/opencode/` per sandbox, so the usage
+    /// of one day is spread over several stores rather than one file.
+    SessionSandboxes(&'static [&'static str]),
+}
+
 /// One product that speaks the OpenCode dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Product {
@@ -43,6 +55,8 @@ pub(crate) struct Product {
     /// `Application Support/com.crow5.desktop/crow5/opencode.db` — disjoint
     /// message ids, so the union bills each call exactly once.
     pub desktop_rel: &'static [&'static str],
+    /// Where the stores live under each data directory.
+    pub layout: Layout,
 }
 
 pub(crate) static OPENCODE: Product = Product {
@@ -53,6 +67,7 @@ pub(crate) static OPENCODE: Product = Product {
     db_file: "opencode.db",
     multi_db: false,
     desktop_rel: &[],
+    layout: Layout::Flat,
 };
 
 /// Crow5, an OpenCode fork. Same `message` table, same `data` JSON.
@@ -66,6 +81,7 @@ pub(crate) static CROW5: Product = Product {
     db_file: "crow5.db",
     multi_db: true,
     desktop_rel: &["com.crow5.desktop", "crow5"],
+    layout: Layout::Flat,
 };
 
 /// Mimocode, an OpenCode fork. Same `message` table, same `data` JSON, and its
@@ -79,6 +95,28 @@ pub(crate) static MIMOCODE: Product = Product {
     db_file: "mimocode.db",
     multi_db: false,
     desktop_rel: &[],
+    layout: Layout::Flat,
+};
+
+/// Open Design (open-design.ai), whose desktop app runs OpenCode as its embedded
+/// agent runtime. Every app run gets its own sandbox under
+/// `~/.amr/opencode-sessions/<id>/data/opencode/`, so this product's stores are
+/// discovered per sandbox rather than by joining a fixed file name.
+///
+/// `OPEN_DESIGN_DATA_DIR` pins the `opencode-sessions` root (comma-separated,
+/// like the other siblings) — tokenme's own override, as the product documents
+/// none. The quota probe reads `~/.amr/config.json` separately.
+pub(crate) static OPEN_DESIGN: Product = Product {
+    id: "opendesign",
+    display: "Open Design",
+    env_dir: "OPEN_DESIGN_DATA_DIR",
+    default_rel: &[".amr", "opencode-sessions"],
+    // The filename the runtime uses today; the sandbox scan accepts any `*.db`
+    // that carries the dialect table, so a renamed store is still read.
+    db_file: "opencode-.db",
+    multi_db: true,
+    desktop_rel: &[],
+    layout: Layout::SessionSandboxes(&["data", "opencode"]),
 };
 
 /// OpenCode's data directory. The adapters resolve through [`data_dir_for`] with
@@ -132,18 +170,23 @@ pub(crate) fn data_dirs_for(product: &Product) -> Vec<PathBuf> {
         return dedupe(split_paths(&v)).into_iter().filter(|p| p.is_dir()).collect();
     }
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        let xdg = PathBuf::from(xdg);
-        // A relative XDG root is undefined by the spec, so it is ignored rather
-        // than resolved against an arbitrary working directory.
-        if xdg.is_absolute() {
-            let mut dir = xdg;
-            // The product's own directory name is the last segment of the
-            // home-relative default; that is what hangs off XDG_DATA_HOME.
-            if let Some(name) = product.default_rel.last() {
-                dir = dir.join(name);
+    // Only the `~/.local/share` family honours XDG_DATA_HOME; Open Design's
+    // runtime lives under `~/.amr`, so hanging its name off XDG would invent a
+    // root the product never writes.
+    if product.default_rel.first() == Some(&".local") {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            let xdg = PathBuf::from(xdg);
+            // A relative XDG root is undefined by the spec, so it is ignored
+            // rather than resolved against an arbitrary working directory.
+            if xdg.is_absolute() {
+                let mut dir = xdg;
+                // The product's own directory name is the last segment of the
+                // home-relative default; that is what hangs off XDG_DATA_HOME.
+                if let Some(name) = product.default_rel.last() {
+                    dir = dir.join(name);
+                }
+                dirs.push(dir);
             }
-            dirs.push(dir);
         }
     }
     let mut legacy = match dirs::home_dir() {
@@ -194,15 +237,39 @@ pub(crate) fn db_path_for(dir: &Path, product: &Product) -> PathBuf {
 /// SQLite will not open, or that carry no `message` table, are skipped — but the
 /// rest are *all* sources, because the app keeps its history and its live store
 /// in separate files with disjoint row ids.
+///
+/// A [`Layout::SessionSandboxes`] product is scanned one level deeper: every
+/// child of `dir` is a sandbox, and the store sits under that sandbox's own
+/// segments. Nothing is joined when the layout says otherwise, and no sandbox is
+/// *required* — an install with no runs answers an empty list, like any other
+/// absent source.
 pub(crate) fn db_list_for(dir: &Path, product: &Product) -> Vec<PathBuf> {
-    if !product.multi_db {
-        return vec![dir.join(product.db_file)];
+    match product.layout {
+        Layout::SessionSandboxes(segments) => {
+            let mut found: Vec<(PathBuf, i64)> = Vec::new();
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return Vec::new();
+            };
+            for entry in entries.flatten() {
+                let sandbox = entry.path();
+                if !sandbox.is_dir() {
+                    continue;
+                }
+                let store_dir = segments.iter().fold(sandbox, |path, segment| path.join(segment));
+                found.extend(usable_dbs(&store_dir));
+            }
+            found.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            found.into_iter().map(|(path, _)| path).collect()
+        }
+        Layout::Flat if !product.multi_db => vec![dir.join(product.db_file)],
+        Layout::Flat => {
+            let found = usable_dbs(dir);
+            if found.is_empty() {
+                return vec![dir.join(product.db_file)];
+            }
+            found.into_iter().map(|(path, _)| path).collect()
+        }
     }
-    let found = usable_dbs(dir);
-    if found.is_empty() {
-        return vec![dir.join(product.db_file)];
-    }
-    found.into_iter().map(|(path, _)| path).collect()
 }
 
 /// `*.db` files in `dir` that this dialect can actually read, newest first.
@@ -595,6 +662,35 @@ mod tests {
         std::fs::write(dir.path().join("opencode-powerformer-v1.18.1.db"), b"junk").unwrap();
         assert_eq!(db_path_for(dir.path(), &CROW5), dir.path().join("crow5.db"));
         assert!(stat_file(&db_path_for(dir.path(), &CROW5)).is_none());
+    }
+
+    /// Open Design spreads its history over one sandbox per run. Both sandboxes
+    /// must be sources, newest first, and a child that is not a sandbox (or a
+    /// sandbox without a readable store) must not invent one.
+    #[test]
+    fn open_design_reads_every_session_sandbox() {
+        let root = tempfile::tempdir().unwrap();
+        let older = seeded_sandbox(root.path(), "a");
+        let newer = seeded_sandbox(root.path(), "b");
+        set_mtime(&older, 1_700_000_000);
+        set_mtime(&newer, 1_800_000_000);
+        // A half-created run: the directory exists, the store does not.
+        std::fs::create_dir_all(root.path().join("c").join("data").join("opencode")).unwrap();
+        // A stray file at the sandbox root is not a sandbox.
+        std::fs::write(root.path().join("notes.txt"), b"x").unwrap();
+
+        assert_eq!(db_list_for(root.path(), &OPEN_DESIGN), vec![newer.clone(), older]);
+        assert_eq!(db_path_for(root.path(), &OPEN_DESIGN), newer);
+        // With no sandbox at all the source is absent, not a phantom join.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(db_list_for(empty.path(), &OPEN_DESIGN).is_empty());
+        assert!(!db_list_for(empty.path(), &OPEN_DESIGN).contains(&empty.path().join("opencode-.db")));
+    }
+
+    fn seeded_sandbox(root: &Path, name: &str) -> PathBuf {
+        let dir = root.join(name).join("data").join("opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+        seeded(&dir, "opencode-.db")
     }
 
     fn seeded(dir: &Path, name: &str) -> PathBuf {

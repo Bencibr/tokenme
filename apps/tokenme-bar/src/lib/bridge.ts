@@ -719,7 +719,8 @@ const browserSettings: PanelSettings = {
 const browserProbes: ProbeTool[] = [
   "claude", "agnes", "antigravity", "antigravity_ide", "trae_cn", "atomcode", "cola", "kimicode", "minimaxcode", "funide",
   "cline", "opencode", "codex", "copilot", "gemini", "joycode", "qoder", "qoder_cn", "workbuddy", "workbuddy_cn", "catpaw",
-  "zcode", "dsh", "trae", "codely",
+  "zcode", "dsh", "trae", "codely", "opendesign",
+
 ].map((id) => ({
   id,
   host_gated: !["kimicode", "minimaxcode", "copilot", "gemini"].includes(id),

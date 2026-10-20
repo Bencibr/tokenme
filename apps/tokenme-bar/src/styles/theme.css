@@ -86,6 +86,8 @@
   --cat-27: #4a6d5f;
   /* codely（含团结 Cowork 桌面版，共用 CLI 存储）的暖橄榄绿 */
   --cat-28: #7a6a2f;
+  /* opendesign 的青绿；ramp 必须长于 TOOL_ORDER */
+  --cat-29: #2f6f5f;
 
   /* activity scale, quiet → saturated */
   --heat-1: #d8e7e4;
@@ -224,6 +226,7 @@
   --cat-26: #d9b55e;
   --cat-27: #79c2a8;
   --cat-28: #e0c060;
+  --cat-29: #5fd9c8;
 
     --heat-1: #1a3f36;
     --heat-2: #215c4d;
@@ -321,6 +324,7 @@
   --cat-26: #d9b55e;
   --cat-27: #79c2a8;
   --cat-28: #e0c060;
+  --cat-29: #5fd9c8;
 
   --heat-1: #1a3f36;
   --heat-2: #215c4d;

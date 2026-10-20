@@ -20,6 +20,7 @@ mod joycode;
 mod kimicode;
 mod minimaxcode;
 mod opencode;
+mod opendesign;
 mod qoder;
 mod trae;
 mod workbuddy;
@@ -54,6 +55,7 @@ pub use joycode::JoycodeQuota;
 pub use kimicode::KimiCodeQuota;
 pub use minimaxcode::MiniMaxCodeQuota;
 pub use opencode::OpenCodeQuota;
+pub use opendesign::OpenDesignQuota;
 pub use qoder::{QoderQuota, QoderCnQuota, qoder_cn_manual_checkin};
 pub use trae::TraeQuota;
 /// The panel's check-in button entry (see `trae::manual_checkin`).
@@ -91,6 +93,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(ClineQuota),
         Box::new(CodelyQuota),
         Box::new(OpenCodeQuota),
+        Box::new(OpenDesignQuota),
         Box::new(CodexQuota),
         Box::new(CopilotQuota),
         Box::new(GeminiQuota),

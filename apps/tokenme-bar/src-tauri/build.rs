@@ -38,5 +38,4 @@ fn link_manifest_into_tests() {
     if resource_lib.exists() {
         println!("cargo:rustc-link-arg={}", resource_lib.display());
     }
->>>>>>> ebe4a20f (test(panel): the Windows test harness gets a manifest, and the panel builds on Linux)
 }

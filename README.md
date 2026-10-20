@@ -144,13 +144,14 @@ $ tokenme daily --days 3
 
 ## 支持的工具与实时配额
 
-以下工具全部内置适配器——共 29 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
+以下工具全部内置适配器——共 30 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
 
 | 工具 | 实时配额 | 签到 | 兼容性测试 | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | <img src="crates/usage-core/assets/claude.png" width="20" alt=""> **Claude Code** | 官方 5 小时/周期窗口 | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT 速率窗口 | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | OpenCode Go 三美元窗口（仅官方 provider） | — | ✅ | ✅ | ⏳ |
+| <img src="crates/usage-core/assets/opendesign.png" width="20" alt=""> **Open Design** | Design Plan 5 小时/7 天额度 | — | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 | — | ✅ | ✅ | ✅ |
@@ -182,7 +183,7 @@ $ tokenme daily --days 3
 >
 > **平台验证**：随实机验证进度更新。⏳ 表示该平台的路径已实现、但尚未在实机上跑通；验证通过后更新标记即可。
 
-OpenCode 配额只适配官方 provider。凭据按顺序取自 `OPENCODE_API_KEY`、OpenCode V2 自己的凭据库（`opencode.db` 的 `credential` 表，桌面端与 CLI 的登录都写在这里）、`$XDG_CONFIG_HOME/opencode/opencode.json` / `~/.config/opencode/opencode.json` 中 `provider.<id>.options.apiKey`（且 `baseURL` 为 `https://opencode.ai/zen/go/v1`），最后是遗留的 `~/.local/share/opencode/auth.json`；自定义代理 provider 不会计入官方配额。
+OpenCode 配额只适配官方 provider。凭据按顺序取自 `OPENCODE_API_KEY`、OpenCode V2 自己的凭据库（`opencode.db` 的 `credential` 表，桌面端与 CLI 的登录都写在这里）、`$XDG_CONFIG_HOME/opencode/opencode.json` / `~/.config/opencode/opencode.json` 中 `provider.<id>.options.apiKey`（且 `baseURL` 为 `https://opencode.ai/zen/go/v1`），最后是遗留的 `~/.local/share/opencode/auth.json`；自定义代理 provider 不会计入官方配额。Open Design 配额读桌面端 `~/.amr/config.json` 的 `profiles.prod.controlKey`（`vela_ctrl_…`，`OPEN_DESIGN_HOME` 可改目录），只取 Design Plan 的 5 小时/7 天窗口；运行时密钥 `sk-amr-…` 与钱包余额都不参与。
 >
 > 仅配额的来源：**Copilot**（高级请求额度，官方后端）只探测配额、不索引用量；**Gemini CLI** 的探测刻意关闭——实测其落盘 OAuth 令牌已过期，要续期就得用 Gemini CLI 自带包里的 client id/secret 去提交表单，而磁盘上也找不到该接口要的 project id（`crates/usage-quota/src/providers/gemini.rs`）。
 

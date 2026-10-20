@@ -248,7 +248,8 @@ def codex():
 
 
 def opencode_family():
-    """OpenCode and its forks: `message.data` JSON with a `tokens` object.
+    """OpenCode, its forks, and products that embed its runtime (Open Design):
+    `message.data` JSON with a `tokens` object.
 
     `tokens.input` is the net prompt and `tokens.cache.read/write` are peers, so
     the identity `total == input + output + reasoning + cache.read + cache.write`
@@ -264,6 +265,8 @@ def opencode_family():
             "~/Library/Application Support/com.crow5.desktop/crow5/*.db",
         ],
         "mimocode": ["~/.local/share/mimocode/mimocode.db"],
+        # One store per embedded-runtime sandbox; every readable one is a source.
+        "opendesign": ["~/.amr/opencode-sessions/*/data/opencode/*.db"],
     }
     result = {}
     for tool, patterns in products.items():

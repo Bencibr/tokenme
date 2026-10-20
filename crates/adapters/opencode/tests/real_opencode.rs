@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::{Connection, OpenFlags};
-use usage_adapter_opencode::{Crow5Adapter, MimocodeAdapter, OpenCodeAdapter};
+use usage_adapter_opencode::{Crow5Adapter, MimocodeAdapter, OpenCodeAdapter, OpenDesignAdapter};
 use usage_core::{DateFilter, ReadCursor, SourceAdapter, SourceFile};
 
 #[test]
@@ -122,10 +122,37 @@ fn real_mimocode_database_matches_a_direct_sql_recomputation() {
     std::env::remove_var("MIMOCODE_DATA_DIR");
 }
 
+/// Open Design keeps one store per run under `~/.amr/opencode-sessions`; every
+/// readable sandbox must reconcile with a direct SQL recomputation.
+#[test]
+#[ignore = "reads ~/.amr/opencode-sessions, which only exists with Open Design installed"]
+fn real_open_design_stores_match_a_direct_sql_recomputation() {
+    let files = OpenDesignAdapter.discover(&DateFilter::default());
+    if files.is_empty() {
+        eprintln!("no readable Open Design sandbox under ~/.amr: nothing to smoke test");
+        return;
+    }
+    eprintln!("opendesign probe: {:?}", OpenDesignAdapter.probe().map(|d| d.hint));
+    for file in files {
+        cross_check_may_be_empty(&OpenDesignAdapter, "opendesign", &file.path);
+    }
+}
+
 /// One database through the adapter, and the same totals recomputed by SQL that
 /// was written from the documented `message.data` shape rather than from the
 /// parser. Both are printed so a disagreement is measurable, not just red.
 fn cross_check(adapter: &dyn SourceAdapter, tool: &str, path: &Path) {
+    cross_check_with(adapter, tool, path, true);
+}
+
+/// A sandbox can legitimately hold only a user turn or a zero-token assistant
+/// row: it is still a readable source, but there is nothing to reconcile, and
+/// demanding a row would fail on a machine that has only just started using it.
+fn cross_check_may_be_empty(adapter: &dyn SourceAdapter, tool: &str, path: &Path) {
+    cross_check_with(adapter, tool, path, false);
+}
+
+fn cross_check_with(adapter: &dyn SourceAdapter, tool: &str, path: &Path, require_rows: bool) {
     let started = Instant::now();
     let ours = through_the_adapter(adapter, tool, path);
     let direct = recomputed_in_sql(path);
@@ -155,7 +182,9 @@ fn cross_check(adapter: &dyn SourceAdapter, tool: &str, path: &Path) {
         format!("{direct:?}"),
         "the adapter's stages must equal a direct SQL recomputation of {tool}"
     );
-    assert!(ours.rows > 0, "{tool} at {} produced nothing", path.display());
+    if require_rows {
+        assert!(ours.rows > 0, "{tool} at {} produced nothing", path.display());
+    }
 }
 
 /// What the adapter reports: one event per billable assistant row.
@@ -174,17 +203,20 @@ fn through_the_adapter(adapter: &dyn SourceAdapter, tool: &str, path: &Path) -> 
         let batch = adapter.read(&file, cursor).expect("read is infallible");
         for e in &batch.events {
             assert_eq!(e.tool, tool, "a sibling must never be billed as another product");
+            // The reader deliberately replays a bounded tail behind the cursor so
+            // an assistant row filled in place is seen again; the index applies
+            // those repeats by dedupe key, so this recomputation must too.
+            if let Some(key) = &e.dedupe_key {
+                if !ids.insert(key.clone()) {
+                    continue;
+                }
+            }
             out.rows += 1;
             out.input += e.counts.input;
             out.cache_creation += e.counts.cache_creation;
             out.cache_read += e.counts.cache_read;
             out.output += e.counts.output;
             out.reasoning += e.counts.reasoning;
-            assert!(
-                ids.insert(e.dedupe_key.clone()),
-                "duplicate dedupe_key {:?}",
-                e.dedupe_key
-            );
         }
         if batch.cursor == cursor {
             break;

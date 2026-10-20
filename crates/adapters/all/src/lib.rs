@@ -41,6 +41,7 @@ pub const TOOL_IDS: &[&str] = &[
     "kimicode",
     "minimaxcode",
     "omp",
+    "opendesign",
 ];
 
 pub fn builtin_adapters() -> Vec<Box<dyn SourceAdapter>> {
@@ -74,6 +75,7 @@ pub fn builtin_adapters() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(usage_adapter_kimicode::KimiCodeAdapter),
         Box::new(usage_adapter_minimaxcode::MiniMaxCodeAdapter),
         Box::new(usage_adapter_pi::OmpAdapter),
+        Box::new(usage_adapter_opencode::OpenDesignAdapter),
     ]
 }
 

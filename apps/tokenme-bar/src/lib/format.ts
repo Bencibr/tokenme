@@ -3,7 +3,7 @@ import { lang, t } from "./i18n";
 
 const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** One categorical slot per tool; index order is the order tools appear. */
+/** Fixed categorical ramp; index order is the order tools appear. */
 const TOOL_ORDER = [
   "claude",
   "codex",
@@ -36,6 +36,7 @@ const TOOL_ORDER = [
   "antigravity_ide",
   // Codely CLI and the Tuanjie Cowork desktop share one store — one tool row.
   "codely",
+  "opendesign",
 
 ];
 
@@ -71,6 +72,7 @@ const DISPLAY: Record<string, string> = {
   minimaxcode: "MiniMax Code",
   omp: "Oh My Pi",
   codely: "Codely",
+  opendesign: "Open Design",
   gemini: "Gemini CLI",
   cursor: "Cursor",
 };
