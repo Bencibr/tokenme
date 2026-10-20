@@ -60,7 +60,7 @@ mod tests {
         let cert = CertificateParams::new(vec!["localhost".into()]).unwrap().self_signed(&key).unwrap();
         let certificate_der = cert.der().to_vec();
         let config = SecondarySyncConfig {
-            primary_id: "primary-1".into(), device_id: identity.device_id.clone(), origin: identity.origin.clone(),
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: identity.device_id.clone(), origin: identity.origin.clone(),
             endpoint: "https://127.0.0.1:1".into(), server_name: "localhost".into(),
             certificate_pin: hash_bytes(&certificate_der), certificate_der, identity_path: dir.join("identity.json"),
             stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
