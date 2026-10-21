@@ -22,6 +22,8 @@ mod updater;
 mod windows_surface;
 #[cfg(target_os = "windows")]
 mod windows_tray;
+#[cfg(target_os = "windows")]
+mod windows_diagnostics;
 
 pub use settings::{BubbleSkin, Settings, TrayMode};
 
@@ -138,6 +140,8 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             logging::init();
+            #[cfg(target_os = "windows")]
+            windows_diagnostics::init();
             if app.state::<engine::Shared>().settings().performance_monitoring {
                 if let Err(error) = performance::set_enabled(true) {
                     logging::error(&format!("performance: could not start sampler: {error}"));
