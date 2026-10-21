@@ -20,7 +20,7 @@ use usage_device_sync::{hash_bytes, ClientTransportCancellation, DeviceIdentity,
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
-use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Theme, TrayMode};
+use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Settings, Theme, TrayMode};
 use crate::tray;
 
 const DEFAULT_PRIMARY_BIND: &str = "0.0.0.0:47821";
@@ -113,6 +113,28 @@ fn log_sync_action(action: &str, started: Instant, error: Option<&str>) {
         None => format!("sync: action={action} total_ms={} outcome=ok", started.elapsed().as_millis()),
     };
     if error.is_some() { crate::logging::error(&message); } else { crate::logging::info(&message); }
+}
+
+async fn save_settings_async(settings: &Settings) -> Result<(), String> {
+    let settings = settings.clone();
+    tauri::async_runtime::spawn_blocking(move || settings.save())
+        .await
+        .map_err(|error| format!("settings worker stopped: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+async fn mutate_settings_async<F>(app: &AppHandle, mutate: F) -> Result<Settings, String>
+where
+    F: FnOnce(&mut Settings),
+{
+    let settings = {
+        let shared = app.state::<Shared>();
+        let mut guard = shared.settings.lock().map_err(|_| "settings busy".to_string())?;
+        mutate(&mut guard);
+        guard.clone()
+    };
+    save_settings_async(&settings).await?;
+    Ok(settings)
 }
 
 #[derive(Debug, Clone)]
@@ -1287,14 +1309,15 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         state.discovery_error = Some(error);
     }
     let index_path = sync_index_path()?;
-    let mut secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| format!("cannot read secondary sync configuration: {error}"))?;
-    let primary_config = SyncStore::read_primary_config(&index_path).map_err(|error| format!("cannot read primary sync configuration: {error}"))?;
+    // One state read and one index read answer the whole poll: role configs,
+    // registry, outbox totals and snapshot cursors. Opening each field through
+    // its own connection queued every five-second tick behind writers ~10 times.
+    let panel = SyncStore::read_panel_state(&index_path)
+        .map_err(|error| format!("cannot read device sync state: {error}"))?;
+    let mut secondary_config = panel.secondary_config.clone();
+    let primary_config = panel.primary_config.clone();
     if let Some(config) = secondary_config.clone() {
-        // Read-only probe: a polling snapshot must never open a writable
-        // store, or every status tick queues behind the ingest write lock.
-        let pending_disconnect = SyncStore::read_secondary_disconnect_requested(&index_path, &config.primary_id)
-            .map_err(|error| format!("cannot read pending secondary disconnect: {error}"))?;
-        if pending_disconnect {
+        if panel.disconnect_requested {
             stop_service(state);
             // Migrate a stop requested by an older build without blocking on
             // its failed network notification again.
@@ -1394,9 +1417,8 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
             if state.phase == SyncPhase::Error { state.phase = SyncPhase::Success; }
         }
     }
-    let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
+    let snapshot = panel.status.clone();
     let primary_id = state.primary_id.clone().or(snapshot.primary_id.clone()).or_else(|| secondary_config.as_ref().map(|config| config.primary_id.clone()));
-    let summary = SyncStore::read_outbox_summary(&index_path).ok();
     let endpoint = state.endpoint.clone()
         .or_else(|| secondary_config.as_ref().map(|config| config.endpoint.clone()))
         .or_else(|| primary_config.as_ref().and_then(primary_endpoint));
@@ -1406,8 +1428,8 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         .or_else(|| (!state.role.is_empty()).then(|| "stopped".into()));
     let stream_id = secondary_config.as_ref().and_then(|config| config.stream_id.clone());
     let data_epoch = secondary_config.as_ref().and_then(|config| config.data_epoch);
-    let upload_complete = secondary_config.as_ref().and_then(|config| SyncStore::read_upload_cursor_complete(&index_path, config));
-    let download_complete = secondary_config.as_ref().and_then(|config| SyncStore::read_download_cursor_complete(&index_path, &config.primary_id));
+    let upload_complete = secondary_config.as_ref().and(panel.upload_complete);
+    let download_complete = secondary_config.as_ref().and(panel.download_complete);
     let last_error = if state.role == "secondary" {
         secondary_config.as_ref().and_then(|config| config.last_error.clone())
     } else {
@@ -1415,9 +1437,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     };
     state.last_checked_at_ms = Some(current_ms());
     let pairing_pending = secondary_config.is_none() && read_pending_pairing()?.is_some();
-    let primary_data_sharing_enabled = SyncStore::read_primary_config(&index_path)
-        .map_err(|error| format!("cannot refresh primary sharing preference: {error}"))?
-        .is_some_and(|config| config.share_data_with_secondaries);
+    let primary_data_sharing_enabled = primary_config.as_ref().is_some_and(|config| config.share_data_with_secondaries);
     Ok(SyncDevicesView {
         primary_id,
         primary_display_name: secondary_config.as_ref().and_then(|config| config.primary_display_name.clone()),
@@ -1432,9 +1452,9 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         data_epoch,
         upload_complete,
         download_complete,
-        pending: summary.as_ref().map(|s| s.pending).unwrap_or(0),
-        in_flight: summary.as_ref().map(|s| s.in_flight).unwrap_or(0),
-        pending_bytes: summary.as_ref().map(|s| s.bytes).unwrap_or(0),
+        pending: panel.outbox.pending,
+        in_flight: panel.outbox.in_flight,
+        pending_bytes: panel.outbox.bytes,
         last_error,
         discovery_error: state.discovery_error.clone(),
         last_connected_at_ms: secondary_config.as_ref().and_then(|config| config.last_connected_at_ms),
@@ -2144,7 +2164,7 @@ pub async fn set_tray_mode(app: AppHandle, mode: TrayMode) -> Result<(), String>
     // Persist after the repaint: disk IO never sits between the click and the
     // menubar, and a failed write still leaves this session working.
     let settings = app.state::<Shared>().settings();
-    settings.save().map_err(|e| e.to_string())?;
+    save_settings_async(&settings).await?;
     Ok(())
 }
 
@@ -2163,13 +2183,10 @@ pub async fn get_quota_order(app: AppHandle) -> Result<QuotaOrder, String> {
 /// never a report.
 #[tauri::command]
 pub async fn set_quota_order(app: AppHandle, order: QuotaOrder) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.quota_tools = order.tools;
-    settings.quota_rows = order.rows;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| {
+        s.quota_tools = order.tools;
+        s.quota_rows = order.rows;
+    }).await.map(|_| ())
 }
 
 /// The drag order of the quota section: tool ids for the groups,
@@ -2355,12 +2372,7 @@ pub async fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
 /// persisting it here is what makes the choice survive a relaunch.
 #[tauri::command]
 pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.theme = theme;
-    settings.clone().save().map_err(|e| e.to_string())?;
+    mutate_settings_async(&app, |s| s.theme = theme).await?;
     // the native backing must follow, or the window strip under the sheet
     // flashes the old theme's colour for the lifetime of the panel
     #[cfg(target_os = "macos")]
@@ -2402,44 +2414,24 @@ pub fn open_log_dir() -> Result<(), String> {
 /// webview re-render from its own state.
 #[tauri::command]
 pub async fn set_hide_unused_tools(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.hide_unused_tools = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.hide_unused_tools = on).await.map(|_| ())
 }
 
 #[tauri::command]
 pub async fn set_hide_unused_quota(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.hide_unused_quota = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.hide_unused_quota = on).await.map(|_| ())
 }
 
 #[tauri::command]
 pub async fn set_hide_unused_estimation(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.hide_unused_estimation = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.hide_unused_estimation = on).await.map(|_| ())
 }
 
 /// The host-exit pause: stop probing a tool's quota once its application has
 /// exited; the last known answer stays on screen until it runs again.
 #[tauri::command]
 pub async fn set_host_exit_pause(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".to_string());
-    };
-    settings.host_exit_pause = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.host_exit_pause = on).await.map(|_| ())
 }
 
 /// The auto-check-in guarantee: on, the host-exit pause stops applying to the
@@ -2450,14 +2442,7 @@ pub async fn set_host_exit_pause(app: AppHandle, on: bool) -> Result<(), String>
 /// change lands within one cadence tick.
 #[tauri::command]
 pub async fn set_auto_checkin(app: AppHandle, on: bool) -> Result<(), String> {
-    {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".to_string());
-        };
-        settings.auto_checkin = on;
-        settings.clone().save().map_err(|e| e.to_string())?;
-    }
+    mutate_settings_async(&app, |s| s.auto_checkin = on).await?;
     // The switch is the probes' master gate now: it takes effect this pass,
     // not on the next settings re-read, so a fresh pass runs with it.
     usage_quota::set_auto_checkin_enabled(on);
@@ -2475,12 +2460,7 @@ pub async fn set_auto_checkin(app: AppHandle, on: bool) -> Result<(), String> {
 /// frontend reads it from settings, not from the report.
 #[tauri::command]
 pub async fn set_quota_polling(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.quota_polling = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.quota_polling = on).await.map(|_| ())
 }
 
 /// One tool's own switch — the only lever for the probes with no host mapping.
@@ -2488,16 +2468,13 @@ pub async fn set_quota_polling(app: AppHandle, on: bool) -> Result<(), String> {
 /// every time the registry gains a probe).
 #[tauri::command]
 pub async fn set_tool_polling(app: AppHandle, tool: String, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.quota_probes_off.retain(|t| *t != tool);
-    if !on {
-        settings.quota_probes_off.push(tool);
-        settings.quota_probes_off.sort();
-    }
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| {
+        s.quota_probes_off.retain(|t| *t != tool);
+        if !on {
+            s.quota_probes_off.push(tool);
+            s.quota_probes_off.sort();
+        }
+    }).await.map(|_| ())
 }
 
 /// Which banner lines fire. Delivery policy only: the tier machine keeps
@@ -2505,12 +2482,7 @@ pub async fn set_tool_polling(app: AppHandle, tool: String, on: bool) -> Result<
 /// retro-fire a line crossed while it was off.
 #[tauri::command]
 pub async fn set_notify_tiers(app: AppHandle, tiers: NotifyTier) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.notify_tiers = tiers;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.notify_tiers = tiers).await.map(|_| ())
 }
 
 /// Which lead time should announce an expiring vendor package. The UI only
@@ -2521,62 +2493,37 @@ pub async fn set_plan_expiry_notify_days(app: AppHandle, days: Option<u8>) -> Re
     if days.is_some_and(|n| !matches!(n, 1 | 3 | 5)) {
         return Err("plan expiry reminder must be 1, 3, 5, or disabled".into());
     }
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.plan_expiry_notify_days = days;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.plan_expiry_notify_days = days).await.map(|_| ())
 }
 
 /// One tool's banner mute, same exclusion-list shape as the polling switches.
 #[tauri::command]
 pub async fn set_tool_muted(app: AppHandle, tool: String, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.notify_muted.retain(|t| *t != tool);
-    if on {
-        settings.notify_muted.push(tool);
-        settings.notify_muted.sort();
-    }
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| {
+        s.notify_muted.retain(|t| *t != tool);
+        if on {
+            s.notify_muted.push(tool);
+            s.notify_muted.sort();
+        }
+    }).await.map(|_| ())
 }
 
 /// Dollar figures render at all — the switch the settings sheet flips.
 #[tauri::command]
 pub async fn set_show_money(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.show_money = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.show_money = on).await.map(|_| ())
 }
 
 /// Persist the gauge direction without waking probes or clearing cached answers.
 #[tauri::command]
 pub async fn set_quota_display_mode(app: AppHandle, mode: QuotaDisplayMode) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
-    let mut next = settings.clone();
-    next.quota_display_mode = mode;
-    next.save().map_err(|e| e.to_string())?;
-    *settings = next;
-    Ok(())
+    mutate_settings_async(&app, |s| s.quota_display_mode = mode).await.map(|_| ())
 }
 
 /// Persist the optional local quota-cycle token summary without changing probes.
 #[tauri::command]
 pub async fn set_show_cycle_tokens(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
-    let mut next = settings.clone();
-    next.show_cycle_tokens = on;
-    next.save().map_err(|e| e.to_string())?;
-    *settings = next;
-    Ok(())
+    mutate_settings_async(&app, |s| s.show_cycle_tokens = on).await.map(|_| ())
 }
 
 #[tauri::command]
@@ -2594,7 +2541,7 @@ pub fn set_ttft_enabled(app: AppHandle, on: bool) -> Result<(), String> {
     ttft.set_enabled(on)?;
     let mut next = settings.clone();
     next.ttft_enabled = on;
-    if let Err(error) = next.clone().save() {
+    if let Err(error) = next.save().map_err(|error| error.to_string()) {
         let _ = ttft.set_enabled(previous);
         return Err(error.to_string());
     }
@@ -2612,7 +2559,7 @@ pub fn set_performance_monitoring(app: AppHandle, on: bool) -> Result<(), String
     crate::performance::set_enabled(on).map_err(|error| error.to_string())?;
     let mut next = settings.clone();
     next.performance_monitoring = on;
-    if let Err(error) = next.clone().save() {
+    if let Err(error) = next.save().map_err(|error| error.to_string()) {
         let _ = crate::performance::set_enabled(previous);
         return Err(error.to_string());
     }
@@ -2625,14 +2572,7 @@ pub fn set_performance_monitoring(app: AppHandle, on: bool) -> Result<(), String
 /// the frontend bridge stays platform-neutral; non-Windows is a no-op.
 #[tauri::command]
 pub async fn set_bubble_enabled(app: AppHandle, on: bool) -> Result<(), String> {
-    {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".into());
-        };
-        settings.bubble_enabled = on;
-        settings.clone().save().map_err(|e| e.to_string())?;
-    }
+    mutate_settings_async(&app, |s| s.bubble_enabled = on).await?;
     bubble::set_enabled(&app, on);
     if !on { crate::pet_notice::dismiss(&app, None); }
     Ok(())
@@ -2642,14 +2582,8 @@ pub async fn set_bubble_enabled(app: AppHandle, on: bool) -> Result<(), String> 
 #[tauri::command]
 pub async fn set_bubble_skin(app: AppHandle, skin: BubbleSkin) -> Result<(), String> {
     {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".into());
-        };
-        let mut next = settings.clone();
-        next.bubble_skin = skin.clone();
-        next.save().map_err(|e| e.to_string())?;
-        *settings = next;
+        let skin_clone = skin.clone();
+        mutate_settings_async(&app, |s| s.bubble_skin = skin_clone).await?;
     }
     app.emit("bubble-skin-changed", skin).map_err(|e| e.to_string())
 }
@@ -2660,10 +2594,8 @@ pub async fn set_pet_preferences(app:AppHandle, prefs:crate::settings::PetPrefer
     let mut prefs = prefs;
     prefs.rest_interval_minutes = prefs.rest_interval_minutes.clamp(15,180);
     {
-        let shared = app.state::<Shared>();
-        let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
-        let mut next = settings.clone(); next.pet_companion = prefs.clone();
-        next.save().map_err(|e| e.to_string())?; *settings = next;
+        let prefs_clone = prefs.clone();
+        mutate_settings_async(&app, |s| s.pet_companion = prefs_clone).await?;
     }
     if crate::pet_notice::get_pet_notice(app.clone()).is_some_and(|n|
         if n.kind == crate::pet_notice::Kind::Rest { !prefs.rest_reminders } else { !prefs.greetings }) {
@@ -2734,14 +2666,7 @@ pub async fn checkin_now(tool: String) -> Result<CheckinResult, String> {
 /// uses it instead of the old value's remaining timeout.
 #[tauri::command]
 pub async fn set_refresh_secs(app: AppHandle, secs: u64) -> Result<(), String> {
-    {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".into());
-        };
-        settings.refresh_secs = secs.clamp(10, 3600);
-        settings.clone().save().map_err(|e| e.to_string())?;
-    }
+    mutate_settings_async(&app, |s| s.refresh_secs = secs.clamp(10, 3600)).await?;
     if let Some(channel) = app.try_state::<EngineChannel>() {
         let _ = channel.0.send(Msg::Refresh);
     }
