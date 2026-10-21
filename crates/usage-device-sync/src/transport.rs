@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AtomicOrdering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -86,11 +86,30 @@ const DISPLAY_NAME_PATH: &str = "/v1/device/display-name";
 const RECOVERY_PATH: &str = "/v1/recovery";
 const DISCONNECT_PATH: &str = "/v1/disconnect";
 const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
+// A transient accept failure (EMFILE, a peer that vanishes between SYN and
+// accept) is not a reason to stop serving. Only a listener that has failed
+// this many times in a row is handed back to the owner for a clean rebind.
+const MAX_CONSECUTIVE_ACCEPT_ERRORS: u32 = 32;
 
 const HEALTH_READY: u8 = 0;
 const HEALTH_RUNNING: u8 = 1;
 const HEALTH_STOPPING: u8 = 2;
 const HEALTH_STOPPED: u8 = 3;
+
+/// A panic in one connection poisons every interior lock it held. The service
+/// recovers the guard instead of turning that one panic into a permanent
+/// failure for every later request; the guarded state is either rebuilt per
+/// request or covered by the store's own transaction rollback.
+fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Per-connection failures are expected: SQLite can be busy, the disk can
+/// reject a write, or a client can vanish mid-frame. Only a configuration
+/// error means this listener cannot serve correctly.
+fn connection_error_is_fatal(error: &TransportError) -> bool {
+    error.is_terminal()
+}
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -122,6 +141,15 @@ pub enum TransportError {
     State(#[source] SyncError),
     #[error("diagnostics request failed: {0}")]
     Diagnostics(#[source] DiagnosticsError),
+}
+
+impl TransportError {
+    /// A configuration error makes a restarted listener fail the same way.
+    /// Every other transport failure is scoped to one attempt and is worth a
+    /// supervised retry.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Config(_))
+    }
 }
 
 impl From<io::Error> for TransportError {
@@ -370,9 +398,7 @@ pub struct ClientTransportCancellation {
 impl ClientTransportCancellation {
     pub fn cancel(&self) {
         self.cancel.store(true, AtomicOrdering::Release);
-        if let Ok(active) = self.active_sockets.lock() {
-            for stream in active.values() { let _ = stream.shutdown(Shutdown::Both); }
-        }
+        for stream in lock_recover(&self.active_sockets).values() { let _ = stream.shutdown(Shutdown::Both); }
     }
 }
 
@@ -383,7 +409,7 @@ struct ClientSocketGuard {
 
 impl Drop for ClientSocketGuard {
     fn drop(&mut self) {
-        if let Ok(mut active) = self.active_sockets.lock() { active.remove(&self.id); }
+        lock_recover(&self.active_sockets).remove(&self.id);
     }
 }
 
@@ -607,7 +633,7 @@ impl Tls13HttpsTransport {
     fn register_socket(&self, stream: &TcpStream) -> Result<ClientSocketGuard, TransportError> {
         let id = self.next_socket_id.fetch_add(1, AtomicOrdering::Relaxed);
         let clone = stream.try_clone().map_err(|error| self.map_io(error))?;
-        let mut active = self.active_sockets.lock().map_err(|_| TransportError::Config("client socket lock poisoned".into()))?;
+        let mut active = lock_recover(&self.active_sockets);
         if self.cancel.load(AtomicOrdering::Acquire) {
             let _ = clone.shutdown(Shutdown::Both);
             return Err(TransportError::Cancelled);
@@ -668,7 +694,7 @@ impl HttpsSyncServerHandle {
         ttl: Duration,
     ) -> Result<DiagnosticsGrant, TransportError> {
         let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| TransportError::Config("diagnostics grant TTL is too large".into()))?;
-        let store = self.context.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+        let store = lock_recover(&self.context.store);
         self.context.diagnostics.issue_grant(&store, debugger_device_id, scopes, issued_at_ms, ttl_ms).map_err(TransportError::Diagnostics)
     }
 
@@ -692,6 +718,8 @@ impl HttpsSyncServerHandle {
 struct ServerContext {
     tls_config: Arc<ServerConfig>,
     store: Arc<Mutex<SyncStore>>,
+    #[cfg(test)]
+    fault_next_connection: AtomicU8,
     diagnostics: Arc<DiagnosticsService>,
     pairing_limiter: PairingRateLimiter,
     gate: Arc<ConcurrencyGate>,
@@ -725,7 +753,7 @@ impl PairingRateLimiter {
     }
 
     fn allow(&self, ip: IpAddr) -> bool {
-        let Ok(mut attempts) = self.attempts.lock() else { return false; };
+        let mut attempts = lock_recover(&self.attempts);
         let now = Instant::now();
         let cutoff = now.checked_sub(PAIRING_WINDOW).unwrap_or(now);
         attempts.retain(|_, values| {
@@ -790,7 +818,7 @@ fn claim_request_nonce(
     nonce: [u8; 16],
     now_ms: i64,
 ) -> Result<(), SyncError> {
-    let mut cache = replay.lock().map_err(|_| SyncError::Security("sync replay cache lock poisoned".into()))?;
+    let mut cache = lock_recover(replay);
     match cache.claim(scope, nonce, now_ms) {
         NonceClaim::Fresh => Ok(()),
         NonceClaim::Replay => Err(SyncError::Auth("signed request was already answered".into())),
@@ -799,9 +827,7 @@ fn claim_request_nonce(
 }
 
 fn release_request_nonce(replay: &Mutex<NonceReplayCache>, scope: &'static str, nonce: [u8; 16]) {
-    if let Ok(mut cache) = replay.lock() {
-        cache.release(scope, nonce);
-    }
+    lock_recover(replay).release(scope, nonce);
 }
 
 /// Claims the nonce before the side effect and releases it only when the
@@ -858,7 +884,7 @@ impl ConcurrencyGate {
     }
 
     fn try_acquire_connection(self: &Arc<Self>) -> Result<Option<ConnectionPermit>, TransportError> {
-        let Ok(mut state) = self.state.lock() else { return Err(TransportError::Config("connection gate lock poisoned".into())); };
+        let mut state = lock_recover(&self.state);
         if state.active >= self.max_concurrent {
             return Ok(None);
         }
@@ -868,7 +894,7 @@ impl ConcurrencyGate {
 
     fn acquire_device(self: &Arc<Self>, device_id: &str, bytes: usize) -> Result<DevicePermit, TransportError> {
         if bytes > self.staging_quota_bytes { return Err(TransportError::Limit); }
-        let Ok(mut state) = self.state.lock() else { return Err(TransportError::Config("connection gate lock poisoned".into())); };
+        let mut state = lock_recover(&self.state);
         let active = state.device_active.get(device_id).copied().unwrap_or(0);
         if active >= MAX_DEVICE_CONCURRENT || state.staged_bytes.saturating_add(bytes) > self.staging_quota_bytes {
             return Err(TransportError::Busy);
@@ -881,22 +907,52 @@ impl ConcurrencyGate {
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.gate.state.lock() {
-            state.active = state.active.saturating_sub(1);
-            self.gate.changed.notify_all();
-        }
+        let mut state = lock_recover(&self.gate.state);
+        state.active = state.active.saturating_sub(1);
+        self.gate.changed.notify_all();
     }
 }
 
 impl Drop for DevicePermit {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.gate.state.lock() {
-            state.staged_bytes = state.staged_bytes.saturating_sub(self.staged_bytes);
-            if let Some(active) = state.device_active.get_mut(&self.device_id) {
-                *active = active.saturating_sub(1);
-                if *active == 0 { state.device_active.remove(&self.device_id); }
-            }
-            self.gate.changed.notify_all();
+        let mut state = lock_recover(&self.gate.state);
+        state.staged_bytes = state.staged_bytes.saturating_sub(self.staged_bytes);
+        if let Some(active) = state.device_active.get_mut(&self.device_id) {
+            *active = active.saturating_sub(1);
+            if *active == 0 { state.device_active.remove(&self.device_id); }
+        }
+        self.gate.changed.notify_all();
+    }
+}
+
+/// Runs one connection to completion behind a panic boundary. Only a
+/// configuration error is returned to the listener; a request-scoped failure
+/// or a panic closes this connection and leaves the service accepting.
+fn handle_connection_isolated(
+    context: &ServerContext,
+    stream: TcpStream,
+    peer: SocketAddr,
+    permit: ConnectionPermit,
+) -> Option<TransportError> {
+    let started = Instant::now();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        context.handle_connection(stream, peer, permit)
+    })) {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => {
+            let code = transport_error_code(&error);
+            context.log_event(true, &format!(
+                "sync: action=connection outcome=error error_code={code} total_ms={}",
+                started.elapsed().as_millis(),
+            ));
+            connection_error_is_fatal(&error).then_some(error)
+        }
+        Err(_) => {
+            context.log_event(true, &format!(
+                "sync: action=connection outcome=panic total_ms={}",
+                started.elapsed().as_millis(),
+            ));
+            None
         }
     }
 }
@@ -928,10 +984,17 @@ impl HttpsSyncServer {
             }
         })?;
         listener.set_nonblocking(false).map_err(TransportError::from)?;
+        // A process that died mid-upload leaves `upload-*.part` behind, and
+        // the in-memory quota counter cannot see those bytes. Only this server
+        // can own the staging directory (the port is bound), and anything older
+        // than twice the longest request cannot belong to a live upload.
+        sweep_stale_staging(&config.staging_dir, config.total_timeout.saturating_mul(2), SystemTime::now());
         let diagnostics = DiagnosticsService::new_with_host(store.primary_id(), host).map_err(TransportError::Diagnostics)?;
         let context = ServerContext {
             tls_config: Arc::new(tls_config),
             store: Arc::new(Mutex::new(store)),
+            #[cfg(test)]
+            fault_next_connection: AtomicU8::new(0),
             diagnostics: Arc::new(diagnostics),
             pairing_limiter: PairingRateLimiter::new(),
             gate: Arc::new(ConcurrencyGate::new(&config)),
@@ -957,9 +1020,7 @@ impl HttpsSyncServer {
         &self,
         sink: impl Fn(bool, &str) + Send + Sync + 'static,
     ) -> Result<(), TransportError> {
-        *self.context.log_sink.lock().map_err(|_| {
-            TransportError::Config("sync log sink lock poisoned".into())
-        })? = Some(Arc::new(sink));
+        *lock_recover(&self.context.log_sink) = Some(Arc::new(sink));
         Ok(())
     }
 
@@ -1015,10 +1076,8 @@ impl HttpsSyncServer {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 };
-                match self.context.handle_connection(stream, peer, permit) {
-                    Ok(()) => {}
-                    Err(TransportError::State(error)) => return Err(TransportError::State(error)),
-                    Err(_) => {}
+                if let Some(error) = handle_connection_isolated(&self.context, stream, peer, permit) {
+                    return Err(error);
                 }
             }
             Ok(())
@@ -1044,6 +1103,7 @@ impl HttpsSyncServer {
         listener.set_nonblocking(true).map_err(TransportError::from)?;
         let (fatal_tx, fatal_rx) = mpsc::channel();
         let mut handlers: Vec<thread::JoinHandle<()>> = Vec::new();
+        let mut consecutive_accept_errors = 0_u32;
         while !stop.load(AtomicOrdering::Acquire) {
             if let Ok(error) = fatal_rx.try_recv() {
                 context.cancel_active();
@@ -1062,6 +1122,7 @@ impl HttpsSyncServer {
             }
             match listener.accept() {
                 Ok((stream, peer)) => {
+                    consecutive_accept_errors = 0;
                     let permit = match context.gate.try_acquire_connection() {
                         Ok(Some(permit)) => permit,
                         Ok(None) => {
@@ -1078,25 +1139,25 @@ impl HttpsSyncServer {
                     let context = context.clone();
                     let fatal_tx = fatal_tx.clone();
                     handlers.push(thread::spawn(move || {
-                        let started = Instant::now();
-                        if let Err(error) = context.handle_connection(stream, peer, permit) {
-                            let code = transport_error_code(&error);
-                            context.log_event(true, &format!(
-                                "sync: action=connection outcome=error error_code={code} total_ms={}",
-                                started.elapsed().as_millis(),
-                            ));
-                            if matches!(error, TransportError::State(_) | TransportError::Config(_)) {
-                                let _ = fatal_tx.send(error);
-                            }
+                        if let Some(error) = handle_connection_isolated(&context, stream, peer, permit) {
+                            let _ = fatal_tx.send(error);
                         }
                     }));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(10)),
                 Err(error) => {
-                    context.cancel_active();
-                    for handler in handlers { let _ = handler.join(); }
-                    context.health.store(HEALTH_STOPPED, AtomicOrdering::Release);
-                    return Err(TransportError::from(error));
+                    consecutive_accept_errors = consecutive_accept_errors.saturating_add(1);
+                    context.log_event(true, &format!(
+                        "sync: action=accept outcome=error error_kind={:?} consecutive={consecutive_accept_errors}",
+                        error.kind(),
+                    ));
+                    if consecutive_accept_errors >= MAX_CONSECUTIVE_ACCEPT_ERRORS {
+                        context.cancel_active();
+                        for handler in handlers { let _ = handler.join(); }
+                        context.health.store(HEALTH_STOPPED, AtomicOrdering::Release);
+                        return Err(TransportError::from(error));
+                    }
+                    thread::sleep(Duration::from_millis(100));
                 }
             }
         }
@@ -1114,7 +1175,7 @@ impl HttpsSyncServer {
 
 impl ServerContext {
     fn log_event(&self, is_error: bool, message: &str) {
-        let sink = self.log_sink.lock().ok().and_then(|slot| slot.clone());
+        let sink = lock_recover(&self.log_sink).clone();
         if let Some(sink) = sink {
             sink(is_error, message);
         } else if is_error {
@@ -1135,7 +1196,7 @@ impl ServerContext {
     fn register_socket(&self, stream: &TcpStream) -> Result<ActiveSocketGuard<'_>, TransportError> {
         let id = self.next_socket_id.fetch_add(1, AtomicOrdering::Relaxed);
         let clone = stream.try_clone().map_err(TransportError::from)?;
-        let mut active = self.active_sockets.lock().map_err(|_| TransportError::Config("active socket lock poisoned".into()))?;
+        let mut active = lock_recover(&self.active_sockets);
         if self.cancel.load(AtomicOrdering::Acquire) {
             let _ = clone.shutdown(Shutdown::Both);
             return Err(TransportError::Cancelled);
@@ -1146,23 +1207,23 @@ impl ServerContext {
 
     fn cancel_active(&self) {
         self.diagnostics.stop();
-        if let Ok(active) = self.active_sockets.lock() {
-            self.cancel.store(true, AtomicOrdering::Release);
-            for stream in active.values() {
-                let _ = stream.shutdown(Shutdown::Both);
-            }
-        } else {
-            self.cancel.store(true, AtomicOrdering::Release);
+        self.cancel.store(true, AtomicOrdering::Release);
+        for stream in lock_recover(&self.active_sockets).values() {
+            let _ = stream.shutdown(Shutdown::Both);
         }
     }
 
     fn unregister_socket(&self, id: u64) {
-        if let Ok(mut active) = self.active_sockets.lock() {
-            active.remove(&id);
-        }
+        lock_recover(&self.active_sockets).remove(&id);
     }
 
     fn handle_connection(&self, stream: TcpStream, peer: SocketAddr, _connection: ConnectionPermit) -> Result<(), TransportError> {
+        #[cfg(test)]
+        match self.fault_next_connection.swap(0, AtomicOrdering::AcqRel) {
+            1 => return Err(TransportError::State(SyncError::Protocol("injected connection fault".into()))),
+            2 => panic!("injected connection panic"),
+            _ => {}
+        }
         if self.cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
         if !self.config.allowed_peer_ips.is_empty() && !self.config.allowed_peer_ips.contains(&peer.ip()) {
             return Err(TransportError::PeerRejected(peer.ip()));
@@ -1194,8 +1255,9 @@ impl ServerContext {
                 Err(error) => return Err(error),
             };
             let authorize_started = Instant::now();
-            let authorized = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))
-                .and_then(|store| store.authorize_upload_metadata(&metadata.envelope, &metadata.signature).map_err(TransportError::State));
+            let authorized = lock_recover(&self.store)
+                .authorize_upload_metadata(&metadata.envelope, &metadata.signature)
+                .map_err(TransportError::State);
             if let Err(error) = authorized {
                 if matches!(&error, TransportError::State(SyncError::Sqlite(_))) {
                     let code = transport_error_code(&error);
@@ -1225,7 +1287,7 @@ impl ServerContext {
                         let result = (|| {
                             if self.cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
                             let file = OpenOptions::new().read(true).open(&staged).map_err(TransportError::from)?;
-                            let mut store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+                            let mut store = lock_recover(&self.store);
                             if self.cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
                             store.import_network_reader_strict(&metadata.envelope, &metadata.signature, file, metadata.gzip_len, now_ms()).map_err(TransportError::State)
                         })();
@@ -1261,7 +1323,7 @@ impl ServerContext {
             (429, serde_json::to_vec(&WireError { message: "pairing rate limit exceeded; retry later".into() }).unwrap_or_else(|_| b"{\"message\":\"pairing rate limit exceeded\"}".to_vec()))
         } else if head.path == DIAGNOSTICS_MCP_PATH {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
-            let store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+            let store = lock_recover(&self.store);
             let diagnostics_deadline = Instant::now()
                 .checked_add(DIAGNOSTICS_REQUEST_TIMEOUT)
                 .map(|value| value.min(deadline))
@@ -1278,7 +1340,7 @@ impl ServerContext {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
             let request = serde_json::from_slice::<WirePairingInviteRequest>(&body)
                 .map_err(|e| TransportError::Protocol(format!("invalid discovery pairing JSON: {e}")))?;
-            let mut store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+            let mut store = lock_recover(&self.store);
             match issue_pairing_invite(&mut store, request, &self.config.certificate_der) {
                 Ok(body) => (200, body),
                 Err(error) => (status_for_error(&error), serde_json::to_vec(&WireError { message: safe_error_message(&error) }).unwrap_or_else(|_| b"{\"message\":\"request rejected\"}".to_vec())),
@@ -1286,7 +1348,7 @@ impl ServerContext {
         } else {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
             let request = HttpRequest { path: head.path.clone(), content_type: head.content_type, body };
-            let mut store = self.store.lock().map_err(|_| TransportError::State(SyncError::Security("sync store lock poisoned".into())))?;
+            let mut store = lock_recover(&self.store);
             dispatch_request(&mut store, &request, &self.replay)
         };
         let content_type = if status == 200 && head.path == DOWNLOAD_PATH { "application/octet-stream" } else { "application/json" };
@@ -2109,6 +2171,25 @@ fn read_u64<R: Read>(reader: &mut LimitedReader<'_, R>) -> Result<u64, Transport
     Ok(u64::from_be_bytes(bytes))
 }
 
+fn sweep_stale_staging(directory: &Path, stale_after: Duration, now: SystemTime) -> usize {
+    let Ok(entries) = fs::read_dir(directory) else { return 0; };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue; };
+        if !name.starts_with("upload-") || !name.ends_with(".part") { continue; }
+        let Ok(metadata) = entry.metadata() else { continue; };
+        if !metadata.is_file() { continue; }
+        let Ok(modified) = metadata.modified() else { continue; };
+        if now.duration_since(modified).is_ok_and(|age| age > stale_after)
+            && fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 fn stage_upload<S: Read>(stream: &mut S, metadata: &UploadMetadata, directory: &Path, deadline: Instant, cancel: &AtomicBool) -> Result<PathBuf, TransportError> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|e| TransportError::Config(format!("cannot create staging name: {e}")))?;
@@ -2689,6 +2770,69 @@ mod tests {
     }
 
     #[test]
+    fn a_request_scoped_store_failure_closes_only_that_connection() {
+        let cert = cert();
+        let device = DeviceIdentity::create("linux", "Linux").unwrap();
+        let (store, upload) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        server.context.fault_next_connection.store(1, AtomicOrdering::Release);
+        let handle = thread::spawn(move || server.run_connections(2));
+
+        let mut faulted = TcpStream::connect(addr).unwrap();
+        let _ = faulted.write_all(b"GET /v1/status HTTP/1.1\r\n\r\n");
+        let _ = faulted.shutdown(Shutdown::Both);
+        thread::sleep(Duration::from_millis(25));
+
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        let receipt = client.upload(&upload).unwrap();
+        assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok(), "a request-scoped store failure must not stop the listener");
+    }
+
+    #[test]
+    fn a_panicking_connection_does_not_stop_the_following_valid_upload() {
+        let cert = cert();
+        let device = DeviceIdentity::create("linux", "Linux").unwrap();
+        let (store, upload) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        server.context.fault_next_connection.store(2, AtomicOrdering::Release);
+        let handle = thread::spawn(move || server.run_connections(2));
+
+        let mut faulted = TcpStream::connect(addr).unwrap();
+        let _ = faulted.write_all(b"GET /v1/status HTTP/1.1\r\n\r\n");
+        let _ = faulted.shutdown(Shutdown::Both);
+        thread::sleep(Duration::from_millis(25));
+
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        let receipt = client.upload(&upload).unwrap();
+        assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok(), "a panicking handler must not stop the listener");
+    }
+
+    #[test]
+    fn a_poisoned_store_lock_recovers_instead_of_stopping_the_listener() {
+        let cert = cert();
+        let device = DeviceIdentity::create("linux", "Linux").unwrap();
+        let (store, upload) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let store_lock = Arc::clone(&server.context.store);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store_lock.lock().unwrap();
+            panic!("poison the store lock");
+        }));
+        assert!(store_lock.is_poisoned());
+        let handle = thread::spawn(move || server.run_connections(1));
+
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        let receipt = client.upload(&upload).unwrap();
+        assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok(), "a poisoned lock must not take the listener down");
+    }
+
+    #[test]
     fn bad_connection_does_not_stop_the_following_valid_upload() {
         let cert = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
@@ -2920,6 +3064,24 @@ mod tests {
         std::fs::remove_file(&lock_path).unwrap();
         assert!(matches!(result, Err(TransportError::Config(message)) if message.contains("lock")));
         let _ = ensure_server_certificate(&cert_path, &key_path, "localhost").unwrap();
+    }
+
+    #[test]
+    fn stale_upload_staging_from_a_crash_is_swept_on_bind() {
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("upload-0123456789abcdef.part");
+        let fresh = root.path().join("upload-fedcba9876543210.part");
+        let other = root.path().join("notes.txt");
+        fs::write(&stale, b"crashed").unwrap();
+        fs::write(&fresh, b"live").unwrap();
+        fs::write(&other, b"keep").unwrap();
+        OpenOptions::new().write(true).open(&stale).unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3_600)).unwrap();
+        let removed = sweep_stale_staging(root.path(), Duration::from_secs(600), SystemTime::now());
+        assert_eq!(removed, 1);
+        assert!(!stale.exists(), "crash residue older than the request budget must not survive a restart");
+        assert!(fresh.exists(), "a fresh staging file can belong to a live upload");
+        assert!(other.exists(), "the sweep only owns upload-*.part");
     }
 
     #[test]

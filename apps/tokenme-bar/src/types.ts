@@ -385,6 +385,7 @@ export type SyncManagementRequest =
   | { action: "stop" }
   | { action: "switch_to_secondary" }
   | { action: "unpair" }
+  | { action: "reset_secondary" }
   | { action: "create_invite"; expires_at_ms?: number | null }
   | { action: "pair"; invite: string; origin?: string | null; display_name?: string | null; os?: string | null }
   | { action: "pair_discovered"; primary_id: string; endpoint: string; certificate_pin: string; origin?: string | null; display_name?: string | null; os?: string | null }

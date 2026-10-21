@@ -405,6 +405,16 @@ pub struct OutboxSummary {
     pub bytes: u64,
 }
 
+/// What `reset_secondary_sync_state` discarded. Local events are never part of
+/// the reset: the next pass re-sends the full local projection and re-downloads
+/// the primary's history from the first identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondaryResetSummary {
+    pub device_id: String,
+    pub discarded_packages: u64,
+    pub discarded_journal_rows: u64,
+}
+
 /// Everything the panel's five-second status poll reads, gathered through one
 /// state connection and one index connection instead of one each per field.
 #[derive(Debug, Clone, Default)]
@@ -610,20 +620,28 @@ impl SyncStore {
         self.release_acked_dirty()
     }
 
-    /// Index-side release of dirty revisions every paired downlink consumer
-    /// confirmed. The paired count and ACK floor come from the state registry;
-    /// only the journal/meta cleanup runs on the index connection.
+    /// Index-side release of dirty revisions every downlink consumer
+    /// confirmed. The consumer count and ACK floor come from the state
+    /// registry; only the journal/meta cleanup runs on the index connection.
+    ///
+    /// Paused and reconciling devices stay in the floor. They are offline,
+    /// not unsubscribed: their last cursor is exactly how far their index has
+    /// merged, and a changed event below that cursor can only arrive through
+    /// the dirty feed. Counting only `paired` let one active device's ACK (or
+    /// a primary restart with every device paused) delete revisions the
+    /// offline device never saw, so its resume was silently stale. Revoking
+    /// the device is the explicit way to give up its share.
     fn release_acked_dirty(&mut self) -> SyncResult<()> {
-        let paired: i64 = self.state.query_row(
-            "SELECT count(*) FROM device_registry WHERE status = 'paired'", [], |row| row.get(0),
+        let consumers: i64 = self.state.query_row(
+            "SELECT count(*) FROM device_registry WHERE status IN ('paired', 'paused', 'reconcile_required')", [], |row| row.get(0),
         ).map_err(sql_err)?;
-        let floor: i64 = if paired == 0 { 0 } else {
+        let floor: i64 = if consumers == 0 { 0 } else {
             self.state.query_row(
-                "SELECT COALESCE(MIN(download_dirty_ack), 0) FROM device_registry WHERE status = 'paired'",
+                "SELECT COALESCE(MIN(download_dirty_ack), 0) FROM device_registry WHERE status IN ('paired', 'paused', 'reconcile_required')",
                 [], |row| row.get(0),
             ).map_err(sql_err)?
         };
-        self.index.with_network_transaction(|tx| release_acked_dirty_tx(tx, paired, floor))
+        self.index.with_network_transaction(|tx| release_acked_dirty_tx(tx, consumers, floor))
     }
 
     /// Recomputes the ingest-time capture switch from the state database and
@@ -1491,6 +1509,71 @@ impl SyncStore {
         disconnect_requested_conn(&conn, primary_id)
     }
 
+    /// Forget every stream-scoped checkpoint of the secondary binding without
+    /// touching local events or the pairing itself. The primary still holds the
+    /// old stream's highwater, so replaying a fresh generation-1 outbox against
+    /// it would be rejected forever; `needs_recovery` makes the next runtime
+    /// pass use the recovery handshake, which freezes that stream and issues a
+    /// new one. Upload restarts as a full snapshot and the primary's history is
+    /// downloaded again from the first identity.
+    pub fn reset_secondary_sync_state(&mut self, now_ms: i64) -> SyncResult<SecondaryResetSummary> {
+        let device_id: Option<String> = self.state.query_row(
+            "SELECT device_id FROM device_sync_secondary_config WHERE config_key = 'secondary' AND primary_id = ?1",
+            params![self.primary_id], |row| row.get(0),
+        ).optional().map_err(sql_err)?;
+        let Some(device_id) = device_id else { return Err(SyncError::NotFound("secondary sync configuration".into())); };
+        // The state flag flips first: a crash before the index cleanup still
+        // leaves the next pass recovering, and `adopt_recovered_stream` deletes
+        // whatever outbox/journal rows this call did not reach.
+        Self::state_tx(&mut self.state, |tx| {
+            let changed = tx.execute(
+                "UPDATE device_sync_secondary_config
+                    SET stream_id = NULL, data_epoch = NULL, expected_generation = NULL,
+                        last_manifest_hash = NULL, last_gzip_hash = NULL,
+                        last_ack_generation = NULL, last_ack_receipt_hash = NULL,
+                        last_error = NULL, needs_recovery = 1, updated_at_ms = ?1
+                  WHERE config_key = 'secondary' AND primary_id = ?2 AND device_id = ?3",
+                params![now_ms, self.primary_id, device_id],
+            ).map_err(sql_err)?;
+            if changed != 1 { return Err(SyncError::NotFound("secondary sync configuration".into())); }
+            Ok(())
+        })?;
+        let (discarded_packages, discarded_journal_rows) = self.index.with_network_transaction(|tx| {
+            let packages: i64 = tx.query_row(
+                "SELECT count(*) FROM device_sync_outbox WHERE device_id = ?1", params![device_id], |row| row.get(0),
+            ).map_err(sql_err)?;
+            let journal: i64 = tx.query_row(
+                "SELECT count(*) FROM device_sync_journal WHERE device_id = ?1", params![device_id], |row| row.get(0),
+            ).map_err(sql_err)?;
+            tx.execute("DELETE FROM device_sync_journal WHERE device_id = ?1", params![device_id]).map_err(sql_err)?;
+            tx.execute("DELETE FROM device_sync_outbox WHERE device_id = ?1", params![device_id]).map_err(sql_err)?;
+            tx.execute("DELETE FROM device_sync_outbox_sequence WHERE device_id = ?1", params![device_id]).map_err(sql_err)?;
+            // The primary-download cursor is keyed by the primary id, not by
+            // the local device id; a reset that only matched the device would
+            // keep the old download checkpoint and never re-read the primary.
+            tx.execute(
+                "DELETE FROM device_sync_snapshot_cursor WHERE device_id IN (?1, ?2)",
+                params![device_id, self.primary_id],
+            ).map_err(sql_err)?;
+            Ok::<_, SyncError>((packages, journal))
+        })?;
+        Ok(SecondaryResetSummary {
+            device_id,
+            discarded_packages: u64::try_from(discarded_packages).map_err(|_| SyncError::Security("outbox row count is negative".into()))?,
+            discarded_journal_rows: u64::try_from(discarded_journal_rows).map_err(|_| SyncError::Security("journal row count is negative".into()))?,
+        })
+    }
+
+    /// True after a reset until a fresh stream has been adopted from the
+    /// primary's recovery handshake.
+    pub fn secondary_needs_recovery(&self) -> SyncResult<bool> {
+        let value: Option<i64> = self.state.query_row(
+            "SELECT needs_recovery FROM device_sync_secondary_config WHERE config_key = 'secondary' AND primary_id = ?1",
+            params![self.primary_id], |row| row.get(0),
+        ).optional().map_err(sql_err)?;
+        Ok(value.is_some_and(|value| value != 0))
+    }
+
     /// Remove the active secondary binding while leaving local usage history and
     /// immutable outbox rows intact for audit/reconciliation.
     pub fn clear_secondary_config(&mut self, now_ms: i64) -> SyncResult<Option<PathBuf>> {
@@ -1600,13 +1683,13 @@ impl SyncStore {
     fn write_secondary_stream(&mut self, receipt: &StreamOpenReceipt, now_ms: i64, force_reset: bool) -> SyncResult<()> {
         if receipt.primary_id != self.primary_id { return Err(SyncError::Auth("stream receipt targets another primary".into())); }
         if receipt.data_epoch == 0 || receipt.expected_generation == 0 { return Err(SyncError::Invalid("stream receipt counters start at 1".into())); }
-        let current: Option<(Option<String>, Option<i64>, Option<i64>, Option<String>)> = self.state.query_row(
-            "SELECT stream_id, data_epoch, expected_generation, last_error
+        let current: Option<(Option<String>, Option<i64>, Option<i64>, Option<String>, i64)> = self.state.query_row(
+            "SELECT stream_id, data_epoch, expected_generation, last_error, needs_recovery
                FROM device_sync_secondary_config
               WHERE config_key = 'secondary' AND primary_id = ?1 AND device_id = ?2",
-            params![self.primary_id, receipt.device_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            params![self.primary_id, receipt.device_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).optional().map_err(sql_err)?;
-        let Some((stream_id, epoch, expected_generation, last_error)) = current else { return Err(SyncError::NotFound("secondary sync configuration".into())); };
+        let Some((stream_id, epoch, expected_generation, last_error, needs_recovery)) = current else { return Err(SyncError::NotFound("secondary sync configuration".into())); };
         let reset = force_reset || stream_id.as_deref() != Some(receipt.stream_id.as_str()) || epoch != Some(receipt.data_epoch as i64);
         // The status loop re-opens the same stream every pass. Rewriting four
         // identical columns (and refreshing updated_at_ms) was a state
@@ -1628,6 +1711,14 @@ impl SyncStore {
                     "DELETE FROM device_sync_snapshot_cursor WHERE device_id = ?1 AND stream_id <> ?2",
                     params![receipt.device_id, PRIMARY_DOWNLOAD_STREAM_ID],
                 ).map_err(sql_err)?;
+                // A user reset must also restart the primary-download cursor.
+                // Deleting it here closes the window where the process died
+                // after setting needs_recovery but before the reset cleaned
+                // the index; an automatic recovery (flag 0) keeps its
+                // download progress, which the upload stream does not govern.
+                if needs_recovery != 0 {
+                    tx.execute("DELETE FROM device_sync_snapshot_cursor WHERE device_id = ?1", params![self.primary_id]).map_err(sql_err)?;
+                }
                 Ok::<_, SyncError>(())
             })?;
         }
@@ -1640,6 +1731,7 @@ impl SyncStore {
                      last_gzip_hash = CASE WHEN ?4 THEN NULL ELSE last_gzip_hash END,
                      last_ack_generation = CASE WHEN ?4 THEN NULL ELSE last_ack_generation END,
                      last_ack_receipt_hash = CASE WHEN ?4 THEN NULL ELSE last_ack_receipt_hash END,
+                     needs_recovery = CASE WHEN ?4 THEN 0 ELSE needs_recovery END,
                      updated_at_ms = ?5
                  WHERE config_key = 'secondary' AND primary_id = ?6 AND device_id = ?7",
                 params![receipt.stream_id, receipt.data_epoch as i64, receipt.expected_generation as i64, reset, now_ms, self.primary_id, receipt.device_id],
@@ -2951,7 +3043,11 @@ fn rotate_index_sync_state_tx(tx: &Transaction<'_>, now_ms: i64) -> SyncResult<(
 
 /// The ingest-time capture switch, computed from the state database: a
 /// secondary's `capture_enabled` wins (a network pause must not pause local
-/// capture); a primary journals only while it has a paired downlink consumer.
+/// capture); a primary journals while any downlink consumer — paired, paused
+/// or reconciling — can still need it. Paused and reconciling devices are
+/// offline, not unsubscribed: their cursor survives, so an update to an event
+/// below it can only arrive through the change feed. Revoking is the explicit
+/// way to give that share up.
 fn sync_capture_enabled_state(state: &Connection) -> SyncResult<bool> {
     let has_capture_column: bool = state.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_sync_secondary_config') WHERE name = 'capture_enabled')",
@@ -2972,23 +3068,24 @@ fn sync_capture_enabled_state(state: &Connection) -> SyncResult<bool> {
     if !configured {
         return Ok(false);
     }
-    let paired: i64 = state.query_row(
-        "SELECT count(*) FROM device_registry WHERE status = 'paired'", [], |row| row.get(0),
+    let consumers: i64 = state.query_row(
+        "SELECT count(*) FROM device_registry WHERE status IN ('paired', 'paused', 'reconcile_required')", [], |row| row.get(0),
     ).map_err(sql_err)?;
-    Ok(paired > 0)
+    Ok(consumers > 0)
 }
 
-/// Drops every dirty revision all paired downlink consumers have confirmed.
+/// Drops every dirty revision all downlink consumers have confirmed.
 /// The floor is the minimum persisted download cursor; revisions above it may
-/// still be needed by a device that has not pulled them yet.  With no paired
-/// device there is no consumer at all and the journal cannot be ACKed, so it
-/// must not keep pinning local events against prune.  The paired count and
-/// floor are read from the state registry before this index-side cleanup runs.
-fn release_acked_dirty_tx(tx: &Transaction<'_>, paired: i64, ack_floor: i64) -> SyncResult<()> {
+/// still be needed by a device that has not pulled them yet (a paused device
+/// keeps its cursor and therefore keeps its share).  With no consumer at all
+/// the journal cannot be ACKed, so it must not keep pinning local events
+/// against prune.  The consumer count and floor are read from the state
+/// registry before this index-side cleanup runs.
+fn release_acked_dirty_tx(tx: &Transaction<'_>, consumers: i64, ack_floor: i64) -> SyncResult<()> {
     // Count only the legacy JSON bytes about to be deleted. A full sum here
     // rescanned every dirty row on every ACK; current rows carry X'' and add
     // nothing.
-    let removed_json_bytes: i64 = if paired == 0 {
+    let removed_json_bytes: i64 = if consumers == 0 {
         tx.query_row(
             "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty WHERE length(event_json) > 0",
             [], |row| row.get(0),
@@ -2999,7 +3096,7 @@ fn release_acked_dirty_tx(tx: &Transaction<'_>, paired: i64, ack_floor: i64) -> 
             params![ack_floor], |row| row.get(0),
         ).map_err(sql_err)?
     };
-    let removed = if paired == 0 {
+    let removed = if consumers == 0 {
         tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?
     } else {
         tx.execute("DELETE FROM sync_dirty WHERE revision <= ?1", params![ack_floor]).map_err(sql_err)?
@@ -3245,6 +3342,7 @@ fn migrate_state(state: &mut Connection, primary_id: &str) -> SyncResult<()> {
                  last_connected_at_ms INTEGER,
                  last_ack_generation INTEGER, last_ack_receipt_hash BLOB,
                  primary_display_name TEXT,
+                 needs_recovery INTEGER NOT NULL DEFAULT 0,
                  updated_at_ms INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS device_sync_primary_config(
@@ -3277,6 +3375,7 @@ fn migrate_state(state: &mut Connection, primary_id: &str) -> SyncResult<()> {
         ensure_column(&tx, "device_sync_secondary_config", "last_ack_receipt_hash", "BLOB")?;
         ensure_column(&tx, "device_sync_secondary_config", "capture_enabled", "INTEGER NOT NULL DEFAULT 1")?;
         ensure_column(&tx, "device_sync_secondary_config", "primary_display_name", "TEXT")?;
+        ensure_column(&tx, "device_sync_secondary_config", "needs_recovery", "INTEGER NOT NULL DEFAULT 0")?;
         // A primary's downlink is a journal consumer: each request carries the
         // secondary's persisted dirty cursor, which ACKs every revision at or
         // below it.  `served` bounds the claim to pages this primary really
@@ -4953,6 +5052,128 @@ mod tests {
     }
 
     #[test]
+    fn reset_discards_stream_state_but_keeps_local_events_and_forces_recovery() {
+        let device = identity("reset-secondary");
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        store.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'reset-key')",
+            [],
+        ).unwrap();
+        let certificate_der = vec![1u8, 2, 3];
+        let config = SecondarySyncConfig {
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
+            certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
+            stream_id: Some("reset-old".into()), data_epoch: Some(1), expected_generation: Some(2), enabled: true, capture_enabled: true,
+            last_error: Some("stuck".into()), last_manifest_hash: Some([1; 32]), last_gzip_hash: Some([2; 32]), last_connected_at_ms: None,
+            last_ack_generation: Some(1), last_ack_receipt_hash: Some([9; 32]),
+        };
+        store.save_secondary_config(&config, 1).unwrap();
+        let row = NetworkRow {
+            key: Some("reset-key".into()), occurrence_id: None, tool: "codex".into(), ts_ms: 10,
+            session: "session".into(), project: None, model: None, meter: "tokens".into(), source: "local.jsonl".into(),
+            counts: NetworkCounts { in_tok: Some(1.0), ..NetworkCounts::all_zero() }, calls: vec![],
+        };
+        let package = NetworkPackage::from_rows(&device.origin, INDEX_SCHEMA_VERSION, 0, 100, &[row.clone()], 10).unwrap();
+        store.enqueue_snapshot_auto(&config, package, &[], &device.signing_key, 2).unwrap().unwrap();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_snapshot_cursor(device_id, stream_id, data_epoch, last_identity, last_dirty_revision, complete, completion_generation, updated_at_ms)
+             VALUES(?1, 'reset-old', 1, 'key:reset-key', 0, 0, NULL, 2),
+                   (?2, ?3, 1, 'key:reset-key', 3, 0, NULL, 2)",
+            params![device.device_id, "primary-1", PRIMARY_DOWNLOAD_STREAM_ID],
+        ).unwrap();
+        assert!(store.secondary_has_history(&config).unwrap());
+        assert!(!store.secondary_needs_recovery().unwrap());
+
+        let summary = store.reset_secondary_sync_state(20).unwrap();
+        assert_eq!(summary.device_id, device.device_id);
+        assert_eq!(summary.discarded_packages, 1);
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_journal", [], |r| r.get(0)).unwrap(), 0);
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_outbox_sequence", [], |r| r.get(0)).unwrap(), 0);
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_snapshot_cursor", [], |r| r.get(0)).unwrap(), 0,
+            "both the upload cursor and the primary download cursor must restart");
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM event", [], |r| r.get(0)).unwrap(), 1,
+            "a reset re-sends local data, it never deletes it");
+        let reset = store.secondary_config().unwrap().unwrap();
+        assert_eq!((reset.stream_id.as_deref(), reset.data_epoch, reset.expected_generation), (None, None, None));
+        assert_eq!(reset.last_ack_generation, None);
+        assert_eq!(reset.last_ack_receipt_hash, None);
+        assert_eq!(reset.last_manifest_hash, None);
+        assert_eq!(reset.last_gzip_hash, None);
+        assert_eq!(reset.last_error, None);
+        assert!(store.secondary_needs_recovery().unwrap(), "the old stream still has primary-side highwater");
+
+        // A normal status pass would adopt the old stream again; only the
+        // recovery handshake may clear the flag by installing a fresh stream.
+        let recovered = StreamOpenReceipt {
+            primary_id: "primary-1".into(), device_id: device.device_id.clone(),
+            stream_id: "reset-new".into(), data_epoch: 1, expected_generation: 1,
+        };
+        store.adopt_recovered_stream(&recovered, 30).unwrap();
+        assert!(!store.secondary_needs_recovery().unwrap());
+        let adopted = store.secondary_config().unwrap().unwrap();
+        assert_eq!(adopted.stream_id.as_deref(), Some("reset-new"));
+        assert_eq!(adopted.expected_generation, Some(1));
+        assert_eq!(adopted.last_ack_generation, None);
+    }
+
+    #[test]
+    fn recovery_after_an_interrupted_reset_still_restarts_the_primary_download_cursor() {
+        let device = identity("reset-crash");
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let certificate_der = vec![1u8, 2, 3];
+        store.save_secondary_config(&SecondarySyncConfig {
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
+            certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
+            stream_id: Some("crash-old".into()), data_epoch: Some(1), expected_generation: Some(2), enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: Some(1), last_ack_receipt_hash: None,
+        }, 1).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_snapshot_cursor(device_id, stream_id, data_epoch, last_identity, last_dirty_revision, complete, completion_generation, updated_at_ms)
+             VALUES('primary-1', ?1, 1, 'key:crash', 0, 1, NULL, 2)",
+            params![PRIMARY_DOWNLOAD_STREAM_ID],
+        ).unwrap();
+        // A reset writes the durable flag before touching the index. This
+        // reproduces the crash window: the flag is set, the index rows are not.
+        store.state.execute(
+            "UPDATE device_sync_secondary_config SET needs_recovery = 1 WHERE device_id = ?1",
+            params![device.device_id],
+        ).unwrap();
+        let receipt = StreamOpenReceipt {
+            primary_id: "primary-1".into(), device_id: device.device_id.clone(),
+            stream_id: "crash-new".into(), data_epoch: 1, expected_generation: 1,
+        };
+        store.adopt_recovered_stream(&receipt, 30).unwrap();
+        assert_eq!(store.index().conn().query_row::<i64, _, _>(
+            "SELECT count(*) FROM device_sync_snapshot_cursor WHERE device_id = 'primary-1'", [], |r| r.get(0),
+        ).unwrap(), 0, "the interrupted reset must still re-read the primary from the first identity");
+        assert!(!store.secondary_needs_recovery().unwrap());
+    }
+
+    #[test]
+    fn reset_without_a_binding_is_an_explicit_error_and_repeatable() {
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        assert!(matches!(store.reset_secondary_sync_state(1), Err(SyncError::NotFound(_))));
+        let device = identity("reset-repeat");
+        let certificate_der = vec![1u8, 2, 3];
+        store.save_secondary_config(&SecondarySyncConfig {
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id, origin: device.origin.clone(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
+            certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }, 1).unwrap();
+        let summary = store.reset_secondary_sync_state(2).unwrap();
+        assert_eq!((summary.discarded_packages, summary.discarded_journal_rows), (0, 0));
+        store.reset_secondary_sync_state(3).unwrap();
+        assert!(store.secondary_needs_recovery().unwrap());
+    }
+
+    #[test]
     fn late_disconnect_notice_does_not_clear_a_newer_bindings_journal() {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let certificate_der = vec![1u8, 2, 3];
@@ -5351,6 +5572,114 @@ mod tests {
         primary.primary_download_page(&request, now + 5, 30).unwrap();
         assert_eq!(dirty_journal_count(&primary), 0);
         assert_eq!(primary.index_mut().prune(cutoff).unwrap(), 1);
+    }
+
+    #[test]
+    fn paused_consumer_keeps_the_change_feed_until_it_resumes() {
+        let device = identity("download-paused");
+        let (mut primary, _) = paired_store_for(&device);
+        primary.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 1).unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let day = 86_400_000_i64;
+        let capture = |store: &SyncStore| -> String {
+            store.index().conn().query_row(
+                "SELECT value FROM meta WHERE key = 'device_sync_capture_enabled'", [], |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(capture(&primary), "0", "no consumer means ingest does not journal");
+        for (key, ts) in [("a", now - 10 * day), ("b", now - day)] {
+            primary.index().conn().execute(
+                "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+                 VALUES('codex', ?1, 'session', 'tokens', 3, 'local.jsonl', ?2)",
+                params![ts, key],
+            ).unwrap();
+        }
+        // The device pulled the initial page; `a` now sorts behind its cursor.
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now).unwrap();
+        let page = primary.primary_download_page(&request, now, 30).unwrap();
+        assert!(page.complete);
+        assert_eq!(page.next_identity.as_deref(), Some("key:b"));
+        let last_identity = Some("key:b".to_string());
+
+        let a_id = primary.index().conn().query_row::<i64, _, _>("SELECT id FROM event WHERE dedupe_key = 'a'", [], |row| row.get(0)).unwrap();
+        primary.index().conn().execute("UPDATE event SET in_tok = 13 WHERE id = ?1", [a_id]).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:a', 'local.jsonl', X'', ?1, ?2, 1, ?3, ?3)",
+            params![a_id, now - 10 * day, now + 1],
+        ).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO meta(key, value) VALUES('device_sync_dirty_revision', '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value", [],
+        ).unwrap();
+
+        // A paused device is offline, not unsubscribed. The maintenance a
+        // primary restart runs must not release the revision it never saw.
+        primary.pause_device(&device.device_id).unwrap();
+        primary.maintain().unwrap();
+        assert_eq!(dirty_journal_count(&primary), 1, "a paused consumer still owns its share of the change feed");
+        assert_eq!(capture(&primary), "1", "ingest must keep journaling for the paused consumer");
+        let cutoff = now - 5 * day;
+        assert_eq!(primary.index_mut().prune(cutoff).unwrap(), 0, "the retained revision keeps pinning its event");
+
+        primary.resume_device(&device.device_id).unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", last_identity.clone(), 0, now + 2).unwrap();
+        let page = primary.primary_download_page(&request, now + 2, 30).unwrap();
+        let (_, rows) = page.package.as_ref().unwrap().validate().unwrap();
+        assert_eq!(rows.len(), 1, "the update made while paused must arrive on resume");
+        assert_eq!(rows[0].key.as_deref(), Some("a"));
+        assert_eq!(rows[0].counts.in_tok, Some(13.0));
+        assert_eq!(page.next_dirty_revision, 1);
+
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", last_identity.clone(), 1, now + 3).unwrap();
+        primary.primary_download_page(&request, now + 3, 30).unwrap();
+        assert_eq!(dirty_journal_count(&primary), 0);
+        assert_eq!(primary.index_mut().prune(cutoff).unwrap(), 1);
+
+        // The same rule covers a device the primary sent back to reconcile:
+        // its pull cursor survives stream recovery, so the change feed is the
+        // only way it can learn about updates below that cursor.
+        let b_id = primary.index().conn().query_row::<i64, _, _>("SELECT id FROM event WHERE dedupe_key = 'b'", [], |row| row.get(0)).unwrap();
+        primary.index().conn().execute("UPDATE event SET in_tok = 7 WHERE id = ?1", [b_id]).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:b', 'local.jsonl', X'', ?1, ?2, 2, ?3, ?3)",
+            params![b_id, now - day, now + 4],
+        ).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO meta(key, value) VALUES('device_sync_dirty_revision', '2')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value", [],
+        ).unwrap();
+        primary.state.execute(
+            "UPDATE device_registry SET status = 'reconcile_required' WHERE device_id = ?1", [&device.device_id],
+        ).unwrap();
+        primary.maintain().unwrap();
+        assert_eq!(dirty_journal_count(&primary), 1, "a reconciling consumer still owns its share of the change feed");
+        assert_eq!(capture(&primary), "1", "ingest must keep journaling while the device reconciles");
+        let young_cutoff = now - day / 2;
+        assert_eq!(primary.index_mut().prune(young_cutoff).unwrap(), 0, "the retained revision pins the updated event");
+
+        primary.resume_device(&device.device_id).unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", last_identity.clone(), 1, now + 5).unwrap();
+        let page = primary.primary_download_page(&request, now + 5, 30).unwrap();
+        let (_, rows) = page.package.as_ref().unwrap().validate().unwrap();
+        assert_eq!(rows.len(), 1, "the update behind the cursor must arrive after recovery");
+        assert_eq!(rows[0].key.as_deref(), Some("b"));
+        assert_eq!(rows[0].counts.in_tok, Some(7.0));
+        assert_eq!(page.next_dirty_revision, 2);
+
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", last_identity, 2, now + 6).unwrap();
+        primary.primary_download_page(&request, now + 6, 30).unwrap();
+        assert_eq!(dirty_journal_count(&primary), 0);
+        assert_eq!(primary.index_mut().prune(young_cutoff).unwrap(), 1);
+
+        // Revoking is the explicit release: no consumer is left to journal for.
+        primary.revoke_device(&device.device_id, now + 7).unwrap();
+        assert_eq!(capture(&primary), "0");
     }
 
     #[test]

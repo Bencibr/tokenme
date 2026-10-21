@@ -53,6 +53,10 @@ pub enum SyncManagementRequest {
     /// secondary while retaining local usage and sync history.
     SwitchToSecondary,
     Unpair,
+    /// Forget the secondary's stream checkpoints, outbox and ACK progress,
+    /// then recover a fresh stream and sync from scratch. Local events and the
+    /// pairing are kept.
+    ResetSecondary,
     CreateInvite { expires_at_ms: Option<i64> },
     Pair { invite: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
     PairDiscovered { primary_id: String, endpoint: String, certificate_pin: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
@@ -77,6 +81,7 @@ fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
         Some(SyncManagementRequest::Stop) => "stop",
         Some(SyncManagementRequest::SwitchToSecondary) => "switch_to_secondary",
         Some(SyncManagementRequest::Unpair) => "unpair",
+        Some(SyncManagementRequest::ResetSecondary) => "reset_secondary",
         Some(SyncManagementRequest::CreateInvite { .. }) => "create_invite",
         Some(SyncManagementRequest::Pair { .. }) => "pair",
         Some(SyncManagementRequest::PairDiscovered { .. }) => "pair_discovered",
@@ -1845,6 +1850,28 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             }
             Ok(())
         },
+        SyncManagementRequest::ResetSecondary => {
+            let config = SyncStore::read_secondary_config(&index_path)
+                .map_err(|error| format!("cannot read secondary sync configuration: {error}"))?
+                .ok_or_else(|| "pair this device before resetting secondary sync".to_string())?;
+            let was_running = state.runtime.is_some();
+            // The runtime holds the scheduler lease and an in-memory outbox
+            // view; dropping it joins the thread and releases the lease before
+            // the reset deletes its rows.
+            stop_service(state);
+            let mut store = SyncStore::open(&index_path, config.primary_id.clone()).map_err(|error| error.to_string())?;
+            store.reset_secondary_sync_state(current_ms()).map_err(|error| error.to_string())?;
+            store.set_secondary_last_error(None, current_ms()).map_err(|error| error.to_string())?;
+            drop(store);
+            if was_running {
+                if let Err(error) = start_secondary_runtime(state) {
+                    let mut rollback = SyncStore::open(&index_path, config.primary_id).map_err(|open_error| open_error.to_string())?;
+                    let _ = rollback.set_secondary_last_error(Some(error.as_str()), current_ms());
+                    return Err(error);
+                }
+            }
+            Ok(())
+        }
         SyncManagementRequest::CreateInvite { expires_at_ms } => {
             let primary_id = state_primary_id(state, &snapshot)?;
             let endpoint = state.endpoint.clone().ok_or_else(|| "start the primary service before creating an invite".to_string())?;

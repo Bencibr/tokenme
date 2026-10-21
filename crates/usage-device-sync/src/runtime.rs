@@ -406,7 +406,11 @@ impl SyncRuntime {
             Err(SyncError::ReconcileRequired) => None,
             Err(error) => return Err(error),
         };
-        let mut recover = status.is_none();
+        // A local reset deliberately forgot the stream while the primary still
+        // holds its highwater: adopting that stream again would replay
+        // generation 1 against a stream expecting N+1 forever. The recovery
+        // handshake freezes it and mints a fresh one instead.
+        let mut recover = status.is_none() || self.store.secondary_needs_recovery()?;
         if let Some(status) = status.as_ref() {
             self.primary_data_sharing = status.primary_data_sharing;
             if let Some(name) = status.primary_display_name.as_deref() {

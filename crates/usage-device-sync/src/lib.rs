@@ -39,7 +39,7 @@ pub use protocol::{
 pub use store::{
     DeviceRecord, DeviceRole, DeviceStatus, DeviceStatusView, DeviceSyncRead, DeviceSyncSnapshot, ImportReceipt,
     DirtyJournalEntry, DirtyJournalInput, MergeOutcome, OutboxEntry, OutboxState, OutboxSummary,
-    DisconnectNotice, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SnapshotCursor, SyncError, SyncResult, SyncStore,
+    DisconnectNotice, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SecondaryResetSummary, SnapshotCursor, SyncError, SyncResult, SyncStore,
 };
 pub use lifecycle::deliver_disconnect_notice;
 pub use runtime::{export_index_snapshot, export_index_snapshots, export_index_snapshots_from_snapshot, LocalSnapshot, RuntimeRunReport, SyncRuntime, SyncRuntimeConfig};

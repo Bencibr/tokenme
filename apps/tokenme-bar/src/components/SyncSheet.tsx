@@ -614,10 +614,17 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               </div>
               {isSecondary && awaitingSecondaryApproval ? <div className="sync-waiting">{t("sync.pairing.waiting_primary")}</div> : null}
               {isSecondary ? (
-                <div className="sync-progress" aria-live="polite">
-                  <div className="sync-progress-row"><span>{t("sync.prog.upload")}</span><code>{uploadState}</code></div>
-                  <div className="sync-progress-row"><span>{t("sync.prog.download")}</span><code>{downloadState}</code></div>
-                </div>
+                <>
+                  <div className="sync-progress" aria-live="polite">
+                    <div className="sync-progress-row"><span>{t("sync.prog.upload")}</span><code>{uploadState}</code></div>
+                    <div className="sync-progress-row"><span>{t("sync.prog.download")}</span><code>{downloadState}</code></div>
+                  </div>
+                  {!awaitingSecondaryApproval ? (
+                    <div className="sync-btnrow">
+                      <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "reset_secondary" }, message: t("sync.reset.confirm") })}>{t("sync.reset.button")}</button>
+                    </div>
+                  ) : null}
+                </>
               ) : null}
               {isPrimary && pendingRequests.length ? (
                 <>

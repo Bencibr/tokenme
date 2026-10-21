@@ -215,6 +215,11 @@ pub enum SyncCmd {
     /// Stop the user-level secondary runtime through its private local control channel.
     Stop,
 
+    /// Forget this secondary's stream, outbox and ACK checkpoints, then recover
+    /// a fresh stream and re-sync from scratch. Local usage history and the
+    /// pairing are kept. Stop the resident runtime first.
+    Reset,
+
     /// Create a one-time invite on the primary.
     Invite {
         #[arg(long, value_name = "URL")]
