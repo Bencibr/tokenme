@@ -134,6 +134,9 @@ async fn pull_one<R: Runtime>(app: &AppHandle<R>, state: &Arc<ServersState>, id:
                     r.fail_count = 0;
                     r.last_rows = pulled.rows;
                     r.last_took_ms = pulled.took_ms;
+                    if let Some(tools) = &pulled.tools {
+                        r.tools = tools.clone();
+                    }
                     r.push_history(SyncEvent {
                         at_ms: now_ms,
                         rows: pulled.rows,

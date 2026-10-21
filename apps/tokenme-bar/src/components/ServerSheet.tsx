@@ -89,6 +89,9 @@ function tookText(ms: number): string {
 /** The list/detail meta line: what happened last and when it happens next. */
 function metaOf(s: ServerView, now: number): { text: string; err: boolean } {
   if (s.status === "syncing") return { text: t("srv.meta.syncing"), err: false };
+  // Paused wins over a stale error: a server the user turned off is described
+  // by that choice, not by whatever failed before they turned it off.
+  if (!s.enabled) return { text: t("srv.meta.disabled"), err: false };
   if (s.status === "error" && s.last_error) {
     const last = s.history.length ? s.history[s.history.length - 1].at_ms : s.last_ok_ms;
     const ago = last === null ? "—" : relativeTime(last, now);
@@ -97,7 +100,6 @@ function metaOf(s: ServerView, now: number): { text: string; err: boolean } {
       : t("srv.meta.retry");
     return { text: `${ago} · ${errTitle(s.last_error)} · ${next}`, err: true };
   }
-  if (!s.enabled) return { text: t("srv.meta.disabled"), err: false };
   const next = s.next_due_ms !== null && s.next_due_ms > now ? eta(s.next_due_ms - now) : "—";
   const rows = t("srv.meta.rows", { n: count(s.last_rows) });
   if (s.last_ok_ms === null) return { text: t("srv.meta.wait", { eta: next }), err: false };
@@ -141,6 +143,8 @@ interface Wiz {
   outcome: ServerInstallOutcome | null;
   every: number;
   days: number;
+  /** A step-5 setting the backend refused; the picker shows its old value. */
+  patchError: string | null;
   version: string;
 }
 
@@ -167,6 +171,7 @@ const emptyWiz = (): Wiz => ({
   outcome: null,
   every: 900,
   days: 30,
+  patchError: null,
   version: "",
 });
 
@@ -404,7 +409,9 @@ export function ServerSheet({
 
   const patchServer = async (id: number, req: { every_secs?: number; days?: number; enabled?: boolean }) => {
     const views = await bridge.serverUpdate({ id, ...req }).catch(() => null);
-    if (views) onServers(views);
+    if (!views) return false;
+    onServers(views);
+    return true;
   };
 
   const removeServer = async (id: number) => {
@@ -911,8 +918,12 @@ export function ServerSheet({
                   className="seg-btn"
                   aria-checked={w.every === secs}
                   onClick={() => {
-                    setWiz({ ...w, every: secs });
-                    if (out?.server) void patchServer(out.server.id, { every_secs: secs });
+                    const prev = w.every;
+                    setWiz({ ...w, every: secs, patchError: null });
+                    if (!out?.server) return;
+                    void patchServer(out.server.id, { every_secs: secs }).then((ok) => {
+                      if (!ok) setWiz((cur) => (cur ? { ...cur, every: prev, patchError: t("srv.patch.fail") } : cur));
+                    });
                   }}
                 >
                   {secs === 300 ? t("srv.int.5m") : secs === 900 ? t("srv.int.15m") : t("srv.int.1h")}
@@ -933,8 +944,12 @@ export function ServerSheet({
                   className="seg-btn"
                   aria-checked={w.days === days}
                   onClick={() => {
-                    setWiz({ ...w, days });
-                    if (out?.server) void patchServer(out.server.id, { days });
+                    const prev = w.days;
+                    setWiz({ ...w, days, patchError: null });
+                    if (!out?.server) return;
+                    void patchServer(out.server.id, { days }).then((ok) => {
+                      if (!ok) setWiz((cur) => (cur ? { ...cur, days: prev, patchError: t("srv.patch.fail") } : cur));
+                    });
                   }}
                 >
                   {days === 7 ? t("srv.days.7") : days === 30 ? t("srv.days.30") : t("srv.days.90")}
@@ -942,6 +957,7 @@ export function ServerSheet({
               ))}
             </div>
           </div>
+          {w.patchError ? <div className="f-hint" data-err="">{w.patchError}</div> : null}
           <div className="wiz-foot">
             <div className="left" />
             <div className="left">

@@ -173,12 +173,30 @@ pub struct ServersState {
 
 impl ServersState {
     pub fn new() -> Self {
+        Self::from_store(load_store())
+    }
+
+    /// Builds the state around an in-memory store — `new` is this plus the disk
+    /// read, and tests use it directly. Record ids survive a restart, so the
+    /// counter starts past the highest one: resetting it to 1 would hand the
+    /// next install an id an existing record already owns (two servers sharing
+    /// an id means the detail sheet shows the wrong one, pulls run against the
+    /// wrong host, and removing one deletes both).
+    pub fn from_store(store: ServersStore) -> Self {
+        let next_id = store
+            .servers
+            .iter()
+            .map(|r| r.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
         Self {
-            store: Mutex::new(load_store()),
+            store: Mutex::new(store),
             pulling: Mutex::new(BTreeSet::new()),
             next_due: Mutex::new(BTreeMap::new()),
             wizards: Mutex::new(BTreeMap::new()),
-            next_id: AtomicU64::new(1),
+            next_id: AtomicU64::new(next_id),
             hub_tx: Mutex::new(None),
         }
     }
@@ -297,6 +315,15 @@ pub fn load_store() -> ServersStore {
     match serde_json::from_str::<ServersStore>(&raw) {
         Ok(mut store) => {
             store.version = STORE_VERSION;
+            // An older build handed a re-run install an id that an existing
+            // record already owned. Repair it on load so the damage stops
+            // here instead of hiding behind a second row with the same id.
+            if repair_ids(&mut store) {
+                crate::logging::error("servers: servers.json held duplicate ids; renumbered the copies");
+                if let Err(e) = save_store(&store) {
+                    crate::logging::error(&format!("servers: cannot persist the renumbered servers.json: {e}"));
+                }
+            }
             store
         }
         Err(e) => {
@@ -306,6 +333,32 @@ pub fn load_store() -> ServersStore {
             ServersStore { version: STORE_VERSION, ..Default::default() }
         }
     }
+}
+
+/// Gives every record a unique, non-zero id — the first duplicate (or `0`)
+/// keeps the id it has, later ones move past the highest id in the file.
+/// Returns whether anything moved.
+fn repair_ids(store: &mut ServersStore) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut next = store
+        .servers
+        .iter()
+        .map(|r| r.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(1);
+    let mut changed = false;
+    for rec in store.servers.iter_mut() {
+        if rec.id != 0 && seen.insert(rec.id) {
+            continue;
+        }
+        rec.id = next;
+        next = next.saturating_add(1);
+        seen.insert(rec.id);
+        changed = true;
+    }
+    changed
 }
 
 /// Managed-state constructor for `lib.rs`.
@@ -388,5 +441,79 @@ mod tests {
         assert_eq!(rec.history.len(), HISTORY_CAP);
         // The oldest fall off the front, not the newest.
         assert_eq!(rec.history.first().unwrap().at_ms, 5);
+    }
+
+    /// Record ids are persisted; the allocator must continue past them. It
+    /// used to restart at 1 on every launch, so the next install reissued an
+    /// existing server's id — the sheet then showed one machine's details for
+    /// the other, the hub pulled whichever record came first, and removing one
+    /// deleted both.
+    #[test]
+    fn next_id_continues_past_persisted_ids() {
+        let store = ServersStore {
+            version: STORE_VERSION,
+            known_hosts: BTreeMap::new(),
+            servers: vec![record(2, "a"), record(7, "b")],
+        };
+        let state = ServersState::from_store(store);
+        assert_eq!(state.next_id(), 8);
+        assert_eq!(state.next_id(), 9);
+    }
+
+    #[test]
+    fn next_id_starts_at_one_for_an_empty_store() {
+        let state = ServersState::from_store(ServersStore {
+            version: STORE_VERSION,
+            ..Default::default()
+        });
+        assert_eq!(state.next_id(), 1);
+    }
+
+    /// A store written by the old allocator can already hold one id twice;
+    /// loading renumbers the copy (and is a no-op on healthy files).
+    #[test]
+    fn duplicate_ids_are_renumbered() {
+        let mut store = ServersStore {
+            version: STORE_VERSION,
+            known_hosts: BTreeMap::new(),
+            servers: vec![record(2, "a"), record(2, "b"), record(7, "c")],
+        };
+        assert!(repair_ids(&mut store));
+        let ids: Vec<u64> = store.servers.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![2, 8, 7]);
+        assert!(!repair_ids(&mut store), "a repaired store needs no second pass");
+    }
+
+    #[test]
+    fn a_zero_id_is_renumbered() {
+        let mut store = ServersStore {
+            version: STORE_VERSION,
+            known_hosts: BTreeMap::new(),
+            servers: vec![record(0, "a")],
+        };
+        assert!(repair_ids(&mut store));
+        assert_eq!(store.servers[0].id, 1);
+    }
+
+    fn record(id: u64, name: &str) -> ServerRecord {
+        ServerRecord {
+            id,
+            name: name.into(),
+            host: "h".into(),
+            port: 22,
+            user: "u".into(),
+            fingerprint: "f".into(),
+            every_secs: 900,
+            days: 30,
+            enabled: true,
+            created_at_ms: 0,
+            last_ok_ms: None,
+            last_error: None,
+            fail_count: 0,
+            last_rows: 0,
+            last_took_ms: 0,
+            tools: vec![],
+            history: vec![],
+        }
     }
 }

@@ -3,7 +3,7 @@
 //! hub or wizard.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -98,9 +98,19 @@ pub fn server_update(app: AppHandle, req: UpdateReq) -> Result<Vec<ServerView>, 
             Some(!was && rec.enabled)
         })
         .map_err(|e| SshError::new("local_io", e))?;
-    if reenabled == Some(true) {
-        if let Ok(mut due) = state.next_due.lock() {
-            due.insert(req.id, Instant::now());
+    if let Some(reenabled) = reenabled {
+        // Re-enabling pulls immediately. A cadence change also has to land
+        // now: shortening 1h → 5m used to wait out the hour the old interval
+        // had already scheduled, because the hub only ever consults `next_due`
+        // (and its `Changed` message is a no-op).
+        let schedule = if reenabled {
+            Some(Instant::now())
+        } else {
+            req.every_secs
+                .map(|every| Instant::now() + Duration::from_secs(every.max(60)))
+        };
+        if let (Some(at), Ok(mut due)) = (schedule, state.next_due.lock()) {
+            due.insert(req.id, at);
         }
     }
     state.hub_send(HubMsg::Changed);

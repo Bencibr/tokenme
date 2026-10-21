@@ -527,7 +527,7 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, state: &Arc<ServersState>, 
     let mut merge_pending = false;
     let rows = if fetched.written {
         fetch::wake_engine(app);
-        match fetch::await_merge(app, &gz_name, MERGE_WAIT).await {
+        match fetch::await_merge(app, &gz_name, &fetched.sha256, MERGE_WAIT).await {
             Some(rows) => {
                 prog.done("merge", Some(format!("{rows} rows merged")));
                 rows
