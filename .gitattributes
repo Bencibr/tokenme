@@ -1,0 +1,4 @@
+# core.autocrlf=true flips this file's checkout form and git reports a
+# phantom modification with an empty diff, which breaks the archive step's
+# "source unchanged since prepare" hash check. Pin it to raw bytes.
+apps/tokenme-bar/src-tauri/Cargo.toml -text
