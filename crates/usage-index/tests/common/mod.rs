@@ -10,7 +10,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use usage_core::{
     Call, CallKind, DateFilter, DetectedSource, Error, FileKind, Meter, ReadCursor, ReadOutcome,
-    Semantics, SourceAdapter, SourceFile, TokenCounts, UsageEvent,
+    Semantics, SourceAdapter, SourceFile, TokenCounts, UsageEvent, UsageForm,
 };
 
 pub struct Mock {
@@ -207,4 +207,69 @@ pub fn replace_file(dir: &Path, target: &str, fixture: &str) {
 
 pub fn count_of(idx: &usage_index::Index, tool: &str) -> u64 {
     idx.per_tool_counts().unwrap().get(tool).copied().unwrap_or(0)
+}
+
+/// A `Cumulative` source: the vendor keeps one running total per session and
+/// re-emits that whole projection on every pass, stamped with the session's own
+/// last-activity time. This is the hermes / joycode shape — and the FunIDE shape
+/// until 2026-10-21 — where billing the projection itself moves a session's
+/// whole lifetime into whichever day it was last touched.
+pub struct CumMock {
+    pub id: &'static str,
+    pub dir: PathBuf,
+}
+
+impl CumMock {
+    pub fn new(id: &'static str, dir: impl Into<PathBuf>) -> Self {
+        Self { id, dir: dir.into() }
+    }
+}
+
+impl SourceAdapter for CumMock {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Mock Projection"
+    }
+
+    fn semantics(&self) -> Semantics {
+        Semantics {
+            usage_form: UsageForm::Cumulative,
+            ..Semantics::TOKENS_PER_CALL_INLINE
+        }
+    }
+
+    fn probe(&self) -> Option<DetectedSource> {
+        (self.dir.is_dir()).then(|| DetectedSource {
+            id: self.id.to_string(),
+            display: "Mock Projection".into(),
+            roots: vec![self.dir.clone()],
+            hint: Some("fixture".into()),
+        })
+    }
+
+    fn discover(&self, _filter: &DateFilter) -> Vec<SourceFile> {
+        let mut out = Vec::new();
+        collect(&self.dir, &mut out);
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
+    }
+
+    fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
+        let bytes = std::fs::read(&file.path).map_err(|e| Error::io(&file.path, e))?;
+        let mut events = Vec::new();
+        for line in bytes.split(|b| *b == b'\n') {
+            if line.iter().all(|b| b.is_ascii_whitespace()) {
+                continue;
+            }
+            if let Some(ev) = parse_line(self.id, &file.path, &String::from_utf8_lossy(line)) {
+                events.push(ev);
+            }
+        }
+        // The cursor is answered untouched: the pass stops after this batch, and
+        // every later pass re-emits the same projection, as a `Tree` source does.
+        Ok(ReadOutcome { events, cursor })
+    }
 }

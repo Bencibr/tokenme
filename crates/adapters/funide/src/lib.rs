@@ -2,9 +2,10 @@
 //!
 //! One source: `<data>/FunIDE/User/funide/sessions/<workspace>/<session>.json`
 //! — each file is a whole session (Tree kind): the UI's own `cacheUsage`
-//! cumulative ledger, the session model, and the workspace key. One cumulative
-//! event per session, replaced on a stable key; the file's mtime is the cursor
-//! and re-reads are absorbed.
+//! cumulative ledger, the per-turn `items[].usage*` numbers, the session model,
+//! and the workspace key. One event per billed turn, keyed on the turn's own id
+//! and stamped with the turn's own start; the file's mtime is the cursor and
+//! re-reads are absorbed.
 //!
 //! `index.json` per workspace is UI bookkeeping (titles, counts) and is not a
 //! session. No quota here: the GLM-plan points balance lives in the FunIDE
@@ -35,7 +36,7 @@ impl SourceAdapter for FunIdeAdapter {
 
     fn semantics(&self) -> Semantics {
         Semantics {
-            usage_form: usage_core::UsageForm::Cumulative,
+            usage_form: usage_core::UsageForm::PerCall,
             meter: usage_core::Meter::Tokens,
             model_attr: usage_core::ModelAttr::Inline,
             dedupes_by_id: true,
@@ -66,13 +67,11 @@ impl SourceAdapter for FunIdeAdapter {
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
         match file.kind {
             FileKind::Tree => {
-                let empty = ReadOutcome { events: Vec::new(), cursor: ReadCursor(file.size) };
-                let Ok(text) = std::fs::read_to_string(&file.path) else { return Ok(empty) };
-                let mut events = Vec::new();
-                if let Some(event) = proj::parse(&text, file.mtime_ms, &file.key()) {
-                    events.push(*event);
-                }
-                Ok(ReadOutcome { events, cursor: ReadCursor(file.size) })
+                let cursor = ReadCursor(file.size);
+                let Ok(text) = std::fs::read_to_string(&file.path) else {
+                    return Ok(ReadOutcome { events: Vec::new(), cursor });
+                };
+                Ok(ReadOutcome { events: proj::parse(&text, file.mtime_ms, &file.key()), cursor })
             }
             _ => Ok(ReadOutcome { events: Vec::new(), cursor }),
         }
@@ -86,7 +85,14 @@ mod tests {
 
     const SESSION: &str = r#"{"version":2,"id":"s1","workspaceKey":"d:\\w\\proj",
         "activeModelId":"cloud:GLM-plan-flash","updatedAt":1790685147111,
-        "cacheUsage":{"promptTokens":100,"cachedTokens":20,"completionTokens":10}}"#;
+        "cacheUsage":{"promptTokens":220,"cachedTokens":60,"completionTokens":30},
+        "items":[{"role":"user","turnId":"turn_1790510647992_1","text":"hi"},
+                 {"role":"assistant","turnId":"turn_1790510647992_1",
+                  "usagePrompt":200,"usageCached":50,"usageCompletion":20},
+                 {"role":"user","turnId":"turn_1790520647992_2","text":"go on"},
+                 {"role":"assistant","turnId":"turn_1790520647992_2",
+                  "usagePrompt":20,"usageCached":10,"usageCompletion":10}]}
+    "#;
 
     fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
         let ws = dir.join("sessions").join("ws1");
@@ -99,21 +105,36 @@ mod tests {
     }
 
     #[test]
-    fn a_session_file_reads_as_one_cumulative_event() {
+    fn a_session_file_reads_as_one_event_per_turn() {
         let _guard = paths::test_lock();
         let dir = tempfile::tempdir().unwrap();
-        let path = fixture(dir.path());
+        let _path = fixture(dir.path());
         std::env::set_var(paths::HOME_ENV, dir.path());
         let detected = FunIdeAdapter.probe().expect("the fixture session exists");
         assert_eq!(detected.roots.len(), 1);
         let files = FunIdeAdapter.discover(&DateFilter::default());
         assert_eq!(files.len(), 1, "index.json is not discovered");
         let outcome = FunIdeAdapter.read(&files[0], ReadCursor::default()).unwrap();
-        assert_eq!(outcome.events.len(), 1);
-        assert_eq!(outcome.events[0].counts.input, 80.0);
-        assert_eq!(outcome.events[0].counts.cache_read, 20.0);
-        assert_eq!(outcome.events[0].counts.output, 10.0);
-        assert_eq!(outcome.events[0].dedupe_key.as_deref(), Some("funide#s1"));
+        assert_eq!(outcome.events.len(), 2, "two billed turns, not one session total");
+        assert_eq!(
+            FunIdeAdapter.semantics().usage_form,
+            usage_core::UsageForm::PerCall,
+            "the day an event belongs to is the day its turn ran"
+        );
+        let (input, cache, output): (f64, f64, f64) = outcome.events.iter().fold(
+            (0.0, 0.0, 0.0),
+            |mut acc, e| {
+                acc.0 += e.counts.input;
+                acc.1 += e.counts.cache_read;
+                acc.2 += e.counts.output;
+                acc
+            },
+        );
+        assert_eq!((input, cache, output), (160.0, 60.0, 30.0), "the turns make the ledger");
+        assert_eq!(outcome.events[0].ts_ms, 1790510647992);
+        assert_eq!(outcome.events[1].ts_ms, 1790520647992);
+        assert_eq!(outcome.events[0].dedupe_key.as_deref(), Some("funide#s1#turn_1790510647992_1"));
+        assert_eq!(outcome.events[1].dedupe_key.as_deref(), Some("funide#s1#turn_1790520647992_2"));
         std::env::remove_var(paths::HOME_ENV);
     }
 }

@@ -434,6 +434,9 @@ fn one_adapter(
     hints: &DiscoverHint<'_>,
 ) -> Result<()> {
     let tool = adapter.id();
+    // The one declaration the pass cannot read off an event: whether an emitted
+    // row is a call or a running total. See `cumulative_growth`.
+    let cumulative = adapter.semantics().usage_form == usage_core::UsageForm::Cumulative;
     let files = match hints(tool) {
         // The caller materialized this list moments ago with fresh stats, so
         // neither the tree walk nor the panic guard around it is needed; what
@@ -485,7 +488,7 @@ fn one_adapter(
     if workers == 1 {
         for job in jobs {
             let read = read_one(adapter, filter, job);
-            persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id)?;
+            persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id, cumulative)?;
         }
         return Ok(());
     }
@@ -512,14 +515,14 @@ fn one_adapter(
         }
         drop(tx);
         for read in rx {
-            if let Err(e) = persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id) {
+            if let Err(e) = persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id, cumulative) {
                 acc.errors.push(format!("{tool}: {e}"));
             }
         }
         for queue in &queues {
             while let Some(job) = pop(queue) {
                 let read = read_one(adapter, filter, job);
-                if let Err(e) = persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id) {
+                if let Err(e) = persist(idx, tool, read, acc, adapter.semantics().dedupes_by_id, cumulative) {
                     acc.errors.push(format!("{tool}: {e}"));
                 }
             }
@@ -618,12 +621,141 @@ fn read_one(adapter: &dyn SourceAdapter, filter: &DateFilter, job: Job) -> FileR
     FileRead { file, cursor: cursor as i64, prev_events, events, error, notes }
 }
 
+/// What a re-emitted `Cumulative` projection contributes to this pass.
+enum Slice {
+    /// Bill this event: the day's growth so far — what today's slice already
+    /// holds plus the increment since the last recorded total.
+    Growth(UsageEvent),
+    /// Nothing new — the ledger already holds at least these totals.
+    Settled,
+    /// No key or no representable local day: leave the event to the plain path.
+    Passthrough,
+}
+
+/// Turns one `Cumulative` source's whole-to-date projection into the growth it
+/// adds on this pass.
+///
+/// Such a source re-emits a session's lifetime totals on every read, and its
+/// stamp moves with the newest activity. Billing the projection itself therefore
+/// puts money from every earlier day into the day it happens to carry: a session
+/// continued across midnight reads as if its whole life was spent today, and the
+/// days behind it go to zero. Measured 2026-10-21 — one FunIDE session's 477M
+/// prompt tokens on a single day.
+///
+/// So the lifetime total only ever drives a ledger (`cumulative_state`), and what
+/// enters `event` is growth, in one slice row per (key, local day): each pass
+/// adds its increment since the last recorded total on top of what that day's
+/// row already holds, so the row always reads the day's whole spend and the
+/// plain grow path — which refuses a total that goes down — sees a number that
+/// only rises. A legacy projection row standing on the same key is the
+/// pre-slice baseline: the ledger seeds from it, so the first growth after this
+/// rule bills the increment and never re-bills or re-dates what is already on
+/// the books. Per component, and never backwards, exactly like the row-level
+/// grow path it feeds.
+fn cumulative_growth(
+    tx: &Transaction<'_>,
+    tool: &str,
+    source: &str,
+    ev: &UsageEvent,
+    updated_ms: i64,
+) -> Result<Slice> {
+    const FIELDS: usize = 6;
+    let Some(base) = ev.dedupe_key.as_deref().filter(|k| !k.is_empty()) else {
+        return Ok(Slice::Passthrough);
+    };
+    let Some(day) = local_day_of(ev.ts_ms) else { return Ok(Slice::Passthrough) };
+    let read_totals = |sql: &str, key: &str| -> Result<Option<[f64; FIELDS]>> {
+        tx.query_row(sql, params![key], |r| {
+            Ok([
+                r.get::<_, f64>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, f64>(5)?,
+            ])
+        })
+        .optional()
+        .map_err(sql_err)
+    };
+    // IFNULL: a staged or hand-migrated row may leave a money column NULL, and
+    // one NULL would error the whole pass into a silently empty report.
+    const COLS: &str = "IFNULL(in_tok, 0.0), IFNULL(cc_tok, 0.0), IFNULL(cr_tok, 0.0), \
+                        IFNULL(out_tok, 0.0), IFNULL(reason_tok, 0.0), IFNULL(credits, 0.0)";
+    let mut recorded = read_totals(
+        &format!("SELECT {COLS} FROM cumulative_state WHERE dedupe_key = ?1"),
+        base,
+    )?;
+    if recorded.is_none() {
+        // First sight of this key under the slice rule: whatever is already on
+        // the books for it (the legacy whole-projection row) is the baseline.
+        recorded = read_totals(&format!("SELECT {COLS} FROM event WHERE dedupe_key = ?1"), base)?;
+    }
+    let recorded = recorded.unwrap_or([0.0; FIELDS]);
+    let now = [
+        ev.counts.input,
+        ev.counts.cache_creation,
+        ev.counts.cache_read,
+        ev.counts.output,
+        ev.counts.reasoning,
+        ev.counts.credits,
+    ];
+    let delta: [f64; FIELDS] =
+        std::array::from_fn(|i| (now[i] - recorded[i]).max(0.0));
+    if delta.iter().all(|d| *d <= 0.0) {
+        return Ok(Slice::Settled);
+    }
+    tx.execute(
+        "INSERT INTO cumulative_state(dedupe_key, tool, source, in_tok, cc_tok, cr_tok, \
+            out_tok, reason_tok, credits, ts_ms, updated_ms) \
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) \
+         ON CONFLICT(dedupe_key) DO UPDATE SET tool = excluded.tool, source = excluded.source, \
+            in_tok = excluded.in_tok, cc_tok = excluded.cc_tok, cr_tok = excluded.cr_tok, \
+            out_tok = excluded.out_tok, reason_tok = excluded.reason_tok, \
+            credits = excluded.credits, ts_ms = excluded.ts_ms, updated_ms = excluded.updated_ms",
+        params![
+            base,
+            tool,
+            source,
+            // Never regresses: a source that reclassifies a field (cache read
+            // moved into input) must not be able to lower the baseline and then
+            // bill the same tokens a second time.
+            recorded[0].max(now[0]),
+            recorded[1].max(now[1]),
+            recorded[2].max(now[2]),
+            recorded[3].max(now[3]),
+            recorded[4].max(now[4]),
+            recorded[5].max(now[5]),
+            ev.ts_ms,
+            updated_ms,
+        ],
+    )
+    .map_err(sql_err)?;
+    let slice_key = format!("{}#d{}", base, day.format("%Y-%m-%d"));
+    let day_so_far =
+        read_totals(&format!("SELECT {COLS} FROM event WHERE dedupe_key = ?1"), &slice_key)?
+            .unwrap_or([0.0; FIELDS]);
+    let mut slice = ev.clone();
+    // Its own key, so the day's slice is one row the plain grow path can keep
+    // raising within the day — and a distinct sync identity, so it never
+    // collides with the baseline row it grew out of.
+    slice.dedupe_key = Some(slice_key);
+    slice.counts.input = day_so_far[0] + delta[0];
+    slice.counts.cache_creation = day_so_far[1] + delta[1];
+    slice.counts.cache_read = day_so_far[2] + delta[2];
+    slice.counts.output = day_so_far[3] + delta[3];
+    slice.counts.reasoning = day_so_far[4] + delta[4];
+    slice.counts.credits = day_so_far[5] + delta[5];
+    Ok(Slice::Growth(slice))
+}
+
 fn persist(
     idx: &mut Index,
     tool: &str,
     read: FileRead,
     acc: &mut Acc,
     full_rescan: bool,
+    cumulative: bool,
 ) -> Result<()> {
     let FileRead { file, cursor, prev_events, events, error, notes } = read;
     let key = file.key();
@@ -694,7 +826,28 @@ fn persist(
         // big file this statement runs as often as INSERT_EVENT.
         let mut up_rollup = tx.prepare(ROLLUP_UPSERT).map_err(sql_err)?;
         let mut relabeled_days: Vec<i64> = Vec::new();
-        for ev in &events {
+        for emitted in &events {
+            // A `Cumulative` source's event is a lifetime projection; the row
+            // that belongs on the books is only its growth, on the day that
+            // growth was seen. `Settled` is the pass where the projection did
+            // not move at all.
+            let grown;
+            let ev = if cumulative {
+                match cumulative_growth(&tx, tool, &key, emitted, now_ms())? {
+                    Slice::Growth(e) => {
+                        grown = e;
+                        &grown
+                    }
+                    Slice::Settled => {
+                        acc.deduped += 1;
+                        *acc.deduped_by_tool.entry(tool.to_string()).or_default() += 1;
+                        continue;
+                    }
+                    Slice::Passthrough => emitted,
+                }
+            } else {
+                emitted
+            };
             let c = &ev.counts;
             let occurrence_id = if sync_enabled && ev.dedupe_key.as_deref().is_none_or(|key| key.is_empty()) {
                 Some(sync_occurrence_for_ingest(&tx, &key, ev, full_rescan, &mut occurrence_used, now_ms())?)
@@ -1053,6 +1206,11 @@ impl Index {
             )
             .map_err(sql_err)?;
         let n = tx.execute("DELETE FROM event WHERE source = ?1", params![key]).map_err(sql_err)?;
+        // The ledger is a cache of what this source's rows already billed. Left
+        // standing beside a purged source, the re-read would compute zero growth
+        // and the tool would come back empty.
+        tx.execute("DELETE FROM cumulative_state WHERE source = ?1", params![key])
+            .map_err(sql_err)?;
         tx.execute("DELETE FROM file_state WHERE source_key = ?1", params![key]).map_err(sql_err)?;
         // Same transaction as the deletes: the rollup never shows the purged
         // file's spend, and `recompute_days_tx` degrades to a full wipe rather

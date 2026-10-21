@@ -287,4 +287,89 @@ mod smoke {
         assert_eq!(late.events[0].dedupe_key.as_deref(), Some("conv-9#u1"));
         assert_eq!(late.cursor, ReadCursor(1_787_000_060_000));
     }
+
+    /// A row the vendor left without a message id keys on its immutable
+    /// rowid: the key survives every pass (the index's re-read collapse
+    /// depends on it) and two id-less rows never collapse into each other.
+    /// The old shape emitted these rows keyless, and a keyless event is
+    /// re-billed by every pass that sees the row again.
+    #[test]
+    fn a_legacy_row_without_a_message_id_keys_on_its_rowid() {
+        let _env = crate::paths::lock_env();
+        let moon = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::paths::ENV_CATPAW_DATA, dir.path());
+        std::env::set_var(crate::paths::ENV_CATPAW_MOON_DATA, moon.path());
+        let db = dir.path().join("sqliteDB/globalCache.sqlite");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t_ui_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT,
+             message_id TEXT, message_type TEXT, content TEXT, create_time INTEGER);
+             INSERT INTO t_ui_messages (conversation_id, message_id, content, create_time) VALUES
+             ('conv-2', NULL, '{\"tokenUsage\":{\"completion_tokens\":10,\"prompt_tokens\":20,\"cacheReadTokens\":0}}', 1787000100000),
+             ('conv-2', '',   '{\"tokenUsage\":{\"completion_tokens\":11,\"prompt_tokens\":21,\"cacheReadTokens\":0}}', 1787000101000);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let adapter = crate::CatpawAdapter;
+        let sources = adapter.discover(&DateFilter::default());
+        let outcome = adapter.read(&sources[0], ReadCursor(0)).unwrap();
+        assert_eq!(outcome.events.len(), 2, "both rows bill");
+        let keys: Vec<_> = outcome.events.iter().map(|e| e.dedupe_key.clone().unwrap()).collect();
+        assert_ne!(keys[0], keys[1], "two id-less rows must not collapse into one key");
+        assert!(
+            keys.iter().all(|k| k.starts_with("conv-2#row")),
+            "the fallback keys on the rowid: {keys:?}"
+        );
+        // The whole point: a later pass re-emits the same keys, which the
+        // index collapses instead of re-billing.
+        let again = adapter.read(&sources[0], ReadCursor(0)).unwrap();
+        let again_keys: Vec<_> = again.events.iter().map(|e| e.dedupe_key.clone().unwrap()).collect();
+        assert_eq!(keys, again_keys, "the key is stable across passes");
+    }
+
+    /// Same rule in the renamed store: a usage row whose message id is empty
+    /// or absent keys on its rowid, and the `updated_at_ms` cursor's
+    /// re-reads re-emit it under the same key.
+    #[test]
+    fn a_moon_row_without_a_message_id_keys_on_its_rowid() {
+        let _env = crate::paths::lock_env();
+        let legacy = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::paths::ENV_CATPAW_DATA, legacy.path());
+        std::env::set_var(crate::paths::ENV_CATPAW_MOON_DATA, dir.path());
+        let db = dir.path().join("catpaw-memory-61041752.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ui_sdk_messages (
+               conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, message_id TEXT,
+               role TEXT NOT NULL, payload TEXT NOT NULL, created_at_ms INTEGER,
+               updated_at_ms INTEGER NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
+               PRIMARY KEY (conversation_id, seq));",
+        )
+        .unwrap();
+        let usage = r#""role":"assistant","finished":true,"extra":{"contextInfo":{"usage":{"promptTokens":20,"completionTokens":3,"totalTokens":23,"cacheWriteTokens":0,"cacheReadTokens":0}}}"#;
+        let payload_with_id = format!("{{\"id\":\"m7\",{usage}}}");
+        let payload_no_id = format!("{{{usage}}}");
+        conn.execute_batch(&format!(
+            "INSERT INTO ui_sdk_messages (conversation_id, seq, message_id, role, payload, created_at_ms, updated_at_ms) VALUES
+             ('conv-4', 1, '', 'assistant', '{payload_with_id}', 1787000200000, 1787000200000),
+             ('conv-4', 2, NULL, 'assistant', '{payload_no_id}', 1787000201000, 1787000201000);",
+        ))
+        .unwrap();
+        drop(conn);
+
+        let adapter = crate::CatpawAdapter;
+        let sources = adapter.discover(&DateFilter::default());
+        let outcome = adapter.read(&sources[0], ReadCursor(0)).unwrap();
+        assert_eq!(outcome.events.len(), 2, "both assistant rows bill");
+        let keys: Vec<_> = outcome.events.iter().map(|e| e.dedupe_key.clone().unwrap()).collect();
+        assert_eq!(keys[0], "conv-4#m7", "the payload's own id still wins when the column is empty");
+        assert!(keys[1].starts_with("conv-4#row"), "an id-less row keys on its rowid: {:?}", keys[1]);
+        let again = adapter.read(&sources[0], ReadCursor(0)).unwrap();
+        let again_keys: Vec<_> = again.events.iter().map(|e| e.dedupe_key.clone().unwrap()).collect();
+        assert_eq!(keys, again_keys, "the key is stable across passes");
+    }
 }

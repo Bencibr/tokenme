@@ -116,8 +116,10 @@ fn parse_value(root: &serde_json::Value, fallback_session: &str, project: Option
         return (events, stats);
     };
     events.reserve(messages.len());
+    // Occurrence counters for the id-less fallback keys, per millisecond.
+    let mut ts_seen: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
 
-    for (idx, message) in messages.iter().enumerate() {
+    for message in messages.iter() {
         let Some(metrics) = assistant_metrics(message) else { continue };
         stats.assistant_with_metrics += 1;
 
@@ -153,11 +155,19 @@ fn parse_value(root: &serde_json::Value, fallback_session: &str, project: Option
         // The indexer's dedupe index is GLOBAL, so a bare `msg_JSe0dOQg` would
         // collide across sessions and silently drop events; a rewritten
         // transcript re-emits every row on each pass, so this key is the only
-        // thing keeping `Tree` idempotent. Positional fallback for a row with no
-        // `id` keeps that property (message order is stable across rewrites).
+        // thing keeping `Tree` idempotent. A row with no `id` keys on its own
+        // millisecond — which every emitted row has (undated rows are skipped
+        // above) — plus its occurrence within that millisecond: the file is
+        // rewritten whole, and a positional index would drift to a different
+        // row the first time a rewrite reorders or drops one.
         event.dedupe_key = Some(match message.get("id").and_then(serde_json::Value::as_str) {
             Some(id) if !id.is_empty() => format!("{session}#{id}"),
-            _ => format!("{session}#idx{idx}"),
+            _ => {
+                let nth = ts_seen.entry(ts_ms).or_insert(0);
+                let key = format!("{session}#t{ts_ms}#{}", *nth);
+                *nth += 1;
+                key
+            }
         });
         event.source = source.to_string();
         events.push(event);
@@ -314,6 +324,38 @@ mod tests {
         assert_eq!(b[0].dedupe_key.as_deref(), Some("2_ts_b#msg_dup"));
         assert_eq!(a[1].dedupe_key.as_deref(), Some("1_ts_a#msg_dup"), "…but a repeated id inside one session must collapse");
         assert_ne!(a[0].dedupe_key, b[0].dedupe_key, "a global unique index must not drop either session");
+    }
+
+    /// An id-less row keys on its own millisecond, not its position in the
+    /// rewritten file: a rewrite that drops a row must not renumber the rows
+    /// behind it — only the lost millisecond's own group ever moves, and two
+    /// id-less rows in one millisecond are told apart by their occurrence
+    /// within it, the only thing left that differs.
+    #[test]
+    fn an_id_less_row_keys_on_its_stamp_not_its_position() {
+        let idless = |out: u64, ts: u64| {
+            let mut m = assistant(10, 0, 0, out, serde_json::json!(ts), "msg_ignored");
+            m.as_object_mut().unwrap().remove("id");
+            m
+        };
+        let user = serde_json::json!({"role": "user", "ts": 1_788_497_041_650_u64});
+        let with_twin = vec![
+            idless(1, 1_788_497_041_700),
+            user,
+            idless(2, 1_788_497_041_700),
+            idless(3, 1_788_497_041_800),
+        ];
+        let after_loss = vec![idless(2, 1_788_497_041_700), idless(3, 1_788_497_041_800)];
+        let parse = |rows: &[serde_json::Value]| {
+            let body = rows.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+            parse_transcript(&format!("{{\"messages\":[{body}]}}"), "s", None, "src").0
+        };
+        let first = parse(&with_twin);
+        assert_eq!(first[0].dedupe_key.as_deref(), Some("s#t1788497041700#0"));
+        assert_eq!(first[1].dedupe_key.as_deref(), Some("s#t1788497041700#1"), "same-millisecond twins stay two calls");
+        assert_eq!(first[2].dedupe_key.as_deref(), Some("s#t1788497041800#0"));
+        let second = parse(&after_loss);
+        assert_eq!(second[1].dedupe_key.as_deref(), first[2].dedupe_key.as_deref(), "a different millisecond never renumbers");
     }
 
     #[test]

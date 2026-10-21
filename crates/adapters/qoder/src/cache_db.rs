@@ -110,7 +110,7 @@
 //! the one message that exists in both on this machine is `bec33c26-…` here and
 //! `334b6be4-…` in the transcript, so only `request_id` is shared at all.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use rusqlite::types::Value as SqlValue;
@@ -375,6 +375,16 @@ fn take_row(
 }
 
 /// Turn the merged rows into events, choosing the identity each one is indexed by.
+///
+/// The request's FIRST row — in the query's own order, which is `rowid` order
+/// and therefore the order the IDE wrote the calls in — claims the bare
+/// `qoder#{request}`, and every later row of that request carries its message
+/// id. Counting rows and branching on the count instead read as the same rule
+/// but was not one: a request with one row today keyed that row bare, and the
+/// day the IDE wrote a second row into the same request, the first row's key
+/// changed shape — the old row stranded frozen and the call re-billed beside
+/// it. First-in-order is a fact about the data; the current count is a fact
+/// about the moment.
 fn finish(seen: Vec<Bucket>, source_key: &str, census: &mut Census) -> Vec<UsageEvent> {
     let mut per_request: HashMap<String, usize> = HashMap::new();
     for bucket in &seen {
@@ -383,6 +393,7 @@ fn finish(seen: Vec<Bucket>, source_key: &str, census: &mut Census) -> Vec<Usage
         }
     }
     census.multi_call_requests = per_request.values().filter(|n| **n > 1).count();
+    let mut claimed: HashSet<String> = HashSet::new();
     let mut events = Vec::with_capacity(seen.len());
     for bucket in seen {
         let mut event = UsageEvent::new(TOOL_ID, bucket.ts_ms, bucket.session);
@@ -395,10 +406,10 @@ fn finish(seen: Vec<Bucket>, source_key: &str, census: &mut Census) -> Vec<Usage
         event.dedupe_key = Some(if bucket.request.is_empty() {
             census.unnamed_rows += 1;
             format!("{DEDUPE_PREFIX}{}", bucket.message)
-        } else if per_request.get(bucket.request.as_str()).copied().unwrap_or(0) > 1 {
-            format!("{DEDUPE_PREFIX}{}#{}", bucket.request, bucket.message)
-        } else {
+        } else if claimed.insert(bucket.request.clone()) {
             format!("{DEDUPE_PREFIX}{}", bucket.request)
+        } else {
+            format!("{DEDUPE_PREFIX}{}#{}", bucket.request, bucket.message)
         });
         event.source = source_key.to_string();
         *census.models.entry(bucket.model.unwrap_or_else(|| "?".into())).or_default() += 1;
@@ -787,20 +798,49 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = fixture(dir.path());
         let (events, _) = read_all(&file, ReadCursor(0));
-        let one = by_key(&events, "qoder#req-7#msg-7");
+        // The request's first call in rowid order keeps the bare shared key — the
+        // one the transcript tree writes for the same call — and the second call
+        // carries its own message id.
+        let one = by_key(&events, "qoder#req-7");
         let two = by_key(&events, "qoder#req-7#msg-8");
         assert_eq!(one.counts.input, 800.0);
         assert_eq!(two.counts.input, 200.0);
         assert_eq!(one.counts.total() + two.counts.total(), 2_170.0, "both calls survive");
         assert!(
-            !events.iter().any(|e| e.dedupe_key.as_deref() == Some("qoder#req-7")),
-            "a shared request id is never used as a single-call key: {:?}",
+            !events.iter().any(|e| e.dedupe_key.as_deref() == Some("qoder#req-7#msg-7")),
+            "the first call does not change shape when a second arrives: {:?}",
             keys(&events)
         );
         let mut seen = std::collections::HashSet::new();
         for key in keys(&events) {
             assert!(seen.insert(key.clone()), "duplicate dedupe key {key}");
         }
+    }
+
+    /// The defect the first-in-order rule exists for: a request read back when it
+    /// had one call must keep that call's key after the IDE writes a second call
+    /// into the same request — otherwise the grown re-read strands the original
+    /// row and bills the call again beside it.
+    #[test]
+    fn a_request_that_grows_a_second_call_keeps_its_first_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(DDL).unwrap();
+        insert(&conn, &Seed::call("msg-a", "req-g", r#"{"prompt_tokens":100,"cached_tokens":0,"completion_tokens":5}"#));
+        drop(conn);
+        let file = source_at(&path);
+        let (first, _) = read_all(&file, ReadCursor(0));
+        assert_eq!(first[0].dedupe_key.as_deref(), Some("qoder#req-g"));
+
+        let conn = Connection::open(&path).unwrap();
+        insert(&conn, &Seed::call("msg-b", "req-g", r#"{"prompt_tokens":200,"cached_tokens":0,"completion_tokens":6}"#));
+        drop(conn);
+        let file = source_at(&path);
+        let (grown, _) = read_all(&file, ReadCursor(0));
+        assert_eq!(grown.len(), 2);
+        assert_eq!(grown[0].dedupe_key.as_deref(), Some("qoder#req-g"), "the first call keeps its key");
+        assert_eq!(grown[1].dedupe_key.as_deref(), Some("qoder#req-g#msg-b"), "only the new call carries its message id");
     }
 
     #[test]

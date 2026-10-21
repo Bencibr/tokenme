@@ -5,7 +5,7 @@ mod common;
 /// holes at the left edge, forever.
 const _: () = assert!(usage_index::RETENTION_DAYS > usage_core::report::HEATMAP_DAYS);
 
-use common::{adapters_for, append_fixture, count_of, replace_file, staged, Mock};
+use common::{CumMock, adapters_for, append_fixture, count_of, replace_file, staged, Mock};
 use usage_core::{CallKind, DateFilter, DetectedSource, Meter, UsageEvent};
 use usage_index::{Index, RETENTION_DAYS};
 
@@ -1204,6 +1204,377 @@ fn the_trae_turn_session_repair_drops_local_rows_and_keeps_merged_ones_once() {
     assert_eq!(back, 1, "the repair never runs twice");
 }
 
+/// FunIDE billed a whole session as one cumulative row stamped with the
+/// session's last edit, so a session carried across midnight moved its lifetime
+/// total into the newest day and emptied the days its turns ran. The adapter now
+/// emits one row per turn under `funide#<session>#<turn>`, so the old
+/// `funide#<session>` rows are stranded double money and go — while turn-shaped
+/// rows (the new truth) and merged rows (another machine's truth) stay.
+#[test]
+fn the_funide_projection_repair_drops_session_rows_and_keeps_turn_rows_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    const LOCAL: &str = "C:\\Users\\demo\\AppData\\Roaming\\FunIDE\\User\\funide\\sessions\\ws1\\s1.json";
+    {
+        let idx = Index::open(&db).unwrap();
+        // Undo the repair a fresh open already ran, to stage the pre-shape.
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:funide-projection-retired-1'", [])
+            .unwrap();
+        for (id, key, source) in [
+            (1, "funide#s1", LOCAL),
+            (2, "funide#s1#turn_1790510647992_1", LOCAL),
+            (
+                3,
+                "funide#s9",
+                "linux:mbp:/Users/demo/Library/Application Support/FunIDE/User/funide/sessions/ws/s9.json",
+            ),
+        ] {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, dedupe_key, source) \
+                     VALUES(?1, 'funide', 10, 's', 'tokens', 100.0, ?2, ?3)",
+                    rusqlite::params![id, key, source],
+                )
+                .unwrap();
+        }
+        idx.conn().execute("INSERT INTO call(event_id, kind, name) VALUES(1, 'tool', 't1')", []).unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO quota(event_id, used_percent, window_minutes, resets_at_ms, label) \
+                 VALUES(1, 5.0, 300, 20, 'w')",
+                [],
+            )
+            .unwrap();
+        for (origin, session) in [("", "s1"), ("mbp", "s9")] {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                         in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                     VALUES('2026-10-21', ?1, 'funide', ?2, '', '', 'tokens', \
+                         100, 0, 0, 0, 0, 0, 1, 1, 10, 10)",
+                    rusqlite::params![origin, session],
+                )
+                .unwrap();
+        }
+        idx.conn()
+            .execute(
+                "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                 VALUES('funide:s1', 'funide', 10, 1, 10, 1, 1)",
+                [],
+            )
+            .unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE tool='funide' AND dedupe_key = 'funide#s1'"),
+        0,
+        "the lifetime projection goes for the day-true re-read"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE dedupe_key = 'funide#s1#turn_1790510647992_1'"),
+        1,
+        "a turn row is the new shape and stands"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE source LIKE 'linux:%'"),
+        1,
+        "merged rows are another machine's truth and stay"
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM call"), 0, "the dropped row's call goes with it");
+    assert_eq!(count("SELECT COUNT(*) FROM quota"), 0, "the dropped row's quota goes with it");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE tool='funide' AND origin=''"),
+        0,
+        "the local rollup groups go, and refold on the re-read"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE tool='funide' AND origin='mbp'"),
+        1,
+        "the merged rollup group stays"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM file_state WHERE tool='funide'"),
+        0,
+        "an unchanged session file must still re-read"
+    );
+    assert_eq!(
+        idx.meta_value("repair:funide-projection-retired-1").unwrap().as_deref(),
+        Some("1")
+    );
+
+    // One-shot: rows written after the repair survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, dedupe_key, source) \
+             VALUES(9, 'funide', 11, 's2', 'tokens', 7.0, 'funide#s2', 'funide:s2')",
+            [],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM event WHERE dedupe_key = 'funide#s2'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 1, "the funide repair never runs twice");
+}
+
+/// The hermes key widened from four vendor fields to six. An old row stands
+/// under a key no future pass writes, and the new key's first projection would
+/// seed its ledger at zero and bill the slice's whole lifetime beside the
+/// frozen row — so the local rows, ledger, cursors and rollup all go, and the
+/// re-read re-bills each slice on its own last-seen day. Merged rows stay.
+#[test]
+fn the_hermes_slice_key_repair_drops_local_rows_ledger_and_cursors_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    const LOCAL: &str = "hermes:usage.db";
+    {
+        let idx = Index::open(&db).unwrap();
+        // Undo the repair a fresh open already ran, to stage the pre-shape.
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:hermes-slice-key-1'", [])
+            .unwrap();
+        for (id, key, source) in [
+            (1, "hermes#s1#m#p#t", LOCAL),
+            (2, "hermes#s1#m#p#https%3A//h/v2#api#t", LOCAL),
+            (3, "hermes#s9#m#p#t", "linux:mbp:hermes:usage.db"),
+        ] {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, dedupe_key, source) \
+                     VALUES(?1, 'hermes', 10, 's', 'tokens', 100.0, ?2, ?3)",
+                    rusqlite::params![id, key, source],
+                )
+                .unwrap();
+        }
+        idx.conn().execute("INSERT INTO call(event_id, kind, name) VALUES(1, 'tool', 't1')", []).unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO cumulative_state(dedupe_key, tool, source, in_tok, cc_tok, cr_tok, \
+                     out_tok, reason_tok, credits, ts_ms, updated_ms) \
+                 VALUES('hermes#s1#m#p#t', 'hermes', 'hermes:usage.db', 100, 0, 0, 0, 0, 0, 10, 10)",
+                [],
+            )
+            .unwrap();
+        for (origin, session) in [("", "s1"), ("mbp", "s9")] {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                         in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                     VALUES('2026-10-21', ?1, 'hermes', ?2, '', '', 'tokens', \
+                         100, 0, 0, 0, 0, 0, 1, 1, 10, 10)",
+                    rusqlite::params![origin, session],
+                )
+                .unwrap();
+        }
+        idx.conn()
+            .execute(
+                "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                 VALUES('hermes:usage.db', 'hermes', 10, 1, 10, 1, 1)",
+                [],
+            )
+            .unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE tool='hermes' AND source NOT LIKE 'linux:%'"),
+        0,
+        "both key shapes are old money: the re-read re-bills them under six-field keys"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE source LIKE 'linux:%'"),
+        1,
+        "merged rows are another machine's truth and stay"
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM call"), 0, "the dropped row's call goes with it");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM cumulative_state WHERE tool='hermes'"),
+        0,
+        "the ledger must seed from what is actually on the books, which is now nothing"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE tool='hermes' AND origin=''"),
+        0,
+        "the local rollup groups go, and refold on the re-read"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE tool='hermes' AND origin='mbp'"),
+        1,
+        "the merged rollup group stays"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM file_state WHERE tool='hermes'"),
+        0,
+        "an unchanged vendor store must still re-read"
+    );
+    assert_eq!(idx.meta_value("repair:hermes-slice-key-1").unwrap().as_deref(), Some("1"));
+
+    // One-shot: rows written after the repair survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, dedupe_key, source) \
+             VALUES(9, 'hermes', 11, 's2', 'tokens', 7.0, 'hermes#s2#m#p#https%3A//h/v2#api#t', 'hermes:usage.db')",
+            [],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM event WHERE id = 9", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 1, "the hermes repair never runs twice");
+}
+
+/// The four key-stability repairs (kimicode amounts-in-key, cline positional
+/// fallback, qoder count-dependent request key, catpaw keyless rows) run the
+/// same shape: the tool's local rows, their calls, the cursors and the local
+/// rollup go, merged rows stay, and each marker fires once.
+#[test]
+fn the_key_stability_repairs_drop_local_rows_cursors_and_local_rollups_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    // (tool, old-shape dedupe key, source) — catpaw's old shape is the keyless
+    // emission the index bills on every pass.
+    let old_rows: [(&str, Option<&str>, &str); 5] = [
+        ("kimicode", Some("kimicode#who#ms#model#120#0#400#30"), "kimicode:s.jsonl"),
+        ("cline", Some("s#idx0"), "cline:s.messages.json"),
+        ("qoder", Some("qoder#req-7#msg-7"), "qoder:local.db"),
+        ("qoder_cn", Some("qoder_cn#req-7#msg-7"), "qoder_cn:local.db"),
+        ("catpaw", None, "catpaw:globalCache.sqlite"),
+    ];
+    let tools = ["kimicode", "cline", "qoder", "qoder_cn", "catpaw"];
+    {
+        let idx = Index::open(&db).unwrap();
+        // Undo the repairs a fresh open already ran, to stage the pre-shape.
+        for marker in [
+            "repair:kimicode-call-key-1",
+            "repair:cline-message-key-1",
+            "repair:qoder-stable-request-key-1",
+            "repair:catpaw-rowid-key-1",
+        ] {
+            idx.conn().execute("DELETE FROM meta WHERE key = ?1", [marker]).unwrap();
+        }
+        for (n, (tool, key, source)) in old_rows.iter().enumerate() {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, dedupe_key, source) \
+                     VALUES(?1, ?2, 10, 's', 'tokens', 100.0, ?3, ?4)",
+                    rusqlite::params![(n + 1) as i64, tool, key, source],
+                )
+                .unwrap();
+        }
+        // Merged rows are another machine's truth and stay.
+        idx.conn()
+            .execute(
+                "INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, dedupe_key, source) \
+                 VALUES(9, 'kimicode', 10, 's', 'tokens', 100.0, 'kimicode#who#ms#model#1#2#3#4', \
+                 'linux:mbp:kimicode:s.jsonl')",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute("INSERT INTO call(event_id, kind, name) VALUES(1, 'tool', 't1')", [])
+            .unwrap();
+        for (n, tool) in tools.iter().enumerate() {
+            idx.conn()
+                .execute(
+                    "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                         in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                     VALUES('2026-10-21', '', ?1, 's', '', '', 'tokens', \
+                         100, 0, 0, 0, 0, 0, 1, 1, 10, 10)",
+                    [tool],
+                )
+                .unwrap();
+            idx.conn()
+                .execute(
+                    "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                     VALUES(?2, ?1, 10, 1, 10, 1, 1)",
+                    rusqlite::params![tool, format!("{tool}:store")],
+                )
+                .unwrap();
+        }
+        idx.conn()
+            .execute(
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, \
+                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                 VALUES('2026-10-21', 'mbp', 'kimicode', 's', '', '', 'tokens', \
+                     100, 0, 0, 0, 0, 0, 1, 1, 10, 10)",
+                [],
+            )
+            .unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    for tool in tools {
+        assert_eq!(
+            count(&format!(
+                "SELECT COUNT(*) FROM event WHERE tool='{tool}' AND source NOT LIKE 'linux:%'"
+            )),
+            0,
+            "{tool}'s old-shape rows are money a future pass can never reconcile"
+        );
+        assert_eq!(
+            count(&format!("SELECT COUNT(*) FROM file_state WHERE tool='{tool}'")),
+            0,
+            "an unchanged store must still re-read"
+        );
+        assert_eq!(
+            count(&format!("SELECT COUNT(*) FROM event_rollup WHERE tool='{tool}' AND origin=''")),
+            0,
+            "the local rollup groups go, and refold on the re-read"
+        );
+    }
+    assert_eq!(count("SELECT COUNT(*) FROM call"), 0, "the dropped row's call goes with it");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE source LIKE 'linux:%'"),
+        1,
+        "merged rows are another machine's truth and stay"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event_rollup WHERE origin='mbp'"),
+        1,
+        "the merged rollup group stays"
+    );
+    for marker in [
+        "repair:kimicode-call-key-1",
+        "repair:cline-message-key-1",
+        "repair:qoder-stable-request-key-1",
+        "repair:catpaw-rowid-key-1",
+    ] {
+        assert_eq!(idx.meta_value(marker).unwrap().as_deref(), Some("1"), "{marker}");
+    }
+
+    // One-shot: rows written after the repairs survive every reopen.
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    for (n, (tool, _key, _source)) in old_rows.iter().enumerate() {
+        let key = format!("{tool}#new-shape");
+        idx.conn()
+            .execute(
+                "INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, dedupe_key, source) \
+                 VALUES(?1, ?2, 11, 's2', 'tokens', 7.0, ?3, ?4)",
+                rusqlite::params![(100 + n) as i64, tool, key, format!("{tool}:store")],
+            )
+            .unwrap();
+    }
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM event WHERE id >= 100", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 5, "no key-stability repair ever runs twice");
+}
+
 #[test]
 fn the_workbuddy_split_preserves_other_editions_and_replays_domestic_cursors() {
     let dir = tempfile::tempdir().unwrap(); let db = dir.path().join("index.db");
@@ -1286,4 +1657,170 @@ fn the_qoder_split_preserves_other_editions_and_replays_domestic_cursors() {
     drop(idx);
     let idx = Index::open(&db).unwrap();
     assert_eq!(idx.conn().query_row("SELECT count(*) FROM event", [], |r| r.get::<_,i64>(0)).unwrap(),6);
+}
+
+/// One indexed row, read back as (input, output, stamp) for the slice tests.
+fn slice_row(idx: &Index, key: &str) -> (f64, f64, i64) {
+    idx.conn()
+        .query_row(
+            "SELECT in_tok, out_tok, ts_ms FROM event WHERE dedupe_key = ?1",
+            rusqlite::params![key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+}
+
+fn day_key(ms: i64) -> String {
+    usage_core::local_day_of(ms).unwrap().format("%Y-%m-%d").to_string()
+}
+
+/// A `Cumulative` source re-emits a session's lifetime totals with a stamp that
+/// moves. Billing that projection is what dragged a session's whole history into
+/// the newest day (477M FunIDE prompt tokens on 2026-10-21, the two days its
+/// turns ran reading as zero). The ledger turns the re-emit into growth, and the
+/// growth lands on — and only on — the day it was seen.
+#[test]
+fn a_cumulative_projection_bills_only_its_growth_on_the_day_that_growth_happened() {
+    use chrono::{Duration, Local, TimeZone};
+    let midnight = Local.with_ymd_and_hms(2026, 9, 12, 0, 0, 0).unwrap();
+    let day_a = midnight.timestamp_millis();
+    let later_a = day_a + 3_600_000;
+    let day_b = (midnight + Duration::days(1)).timestamp_millis();
+    let slice_a = format!("k1#d{}", day_key(day_a));
+    let slice_b = format!("k1#d{}", day_key(day_b));
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("proj.jsonl");
+    let write = |ts: i64, input: f64, output: f64| {
+        std::fs::write(
+            &file,
+            format!("{{\"id\":\"k1\",\"ts\":{ts},\"session\":\"s1\",\"in\":{input},\"out\":{output}}}\n"),
+        )
+        .unwrap();
+    };
+    let adapter = CumMock::new("mocka", dir.path());
+    let mut idx = Index::open_in_memory().unwrap();
+    let filter = DateFilter::default();
+
+    write(day_a, 100.0, 10.0);
+    let first = idx.ingest_adapter(&adapter, &filter).unwrap();
+    assert_eq!(first.new_events, 1, "the first projection opens the day's slice");
+    assert_eq!(slice_row(&idx, &slice_a), (100.0, 10.0, day_a));
+
+    write(later_a, 150.0, 20.0);
+    let second = idx.ingest_adapter(&adapter, &filter).unwrap();
+    assert_eq!(second.new_events, 0, "growth inside one day opens no new row");
+    assert_eq!(slice_row(&idx, &slice_a), (150.0, 20.0, later_a), "the slice grows with it");
+
+    // The day the bug lived: the projection now says 200 in total, and the old
+    // shape would have stamped all 200 on the new day and emptied the old one.
+    write(day_b, 200.0, 25.0);
+    let third = idx.ingest_adapter(&adapter, &filter).unwrap();
+    assert_eq!(third.new_events, 1, "the new day opens its own slice");
+    assert_eq!(slice_row(&idx, &slice_a), (150.0, 20.0, later_a), "yesterday keeps yesterday's spend");
+    assert_eq!(slice_row(&idx, &slice_b), (50.0, 5.0, day_b), "today is billed with today's growth only");
+
+    let total: (f64, f64) = idx
+        .conn()
+        .query_row(
+            "SELECT sum(in_tok), sum(out_tok) FROM event WHERE tool = 'mocka'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(total, (200.0, 25.0), "the slices add up to the projection, never more");
+
+    // Same totals, new stamp: the source touched its file without new spend,
+    // which is the shape of every no-op pass against a projection store.
+    write(day_b + 3_600_000, 200.0, 25.0);
+    let fourth = idx.ingest_adapter(&adapter, &filter).unwrap();
+    assert_eq!(fourth.new_events, 0, "a re-emit of an unchanged projection bills nothing");
+    assert!(fourth.deduped >= 1, "and it is accounted as deduped, not lost");
+
+    let rollup: Vec<(String, f64)> = idx
+        .conn()
+        .prepare("SELECT day, in_tok FROM event_rollup WHERE tool = 'mocka' ORDER BY day")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rollup,
+        vec![(day_key(day_a), 150.0), (day_key(day_b), 50.0)],
+        "the day view folds the slices, which is the whole point"
+    );
+}
+
+/// An index built under the old rule already holds one whole-projection row per
+/// key. That row is the baseline: the ledger seeds from it, so the first slice
+/// bills the increment instead of re-billing the lifetime total beside it.
+#[test]
+fn a_projection_row_already_on_the_books_is_the_baseline_for_the_first_slice() {
+    use chrono::{Local, TimeZone};
+    let day_a = Local.with_ymd_and_hms(2026, 9, 12, 0, 0, 0).unwrap().timestamp_millis();
+    let day_b = day_a + 2 * 86_400_000;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("proj.jsonl");
+    let mut idx = Index::open_in_memory().unwrap();
+    idx.conn()
+        .execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, out_tok, dedupe_key, source) \
+             VALUES('mocka', ?1, 's1', 'tokens', 120.0, 12.0, 'k1', 'p')",
+            rusqlite::params![day_a],
+        )
+        .unwrap();
+
+    std::fs::write(
+        &file,
+        format!("{{\"id\":\"k1\",\"ts\":{day_b},\"session\":\"s1\",\"in\":200.0,\"out\":25.0}}\n"),
+    )
+    .unwrap();
+    let report = idx.ingest_adapter(&CumMock::new("mocka", dir.path()), &DateFilter::default()).unwrap();
+    assert_eq!(report.new_events, 1);
+    assert_eq!(
+        slice_row(&idx, &format!("k1#d{}", day_key(day_b))),
+        (80.0, 13.0, day_b),
+        "only the growth since the baseline row is billed"
+    );
+    assert_eq!(slice_row(&idx, "k1"), (120.0, 12.0, day_a), "the baseline stays where it was billed");
+    let total: f64 = idx
+        .conn()
+        .query_row("SELECT sum(in_tok) FROM event WHERE tool = 'mocka'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(total, 200.0, "baseline plus slice is the projection, not twice of it");
+}
+
+/// The ledger is a cache of what the rows already billed. A shrink purges the
+/// source's rows, so it must purge the ledger with them — otherwise the re-read
+/// computes a negative growth, bills nothing, and the tool silently empties.
+#[test]
+fn shrinking_a_projection_source_purges_its_ledger_so_the_reread_rebills() {
+    use chrono::{Local, TimeZone};
+    let day = Local.with_ymd_and_hms(2026, 9, 12, 0, 0, 0).unwrap().timestamp_millis();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("proj.jsonl");
+    let adapter = CumMock::new("mocka", dir.path());
+    let mut idx = Index::open_in_memory().unwrap();
+
+    std::fs::write(&file, format!("{{\"id\":\"k1\",\"ts\":{day},\"session\":\"s1\",\"in\":200.0,\"out\":25.0}}\n")).unwrap();
+    idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+
+    std::fs::write(&file, format!("{{\"id\":\"k1\",\"ts\":{day},\"session\":\"s1\",\"in\":50.0}}\n")).unwrap();
+    let report = idx.ingest_adapter(&adapter, &DateFilter::default()).unwrap();
+    assert_eq!(report.purged, 1, "the shrink purges the slice row");
+    let rows: Vec<(String, f64)> = idx
+        .conn()
+        .prepare("SELECT dedupe_key, in_tok FROM event WHERE tool = 'mocka'")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![(format!("k1#d{}", day_key(day)), 50.0)], "the re-read rebills the smaller projection");
+    let ledger: f64 = idx
+        .conn()
+        .query_row("SELECT in_tok FROM cumulative_state WHERE dedupe_key = 'k1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ledger, 50.0, "the ledger follows the rows instead of outbidding them");
 }

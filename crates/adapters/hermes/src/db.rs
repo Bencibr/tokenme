@@ -7,6 +7,23 @@
 //! stable dedupe key — the indexer replaces on the key, so re-reading a row is
 //! idempotent and the cursor may replay it freely.
 //!
+//! The dedupe key carries **all six** primary-key columns, in the PK's own
+//! order. The index's dedupe index is one global unique index over `dedupe_key`
+//! that replaces on grow (`usage_index::ingest`), so a key coarser than the
+//! source's PK silently folds two distinct slices into one row: the second
+//! slice's smaller total loses to the first and its tokens are dropped for
+//! good. Hermes keeps that pair in the wild — the same session, model and
+//! provider under `https://host/api/v4` and `https://host/api/v4/`, or under
+//! two `billing_mode` values — so the key must be as fine as the PK, no
+//! narrower.
+//!
+//! Widening the key also re-draws the key space: rows indexed under the old
+//! four-field key stay stranded beside the new six-field ones and the next
+//! pass re-emits the slice at full value, so the store needs its read cursor
+//! dropped (or its hermes rows purged) once — the same one-shot the index
+//! already does for `repair:cumulative-rescan-1`. That repair lives in
+//! `usage-index`, not here.
+//!
 //! The cursor is the highest `last_seen` consumed (milliseconds). An SQLite
 //! `UPDATE` keeps the rowid, so the rowid cursor the append-only sources use
 //! would never re-see a live row's growth; `last_seen` bumps on every call and
@@ -23,6 +40,7 @@
 
 use rusqlite::{Connection, OpenFlags};
 
+use crate::DEDUPE_PREFIX;
 use usage_core::{Error, Meter, ReadCursor, ReadOutcome, SourceFile, UsageEvent};
 
 /// Rows touched in one pass; per-session slices stay small next to a
@@ -30,8 +48,8 @@ use usage_core::{Error, Meter, ReadCursor, ReadOutcome, SourceFile, UsageEvent};
 const BATCH: i64 = 512;
 
 const QUERY: &str = "\
-SELECT u.session_id, u.model, u.billing_provider, u.task, u.api_call_count, \
-       u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens, \
+SELECT u.session_id, u.model, u.billing_provider, u.billing_base_url, u.billing_mode, u.task, \
+       u.api_call_count, u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens, \
        u.reasoning_tokens, u.last_seen, s.cwd \
 FROM session_model_usage u LEFT JOIN sessions s ON s.id = u.session_id \
 WHERE u.last_seen > ?1 \
@@ -67,14 +85,16 @@ pub fn read(file: &SourceFile, cursor: ReadCursor) -> Result<(ReadOutcome, u64),
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
                 row.get::<_, i64>(8)?,
                 row.get::<_, i64>(9)?,
-                row.get::<_, f64>(10)?,
-                row.get::<_, Option<String>>(11)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, f64>(12)?,
+                row.get::<_, Option<String>>(13)?,
             ))
         })
         .map_err(|source| Error::Io { path: file.path.clone(), source: std::io::Error::other(source) })?;
@@ -82,8 +102,22 @@ pub fn read(file: &SourceFile, cursor: ReadCursor) -> Result<(ReadOutcome, u64),
     let mut events = Vec::new();
     let mut high = cursor.0;
     for row in rows {
-        let (session_id, model, billing_provider, task, _api_calls, input, output, cache_read, cache_write, reasoning, last_seen, cwd) =
-            row.map_err(|source| Error::Io { path: file.path.clone(), source: std::io::Error::other(source) })?;
+        let (
+            session_id,
+            model,
+            billing_provider,
+            billing_base_url,
+            billing_mode,
+            task,
+            _api_calls,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+            last_seen,
+            cwd,
+        ) = row.map_err(|source| Error::Io { path: file.path.clone(), source: std::io::Error::other(source) })?;
         let ts_ms = (last_seen.max(0.0) * 1000.0) as u64;
         high = high.max(ts_ms);
         // A session that opened but never answered: nothing to bill yet, and
@@ -103,13 +137,54 @@ pub fn read(file: &SourceFile, cursor: ReadCursor) -> Result<(ReadOutcome, u64),
         event.model = Some(model.clone());
         event.project = cwd.as_deref().filter(|c| !c.is_empty()).map(project_name);
         event.dedupe_key = Some(format!(
-            "{}{session_id}#{model}#{billing_provider}#{task}",
-            crate::DEDUPE_PREFIX
+            "{DEDUPE_PREFIX}{}#{}#{}#{}#{}#{}",
+            key_segment(&session_id),
+            key_segment(&model),
+            key_segment(&billing_provider),
+            key_segment(&billing_base_url),
+            key_segment(&billing_mode),
+            key_segment(&task),
         ));
         event.source = file.key();
         events.push(event);
     }
     Ok((ReadOutcome { events, cursor: ReadCursor(high) }, high))
+}
+
+/// One slice field as it appears inside the dedupe key.
+///
+/// The key must be an injective encoding of the six PK columns: `#` separates
+/// them, so a value that contains `#` (a URL fragment, an id with a hash mark)
+/// would let two different slices spell the same key, and `%` is this escape's
+/// lead — escaping `%` itself (`a%23b` → `a%2523b`) is what keeps `a#b` and
+/// `a%23b` apart instead of folding them together.
+///
+/// `:` is escaped for the sync layer's convention, not for a bug open today.
+/// A dedupe key never becomes a `source`, so [`usage_core::origin_of`]'s
+/// `linux:<origin>:<key>` split is not reached by it, and the only place a
+/// dedupe key is wrapped — `sync_event_identity`'s `key:<dedupe_key>` — is
+/// prefixed by a fixed literal and compared whole, never re-split at the first
+/// colon (sync's own fallback keys, `mix:<origin>:<hash>`, carry colons and
+/// rely on that). But `usage_core::origin_ok` documents `:` as reserved inside
+/// dedupe keys as well, and `https://host/api/v4` is exactly the kind of value
+/// this column holds, so a bare colon here is a landmine for the next parser
+/// added on the other side. Escaping is reversible and costs nothing, so the
+/// key keeps the guarantee instead of relying on it being unneeded.
+///
+/// `/`, `?`, `=` and friends stay literal: they are not separators anywhere in
+/// the key or the sync protocol, and a readable base URL in a stored key is
+/// worth debugging.
+fn key_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '#' => out.push_str("%23"),
+            '%' => out.push_str("%25"),
+            ':' => out.push_str("%3A"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// `C:\Users\me\workspace\tokenme` → `tokenme`; the panel shows basenames, and
@@ -148,14 +223,47 @@ CREATE TABLE session_model_usage (session_id TEXT NOT NULL, model TEXT NOT NULL,
     }
 
     pub fn insert_usage(db: &Path, session: &str, model: &str, task: &str, input: i64, output: i64, last_seen: f64) {
+        insert_slice(db, session, model, "", "", "", task, input, output, last_seen);
+    }
+
+    /// Inserts one full `(session, model, provider, base_url, mode, task)`
+    /// slice — the whole primary key, because two rows differing only in
+    /// `billing_base_url` or `billing_mode` are two rows the old narrower key
+    /// folded into one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_slice(
+        db: &Path,
+        session: &str,
+        model: &str,
+        provider: &str,
+        base_url: &str,
+        mode: &str,
+        task: &str,
+        input: i64,
+        output: i64,
+        last_seen: f64,
+    ) {
         let conn = Connection::open(db).unwrap();
         // INSERT OR REPLACE: the tool upserts the slice as a session runs, and
         // the composite PK is what a second call collides on.
         conn.execute(
-            "INSERT OR REPLACE INTO session_model_usage (session_id, model, task, api_call_count, input_tokens, output_tokens, last_seen) \
-             VALUES (?1, ?2, ?3, 3, ?4, ?5, ?6)",
-            rusqlite::params![session, model, task, input, output, last_seen],
+            "INSERT OR REPLACE INTO session_model_usage \
+             (session_id, model, billing_provider, billing_base_url, billing_mode, task, \
+              api_call_count, input_tokens, output_tokens, last_seen) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 3, ?7, ?8, ?9)",
+            rusqlite::params![session, model, provider, base_url, mode, task, input, output, last_seen],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_segment_escape_is_reversible_and_keeps_the_separators_free() {
+        // The separator itself cannot survive an escape: `a#b` and `a`+`b` in
+        // two different fields must not spell one key.
+        assert_eq!(key_segment("a#b"), "a%23b");
+        assert_eq!(key_segment("a%23b"), "a%2523b", "the escape lead escapes itself");
+        assert_eq!(key_segment("https://open.bigmodel.cn/api/paas/v4/"), "https%3A//open.bigmodel.cn/api/paas/v4/");
+        assert_eq!(key_segment(""), "");
+        assert_ne!(key_segment("a#b"), key_segment("a%23b"), "no two values share an encoding");
     }
 }

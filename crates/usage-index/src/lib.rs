@@ -204,6 +204,27 @@ CREATE TABLE IF NOT EXISTS event_rollup(
 -- Serves the per-session correlated lookups (first project / last model) and
 -- the newest-event probe without a full scan.
 CREATE INDEX IF NOT EXISTS event_tool_session ON event(tool, session);
+-- The lifetime total already billed for every `Cumulative` source's key. Such a
+-- source re-emits one session's whole-to-date totals on every pass, so the
+-- ledger is what turns that projection into growth: only the difference since
+-- the recorded total enters `event`, stamped with the day the growth was seen
+-- (see `persist`'s slice branch). Component-wise, never backwards, and derived
+-- from `event` — a purge or rebuild that drops the rows must drop the row here
+-- too, or the re-read would bill nothing.
+CREATE TABLE IF NOT EXISTS cumulative_state(
+    dedupe_key TEXT    PRIMARY KEY,
+    tool       TEXT    NOT NULL,
+    source     TEXT    NOT NULL,
+    in_tok     REAL    NOT NULL,
+    cc_tok     REAL    NOT NULL,
+    cr_tok     REAL    NOT NULL,
+    out_tok    REAL    NOT NULL,
+    reason_tok REAL    NOT NULL,
+    credits    REAL    NOT NULL,
+    ts_ms      INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cumulative_state_source ON cumulative_state(source);
 -- Keys: `schema_version`, `index_id`, `last_ingest_ms`, and `index_claim` — the
 -- single-row ingest lease that keeps two processes off the same cursors.
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -1271,6 +1292,258 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot retirement of the FunIDE lifetime projection, the same shape
+        // as the dsh one above: the adapter stamped one event per session with
+        // the session's `updatedAt`, so a session continued across a day
+        // boundary dragged its whole total into the newest day (measured
+        // 2026-10-21, session smvf8pvrm7qrg: 477M prompt tokens read on 10-21
+        // while 10-19 and 10-20 — the days its 13 turns ran — went to zero). The
+        // session items carry that money per turn with the turn's own start ms
+        // in `turnId`, so the adapter now emits those day-true turn events.
+        // The session-shaped rows must go, not stay: their key is
+        // `funide#<session>` and the turn rows are `funide#<session>#<turn>`, so
+        // a re-emit would leave the lifetime total standing beside its own turns
+        // as double money. Turn-shaped rows are the new shape and stay, merged
+        // rows are another machine's truth and stay (`source NOT LIKE 'linux:%'`,
+        // the antigravity rule), and the tool's rollup rows refold when the
+        // re-read lands (the dsh precedent).
+        const REPAIR_FUNIDE_PROJECTION_RETIRED: &str = "repair:funide-projection-retired-1";
+        let funide_proj: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_FUNIDE_PROJECTION_RETIRED],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if funide_proj.is_none() {
+            const FUNIDE_PROJ_ROWS: &str = "(SELECT id FROM event WHERE tool = 'funide' \
+                 AND dedupe_key LIKE 'funide#%' AND dedupe_key NOT LIKE 'funide#%#%' \
+                 AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({FUNIDE_PROJ_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({FUNIDE_PROJ_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({FUNIDE_PROJ_ROWS})"), [])
+                .map_err(sql_err)?;
+            // Every session file re-reads from byte 0: the turn events re-emit
+            // under keys no past pass wrote for these files.
+            conn.execute("DELETE FROM file_state WHERE tool = 'funide'", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup WHERE tool = 'funide' AND origin = ''", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_FUNIDE_PROJECTION_RETIRED],
+            )
+            .map_err(sql_err)?;
+        }
+        // One-shot re-billing of the Hermes rows: the dedupe key was
+        // `hermes#<session>#<model>#<provider>#<task>` — four of the vendor's
+        // six primary-key fields — so two slices differing only in billing
+        // endpoint or mode collided into one row and undercounted (2026-10-21).
+        // The key now carries all six. Every old row therefore stands under a
+        // key no future pass will touch, and worse: the new key's first
+        // projection would seed its ledger at zero and re-bill the slice's
+        // whole lifetime beside the frozen old row. The rows must go, not stay:
+        // when the vendor store re-reads, each slice's lifetime lands on its
+        // own last-seen day, and the ledger goes with the rows so the re-read
+        // seeds from what is actually on the books — nothing. Merged rows are
+        // another machine's truth and stay (`source NOT LIKE 'linux:%'`, the
+        // antigravity rule); the tool's rollup rows refold when the re-read
+        // lands (the dsh precedent).
+        const REPAIR_HERMES_SLICE_KEY: &str = "repair:hermes-slice-key-1";
+        let hermes_key: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_HERMES_SLICE_KEY],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if hermes_key.is_none() {
+            const HERMES_LOCAL_ROWS: &str =
+                "(SELECT id FROM event WHERE tool = 'hermes' AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({HERMES_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({HERMES_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({HERMES_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute("DELETE FROM cumulative_state WHERE tool = 'hermes'", [])
+                .map_err(sql_err)?;
+            // Every vendor store re-reads whole: the projections re-emit under
+            // keys no past pass wrote for these files.
+            conn.execute("DELETE FROM file_state WHERE tool = 'hermes'", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup WHERE tool = 'hermes' AND origin = ''", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_HERMES_SLICE_KEY],
+            )
+            .map_err(sql_err)?;
+        }
+        // One-shot re-key of the Kimi Code rows: the dedupe key carried the
+        // restated amounts (`…#{input}#{creation}#{read}#{output}`), and a
+        // transcript restating its accumulated totals is this tool's normal
+        // heartbeat — every restatement stranded the old row under its old
+        // key and billed the call again under the new one (2026-10-21). The
+        // key is now the call's identity (`who#stamp#model`) and a
+        // restatement updates in place. Every stored row stands under an
+        // old-shape key no future pass will touch and must go; the re-read
+        // re-bills each call once under its identity key. Merged rows are
+        // another machine's truth and stay (`source NOT LIKE 'linux:%'`, the
+        // antigravity rule); the rollup rows refold when the re-read lands
+        // (the dsh precedent).
+        const REPAIR_KIMICODE_CALL_KEY: &str = "repair:kimicode-call-key-1";
+        let kimicode_key: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_KIMICODE_CALL_KEY],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if kimicode_key.is_none() {
+            const KIMICODE_LOCAL_ROWS: &str =
+                "(SELECT id FROM event WHERE tool = 'kimicode' AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({KIMICODE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({KIMICODE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({KIMICODE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            // Every transcript re-reads whole: the calls re-emit under keys
+            // no past pass wrote for these files.
+            conn.execute("DELETE FROM file_state WHERE tool = 'kimicode'", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup WHERE tool = 'kimicode' AND origin = ''", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_KIMICODE_CALL_KEY],
+            )
+            .map_err(sql_err)?;
+        }
+        // One-shot re-key of the Cline rows without a vendor message id: the
+        // fallback key was positional (`{session}#idx{idx}`), so dropping an
+        // earlier row of the transcript renumbered every survivor and
+        // re-billed each under its new key (2026-10-21). The fallback now
+        // keys on the row's own stamp with a first-in-order ordinal.
+        // Fallback rows stand under keys no future pass will touch and must
+        // go; id-bearing rows re-emit under their unchanged keys and
+        // re-insert as they were. Merged rows are another machine's truth
+        // and stay (`source NOT LIKE 'linux:%'`, the antigravity rule); the
+        // rollup rows refold when the re-read lands (the dsh precedent).
+        const REPAIR_CLINE_MESSAGE_KEY: &str = "repair:cline-message-key-1";
+        let cline_key: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_CLINE_MESSAGE_KEY],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if cline_key.is_none() {
+            const CLINE_LOCAL_ROWS: &str =
+                "(SELECT id FROM event WHERE tool = 'cline' AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({CLINE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({CLINE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({CLINE_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            // Every transcript re-reads whole: see the kimicode repair.
+            conn.execute("DELETE FROM file_state WHERE tool = 'cline'", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup WHERE tool = 'cline' AND origin = ''", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_CLINE_MESSAGE_KEY],
+            )
+            .map_err(sql_err)?;
+        }
+        // One-shot re-key of the Qoder cache-db rows: the key of a request's
+        // call depended on how many rows the request had *at read time* — a
+        // single-call request keyed bare `qoder#<request>`, the same request
+        // grown to a second call re-keyed its first row to
+        // `qoder#<request>#<message>` and billed it again under the new key
+        // (2026-10-21). The key is now fixed by row order: the first call
+        // claims the bare key forever, later calls carry their message id.
+        // Both editions share the rule and the repair. Merged rows are
+        // another machine's truth and stay (`source NOT LIKE 'linux:%'`, the
+        // antigravity rule); the rollup rows refold when the re-read lands
+        // (the dsh precedent).
+        const REPAIR_QODER_STABLE_REQUEST_KEY: &str = "repair:qoder-stable-request-key-1";
+        let qoder_key: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_QODER_STABLE_REQUEST_KEY],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if qoder_key.is_none() {
+            const QODER_LOCAL_ROWS: &str =
+                "(SELECT id FROM event WHERE tool IN ('qoder', 'qoder_cn') AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({QODER_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({QODER_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({QODER_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            // Both stores re-read whole: the transcript tree and the cache db
+            // re-emit under keys no past pass wrote for these files.
+            conn.execute("DELETE FROM file_state WHERE tool IN ('qoder', 'qoder_cn')", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM event_rollup WHERE tool IN ('qoder', 'qoder_cn') AND origin = ''",
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_QODER_STABLE_REQUEST_KEY],
+            )
+            .map_err(sql_err)?;
+        }
+        // One-shot re-key of the CatPaw rows without a message id: they
+        // emitted keyless, and the index bills every keyless event — the
+        // renamed store's `updated_at_ms` cursor re-reads a re-touched row,
+        // so an id-less turn re-billed on every pass that saw it (2026-10-21;
+        // the legacy store's rowid cursor only ever read such a row once, but
+        // keyless rows cannot be told from duplicates after the fact). Id-less
+        // rows now key on their immutable rowid. Merged rows are another
+        // machine's truth and stay (`source NOT LIKE 'linux:%'`, the
+        // antigravity rule); the rollup rows refold when the re-read lands
+        // (the dsh precedent).
+        const REPAIR_CATPAW_ROWID_KEY: &str = "repair:catpaw-rowid-key-1";
+        let catpaw_key: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_CATPAW_ROWID_KEY],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if catpaw_key.is_none() {
+            const CATPAW_LOCAL_ROWS: &str =
+                "(SELECT id FROM event WHERE tool = 'catpaw' AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({CATPAW_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({CATPAW_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({CATPAW_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            // Both stores re-read whole: the id-less rows re-emit under keys
+            // no past pass wrote for these files.
+            conn.execute("DELETE FROM file_state WHERE tool = 'catpaw'", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup WHERE tool = 'catpaw' AND origin = ''", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_CATPAW_ROWID_KEY],
+            )
+            .map_err(sql_err)?;
+        }
         // One-shot re-key of the Trae events: the adapter stamped every event's
         // session with the turn id, and the panel folds 会话 by that key — one
         // chat conversation read as N sessions, each one turn (3 messages of a
@@ -1580,6 +1853,11 @@ impl Index {
         tx.execute(&format!("DELETE FROM call WHERE event_id IN ({local_ids})"), []).map_err(sql_err)?;
         tx.execute(&format!("DELETE FROM quota WHERE event_id IN ({local_ids})"), []).map_err(sql_err)?;
         tx.execute(&format!("DELETE FROM event WHERE ({ORIGIN_SQL}) = ''"), []).map_err(sql_err)?;
+        // The ledger is a cache of what `event` already billed: with the local
+        // rows gone for the re-read, a surviving ledger would make that re-read
+        // compute a zero growth and rebuild the tool empty.
+        tx.execute(&format!("DELETE FROM cumulative_state WHERE ({ORIGIN_SQL}) = ''"), [])
+            .map_err(sql_err)?;
         tx.execute("DELETE FROM file_state", []).map_err(sql_err)?;
         tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
         tx.execute("DELETE FROM meta WHERE key = 'device_sync_occurrence_init_event_id'", []).map_err(sql_err)?;
@@ -1592,6 +1870,7 @@ impl Index {
             .execute_batch(
                 "DELETE FROM event; DELETE FROM call; DELETE FROM quota; \
                  DELETE FROM file_state; DELETE FROM event_rollup; \
+                 DELETE FROM cumulative_state; \
                  DELETE FROM sync_event_occurrence; DELETE FROM sync_event_identity; \
                  DELETE FROM meta WHERE key = 'device_sync_occurrence_init_event_id';",
             )

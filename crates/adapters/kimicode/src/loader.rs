@@ -69,9 +69,16 @@ fn event(parsed: Parsed, file: &SourceFile, session: &str, project: Option<&str>
 /// The identity a replay is absorbed by.
 ///
 /// Three shapes, best evidence first: the legacy payload's own `message_id`;
-/// otherwise the stamp plus the model and all four stages, which is the tuple a
-/// second call would have to match by millisecond; otherwise, for a row with
-/// neither, the position in the file.
+/// otherwise the stamp, the agent and the model — what the source itself names
+/// the call; otherwise, for a row with neither, the position in the file.
+///
+/// The stage amounts are deliberately **not** in it. They read as a tie-breaker
+/// for two calls in one millisecond, but they price the key: a restated amount
+/// (the vendor rewriting the log, a proxy re-stringifying a number) mints a new
+/// key and strands the old row beside the re-billed call, and the indexer's
+/// grow path — which updates a row's totals under the SAME key — never gets to
+/// run. One agent has one request in flight, so two of its calls cannot share a
+/// millisecond, and the agent id is in the key.
 ///
 /// The agent is in it because the source states it (`agentId`), and a different
 /// agent's call is a different call. Deliberately **not** in it: the session
@@ -85,15 +92,8 @@ fn key(parsed: &Parsed, file: &SourceFile, session: &str, ordinal: usize) -> Str
     // The agent as the source wrote it, not as the directory names it: v1 has no
     // `agents/` level, so the payload id is the one spelling a migrated copy keeps.
     let who = parsed.agent_id.as_deref().unwrap_or("");
-    let c = &parsed.counts;
     match parsed.time_ms.filter(|ms| *ms > 0) {
-        Some(ms) => {
-            let [input, creation, read, output] = stages(c.input, c.cache_creation, c.cache_read, c.output);
-            format!(
-                "{TOOL_ID}#{who}#{ms}#{}#{input}#{creation}#{read}#{output}",
-                parsed.model.as_deref().unwrap_or("-")
-            )
-        }
+        Some(ms) => format!("{TOOL_ID}#{who}#{ms}#{}", parsed.model.as_deref().unwrap_or("-")),
         // A row with no stamp cannot be told apart from its twin by content, so
         // the only identity left is where it sits.
         None => format!(
@@ -101,17 +101,6 @@ fn key(parsed: &Parsed, file: &SourceFile, session: &str, ordinal: usize) -> Str
             file.path.to_string_lossy()
         ),
     }
-}
-
-/// A stage tuple that survives a float formatting change in the middle of a key
-/// space already written into the index: an integer tuple is stable.
-fn stages(input: f64, cache_creation: f64, cache_read: f64, output: f64) -> [u64; 4] {
-    [
-        input.max(0.0).round() as u64,
-        cache_creation.max(0.0).round() as u64,
-        cache_read.max(0.0).round() as u64,
-        output.max(0.0).round() as u64,
-    ]
 }
 
 /// Every home's `workspaces.json` → `id → root`, the label each host shows for a
@@ -203,13 +192,22 @@ mod tests {
     }
 
     #[test]
-    fn different_stamps_or_stages_are_different_calls() {
+    fn different_stamps_or_models_are_different_calls() {
         let base = key(&parsed(None, Some(1_000), Some("m")), &file("/w/ses/wire.jsonl"), "ses", 0);
         assert_ne!(base, key(&parsed(None, Some(1_001), Some("m")), &file("/w/ses/wire.jsonl"), "ses", 0));
-        let mut other = parsed(None, Some(1_000), Some("m"));
-        other.counts.output = 4.0;
-        assert_ne!(base, key(&other, &file("/w/ses/wire.jsonl"), "ses", 0));
         assert_ne!(base, key(&parsed(None, Some(1_000), Some("other")), &file("/w/ses/wire.jsonl"), "ses", 0));
+    }
+
+    /// The amounts are what the source billed, not who the call was: a restated
+    /// number must UPDATE the row under its key, never strand the old one and
+    /// re-bill the call beside it.
+    #[test]
+    fn a_restated_amount_keeps_the_key() {
+        let base = key(&parsed(None, Some(1_000), Some("m")), &file("/w/ses/wire.jsonl"), "ses", 0);
+        let mut restated = parsed(None, Some(1_000), Some("m"));
+        restated.counts.output = 99.0;
+        restated.counts.cache_read = 12.0;
+        assert_eq!(base, key(&restated, &file("/w/ses/wire.jsonl"), "ses", 0));
     }
 
     /// Two agents' calls are two calls even when the millisecond and every stage

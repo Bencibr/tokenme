@@ -9,8 +9,10 @@
 //!   an assistant row is inserted when its turn starts and its usage lands at
 //!   the turn's end (measured: created 11:09:31.462, updated 11:09:34.439),
 //!   so a rowid cursor would walk past a row before the numbers arrive.
-//!   Re-reading the re-touched rows is safe: the dedupe keys are stable and
-//!   the index enforces them across passes.
+//!   Re-reading the re-touched rows is safe: every row has a stable dedupe
+//!   key — an id-less one keys on its immutable `rowid` — and the index
+//!   enforces them across passes. A keyless event would be re-billed by
+//!   every pass that re-reads the row.
 //!
 //! A corrupted store is a supported state on long-running installs (the
 //! legacy machine copy is 2.5 GB): the first unreadable page stops the pass
@@ -157,8 +159,13 @@ fn row_to_event(row: &rusqlite::Row<'_>, source_key: &str) -> rusqlite::Result<(
     event.meter = usage_core::Meter::Tokens;
     event.model = model.map(str::to_string);
     event.project = basename(&project);
-    // One row is one model call: the message id is the billed identity.
-    event.dedupe_key = message_id.map(|mid| format!("{session}#{mid}"));
+    // One row is one model call: the message id is the billed identity, and
+    // a row the vendor left without one keys on its immutable rowid — a
+    // keyless event is re-billed by every pass that sees the row again.
+    event.dedupe_key = Some(match message_id.filter(|m| !m.is_empty()) {
+        Some(mid) => format!("{session}#{mid}"),
+        None => format!("{session}#row{rowid}"),
+    });
     event.source = format!("{source_key}#t_ui_messages#{rowid}");
     Ok((Some(event), counts))
 }
@@ -197,7 +204,7 @@ fn read_moon(
     if i64::try_from(cursor.0).unwrap_or(i64::MAX) > max_updated {
         return Err(Error::Cursor { path: path.to_path_buf(), cursor: cursor.0 });
     }
-    let sql = "SELECT conversation_id, message_id, payload, created_at_ms, updated_at_ms \
+    let sql = "SELECT rowid, conversation_id, message_id, payload, created_at_ms, updated_at_ms \
                FROM ui_sdk_messages WHERE updated_at_ms > ?1 \
                ORDER BY updated_at_ms, conversation_id, seq";
     let mut events = Vec::new();
@@ -249,6 +256,7 @@ fn read_moon(
 /// `(event or skip, counts)` for a `ui_sdk_messages` row — the renamed store's
 /// analog of [`row_to_event`].
 fn moon_row_to_event(row: &rusqlite::Row<'_>, source_key: &str) -> rusqlite::Result<(Option<UsageEvent>, TokenCounts)> {
+    let rowid: i64 = row.get::<_, i64>("rowid")?;
     let conversation: Option<String> = row.get::<_, Option<String>>("conversation_id")?;
     let message_id: Option<String> = row.get::<_, Option<String>>("message_id")?;
     let payload_raw: Option<String> = row.get::<_, Option<String>>("payload")?;
@@ -273,18 +281,24 @@ fn moon_row_to_event(row: &rusqlite::Row<'_>, source_key: &str) -> rusqlite::Res
     let mut event = UsageEvent::new(TOOL_ID, ts_ms, &session).with(counts);
     event.meter = usage_core::Meter::Tokens;
     // One assistant row is one model call: the message id is the billed
-    // identity, same shape as the legacy `conversation#message_id` keys.
-    event.dedupe_key = message_id
-        .clone()
-        .filter(|m| !m.is_empty())
-        .or_else(|| {
-            parsed
-                .as_ref()
-                .and_then(|p| p.get("id"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .map(|mid| format!("{session}#{mid}"));
+    // identity, same shape as the legacy `conversation#message_id` keys; a
+    // row the vendor left without one keys on its immutable rowid, because a
+    // keyless event is re-billed by every pass the row's update stamp
+    // pushes it past the cursor.
+    event.dedupe_key = Some(
+        message_id
+            .clone()
+            .filter(|m| !m.is_empty())
+            .or_else(|| {
+                parsed
+                    .as_ref()
+                    .and_then(|p| p.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .map(|mid| format!("{session}#{mid}"))
+            .unwrap_or_else(|| format!("{session}#row{rowid}")),
+    );
     event.source = format!(
         "{source_key}#ui_sdk_messages#{}#{}",
         session,
