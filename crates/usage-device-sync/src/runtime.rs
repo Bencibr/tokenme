@@ -25,6 +25,11 @@ use crate::{
 const DEFAULT_LEASE_TTL_MS: i64 = 15 * 60 * 1000;
 const DEFAULT_POLL_MS: u64 = 5_000;
 const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 4;
+// A fresh backup can owe tens of thousands of identity rows. One 256-row batch
+// per five-second poll left the first sync materializing for half an hour, so
+// each pass runs a few batches while it is already holding the index lock.
+const HISTORY_INIT_BATCHES_PER_PASS: usize = 4;
+const HISTORY_INIT_BATCH_ROWS: usize = 256;
 // While the primary materializes historical identities it serves an empty
 // preparing page. Poll that state like a progress bar: fast enough to finish
 // initialization promptly, slow enough that the secondary is not a busy loop.
@@ -76,6 +81,10 @@ pub struct SyncRuntime {
     primary_download_complete: bool,
     occurrences_initialized: bool,
     occurrence_init_progressed: bool,
+    /// Last instant the scheduler lease was actually rewritten. Renewing on
+    /// every pass committed a write transaction twice per 5 s poll while the
+    /// 15-minute lease was nowhere near expiry.
+    lease_renewed_at_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +95,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false }
+        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0 }
     }
 
     pub fn new_secondary(
@@ -95,7 +104,7 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false }
+        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0 }
     }
 
     pub fn new_secondary_with_display_name(
@@ -140,6 +149,7 @@ impl SyncRuntime {
         if !self.store.acquire_scheduler_lease(&self.config.owner, first_now, self.config.lease_ttl_ms)? {
             return Err(SyncError::Security("another sync runtime owns the scheduler lease".into()));
         }
+        self.lease_renewed_at_ms = first_now;
         let result = (|| {
             self.store.recover_inflight_outbox(&self.config.owner, first_now)?;
             let _ = self.prepare_secondary(&mut now_ms)?;
@@ -171,6 +181,7 @@ impl SyncRuntime {
         if !self.store.acquire_scheduler_lease(&self.config.owner, first_now, self.config.lease_ttl_ms)? {
             return Err(SyncError::Security("another sync runtime owns the scheduler lease".into()));
         }
+        self.lease_renewed_at_ms = first_now;
         if let Err(error) = self.store.recover_inflight_outbox(&self.config.owner, first_now) {
             let _ = self.store.release_scheduler_lease(&self.config.owner);
             return Err(error);
@@ -183,7 +194,7 @@ impl SyncRuntime {
             self.primary_download_more = false;
             self.primary_download_preparing = false;
             let lease_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, lease_now, self.config.lease_ttl_ms)? {
+            if !self.renew_lease_if_due(lease_now)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
                 return Err(SyncError::Security("sync scheduler lease was lost before preparing the next pass".into()));
             }
@@ -229,7 +240,7 @@ impl SyncRuntime {
             let pass_had_primary_download_progress = self.primary_download_progressed;
             total.last_error = pass.last_error;
             let renew_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, renew_now, self.config.lease_ttl_ms)? {
+            if !self.renew_lease_if_due(renew_now)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
                 return Err(SyncError::Security("sync scheduler lease was lost".into()));
             }
@@ -255,6 +266,18 @@ impl SyncRuntime {
         }
         let _ = self.store.release_scheduler_lease(&self.config.owner);
         Ok(total)
+    }
+
+    /// Renews at most once per half TTL. A renew that is not due still answers
+    /// `true`: the lease cannot be taken by another owner before it expires.
+    fn renew_lease_if_due(&mut self, now_ms: i64) -> SyncResult<bool> {
+        let half_ttl = self.config.lease_ttl_ms / 2;
+        if self.lease_renewed_at_ms != 0 && now_ms.saturating_sub(self.lease_renewed_at_ms) < half_ttl {
+            return Ok(true);
+        }
+        let renewed = self.store.renew_scheduler_lease(&self.config.owner, now_ms, self.config.lease_ttl_ms)?;
+        if renewed { self.lease_renewed_at_ms = now_ms; }
+        Ok(renewed)
     }
 
     fn run_owned_once(&mut self, stop: Option<&AtomicBool>, now_ms: &mut impl FnMut() -> i64) -> SyncResult<RuntimeRunReport> {
@@ -283,7 +306,7 @@ impl SyncRuntime {
                 Ok(receipt) => {
                     report.uploaded += 1;
                     let commit_now = now_ms();
-                    if !self.store.renew_scheduler_lease(&self.config.owner, commit_now, self.config.lease_ttl_ms)? {
+                    if !self.renew_lease_if_due(commit_now)? {
                         return Err(SyncError::Security("sync scheduler lease was lost before ACK".into()));
                     }
                     self.store.ack_outbox(&self.config.owner, entry.id, &receipt, commit_now)?;
@@ -362,7 +385,7 @@ impl SyncRuntime {
         let mut catchup_complete = true;
         if had_stream && !has_pending {
             let snapshot_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, snapshot_now, self.config.lease_ttl_ms)? {
+            if !self.renew_lease_if_due(snapshot_now)? {
                 return Err(SyncError::Security("sync scheduler lease was lost before snapshot".into()));
             }
             catchup_complete = self.enqueue_local_snapshot(&config, &identity, snapshot_now)?;
@@ -440,7 +463,7 @@ impl SyncRuntime {
             }
         };
         let stream_now = now_ms();
-        if !self.store.renew_scheduler_lease(&self.config.owner, stream_now, self.config.lease_ttl_ms)? {
+        if !self.renew_lease_if_due(stream_now)? {
             return Err(SyncError::Security("sync scheduler lease was lost before stream update".into()));
         }
         if recover {
@@ -451,12 +474,11 @@ impl SyncRuntime {
         if recover || (!had_stream && !has_pending) {
             let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
             let snapshot_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, snapshot_now, self.config.lease_ttl_ms)? {
+            if !self.renew_lease_if_due(snapshot_now)? {
                 return Err(SyncError::Security("sync scheduler lease was lost before snapshot".into()));
             }
             catchup_complete = self.enqueue_local_snapshot(&config, &identity, snapshot_now)?;
         }
-        self.store.set_secondary_last_error(None, now_ms())?;
         Ok(catchup_complete && !has_pending)
     }
 
@@ -475,9 +497,15 @@ impl SyncRuntime {
         let historical_ready = if self.occurrences_initialized {
             true
         } else {
-            let complete = self.store.index_mut().ensure_sync_occurrences_page(256).map_err(SyncError::from)?;
-            if !complete { self.occurrence_init_progressed = true; }
-            if complete { self.occurrences_initialized = true; }
+            let mut complete = false;
+            for _ in 0..HISTORY_INIT_BATCHES_PER_PASS {
+                complete = self.store.index_mut().ensure_sync_occurrences_page(HISTORY_INIT_BATCH_ROWS).map_err(SyncError::from)?;
+                if complete {
+                    self.occurrences_initialized = true;
+                    break;
+                }
+                self.occurrence_init_progressed = true;
+            }
             complete
         };
         let mut cursor = self.store.snapshot_cursor(config)?;
@@ -1022,9 +1050,9 @@ mod tests {
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
         }, now).unwrap();
-        // More events than four identity-preparation batches, so one pass can
-        // only see preparing markers.
-        let rows = usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4 + 200;
+        // More events than one pass can materialize: four download requests,
+        // each running four identity batches.
+        let rows = usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4 * MAX_SNAPSHOT_PAGES_PER_PASS + 200;
         for index in 0..rows {
             primary.index().conn().execute(
                 "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
@@ -1095,24 +1123,28 @@ mod tests {
             last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
             last_ack_generation: None, last_ack_receipt_hash: None,
         }, first_now).unwrap();
-        for id in 1..=257_i64 {
+        // One more history row than the upload side materializes per pass
+        // (four identity batches).
+        let missing = usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4 + 1;
+        for id in 1..=missing as i64 {
             secondary.index_mut().conn().execute(
                 "INSERT INTO event(id, tool, ts_ms, session, meter, source) VALUES(?1, 'codex', ?2, ?3, 'tokens', 'history.jsonl')",
                 rusqlite::params![id, first_now, format!("history-{id}")],
             ).unwrap();
         }
+        let dirty_id = missing as i64 + 1;
         secondary.index_mut().conn().execute(
-            "INSERT INTO event(id, tool, ts_ms, session, meter, dedupe_key, source) VALUES(258, 'codex', ?1, 'live', 'tokens', 'live-row', 'live.jsonl')",
-            rusqlite::params![first_now],
+            "INSERT INTO event(id, tool, ts_ms, session, meter, dedupe_key, source) VALUES(?1, 'codex', ?2, 'live', 'tokens', 'live-row', 'live.jsonl')",
+            rusqlite::params![dirty_id, first_now],
         ).unwrap();
         secondary.index_mut().conn().execute(
-            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(258, 'key:live-row', NULL)",
-            [],
+            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(?1, 'key:live-row', NULL)",
+            rusqlite::params![dirty_id],
         ).unwrap();
         secondary.index_mut().conn().execute(
             "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
-             VALUES('key:live-row', 'live.jsonl', X'', 258, ?1, 1, ?1, ?1)",
-            rusqlite::params![first_now],
+             VALUES('key:live-row', 'live.jsonl', X'', ?1, ?2, 1, ?2, ?2)",
+            rusqlite::params![dirty_id, first_now],
         ).unwrap();
 
         let server_thread = thread::spawn(move || server.run_connections(3));
@@ -1126,7 +1158,7 @@ mod tests {
             "SELECT value FROM meta WHERE key = 'device_sync_occurrence_init_event_id'",
             [], |row| row.get::<_, String>(0),
         ).unwrap().parse().unwrap();
-        assert_eq!(initialized_to, 256);
+        assert_eq!(initialized_to, (usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4) as i64);
         let config = runtime.store().secondary_config().unwrap().unwrap();
         assert!(!runtime.store().snapshot_cursor(&config).unwrap().complete);
         assert!(server_thread.join().unwrap().is_ok());

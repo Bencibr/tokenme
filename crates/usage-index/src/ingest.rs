@@ -820,7 +820,7 @@ fn persist(
                 if changed {
                     if sync_enabled {
                         let dirty_identity = sync_event_identity(ev, occurrence_id.as_deref())?;
-                        mark_sync_dirty(&tx, &dirty_identity, &key, occurrence_id.as_deref(), old_id, old_ts, now_ms())?;
+                        mark_sync_dirty(&tx, sync_enabled, &dirty_identity, &key, occurrence_id.as_deref(), old_id, old_ts, now_ms())?;
                     }
                 } else {
                     acc.deduped += 1;
@@ -876,7 +876,7 @@ fn persist(
             }
             if sync_enabled {
                 let dirty_identity = sync_event_identity(ev, occurrence_id.as_deref())?;
-                mark_sync_dirty(&tx, &dirty_identity, &key, occurrence_id.as_deref(), id, ev.ts_ms, now_ms())?;
+                mark_sync_dirty(&tx, sync_enabled, &dirty_identity, &key, occurrence_id.as_deref(), id, ev.ts_ms, now_ms())?;
             }
             // Same transaction as the event row above: the rollup is a cache of
             // exactly these rows, and a crash may lose both or neither, never

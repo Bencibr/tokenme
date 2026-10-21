@@ -37,7 +37,7 @@ pub use protocol::{
     MAX_ROWS, MAX_STRING_BYTES, PROTOCOL_ID, SYNC_FORMAT,
 };
 pub use store::{
-    DeviceRecord, DeviceRole, DeviceStatus, DeviceStatusView, DeviceSyncSnapshot, ImportReceipt,
+    DeviceRecord, DeviceRole, DeviceStatus, DeviceStatusView, DeviceSyncRead, DeviceSyncSnapshot, ImportReceipt,
     DirtyJournalEntry, DirtyJournalInput, MergeOutcome, OutboxEntry, OutboxState, OutboxSummary,
     DisconnectNotice, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SnapshotCursor, SyncError, SyncResult, SyncStore,
 };
