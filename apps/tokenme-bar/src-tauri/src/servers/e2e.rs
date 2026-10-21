@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 
 use super::fetch;
-use super::{keys, remote, ssh, wizard, ServerRecord};
+use super::{collector, keys, remote, ssh, wizard, ServerRecord};
 use crate::engine;
 
 fn env_or(name: &str, default: &str) -> String {
@@ -180,7 +180,14 @@ fn live_install_pull_resync_cleanup() {
     ));
     assert!(probe_out.ok, "probe failed: {:?}", probe_out.error);
     assert!(!probe_out.mismatch);
-    assert_eq!(probe_out.arch.as_deref(), Some("aarch64"), "arch: {:?}", probe_out.arch);
+    // The probe reports what the target is; the e2e only needs an arch this
+    // build ships a collector for. (It used to hardcode aarch64, which tied
+    // the test to the Mac colima box it was written on.)
+    let arch = probe_out.arch.clone().expect("probe should report uname -m");
+    assert!(
+        collector::arch_target(&arch).is_some(),
+        "the target reports arch {arch:?}, which has no bundled collector"
+    );
     assert!(probe_out.hostname.is_some(), "probe should capture the hostname");
     let session = probe_out.session.expect("probe session id");
     let fingerprint = probe_out.fingerprint.clone().expect("probe fingerprint");
