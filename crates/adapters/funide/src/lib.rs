@@ -1,10 +1,11 @@
 //! FunIDE adapter (唐山趣绮梦's VS Code fork with a built-in agent).
 //!
 //! One source: `<data>/FunIDE/User/funide/sessions/<workspace>/<session>.json`
-//! — each file is a whole session (Tree kind): the UI's own `cacheUsage`
-//! cumulative ledger, the session model, and the workspace key. One cumulative
-//! event per session, replaced on a stable key; the file's mtime is the cursor
-//! and re-reads are absorbed.
+//! — each file is a whole session (Tree kind): the UI's own per-turn `usage*`
+//! ledger, the session model, and the workspace key. One event per turn, keyed
+//! `funide#<session>#<turnId>` and stamped from the turn id's own epoch millis;
+//! the file is re-read whole on every stat change and replaced on grow. See
+//! [`proj`] for why the session's lifetime `cacheUsage` alone cannot be used.
 //!
 //! `index.json` per workspace is UI bookkeeping (titles, counts) and is not a
 //! session. No quota here: the GLM-plan points balance lives in the FunIDE
@@ -35,7 +36,11 @@ impl SourceAdapter for FunIdeAdapter {
 
     fn semantics(&self) -> Semantics {
         Semantics {
-            usage_form: usage_core::UsageForm::Cumulative,
+            // One event per turn, from the per-turn `usage*` block: summing
+            // them is exactly right. (The session's `cacheUsage` is a lifetime
+            // total whose only timestamp is the file's last write, which used
+            // to drag a whole multi-day session onto the day it was resumed.)
+            usage_form: usage_core::UsageForm::PerCall,
             meter: usage_core::Meter::Tokens,
             model_attr: usage_core::ModelAttr::Inline,
             dedupes_by_id: true,
@@ -68,10 +73,7 @@ impl SourceAdapter for FunIdeAdapter {
             FileKind::Tree => {
                 let empty = ReadOutcome { events: Vec::new(), cursor: ReadCursor(file.size) };
                 let Ok(text) = std::fs::read_to_string(&file.path) else { return Ok(empty) };
-                let mut events = Vec::new();
-                if let Some(event) = proj::parse(&text, file.mtime_ms, &file.key()) {
-                    events.push(*event);
-                }
+                let events = proj::parse(&text, file.mtime_ms, &file.key());
                 Ok(ReadOutcome { events, cursor: ReadCursor(file.size) })
             }
             _ => Ok(ReadOutcome { events: Vec::new(), cursor }),
@@ -86,6 +88,8 @@ mod tests {
 
     const SESSION: &str = r#"{"version":2,"id":"s1","workspaceKey":"d:\\w\\proj",
         "activeModelId":"cloud:GLM-plan-flash","updatedAt":1790685147111,
+        "items":[{"role":"assistant","turnId":"turn_1790685000000_1",
+                  "usagePrompt":100,"usageCached":20,"usageCompletion":10}],
         "cacheUsage":{"promptTokens":100,"cachedTokens":20,"completionTokens":10}}"#;
 
     fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
@@ -102,7 +106,7 @@ mod tests {
     fn a_session_file_reads_as_one_cumulative_event() {
         let _guard = paths::test_lock();
         let dir = tempfile::tempdir().unwrap();
-        let path = fixture(dir.path());
+        let _path = fixture(dir.path());
         std::env::set_var(paths::HOME_ENV, dir.path());
         let detected = FunIdeAdapter.probe().expect("the fixture session exists");
         assert_eq!(detected.roots.len(), 1);
@@ -113,7 +117,8 @@ mod tests {
         assert_eq!(outcome.events[0].counts.input, 80.0);
         assert_eq!(outcome.events[0].counts.cache_read, 20.0);
         assert_eq!(outcome.events[0].counts.output, 10.0);
-        assert_eq!(outcome.events[0].dedupe_key.as_deref(), Some("funide#s1"));
+        assert_eq!(outcome.events[0].dedupe_key.as_deref(), Some("funide#s1#turn_1790685000000_1"));
+        assert_eq!(outcome.events[0].ts_ms, 1790685000000, "the turn's own instant");
         std::env::remove_var(paths::HOME_ENV);
     }
 }

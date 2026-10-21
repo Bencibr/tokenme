@@ -610,6 +610,50 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot re-split of the FunIDE events. The adapter used to read the
+        // session's LIFETIME `cacheUsage` as a single cumulative row keyed
+        // `funide#<session>` and stamped with `updatedAt` — the file's last
+        // write. A session continued into the next morning therefore dragged
+        // its whole history onto that morning: 360.20M tokens from 2026-10-20
+        // read as 360.20M "today" on 2026-10-21 with 0 calls made (reported
+        // 2026-10-21, session smvg415dt5wbv). Each turn now lands on its own
+        // day under `funide#<session>#<turnId>`, so the old rows must GO: a
+        // redrawn key strands them beside the new ones, and their lifetime
+        // total would sit on top of the per-turn split as double money. The
+        // cursors go with them so every session re-reads from the start; the
+        // rollup rows for this tool rebuild lazily from `event` on the next
+        // report read (the dsh-projection precedent). Merged rows are another
+        // machine's truth and stay (`source NOT LIKE 'linux:%'`), and so does
+        // a row an older build already wrote in the per-turn shape — hence the
+        // "no second `#` after the tool prefix" test rather than `tool =
+        // 'funide'` alone.
+        const REPAIR_FUNIDE_PER_TURN: &str = "repair:funide-per-turn-1";
+        let funide_per_turn: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_FUNIDE_PER_TURN],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if funide_per_turn.is_none() {
+            const FUNIDE_LIFETIME_ROWS: &str = "(SELECT id FROM event WHERE tool = 'funide' \
+                 AND source NOT LIKE 'linux:%' AND instr(substr(dedupe_key, 8), '#') = 0)";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({FUNIDE_LIFETIME_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({FUNIDE_LIFETIME_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({FUNIDE_LIFETIME_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute("DELETE FROM file_state WHERE tool = 'funide'", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup WHERE tool = 'funide' AND origin = ''", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_FUNIDE_PER_TURN],
+            )
+            .map_err(sql_err)?;
+        }
         // One-shot re-key of the Trae events: the adapter stamped every event's
         // session with the turn id, and the panel folds 会话 by that key — one
         // chat conversation read as N sessions, each one turn (3 messages of a
