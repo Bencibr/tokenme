@@ -65,8 +65,11 @@ mac-usernotifications = "0.3"
 # path this repo's spike proved delivers from an ad-hoc-signed bundle — and lets
 # `show` return the real result, which the dedup state machine needs (a banner
 # that failed to post must not be marked as fired). Windows rides the same
-# crate's WinRT toast backend. The feature is inert off macOS.
-[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+# crate's WinRT toast backend, and Linux its D-Bus one — `notify.rs`'s shared
+# `post` is `cfg(any(macos, linux))`, so the dependency has to be declared for
+# Linux too or the panel simply does not compile there. The macOS-only feature
+# is inert on the other two.
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
 notify-rust = { version = "4", features = ["preview-macos-un"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
