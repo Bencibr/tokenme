@@ -76,8 +76,11 @@ pub const CMD_DETECT: &str = "~/.tokenme/bin/tokenme detect --json --quiet";
 
 pub const CMD_CLEANUP_BIN: &str = "rm -f ~/.tokenme/bin/tokenme ~/.tokenme/bin/tokenme.tmp && exit 0";
 
-/// `tokenme export` with the two validated values. `--origin NAME` makes the
+/// `tokenme export` with the two validated values. `--origin=NAME` makes the
 /// bundle name `tokenme-NAME.jsonl.gz` and stamps `origin: NAME` inside it.
+/// The `=` form is deliberate: the name grammar allows a leading `-`, and a
+/// bare `--origin -box` would be parsed by clap as a flag, failing the install
+/// at its slowest step with a message about arguments rather than a name.
 pub fn cmd_export(name: &str, days: i64) -> Result<String, SshError> {
     if !valid_name(name) {
         return Err(SshError::new("proto", format!("invalid server name {name:?}")));
@@ -85,7 +88,7 @@ pub fn cmd_export(name: &str, days: i64) -> Result<String, SshError> {
     if !valid_days(days) {
         return Err(SshError::new("proto", format!("invalid export window {days}")));
     }
-    Ok(format!("~/.tokenme/bin/tokenme export --days {days} --out ~/.tokenme/sync --origin {name}"))
+    Ok(format!("~/.tokenme/bin/tokenme export --days {days} --out ~/.tokenme/sync --origin={name}"))
 }
 
 /// Appends our public key line to `~/.ssh/authorized_keys`, idempotently.
@@ -161,11 +164,20 @@ mod tests {
     fn export_command_is_pinned() {
         assert_eq!(
             cmd_export("box", 30).unwrap(),
-            "~/.tokenme/bin/tokenme export --days 30 --out ~/.tokenme/sync --origin box"
+            "~/.tokenme/bin/tokenme export --days 30 --out ~/.tokenme/sync --origin=box"
         );
         assert!(cmd_export("bad name", 30).is_err());
         assert!(cmd_export("box", 0).is_err());
         assert!(cmd_export("box", 10_000).is_err());
+    }
+
+    /// The name grammar allows a leading hyphen; `--origin=NAME` keeps clap
+    /// from reading that name as another flag.
+    #[test]
+    fn export_command_survives_a_hyphenated_origin() {
+        let cmd = cmd_export("-leading", 7).unwrap();
+        assert!(cmd.contains("--origin=-leading"));
+        assert!(valid_name("-leading"));
     }
 
     #[test]

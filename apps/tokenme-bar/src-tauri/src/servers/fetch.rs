@@ -26,6 +26,10 @@ pub struct Pulled {
     /// `true` when a bundle was written (and the engine woken); `false` when
     /// the server's bundle was already here, byte for byte.
     pub delivered: bool,
+    /// Tool display names the server reported after this pull. `None` when the
+    /// detect call failed — the record keeps its last known list rather than
+    /// blanking on a transient failure.
+    pub tools: Option<Vec<String>>,
 }
 
 /// Connect + authenticate with the dedicated key. Shared entry for hub pulls
@@ -45,6 +49,9 @@ pub async fn pull_once<R: Runtime>(app: &AppHandle<R>, rec: &ServerRecord) -> Re
 
     let uploaded = ensure_collector(app, &conn, &sn).await?;
     run_export(&conn, &rec.name, rec.days).await?;
+    // Informational, and cheap next to the export: it keeps the detail sheet's
+    // tool chips honest when the server gains or loses a tool after install.
+    let tools = detect_tools(&conn).await.ok();
     let fetched = fetch_bundle(&sn, &rec.name).await;
     ssh::sftp_close(&mut conn).await;
     let fetched = fetched?;
@@ -57,6 +64,7 @@ pub async fn pull_once<R: Runtime>(app: &AppHandle<R>, rec: &ServerRecord) -> Re
         took_ms: started.elapsed().as_millis() as i64,
         uploaded,
         delivered: fetched.written,
+        tools,
     })
 }
 
@@ -117,6 +125,10 @@ pub struct Fetched {
     pub rows: u64,
     /// `false` when the identical bundle was already here.
     pub written: bool,
+    /// The sha256 the manifest declared (and the download verified). A merge
+    /// record for this file only counts as *this* bundle when it carries the
+    /// same digest — a re-added server reuses the file name.
+    pub sha256: String,
 }
 
 /// Reads the manifest, and unless the same sha is already on disk, downloads
@@ -146,7 +158,7 @@ pub async fn fetch_bundle(sn: &SftpSession, name: &str) -> Result<Fetched, SshEr
     if gz_path.exists() {
         if let Ok(local_sha) = usage_index::sha256_file(&gz_path) {
             if local_sha.eq_ignore_ascii_case(&manifest.sha256) {
-                return Ok(Fetched { rows: manifest.rows, written: false });
+                return Ok(Fetched { rows: manifest.rows, written: false, sha256: manifest.sha256.clone() });
             }
         }
     }
@@ -168,7 +180,7 @@ pub async fn fetch_bundle(sn: &SftpSession, name: &str) -> Result<Fetched, SshEr
     let manifest_name = format!("tokenme-{name}.manifest.json");
     write_private(&dir, &manifest_name, &manifest_bytes)?;
 
-    Ok(Fetched { rows: manifest.rows, written: true })
+    Ok(Fetched { rows: manifest.rows, written: true, sha256: manifest.sha256 })
 }
 
 /// Detected tool display names from the server's own `tokenme detect`.
@@ -199,14 +211,22 @@ pub fn wake_engine<R: Runtime>(app: &AppHandle<R>) {
     let _ = app.state::<crate::engine::EngineChannel>().0.send(crate::engine::Msg::Wake(dir));
 }
 
-/// Waits (up to `timeout`) for the engine to publish the merge of `gz_name`.
-/// `None` means "still written to ~/tokenme-sync, merge pending" — the honest
-/// fallback the wizard UI shows.
-pub async fn await_merge<R: Runtime>(app: &AppHandle<R>, gz_name: &str, timeout: Duration) -> Option<u64> {
+/// Waits (up to `timeout`) for the engine to publish the merge of `gz_name`
+/// **at `want_sha`**. Matching on the file name alone is not enough: a server
+/// name can be re-installed, and the index would still hold the previous
+/// bundle's record under the same file name — the wizard would then report a
+/// merge that had not happened yet. `None` means "written to ~/tokenme-sync,
+/// merge pending" — the honest fallback the wizard UI shows.
+pub async fn await_merge<R: Runtime>(app: &AppHandle<R>, gz_name: &str, want_sha: &str, timeout: Duration) -> Option<u64> {
+    let want_sha = want_sha.trim();
     let started = Instant::now();
     loop {
         if let Some(report) = app.state::<crate::engine::Shared>().report() {
-            if let Some(rec) = report.syncs.iter().find(|s| s.file == gz_name) {
+            if let Some(rec) = report.syncs.iter().find(|s| {
+                s.file == gz_name
+                    && (want_sha.is_empty()
+                        || s.sha256.as_deref().is_some_and(|got| got.eq_ignore_ascii_case(want_sha)))
+            }) {
                 return Some(rec.rows);
             }
         }
