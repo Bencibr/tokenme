@@ -551,6 +551,12 @@ impl Tls13HttpsTransport {
                 Ok(receipt)
             }
             crate::ws::WsSyncFrame::SyncAck { success: false, error, .. } => {
+                // A rejection still leaves a live socket — but the runtime's
+                // fallback must reach the primary over HTTP right away, and on
+                // a one-slot server the open leg IS the blocker (new
+                // connections are shut down while slots are held). Drop it so
+                // the fallback cannot starve behind the leg that just failed.
+                *ws_guard = None;
                 Err(TransportError::Protocol(error.unwrap_or_else(|| "sync failed on primary".into())))
             }
             _ => {
@@ -562,6 +568,15 @@ impl Tls13HttpsTransport {
 
     pub fn ws_upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
         self.try_ws_upload(upload)
+    }
+
+    /// Drops the cached WebSocket, if any. The upload leg holds the socket only
+    /// for the outbox drain it serves: a primary admitting one connection at a
+    /// time (`max_concurrent: 1`) rejects every later HTTP request while a
+    /// socket sits open, so the runtime closes the leg between passes and the
+    /// next pass's status/download calls always find a free slot.
+    pub fn ws_close(&mut self) {
+        *lock_recover(&self.ws_client) = None;
     }
 
     pub fn upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
@@ -833,7 +848,8 @@ struct ServerContext {
     log_sink: Mutex<Option<Arc<dyn Fn(bool, &str) + Send + Sync>>>,
     /// Embedding-UI wake for pairing requests that persist out-of-band (fresh
     /// row, or an auto-approve landing) so the panel need not poll for them.
-    pairing_notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Receives the requesting device's display name.
+    pairing_notify: Mutex<Option<Arc<dyn Fn(&str, bool) + Send + Sync>>>,
     replay: Mutex<NonceReplayCache>,
 }
 
@@ -1132,11 +1148,13 @@ impl HttpsSyncServer {
 
     /// Registers the embedding UI's wake for pairing requests that persist
     /// out-of-band of any panel command: a fresh pending row, or an
-    /// auto-approve landing on arrival. The hook runs on the connection
-    /// thread and must be cheap (the panel emits an event and returns).
+    /// auto-approve landing on arrival. The hook receives the requesting
+    /// device's display name and whether it was auto-approved, runs on the
+    /// connection thread and must be cheap (the panel emits an event, maybe a
+    /// toast, and returns).
     pub fn set_pairing_notify(
         &self,
-        hook: impl Fn() + Send + Sync + 'static,
+        hook: impl Fn(&str, bool) + Send + Sync + 'static,
     ) -> Result<(), TransportError> {
         *lock_recover(&self.context.pairing_notify) = Some(Arc::new(hook));
         Ok(())
@@ -1484,7 +1502,8 @@ impl ServerContext {
             if head.path == PAIRING_PATH && dispatched.0 == 200 {
                 if let Ok(state) = serde_json::from_slice::<PairingRequestState>(&dispatched.1) {
                     if state.status == "pending" || state.status == "paired" {
-                        if let Some(hook) = lock_recover(&self.pairing_notify).clone() { hook(); }
+                        let (display_name, auto_approved) = (state.display_name.clone(), state.status == "paired");
+                        if let Some(hook) = lock_recover(&self.pairing_notify).clone() { hook(&display_name, auto_approved); }
                     }
                 }
             }

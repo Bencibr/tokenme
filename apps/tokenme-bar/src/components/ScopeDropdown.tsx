@@ -133,7 +133,10 @@ export function ScopeDropdown({
   const remotes = rows.filter((r) => !r.local);
   if (remotes.length === 0) return null;
 
-  const total = rows.reduce((a, r) => a + r.tokens, 0);
+  // The All window folds the unscoped machines list the report carries, so
+  // the menu's "全部" total and every share must use the same denominator —
+  // not the managed rows above, which drop a revoked machine's history.
+  const total = machines.reduce((a, m) => a + m.today_tokens, 0);
   const remoteTokens = remotes.reduce((a, r) => a + r.tokens, 0);
   const remotePct = total > 0 ? (remoteTokens / total) * 100 : 0;
   const remoteShare = share(remoteTokens, total);

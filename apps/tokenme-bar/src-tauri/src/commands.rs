@@ -920,11 +920,14 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         if is_error { crate::logging::error(message); } else { crate::logging::info(message); }
     }).map_err(|error| format!("cannot configure sync runtime logging: {error}"))?;
     // A pairing request lands in sync_state.db on the service thread, outside
-    // any panel command; push the news instead of letting the UI poll for it.
+    // any panel command; push the news instead of letting the UI poll for it,
+    // and toast the owner — a closed panel must not swallow a device asking
+    // to pair. Auto-approved pairings toast as done; pending ones ask.
     if let Some(app) = diagnostics_app.as_ref() {
         let app = app.clone();
-        server.set_pairing_notify(move || {
+        server.set_pairing_notify(move |display_name: &str, auto_approved: bool| {
             let _ = app.emit("sync-updated", ());
+            crate::notify::post_pairing_request(display_name, auto_approved);
         }).map_err(|error| format!("cannot configure sync pairing notify: {error}"))?;
     }
     if let Some(app) = diagnostics_app {

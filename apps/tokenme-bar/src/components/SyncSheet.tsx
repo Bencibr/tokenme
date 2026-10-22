@@ -86,6 +86,9 @@ function syncErrorMessage(error: string | null): string | null {
   // the primary — same family as a relink.
   if (normalized.includes("lease")) return t("sync.error.disabled");
   if (normalized.includes("previous disconnect")) return t("sync.error.relink");
+  // A rotated primary cert fails every pinned call; re-pairing is the only
+  // path (auto-unpair makes it zero-friction), so name it distinctly.
+  if (normalized.includes("pin mismatch")) return t("sync.error.pin_changed");
   // Residual pairing races (a start worker or a restore flipping the role
   // mid-flight) read as "state changed"; the honest next step is a rescan.
   if (normalized.includes("sync state changed while pairing")) return t("sync.error.relink");

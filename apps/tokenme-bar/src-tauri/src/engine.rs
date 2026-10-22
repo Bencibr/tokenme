@@ -873,41 +873,71 @@ fn publish_with_quota<R: Runtime>(
         (Vec::new(), false)
     };
     let captured = now_ms();
-    let scope = app.state::<Shared>().scope();
-    let opts = ReportOptions {
-        pricing,
-        // After the probes, not before them: a vendor CLI that answers late must
-        // not leave the report stamped older than a window it is showing.
-        now_ms: usage_core::report::instant_after_polling(false, captured, &polled_quota),
-        sources: sources.to_vec(),
-        recent_session_limit: 12,
-        polled_quota,
-        budgets: app.state::<Shared>().settings().budgets,
-        scope: scope.clone(),
-    };
-    // Every period's numbers fold from the day rollup (~2k rows) plus the
-    // plan's live slices over today — never from re-reading all events. The
-    // scope travels into the fetch as well: the sessions' top-N is applied in
-    // SQL, so it must already be the top-N of the chosen scope.
-    let plan = AggregatePlan::build(opts.now_ms, opts.recent_session_limit);
-    let facts_started = Instant::now();
-    let facts = match index.report_facts(&plan, &scope) {
-        Ok(facts) => facts,
-        Err(e) => {
-            crate::logging::error(&format!(
-                "publish: facts query failed scope={} total_ms={} — previous report stays on screen: {e}",
-                scope_kind(&scope), facts_started.elapsed().as_millis(),
-            ));
-            return false;
+    let shared = app.state::<Shared>();
+    let mut scope = shared.scope();
+    let folded_at = usage_core::report::instant_after_polling(false, captured, &polled_quota);
+    // The fold runs at most twice: an Origin scope naming a machine the fresh
+    // fold no longer holds resets to All and re-folds once, so the panel
+    // self-corrects within one cadence instead of stranding the user on a
+    // machine that has no way back (the scope menu collapses when no remote
+    // row remains). `report.machines` is unscoped by construction — the rollup
+    // spans the whole index whatever the report's own scope — so a missing
+    // origin means the index truly holds no rows for it, not a filtered view.
+    let mut report = loop {
+        let opts = ReportOptions {
+            pricing,
+            // After the probes, not before them: a vendor CLI that answers late must
+            // not leave the report stamped older than a window it is showing.
+            now_ms: folded_at,
+            sources: sources.to_vec(),
+            recent_session_limit: 12,
+            // The rare second fold re-uses the pass's samples; the vec is a
+            // dozen rows, noise next to the fold itself.
+            polled_quota: polled_quota.clone(),
+            budgets: shared.settings().budgets,
+            scope: scope.clone(),
+        };
+        // Every period's numbers fold from the day rollup (~2k rows) plus the
+        // plan's live slices over today — never from re-reading all events. The
+        // scope travels into the fetch as well: the sessions' top-N is applied in
+        // SQL, so it must already be the top-N of the chosen scope.
+        let plan = AggregatePlan::build(opts.now_ms, opts.recent_session_limit);
+        let facts_started = Instant::now();
+        let facts = match index.report_facts(&plan, &scope) {
+            Ok(facts) => facts,
+            Err(e) => {
+                crate::logging::error(&format!(
+                    "publish: facts query failed scope={} total_ms={} — previous report stays on screen: {e}",
+                    scope_kind(&scope), facts_started.elapsed().as_millis(),
+                ));
+                return false;
+            }
+        };
+        if facts.rebuilt {
+            crate::logging::info(
+                "publish: rebuilt the day rollup from the event table (first publish after an \
+                 upgrade, or after a fail-safe invalidation)",
+            );
         }
+        let folded = usage_core::report::summarize_facts(&facts, &opts);
+        if let MachineScope::Origin { name } = &scope {
+            // Correct only the scope this fold actually used: a pick that
+            // landed mid-fold has already replaced the stored scope and queued
+            // its own Msg::Scope, and clobbering it with All would silently
+            // drop the user's click (the same stale-read race the tray-mode
+            // refresh guards below). If the newer pick names a dead machine
+            // too, its own pass resets it the same way.
+            if !folded.machines.iter().any(|machine| &machine.origin == name) && shared.scope() == scope {
+                let _ = shared.set_scope(MachineScope::All, None);
+                crate::logging::info(&format!(
+                    "scope_reset: origin {name:?} matches no machine in the fold — scope back to all"
+                ));
+                scope = MachineScope::All;
+                continue;
+            }
+        }
+        break folded;
     };
-    if facts.rebuilt {
-        crate::logging::info(
-            "publish: rebuilt the day rollup from the event table (first publish after an \
-             upgrade, or after a fail-safe invalidation)",
-        );
-    }
-    let mut report = usage_core::report::summarize_facts(&facts, &opts);
     let cycle_usage_started = Instant::now();
     if let Err(e) = index.attach_cycle_usage(&mut report.quotas, report.generated_at_ms) {
         crate::logging::error(&format!(

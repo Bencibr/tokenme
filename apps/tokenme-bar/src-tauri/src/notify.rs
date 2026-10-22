@@ -456,6 +456,23 @@ pub fn send_test() {
     });
 }
 
+/// A new secondary asked to pair: post directly, bypassing the quota-alert
+/// gate — this is a person asking at the door, not a threshold event, and it
+/// must reach the owner even with quota alerts muted.
+pub fn post_pairing_request(device_name: &str, auto_approved: bool) {
+    let zh = crate::lang::get() == crate::lang::Lang::Zh;
+    let title = if zh { "TokenMe 设备同步" } else { "TokenMe device sync" };
+    let body = match (zh, auto_approved) {
+        (true, true) => format!("「{device_name}」已免认证接入，同步开始。"),
+        (true, false) => format!("「{device_name}」请求接入，请打开同步面板确认。"),
+        (false, true) => format!("\"{device_name}\" was auto-approved — sync has started."),
+        (false, false) => format!("\"{device_name}\" wants to pair — approve it in the sync panel."),
+    };
+    if let Err(e) = post(title, &body) {
+        crate::logging::error(&format!("notify: pairing toast failed — {e}"));
+    }
+}
+
 /// The panel's whole view of the permission: whether the OS will deliver a
 /// banner at all, as one word — `granted` / `denied` / `not_determined`, or
 /// `unknown` where the platform has no answer (Windows). `TOKENME_NOTIFY_STATE`

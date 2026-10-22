@@ -177,9 +177,27 @@ impl SyncRuntime {
     where
         F: FnMut(&mut SyncStore) -> SyncResult<()>,
     {
-        let first_now = now_ms();
-        if !self.store.acquire_scheduler_lease(&self.config.owner, first_now, self.config.lease_ttl_ms)? {
-            return Err(SyncError::Security("another sync runtime owns the scheduler lease".into()));
+        // A lease held by another owner means a previous host process died
+        // without releasing it (or a sibling runtime is live). Both are
+        // wait-out situations, not failures: wait one poll interval between
+        // attempts until the lease frees (crash: ≤ one TTL) or the owner
+        // renews (a live peer is doing the work). Failing hard here is what
+        // used to strand a crash-restarted secondary in a futile respawn
+        // loop for the whole TTL.
+        let mut first_now = now_ms();
+        while !self.store.acquire_scheduler_lease(&self.config.owner, first_now, self.config.lease_ttl_ms)? {
+            if stop.load(Ordering::Acquire) {
+                return Ok(RuntimeRunReport::default());
+            }
+            let wait_started = std::time::Instant::now();
+            let wait = Duration::from_secs(5);
+            while wait_started.elapsed() < wait && !stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(50).min(wait));
+            }
+            if stop.load(Ordering::Acquire) {
+                return Ok(RuntimeRunReport::default());
+            }
+            first_now = now_ms();
         }
         self.lease_renewed_at_ms = first_now;
         if let Err(error) = self.store.recover_inflight_outbox(&self.config.owner, first_now) {
@@ -294,43 +312,74 @@ impl SyncRuntime {
             report.bytes = summary.bytes;
             return Ok(report);
         }
-        loop {
-            if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) { break; }
-            let claim_now = now_ms();
-            let entries = self.store.claim_outbox(&self.config.owner, claim_now, 1)?;
-            if entries.is_empty() { break; }
-            report.claimed += entries.len() as u64;
-            let entry = &entries[0];
-            if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-                self.store.retry_outbox(&self.config.owner, entry.id, now_ms(), "sync stopped before upload")?;
-                break;
-            }
-            match self.transport.upload(&entry.signed_upload()) {
-                Ok(receipt) => {
-                    report.uploaded += 1;
-                    let commit_now = now_ms();
-                    if !self.renew_lease_if_due(commit_now)? {
-                        return Err(SyncError::Security("sync scheduler lease was lost before ACK".into()));
-                    }
-                    self.store.ack_outbox(&self.config.owner, entry.id, &receipt, commit_now)?;
-                    report.acknowledged += 1;
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    let fatal = is_unrecoverable_sync_error(&message) || entry.attempts >= 4;
-                    if fatal && self.secondary_identity.is_some() {
-                        let _ = self.store.reset_secondary_sync_state(now_ms());
-                        report.retried += 1;
-                        report.last_error = Some(format!("auto-recovering: {message}"));
-                        break;
-                    }
-                    self.store.retry_outbox(&self.config.owner, entry.id, now_ms(), &message)?;
-                    report.retried += 1;
-                    report.last_error = Some(message);
+        // The WS leg lives exactly for this drain: opened for the first push,
+        // reused across the burst, and closed on every exit — a primary that
+        // admits one connection at a time must see the slot again before the
+        // pass's own status/download calls.
+        let drain = 'drain: {
+            loop {
+                if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) { break; }
+                let claim_now = now_ms();
+                let entries = self.store.claim_outbox(&self.config.owner, claim_now, 1)?;
+                if entries.is_empty() { break; }
+                report.claimed += entries.len() as u64;
+                let entry = &entries[0];
+                if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                    self.store.retry_outbox(&self.config.owner, entry.id, now_ms(), "sync stopped before upload")?;
                     break;
                 }
+                // The resident WebSocket goes first; ANY failure falls back to the
+                // one-shot HTTP upload. The primary's import is idempotent per
+                // envelope — a package whose manifest+gzip hashes already have a
+                // receipt returns that receipt without re-importing — so a push
+                // the primary imported before its ack was lost is safely re-sent
+                // over HTTP.
+                let upload = entry.signed_upload();
+                let result = self.transport.ws_upload(&upload).or_else(|ws_error| {
+                    eprintln!("tokenme sync: ws upload fell back to http: {ws_error}");
+                    self.transport.upload(&upload)
+                });
+                match result {
+                    Ok(receipt) => {
+                        report.uploaded += 1;
+                        let commit_now = now_ms();
+                        if !self.renew_lease_if_due(commit_now)? {
+                            break 'drain Err(SyncError::Security("sync scheduler lease was lost before ACK".into()));
+                        }
+                        self.store.ack_outbox(&self.config.owner, entry.id, &receipt, commit_now)?;
+                        report.acknowledged += 1;
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        // A version-incompatible primary would just 426 the
+                        // re-snapshot too: resetting here used to loop
+                        // reset → full snapshot → 426 forever. Surface the
+                        // version copy instead and wait for an upgrade.
+                        if is_version_incompatible_error(&message) && self.secondary_identity.is_some() {
+                            let _ = self.store.reset_secondary_sync_state(now_ms());
+                            let _ = self.store.set_secondary_enabled(false, now_ms());
+                            let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
+                            report.last_error = Some(message.clone());
+                            break;
+                        }
+                        let fatal = is_unrecoverable_sync_error(&message) || entry.attempts >= 4;
+                        if fatal && self.secondary_identity.is_some() {
+                            let _ = self.store.reset_secondary_sync_state(now_ms());
+                            report.retried += 1;
+                            report.last_error = Some(format!("auto-recovering: {message}"));
+                            break;
+                        }
+                        self.store.retry_outbox(&self.config.owner, entry.id, now_ms(), &message)?;
+                        report.retried += 1;
+                        report.last_error = Some(message);
+                        break;
+                    }
+                }
             }
-        }
+            Ok(())
+        };
+        self.transport.ws_close();
+        drain?;
         if self.secondary_identity.is_some() && self.primary_data_sharing && !self.primary_download_complete {
             match self.download_primary_pages(stop, now_ms) {
                 Ok(complete) => self.primary_download_more = !complete,
@@ -646,6 +695,14 @@ fn retryable_secondary_error(error: &SyncError) -> bool {
         | SyncError::Limit(_) => true,
         _ => false,
     }
+}
+
+/// A primary (or secondary) on an incompatible schema version answers 426
+/// "update tokenme…" — no amount of resetting or re-snapshotting fixes that;
+/// only an upgrade does.
+fn is_version_incompatible_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("update tokenme") || lower.contains("unsupported") || lower.contains("schema is not supported")
 }
 
 fn is_unrecoverable_sync_error(message: &str) -> bool {

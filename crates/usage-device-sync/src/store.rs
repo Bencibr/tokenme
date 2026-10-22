@@ -1785,9 +1785,16 @@ impl SyncStore {
                 // A user reset must also restart the primary-download cursor.
                 // Deleting it here closes the window where the process died
                 // after setting needs_recovery but before the reset cleaned
-                // the index; an automatic recovery (flag 0) keeps its
-                // download progress, which the upload stream does not govern.
-                if needs_recovery != 0 {
+                // the index. A same-epoch automatic recovery (flag 0) keeps
+                // its download progress, which the upload stream does not
+                // govern — but an epoch change means the primary destroyed
+                // its change feed (revoke, re-pair, primary reset): the stored
+                // cursor points past revisions that no longer exist, so every
+                // update made below it would never be re-downloaded. Delete
+                // the row and the next download pass re-walks the identities
+                // from the start; the merge dedupes by stable key, so the
+                // re-walk is idempotent.
+                if needs_recovery != 0 || epoch != Some(receipt.data_epoch as i64) {
                     tx.execute("DELETE FROM device_sync_snapshot_cursor WHERE device_id = ?1", params![self.primary_id]).map_err(sql_err)?;
                 }
                 Ok::<_, SyncError>(())
@@ -3107,6 +3114,11 @@ fn rotate_state_primary_id_tx(tx: &Transaction<'_>, new_primary_id: &str) -> Syn
 
 /// Index-side half of a role switch: streams, receipts, markers, conflicts,
 /// outbox/journal payloads and lease/recovery state of the old primary go.
+/// The rows the old primary *downloaded* go too: a `device-sync:v1:` dedupe
+/// key embeds the primary id (`network_event_key`), so a new primary re-sends
+/// the same origin data under fresh keys and keeping the old rows would
+/// double-count every origin in the report. The days the rows touched are
+/// recomputed in the same transaction, the way the import path does.
 fn rotate_index_sync_state_tx(tx: &Transaction<'_>, now_ms: i64) -> SyncResult<()> {
     for table in [
         "device_stream", "device_receipt", "device_package_marker",
@@ -3115,6 +3127,26 @@ fn rotate_index_sync_state_tx(tx: &Transaction<'_>, now_ms: i64) -> SyncResult<(
         "device_sync_outbox_sequence", "device_sync_scheduler_lease", "device_sync_recovery",
     ] {
         tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
+    }
+    const DOWNLOAD_KEY_PREFIX: &str = "device-sync:v1:%";
+    let doomed_ts: Vec<i64> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT ts_ms FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}'"
+        )).map_err(sql_err)?;
+        let rows = stmt.query_map([], |row| row.get(0)).map_err(sql_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?
+    };
+    if !doomed_ts.is_empty() {
+        tx.execute(
+            &format!("DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}')"),
+            [],
+        ).map_err(sql_err)?;
+        tx.execute(
+            &format!("DELETE FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}'"),
+            [],
+        ).map_err(sql_err)?;
+        usage_index::recompute_network_days(tx, &doomed_ts).map_err(SyncError::from)?;
+        ensure_network_rollups_finite(tx)?;
     }
     tx.execute(
         "INSERT INTO meta(key, value) VALUES('device_sync_last_role_switch_at_ms', ?1)
@@ -5245,6 +5277,114 @@ mod tests {
         assert_eq!(adopted.stream_id.as_deref(), Some("reset-new"));
         assert_eq!(adopted.expected_generation, Some(1));
         assert_eq!(adopted.last_ack_generation, None);
+    }
+
+    /// A revoke→re-pair cycle bumps the primary's data_epoch, and the revoke
+    /// with no consumers left destroyed the whole `sync_dirty` feed. A download
+    /// cursor that survived the bump would resume past the destroyed revisions
+    /// and never re-read the identities below it — updates made between revoke
+    /// and re-pair would stay invisible forever. An epoch change on the
+    /// recovery handshake therefore restarts the identity walk (the merge
+    /// dedupes by stable key, so the re-walk is idempotent); a same-epoch
+    /// reconcile keeps its progress.
+    #[test]
+    fn an_epoch_change_restarts_the_primary_download_cursor() {
+        let device = identity("cursor-reset");
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let certificate_der = vec![1u8, 2, 3];
+        let config = SecondarySyncConfig {
+            primary_os: None,
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
+            certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
+            stream_id: Some("stream-1".into()), data_epoch: Some(1), expected_generation: Some(2), enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: Some(1), last_ack_receipt_hash: Some([9; 32]),
+        };
+        store.save_secondary_config(&config, 1).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO device_sync_snapshot_cursor(device_id, stream_id, data_epoch, last_identity, last_dirty_revision, complete, completion_generation, updated_at_ms)
+             VALUES('primary-1', 'primary-download-v1', 1, 'identity-zz', 40, 1, NULL, 2)",
+            [],
+        ).unwrap();
+        // A same-epoch stream reconcile (a checkpoint repair) keeps the walk.
+        store.adopt_recovered_stream(&StreamOpenReceipt {
+            primary_id: "primary-1".into(), device_id: device.device_id.clone(),
+            stream_id: "stream-2".into(), data_epoch: 1, expected_generation: 1,
+        }, 3).unwrap();
+        assert!(store.primary_download_cursor().unwrap().complete, "a same-epoch reconcile keeps the download progress");
+
+        // The revoke/re-pair epoch bump restarts the identity walk.
+        store.adopt_recovered_stream(&StreamOpenReceipt {
+            primary_id: "primary-1".into(), device_id: device.device_id.clone(),
+            stream_id: "stream-3".into(), data_epoch: 2, expected_generation: 1,
+        }, 4).unwrap();
+        let cursor = store.primary_download_cursor().unwrap();
+        assert_eq!(cursor.last_identity, None);
+        assert_eq!(cursor.last_dirty_revision, 0);
+        assert!(!cursor.complete);
+        let adopted = store.secondary_config().unwrap().unwrap();
+        assert_eq!((adopted.stream_id.as_deref(), adopted.data_epoch), (Some("stream-3"), Some(2)));
+    }
+
+    /// Pairing to a DIFFERENT primary rotates the sync state but used to leave
+    /// the old primary's downloaded rows in place: their dedupe keys embed the
+    /// old primary id (`network_event_key`), so the new primary re-downloads
+    /// the same origin data under fresh keys and every origin double-counted
+    /// in the report. The rotate now deletes the downloaded rows (and their
+    /// calls) with the rest of the old role and recomputes the touched days,
+    /// the way the import path does.
+    #[test]
+    fn rotating_to_a_new_primary_deletes_the_rows_the_old_one_downloaded() {
+        let device = identity("rotate-download");
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let downloaded_key = network_event_key("primary-1", "remote-row");
+        store.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'remote-session', 'tokens', 5, 'linux:remote-host:remote-row', ?1)",
+            params![downloaded_key],
+        ).unwrap();
+        let downloaded_id = store.index().conn().last_insert_rowid();
+        store.index().conn().execute(
+            "INSERT INTO call(event_id, kind, name) VALUES(?1, 'mcp', 'remote-tool')",
+            params![downloaded_id],
+        ).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'local-session', 'tokens', 7, 'local.jsonl', 'local-row')",
+            [],
+        ).unwrap();
+        store.index_mut().with_network_transaction(|tx| usage_index::recompute_network_days(tx, &[10])).unwrap();
+        let remote_groups: i64 = store.index().conn().query_row(
+            "SELECT count(*) FROM event_rollup WHERE origin = 'remote-host'", [], |row| row.get(0),
+        ).unwrap();
+        assert!(remote_groups > 0, "precondition: the downloaded rows reach the report through the rollup");
+
+        store.transition_to_secondary(&SecondarySyncConfig {
+            primary_os: None,
+            primary_id: "primary-2".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1u8, 2, 3],
+            certificate_pin: hash_bytes(&[1u8, 2, 3]), identity_path: PathBuf::from("identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }, 20).unwrap();
+        assert_eq!(store.primary_id(), "primary-2");
+        assert_eq!(store.index().conn().query_row::<i64, _, _>(
+            "SELECT count(*) FROM event WHERE dedupe_key LIKE 'device-sync:v1:%'", [], |row| row.get(0),
+        ).unwrap(), 0, "the old primary's downloaded rows must not survive the rotate");
+        assert_eq!(store.index().conn().query_row::<i64, _, _>(
+            "SELECT count(*) FROM call WHERE event_id = ?1", params![downloaded_id], |row| row.get(0),
+        ).unwrap(), 0, "the downloaded rows' calls go with them");
+        assert_eq!(store.index().conn().query_row::<i64, _, _>(
+            "SELECT count(*) FROM event WHERE dedupe_key = 'local-row'", [], |row| row.get(0),
+        ).unwrap(), 1, "local usage never leaves");
+        assert_eq!(store.index().conn().query_row::<i64, _, _>(
+            "SELECT count(*) FROM event_rollup WHERE origin = 'remote-host'", [], |row| row.get(0),
+        ).unwrap(), 0, "the recomputed day no longer bills the remote origin");
+        assert!(store.index().conn().query_row::<i64, _, _>(
+            "SELECT count(*) FROM event_rollup WHERE origin = ''", [], |row| row.get(0),
+        ).unwrap() > 0, "the local group of the touched day stays");
     }
 
     #[test]
