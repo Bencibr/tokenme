@@ -545,7 +545,7 @@ pub struct NetworkManifest {
     pub snapshot_complete: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UploadEnvelope {
     pub protocol_id: String,
     pub primary_id: String,

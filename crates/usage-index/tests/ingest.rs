@@ -1800,3 +1800,39 @@ fn shrinking_a_projection_source_purges_its_ledger_so_the_reread_rebills() {
         .unwrap();
     assert_eq!(ledger, 50.0, "the ledger follows the rows instead of outbidding them");
 }
+
+#[test]
+fn the_linux_scoped_keys_repair_prefixes_bare_remote_keys_and_preserves_local_and_mix() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    {
+        let idx = Index::open(&db).unwrap();
+        idx.conn().execute("DELETE FROM meta WHERE key = 'repair:linux-scoped-keys-1'", []).unwrap();
+        for (id, key, source) in [
+            (1, "trae#1", "linux:srv1:/Users/remote/.trae/log.json"),
+            (2, "opencode#2", "linux:srv2:/Users/remote/.opencode/log.json"),
+            (3, "mix:srv1:abcdef", "linux:srv1:/Users/remote/.codex/log.json"),
+            (4, "linux:srv3:already", "linux:srv3:/Users/remote/.claude/log.json"),
+            (5, "local#1", "/Users/local/.claude/log.json"),
+        ] {
+            idx.conn().execute(
+                "INSERT INTO event(id,tool,ts_ms,session,meter,in_tok,dedupe_key,source) VALUES(?1,'trae',10,'s','tokens',100,?2,?3)",
+                rusqlite::params![id, key, source],
+            ).unwrap();
+        }
+        idx.conn().execute(
+            "INSERT INTO event_rollup(day,origin,tool,session,project,model,meter,in_tok,cc_tok,cr_tok,out_tok,reason_tok,credits,n,nonzero,min_ts,max_ts) VALUES('2026-10-10','','claude','s','','','tokens',1,0,0,0,0,0,1,1,10,10)",
+            [],
+        ).unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let get_key = |id: i64| -> Option<String> {
+        idx.conn().query_row("SELECT dedupe_key FROM event WHERE id = ?1", rusqlite::params![id], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(get_key(1).as_deref(), Some("linux:srv1:trae#1"));
+    assert_eq!(get_key(2).as_deref(), Some("linux:srv2:opencode#2"));
+    assert_eq!(get_key(3).as_deref(), Some("mix:srv1:abcdef"));
+    assert_eq!(get_key(4).as_deref(), Some("linux:srv3:already"));
+    assert_eq!(get_key(5).as_deref(), Some("local#1"));
+    assert_eq!(idx.meta_value("repair:linux-scoped-keys-1").unwrap().as_deref(), Some("1"));
+}

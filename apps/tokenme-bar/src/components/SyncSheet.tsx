@@ -79,7 +79,9 @@ function syncErrorMessage(error: string | null): string | null {
   if (normalized.includes("invalid pairing invite")) return t("sync.error.invite_invalid");
   if (normalized.includes("already in use")) return t("sync.error.listener");
   if (normalized.includes("sync protocol") || normalized.includes("update tokenme on the other machine")) return t("sync.error.version");
-  return t("sync.error.generic");
+  if (normalized.includes("busy") || normalized.includes("already running")) return t("sync.error.busy");
+  if (normalized.includes("network") || normalized.includes("timeout") || normalized.includes("timed out")) return t("sync.error.network");
+  return error;
 }
 
 function syncScreenFor(snapshot: SyncDevicesSnapshot): Screen {
@@ -94,6 +96,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const [initializing, setInitializing] = useState(true);
   const [discovering, setDiscovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>(() => syncScreenFor(snapshot));
   const [pickedRole, setPickedRole] = useState<"primary" | "secondary" | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<DiscoveredPrimaryView | null>(null);
@@ -133,17 +136,19 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   }, [onClose]);
 
   const run = async (request: SyncManagementRequest, onSuccess?: (next: SyncDevicesSnapshot) => void) => {
-    if (!mounted.current || mutationInFlight.current) return;
+    if (!mounted.current) return;
     setPendingConfirm(null);
     const generation = ++operationGeneration.current;
     mutationInFlight.current = true;
     setMutationBusy(true);
     setError(null);
+    setDismissedError(null);
     setPollGeneration((value) => value + 1);
     try {
       const next = await bridge.syncDevices(request);
-      if (!mounted.current || generation !== operationGeneration.current) return;
+      if (!mounted.current) return;
       setError(null);
+      setDismissedError(null);
       onSnapshot(next);
       if (request.action === "stop") setScreen("setup");
       else onSuccess?.(next);
@@ -152,13 +157,14 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       const latest = await bridge.syncDevices({ action: "status" });
       if (mounted.current && generation === operationGeneration.current) {
         setError(null);
+        setDismissedError(null);
         onSnapshot(latest);
       }
     } catch (e) {
-      if (mounted.current && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
+      if (mounted.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (generation === operationGeneration.current) mutationInFlight.current = false;
-      if (mounted.current && generation === operationGeneration.current) setMutationBusy(false);
+      mutationInFlight.current = false;
+      if (mounted.current) setMutationBusy(false);
     }
   };
 
@@ -229,7 +235,10 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // A successful backend snapshot is authoritative. Clear a previous
   // transport error even when the sheet stayed mounted through recovery.
   useEffect(() => {
-    if (!snapshot.last_error) setError(null);
+    if (!snapshot.last_error) {
+      setError(null);
+      setDismissedError(null);
+    }
   }, [snapshot.last_error]);
 
   // Entering the discovery screen starts one bounded mDNS browse; the small
@@ -455,11 +464,22 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
           </div>
         </div>
         <div className="sheet-body sync-body">
-          {visibleError ? <div className="sheet-notice is-error" role="alert"><IconWarn size={12} /><div className="sync-error-copy">
-            {secondaryDegraded ? <strong>{t("sync.degraded.hint")}</strong> : secondaryRecovering ? <strong>{t("sync.recovery.hint")}</strong> : null}
-            <span>{visibleError}</span>
-            {errorDetail ? <details className="sync-error-details"><summary>{t("sync.error.details")}</summary><code>{errorDetail.slice(0, 600)}</code></details> : null}
-          </div></div> : null}
+          {visibleError && dismissedError !== errorDetail ? (
+            <div className="sheet-notice is-error" role="alert">
+              <IconWarn size={12} />
+              <div className="sync-error-head">
+                <div className="sync-error-copy">
+                  {secondaryDegraded ? <strong>{t("sync.degraded.hint")}</strong> : secondaryRecovering ? <strong>{t("sync.recovery.hint")}</strong> : null}
+                  <span>{visibleError}</span>
+                  {errorDetail ? <details className="sync-error-details"><summary>{t("sync.error.details")}</summary><code>{errorDetail.slice(0, 600)}</code></details> : null}
+                </div>
+                <div className="sync-error-actions">
+                  <button type="button" className="sync-error-btn" disabled={commandBusy} onClick={() => void run({ action: "retry_connect" })}>{t("sync.error.retry")}</button>
+                  <button type="button" className="sync-error-close" title={t("sync.error.dismiss")} onClick={() => setDismissedError(errorDetail)}><IconClose size={11} /></button>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {snapshot.discovery_error ? <div className="sheet-notice" role="status"><IconWarn size={12} />{t("sync.discovery.permission_error", { message: snapshot.discovery_error })}</div> : null}
           {pendingConfirm ? <div className="sync-confirm" role="alertdialog" aria-live="assertive" aria-label={t("sync.confirm.title")}>
             <div className="sync-confirm-copy"><strong>{t("sync.confirm.title")}</strong><span>{pendingConfirm.message}</span></div>
@@ -621,6 +641,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   </div>
                   {!awaitingSecondaryApproval ? (
                     <div className="sync-btnrow">
+                      <button type="button" className="btn-accent" disabled={commandBusy} onClick={() => void run({ action: "retry_connect" })}>{t("sync.action.reconnect")}</button>
                       <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "reset_secondary" }, message: t("sync.reset.confirm") })}>{t("sync.reset.button")}</button>
                     </div>
                   ) : null}

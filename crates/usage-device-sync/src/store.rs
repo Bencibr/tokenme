@@ -702,6 +702,26 @@ impl SyncStore {
         &self.primary_id
     }
 
+    /// Status of a registered device for WebSocket connection gating.
+    pub fn ws_device_status(&self, device_id: &str) -> SyncResult<Option<String>> {
+        let status: Option<String> = self.state.query_row(
+            "SELECT status FROM device_registry WHERE device_id = ?1",
+            params![device_id],
+            |row| row.get(0),
+        ).optional().map_err(sql_err)?;
+        Ok(status)
+    }
+
+    /// Data epoch of a registered device.
+    pub fn ws_device_epoch(&self, device_id: &str) -> SyncResult<Option<i64>> {
+        let epoch: Option<i64> = self.state.query_row(
+            "SELECT data_epoch FROM device_registry WHERE device_id = ?1",
+            params![device_id],
+            |row| row.get(0),
+        ).optional().map_err(sql_err)?;
+        Ok(epoch)
+    }
+
     /// Starts a new sync role/primary epoch without deleting local usage
     /// events. Trust, streams, receipts and unsent packages belong to the old
     /// role and must not be reused by the new role.
@@ -2791,7 +2811,7 @@ impl SyncStore {
                 &registry, reader, compressed_len, merged_at_ms,
             )
         });
-        if matches!(&result, Err(SyncError::ReconcileRequired)) {
+        if matches!(&result, Err(SyncError::ReconcileRequired | SyncError::EpochStale | SyncError::Conflict(_) | SyncError::StreamClosed(_))) {
             self.state.execute(
                 "UPDATE device_registry SET status = 'reconcile_required' WHERE device_id = ?1 AND status != 'revoked'",
                 params![device_id],

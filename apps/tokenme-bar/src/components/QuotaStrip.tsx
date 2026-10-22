@@ -929,7 +929,17 @@ export function QuotaStrip({
                                 const share = m.tokens / mTotal;
                                 const dom = share >= 0.9;
                                 const quota = est * share;
-                                const shown = remaining ? Math.max(0, 100 - q.used_percent) : Math.min(100, q.used_percent);
+                                // The per-model bar answers "how much of the
+                                // window's pool this model consumed": the row's
+                                // used share of the pool scaled by the model's
+                                // share of the local usage. Rows then sum to the
+                                // parent window's percent, not to 100. Rounded
+                                // like the parent's own figure so the column
+                                // reads as one scale.
+                                const poolShare = remaining
+                                  ? Math.max(0, 100 - q.used_percent) * share
+                                  : Math.min(100, q.used_percent) * share;
+                                const shown = poolShare > 100 ? Math.round(poolShare) : poolShare < 10 ? Number(poolShare.toFixed(1)) : Math.round(poolShare);
                                 const stage = q.used_percent >= 80 ? "high" : q.used_percent >= 50 ? "mid" : undefined;
                                 const nameK = `n:${rowK}:${i}`;
                                 const barK = `b:${rowK}:${i}`;
@@ -962,7 +972,7 @@ export function QuotaStrip({
                                           }
                                         }}
                                       >
-                                        <i data-stage={stage} style={{ width: `${shown}%` }} />
+                                        <i data-stage={stage} style={{ width: `${shown}%`, minWidth: poolShare > 0 ? 2 : undefined }} />
                                       </span>
                                       <span className="quota-mpct num" data-stage={stage}>
                                         {shown}

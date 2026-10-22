@@ -46,8 +46,8 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_STAGING_QUOTA_BYTES: usize = 512 * 1024 * 1024;
-const MAX_GLOBAL_CONCURRENT: usize = 4;
-const MAX_DEVICE_CONCURRENT: usize = 1;
+const MAX_GLOBAL_CONCURRENT: usize = 16;
+const MAX_DEVICE_CONCURRENT: usize = 4;
 const MAX_CONTROL_BODY_BYTES: usize = 64 * 1024;
 const MAX_PAIRING_PER_IP: usize = 5;
 const PAIRING_WINDOW: Duration = Duration::from_secs(60);
@@ -85,6 +85,7 @@ const DOWNLOAD_PATH: &str = "/v1/download";
 const DISPLAY_NAME_PATH: &str = "/v1/device/display-name";
 const RECOVERY_PATH: &str = "/v1/recovery";
 const DISCONNECT_PATH: &str = "/v1/disconnect";
+pub const WS_SYNC_PATH: &str = "/v2/sync-ws";
 const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
 // A transient accept failure (EMFILE, a peer that vanishes between SYN and
 // accept) is not a reason to stop serving. Only a listener that has failed
@@ -322,6 +323,7 @@ pub struct Tls13HttpsTransport {
     cancel: Arc<AtomicBool>,
     active_sockets: Arc<Mutex<BTreeMap<u64, TcpStream>>>,
     next_socket_id: Arc<AtomicU64>,
+    ws_client: Arc<Mutex<Option<(tungstenite::protocol::WebSocket<StreamOwned<ClientConnection, TcpStream>>, ClientSocketGuard)>>>,
 }
 
 /// A TCP stream whose every read/write is bounded by one absolute request
@@ -402,7 +404,7 @@ impl ClientTransportCancellation {
     }
 }
 
-struct ClientSocketGuard {
+pub struct ClientSocketGuard {
     active_sockets: Arc<Mutex<BTreeMap<u64, TcpStream>>>,
     id: u64,
 }
@@ -430,6 +432,7 @@ impl Tls13HttpsTransport {
             cancel: Arc::new(AtomicBool::new(false)),
             active_sockets: Arc::new(Mutex::new(BTreeMap::new())),
             next_socket_id: Arc::new(AtomicU64::new(1)),
+            ws_client: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -460,6 +463,105 @@ impl Tls13HttpsTransport {
     pub fn probe_tls(&self) -> Result<(), TransportError> {
         let (_stream, _socket) = self.connect()?;
         Ok(())
+    }
+
+    pub fn connect_ws(&self) -> Result<(tungstenite::protocol::WebSocket<StreamOwned<ClientConnection, TcpStream>>, ClientSocketGuard), TransportError> {
+        self.check_cancelled()?;
+        let parsed = self.config.validate()?;
+        let deadline = Instant::now().checked_add(self.config.connect_timeout).ok_or(TransportError::Timeout)?;
+        let addr = resolve_connect_addr(parsed.host(&self.config.endpoint), parsed.port(), deadline, &self.cancel)?;
+        let tcp = connect_tcp_with_deadline(&addr, deadline, &self.cancel)?;
+        let socket = self.register_socket(&tcp)?;
+        tcp.set_nonblocking(false).map_err(|e| self.map_io(e))?;
+        tcp.set_read_timeout(Some(Duration::from_secs(15))).map_err(|e| self.map_io(e))?;
+        tcp.set_write_timeout(Some(Duration::from_secs(15))).map_err(|e| self.map_io(e))?;
+        let client_config = client_config(&self.config)?;
+        let server_name = ServerName::try_from(self.config.server_name.clone())
+            .map_err(|_| TransportError::Config("server_name is not a valid DNS name".into()))?;
+        let mut connection = ClientConnection::new(Arc::new(client_config), server_name)
+            .map_err(|e| TransportError::Tls(e.to_string()))?;
+        let mut tcp_stream = tcp;
+        connection.complete_io(&mut tcp_stream).map_err(|e| self.map_io(e))?;
+        self.check_cancelled()?;
+        verify_peer_pin(&connection, self.config.pinned_certificate_sha256)?;
+        let stream = StreamOwned::new(connection, tcp_stream);
+        let ws_url = format!("wss://{}/v2/sync-ws", parsed.host(&self.config.endpoint));
+        let (ws, _response) = tungstenite::client::client(ws_url, stream)
+            .map_err(|e| TransportError::Protocol(format!("ws handshake: {e}")))?;
+        Ok((ws, socket))
+    }
+
+    fn try_ws_upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
+        let mut ws_guard = lock_recover(&self.ws_client);
+        if ws_guard.is_none() {
+            let (mut ws, socket) = self.connect_ws()?;
+            let auth = crate::ws::WsSyncFrame::Auth {
+                device_id: upload.envelope.device_id.clone(),
+                origin: upload.envelope.origin.clone(),
+                display_name: upload.envelope.origin.clone(),
+                version: crate::ws::WS_PROTOCOL_VERSION.to_string(),
+            };
+            let auth_msg = serde_json::to_string(&auth).map_err(|e| TransportError::Protocol(e.to_string()))?;
+            ws.send(tungstenite::Message::Text(auth_msg)).map_err(|e| TransportError::Protocol(e.to_string()))?;
+            let ack_frame: crate::ws::WsSyncFrame = match ws.read() {
+                Ok(tungstenite::Message::Text(t)) => serde_json::from_str(&t).map_err(|e| TransportError::Protocol(e.to_string()))?,
+                _ => return Err(TransportError::Protocol("expected auth ack".into())),
+            };
+            match ack_frame {
+                crate::ws::WsSyncFrame::AuthAck { status, .. } if status == "connected" => {},
+                crate::ws::WsSyncFrame::AuthAck { error, .. } => {
+                    return Err(TransportError::Protocol(error.unwrap_or_else(|| "auth failed".into())));
+                }
+                _ => return Err(TransportError::Protocol("invalid auth ack frame".into())),
+            }
+            *ws_guard = Some((ws, socket));
+        }
+
+        let Some((ws, _socket)) = ws_guard.as_mut() else {
+            return Err(TransportError::Protocol("ws unavailable".into()));
+        };
+
+        let push_frame = crate::ws::WsSyncFrame::SyncPush {
+            batch_id: format!("{}-{}", upload.envelope.device_id, upload.envelope.generation),
+            envelope: upload.envelope.clone(),
+            signature: upload.signature.to_vec(),
+            gzip_bytes: upload.gzip_bytes.clone(),
+        };
+        let push_msg = serde_json::to_string(&push_frame).map_err(|e| TransportError::Protocol(e.to_string()))?;
+        if let Err(e) = ws.send(tungstenite::Message::Text(push_msg)) {
+            *ws_guard = None;
+            return Err(TransportError::Protocol(format!("ws send failed: {e}")));
+        }
+
+        let reply = match ws.read() {
+            Ok(tungstenite::Message::Text(t)) => serde_json::from_str::<crate::ws::WsSyncFrame>(&t)
+                .map_err(|e| TransportError::Protocol(e.to_string()))?,
+            Err(e) => {
+                *ws_guard = None;
+                return Err(TransportError::Protocol(format!("ws read reply failed: {e}")));
+            }
+            _ => {
+                *ws_guard = None;
+                return Err(TransportError::Protocol("unexpected non-text frame for sync ack".into()));
+            }
+        };
+
+        match reply {
+            crate::ws::WsSyncFrame::SyncAck { success: true, receipt: Some(receipt), .. } => {
+                Ok(receipt)
+            }
+            crate::ws::WsSyncFrame::SyncAck { success: false, error, .. } => {
+                Err(TransportError::Protocol(error.unwrap_or_else(|| "sync failed on primary".into())))
+            }
+            _ => {
+                *ws_guard = None;
+                Err(TransportError::Protocol("expected sync ack frame with receipt".into()))
+            }
+        }
+    }
+
+    pub fn ws_upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
+        self.try_ws_upload(upload)
     }
 
     pub fn upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
@@ -1239,6 +1341,14 @@ impl ServerContext {
         let connection = ServerConnection::new(self.tls_config.clone()).map_err(|e| TransportError::Tls(e.to_string()))?;
         let mut tls = StreamOwned::new(connection, stream);
         let head = read_request_head(&mut tls, self.config.max_body_bytes, deadline, &self.cancel)?;
+        if head.is_websocket {
+            let prefixed = PrefixedStream { prefix: std::io::Cursor::new(head.raw_header), inner: tls };
+            let ws = tungstenite::accept(prefixed).map_err(|e| TransportError::Protocol(format!("ws accept: {e}")))?;
+            self.log_event(false, "sync: action=ws_connect outcome=ok");
+            let store = Arc::clone(&self.store);
+            crate::ws::handle_server_websocket(ws, store, now_ms, &self.cancel).map_err(TransportError::State)?;
+            return Ok(());
+        }
         if head.known_path.is_some() && head.wire_version.is_none_or(|(major, _)| major != WIRE_VERSION_MAJOR) {
             self.reject_wire_version(&mut tls, &head)?;
             return Ok(());
@@ -1578,6 +1688,35 @@ struct HttpRequestHead {
     known_path: Option<()>,
     expect_continue: bool,
     wire_version: Option<(u16, u16)>,
+    is_websocket: bool,
+    raw_header: Vec<u8>,
+}
+
+struct PrefixedStream<S> {
+    prefix: std::io::Cursor<Vec<u8>>,
+    inner: S,
+}
+
+impl<S: Read> Read for PrefixedStream<S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if (self.prefix.position() as usize) < self.prefix.get_ref().len() {
+            let n = self.prefix.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl<S: Write> Write for PrefixedStream<S> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 struct LimitedReader<'a, R> {
@@ -2032,11 +2171,12 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
     }
     let method = request.method.unwrap_or_default();
     let path = request.path.unwrap_or_default();
-    if method != "POST" || request.version != Some(1) || path.is_empty() {
-        return Err(TransportError::Protocol("only HTTP/1.1 POST is supported".into()));
+    let is_ws = method.eq_ignore_ascii_case("GET") && (path == WS_SYNC_PATH || path == "/v1/sync/ws");
+    if !is_ws && (method != "POST" || request.version != Some(1) || path.is_empty()) {
+        return Err(TransportError::Protocol("only HTTP/1.1 POST or WebSocket GET is supported".into()));
     }
     let known_path = match path {
-        UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        WS_SYNC_PATH | "/v1/sync/ws" | UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
@@ -2076,7 +2216,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
     }
     let length = content_length.unwrap_or(0);
     let content_type = content_type.unwrap_or_default().split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
-    if known_path.is_some() {
+    if known_path.is_some() && !is_ws {
         if content_length.is_none() { return Err(TransportError::Protocol("known endpoint lacks content-length".into())); }
         let limit = if path == UPLOAD_PATH {
             max_body
@@ -2090,7 +2230,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         if content_type != expected { return Err(TransportError::Protocol(format!("unexpected content-type for {path}"))); }
     }
     if Instant::now() >= deadline { return Err(TransportError::Timeout); }
-    Ok(HttpRequestHead { path: path.to_string(), content_type, content_length: length, known_path, expect_continue, wire_version })
+    Ok(HttpRequestHead { path: path.to_string(), content_type, content_length: length, known_path, expect_continue, wire_version, is_websocket: is_ws, raw_header: header })
 }
 
 fn parse_wire_version(value: &str) -> Result<(u16, u16), TransportError> {
@@ -3296,6 +3436,37 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn websocket_roundtrip_over_pinned_tls() {
+        let cert = cert();
+        let device = DeviceIdentity::create("ws-test", "macOS").unwrap();
+        let (store, _upload) = package(&device);
+        let config = server_config(&cert);
+        let server = HttpsSyncServer::bind(config, store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        let (mut ws, _guard) = client.connect_ws().unwrap();
+        let ping = crate::ws::WsSyncFrame::Ping { client_time_ms: 12345 };
+        let text = serde_json::to_string(&ping).unwrap();
+        ws.send(tungstenite::Message::Text(text)).unwrap();
+        let resp = ws.read().unwrap();
+        match resp {
+            tungstenite::Message::Text(resp_text) => {
+                let frame: crate::ws::WsSyncFrame = serde_json::from_str(&resp_text).unwrap();
+                match frame {
+                    crate::ws::WsSyncFrame::Pong { server_time_ms } => {
+                        assert!(server_time_ms > 0);
+                    }
+                    _ => panic!("expected pong frame"),
+                }
+            }
+            _ => panic!("expected text frame"),
+        }
+        let _ = ws.close(None);
         assert!(handle.join().unwrap().is_ok());
     }
 

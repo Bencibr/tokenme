@@ -1745,6 +1745,40 @@ impl Index {
             tx.execute("INSERT INTO meta(key, value) VALUES(?1, '1')", params![REPAIR_QODER_SPLIT]).map_err(sql_err)?;
             tx.commit().map_err(sql_err)?;
         }
+        // One-shot re-homing for Linux-synced dedupe keys: previously, keyed
+        // events imported from a Linux collector kept their raw bare key
+        // (`trae#1`, `1`, etc.), causing cross-server collisions on the unique
+        // `event_dedupe` index. Scoping them with `linux:<origin>:<key>` ensures
+        // multiple Linux servers coexist idempotently without clobbering each other.
+        const REPAIR_LINUX_SCOPED_KEYS: &str = "repair:linux-scoped-keys-1";
+        let scoped_keys: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_LINUX_SCOPED_KEYS],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if scoped_keys.is_none() {
+            repairs_applied += 1;
+            conn.execute(
+                &format!(
+                    "UPDATE event SET dedupe_key = 'linux:' || ({ORIGIN_SQL}) || ':' || dedupe_key \
+                     WHERE ({ORIGIN_SQL}) <> '' \
+                       AND dedupe_key IS NOT NULL \
+                       AND dedupe_key NOT LIKE 'linux:%' \
+                       AND dedupe_key NOT LIKE 'mix:%'"
+                ),
+                [],
+            )
+            .map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_LINUX_SCOPED_KEYS],
+            )
+            .map_err(sql_err)?;
+        }
         // All compatibility repairs above may have removed or re-keyed event
         // rows.  Reconcile the additive identity projection after those
         // mutations, rather than waiting for the next ingest to encounter a
