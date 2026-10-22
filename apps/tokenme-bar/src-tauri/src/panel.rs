@@ -1855,6 +1855,17 @@ fn rect_size(rect: &Rect) -> (f64, f64) {
     }
 }
 
+/// Pulls the panel back onto a connected monitor without moving it if it fits.
+/// Only the non-macOS `menu_bar_origin` calls this; macOS anchors from the
+/// monitor list instead.
+#[cfg(not(target_os = "macos"))]
+fn clamp(window: &WebviewWindow) {
+    if let Ok(pos) = window.outer_position() {
+        let (x, y) = clamp_point(window, pos.x as f64, pos.y as f64);
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    }
+}
+
 fn clamp_point(window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
     let monitors = window.available_monitors().unwrap_or_default();
     let size = window
