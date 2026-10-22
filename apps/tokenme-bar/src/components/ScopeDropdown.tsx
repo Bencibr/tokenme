@@ -38,6 +38,7 @@ interface Props {
   machines: MachineView[];
   syncs?: SyncRecord[];
   devices?: SyncDeviceView[];
+  isSecondary?: boolean;
   now: number;
   /** Open state lives in App so Escape closes menu → sheet → panel in order. */
   open: boolean;
@@ -49,15 +50,17 @@ interface Props {
 
 /** The one rule for "is this origin a machine we manage right now": a
  *  registered device that was not revoked, else an origin backed by a
- *  configured server. Everything else the index remembers — an old collector
- *  bundle, a manual import — is history, not a machine. The scope menu and the
- *  header's sync badge both ask this, so they cannot disagree about which
- *  machines exist. */
+ *  configured server, OR a downlink origin received while this machine is an
+ *  active secondary. On a secondary, `devices` is empty (the secondary has no
+ *  secondaries of its own), so without the secondary check, primary-downlinked
+ *  data is misclassified as historical orphan data and hidden from the menu. */
 export function isManagedOrigin(
   origin: string,
   devices: SyncDeviceView[] | undefined,
   serverOrigins: Set<string> | undefined,
+  isSecondary?: boolean,
 ): boolean {
+  if (isSecondary) return true;
   const device = devices?.find((d) => d.origin === origin);
   if (device) return device.status !== "revoked";
   // The server list is still loading: keep the origin until it resolves, so a
@@ -74,6 +77,7 @@ export function ScopeDropdown({
   machines,
   syncs,
   devices,
+  isSecondary,
   now,
   open,
   onOpen,
@@ -100,7 +104,7 @@ export function ScopeDropdown({
   const registered = new Map((devices ?? []).map((device) => [device.origin, device]));
   // 选择器只展示可管理的来源；历史手动导入仍留在索引里，但不冒充机器。
   const machineRows = [...machines].filter(
-    (machine) => machine.origin === "" || isManagedOrigin(machine.origin, devices, serverOrigins),
+    (machine) => machine.origin === "" || isManagedOrigin(machine.origin, devices, serverOrigins, isSecondary),
   );
   for (const device of devices ?? []) {
     if (device.status !== "revoked" && !machineRows.some((machine) => machine.origin === device.origin)) {
@@ -119,7 +123,7 @@ export function ScopeDropdown({
     const importedAt = device?.last_merged_at_ms ?? rec?.imported_at_ms ?? null;
     return {
       origin: m.origin,
-      name: local ? t("scope.local") : m.origin,
+      name: local ? t("scope.local") : (device?.display_name || m.origin),
       local,
       tokens: m.today_tokens,
       color: local ? "var(--accent)" : SLOTS[slot++ % SLOTS.length],

@@ -258,6 +258,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
           machines={report.machines ?? []}
           syncs={report.syncs}
           devices={syncDevices?.devices}
+          isSecondary={syncDevices?.role === "secondary"}
           now={now}
           open={scopeMenuOpen}
           onOpen={onScopeMenuOpen}

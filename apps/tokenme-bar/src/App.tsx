@@ -423,7 +423,7 @@ const [page, setPage] = useState<PageKey>(() => {
     // same rule as the scope menu, so the badge never names a machine the
     // menu does not list.
     const all = (report?.syncs ?? [])
-      .filter((r) => isManagedOrigin(r.origin, syncDevices.devices, serverOrigins))
+      .filter((r) => isManagedOrigin(r.origin, syncDevices.devices, serverOrigins, syncDevices.role === "secondary"))
       .sort((a, b) => b.imported_at_ms - a.imported_at_ms);
     // The badge says whose numbers these are: under a machine scope it reports
     // that machine's merge only, and the local scope has no import to report.
