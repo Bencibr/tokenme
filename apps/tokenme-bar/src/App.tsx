@@ -32,6 +32,13 @@ import { SpeedPage } from "./components/SpeedPage";
 /** 托盘显示模式循环顺序:仅托盘 → 仅Token → 仅花费 → 三个托盘组合。 */
 const MODES: TrayMode[] = ["tray_only", "tokens_only", "cost_only", "tray_tokens", "tray_cost", "tray_tokens_cost"];
 
+// App-level sync reads race: the boot read, the report-updated refresh and the
+// sync-updated push all settle out of order, and an older read settling late
+// must not clobber the newer answer already applied. This module-scoped
+// monotonic sequence is the judge — a read applies `setSyncDevices` only when
+// its seq is still the newest.
+let syncReadSeq = 0;
+
 export default function App() {
   // The bubble is a runtime-created Windows window that shares this frontend
   // entrypoint. Keeping it in a separate component prevents panel hooks from
@@ -122,16 +129,27 @@ const [page, setPage] = useState<PageKey>(() => {
   // Sync state can change out-of-band: the primary's service thread pushes
   // `sync-updated` the moment a pairing request persists (or an auto-approve
   // lands), and mutations plus the recovery loop push their flips. Re-read
-  // status once per event; the in-flight guard collapses a burst into one
-  // read instead of queueing several against the control-state mutex.
-  const syncReadInFlight = useRef(false);
-  const refreshSyncDevices = useCallback(() => {
-    if (syncReadInFlight.current) return;
-    syncReadInFlight.current = true;
-    void bridge.syncDevices({ action: "status" }).then((v) => {
-      setSyncDevices(v);
+  // status once per event. The reads are guarded by the module-scoped
+  // sequence above; an event landing while a read is in flight schedules
+  // exactly one trailing re-read instead of being swallowed by the old
+  // in-flight guard together with a possibly-stale winner.
+  const syncReadsInFlight = useRef(0);
+  const syncReadTrailing = useRef(false);
+  const readSyncDevices = useCallback<(read?: Promise<SyncDevicesSnapshot>) => void>((read) => {
+    if (syncReadsInFlight.current > 0) {
+      if (read !== undefined) syncReadTrailing.current = true;
+      return;
+    }
+    const seq = ++syncReadSeq;
+    syncReadsInFlight.current += 1;
+    void (read ?? bridge.syncDevices({ action: "status" })).then((v) => {
+      if (seq === syncReadSeq) setSyncDevices(v);
     }).catch(() => {}).finally(() => {
-      syncReadInFlight.current = false;
+      syncReadsInFlight.current -= 1;
+      if (syncReadsInFlight.current === 0 && syncReadTrailing.current) {
+        syncReadTrailing.current = false;
+        window.setTimeout(() => readSyncDevices(), 0);
+      }
     });
   }, []);
 
@@ -142,9 +160,9 @@ const [page, setPage] = useState<PageKey>(() => {
   const syncServiceLive = syncDevices.role !== "unconfigured" && syncDevices.service_running && !syncOpen;
   useEffect(() => {
     if (!syncServiceLive) return;
-    const timer = window.setInterval(refreshSyncDevices, 5000);
+    const timer = window.setInterval(() => readSyncDevices(), 5000);
     return () => window.clearInterval(timer);
-  }, [refreshSyncDevices, syncServiceLive]);
+  }, [readSyncDevices, syncServiceLive]);
 
   useEffect(() => {
     // The native chrome (tray menu, tooltip, updater copy) cannot see the
@@ -227,26 +245,22 @@ const [page, setPage] = useState<PageKey>(() => {
         }
       })
       .catch(() => {});
-    void bridge
-      .syncDevices()
-      .then((v) => {
-        if (alive) setSyncDevices(v);
-      })
-      .catch(() => {});
+    // Boot read, routed through the guarded applier: its seq is captured at
+    // read start, so an event read that starts later always outranks it.
+    if (alive) readSyncDevices(bridge.syncDevices());
     const unServers = bridge.onServersUpdated((v) => {
       setServers(v);
       setServersLoaded(true);
     });
-    const unSync = bridge.onSyncUpdated(refreshSyncDevices);
+    const unSync = bridge.onSyncUpdated(readSyncDevices);
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
       // Device receipts are not part of Report.syncs. Refresh the local sync
       // view after an engine publish so ScopeDropdown shows the latest ACK and
-      // snapshot completion instead of a stale mount-time status.
-      void bridge.syncDevices().then((v) => {
-        if (alive) setSyncDevices(v);
-      }).catch(() => {});
+      // snapshot completion instead of a stale mount-time status. Same guarded
+      // applier: a sync-updated read started after this one outranks it.
+      readSyncDevices(bridge.syncDevices());
       // Any publish — this refresh's result, a cadence tick, a healed engine —
       // means the figures on screen are new, so the busy readout is done.
       setRefreshPending(null);
@@ -265,7 +279,7 @@ const [page, setPage] = useState<PageKey>(() => {
       unServers();
       unSync();
     };
-  }, [refreshSyncDevices]);
+  }, [readSyncDevices]);
 
   const refresh = useCallback(async () => {
     setLoading(true);

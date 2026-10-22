@@ -81,6 +81,14 @@ function syncErrorMessage(error: string | null): string | null {
   if (normalized.includes("device is revoked")) return t("sync.error.revoked");
   if (normalized.includes("already paired")) return t("sync.error.relink");
   if (normalized.includes("secondary sync is disabled")) return t("sync.error.disabled");
+  // A lost scheduler lease self-disabled the runtime; retry re-enables it.
+  // A stale previous-disconnect notice blocks the pairing until it reaches
+  // the primary — same family as a relink.
+  if (normalized.includes("lease")) return t("sync.error.disabled");
+  if (normalized.includes("previous disconnect")) return t("sync.error.relink");
+  // Residual pairing races (a start worker or a restore flipping the role
+  // mid-flight) read as "state changed"; the honest next step is a rescan.
+  if (normalized.includes("sync state changed while pairing")) return t("sync.error.relink");
   if (normalized.includes("already in use")) return t("sync.error.listener");
   if (normalized.includes("sync protocol") || normalized.includes("update tokenme on the other machine")) return t("sync.error.version");
   if (normalized.includes("busy") || normalized.includes("already running")) return t("sync.error.busy");
@@ -423,7 +431,14 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const primaryDevices = connectedDevices.filter((device) => device.role === "primary");
   const secondaryDevices = connectedDevices.filter((device) => device.role === "secondary");
   const pairedPrimaryCount = primaryDevices.length || (isSecondary && snapshot.primary_id ? 1 : 0);
-  const errorDetail = (error ?? snapshot.last_error)?.trim() || null;
+  const rawErrorDetail = (error ?? snapshot.last_error)?.trim() || null;
+  // While the request is genuinely awaiting the primary's approval, the only
+  // "error" is the waiting note itself — and `mark_secondary_connected` keeps
+  // `last_connected` fresh, so the banner would pair a raw English note with
+  // a misleading degraded hint and a useless retry button. The dual-ring
+  // waiting card is the UI for that state; keep the banner out of the way
+  // until a real error shows up.
+  const errorDetail = awaitingSecondaryApproval && rawErrorDetail?.toLowerCase().includes("awaiting approval") ? null : rawErrorDetail;
   const visibleError = syncErrorMessage(errorDetail);
   // The two halves of a secondary's sync, each with its own finish line: the
   // initial upload snapshot (pages still ACKing → queued items) and the
@@ -697,7 +712,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                       <input
                         type="checkbox"
                         checked={shareOverride ?? snapshot.primary_data_sharing_enabled}
-                        disabled={commandBusy}
+                        disabled={commandBusy || primaryStarting}
                         onChange={(event) => toggleSharing(event.currentTarget.checked)}
                       />
                       <span className="sync-share-copy">
@@ -709,7 +724,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                       <input
                         type="checkbox"
                         checked={autoApproveOverride ?? snapshot.primary_auto_approve_enabled}
-                        disabled={commandBusy}
+                        disabled={commandBusy || primaryStarting}
                         onChange={(event) => toggleAutoApprove(event.currentTarget.checked)}
                       />
                       <span className="sync-share-copy">
@@ -777,7 +792,10 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                       <span className={`sync-dev-dot${secondaryRecovering ? " is-paused" : secondaryDegraded ? " is-error" : ""}`} aria-hidden="true" />
                       <span className="sync-dev-platform" role="img" aria-label={snapshot.primary_os || "unknown system"} title={snapshot.primary_os || "unknown system"}><IconDevicePlatform os={snapshot.primary_os ?? ""} size={14} /></span>
                       <span className="sync-dev-name">{snapshot.primary_display_name?.trim() || snapshot.discovered_primaries.find((primary) => primary.primary_id === snapshot.primary_id)?.display_name.trim() || t("sync.role.primary")}<code>{snapshot.endpoint ?? snapshot.primary_id}</code></span>
-                      <code>{secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
+                      {/* Same override as the chip: a pairing wait refreshed
+                          `last_connected`, so the raw degraded/recovering
+                          verdicts would read 已连接 · 同步异常 over a live wait. */}
+                      <code>{awaitingSecondaryApproval ? t("sync.state.starting") : secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
                     </div>
                   )}
                 </>
