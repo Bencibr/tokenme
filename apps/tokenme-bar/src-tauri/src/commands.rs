@@ -714,7 +714,10 @@ fn send_pending_pairing(interrupt: &SyncInterrupt, pending: &PendingPairing) -> 
     interrupt.install(&transport);
     let response = transport.send_pairing_request(&pending.request).map_err(|error| format!("pairing request failed: {error}"))?;
     match response.status.as_str() {
-        "pending" | "approved" => Ok(()),
+        // "paired" is the auto-approve answer: the primary approved on
+        // arrival, so the pairing is done — same as a manual approval ("approved")
+        // and a replay of one.
+        "pending" | "approved" | "paired" => Ok(()),
         "rejected" => Err("pairing request was rejected".into()),
         "expired" => Err("pairing invite expired".into()),
         _ => Err("pairing response contains an unknown state".into()),
