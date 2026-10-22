@@ -817,6 +817,7 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     let mut runtime = SyncRuntime::new_secondary_with_display_name(
         store, transport, runtime_config, identity, usage_index::hostname(),
     );
+    runtime.set_cut_off_notify(|reason| crate::notify::post_cut_off(reason));
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let join = thread::spawn(move || runtime.run_until_real(&thread_stop));
@@ -940,10 +941,22 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
             dispatch_diagnostics_control(diag_app.clone(), diagnostics_host.clone(), tool, arguments)
         }).map_err(|e| format!("cannot configure diagnostics control handler: {e}"))?;
         let refresh_app = app;
-        server.set_disconnect_sink(move |_device_id| {
+        let sink_index = index_path.clone();
+        server.set_disconnect_sink(move |device_id: &str| {
             if let Some(channel) = refresh_app.try_state::<EngineChannel>() {
                 let _ = channel.0.send(Msg::Refresh);
             }
+            // The list refresh covers the UI; the toast covers the owner who
+            // is not looking at it. Resolve the device's display name off the
+            // busy-tolerant read path, then toast off this connection thread.
+            let (device_id, sink_index, refresh_app) = (device_id.to_string(), sink_index.clone(), refresh_app.clone());
+            tauri::async_runtime::spawn_blocking(move || {
+                let name = SyncStore::read_status(&sink_index).ok()
+                    .and_then(|status| status.devices.into_iter().find(|d| d.device_id == device_id))
+                    .map(|d| if d.display_name.trim().is_empty() { d.origin } else { d.display_name })
+                    .unwrap_or_else(|| device_id.clone());
+                crate::notify::post_secondary_left(&name);
+            });
         }).map_err(|e| format!("cannot configure disconnect listener: {e}"))?;
     }
     let diagnostics = server.diagnostics_handle();

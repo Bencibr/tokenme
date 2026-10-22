@@ -4,6 +4,7 @@
 //! or `run_until`, while the SQLite lease is the process-wide singleton gate.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -78,6 +79,10 @@ pub struct SyncRuntime {
     primary_download_progressed: bool,
     primary_download_more: bool,
     primary_download_preparing: bool,
+    /// Embedding-UI wake for the moment the primary cuts this device off
+    /// (revoked/blocked) and the runtime self-disables. Receives a short
+    /// reason tag; the panel turns it into a toast.
+    on_cut_off: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     primary_download_complete: bool,
     occurrences_initialized: bool,
     occurrence_init_progressed: bool,
@@ -95,7 +100,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0 }
+        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0, on_cut_off: None }
     }
 
     pub fn new_secondary(
@@ -104,7 +109,7 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0 }
+        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0, on_cut_off: None }
     }
 
     pub fn new_secondary_with_display_name(
@@ -121,6 +126,11 @@ impl SyncRuntime {
 
     pub fn store(&self) -> &SyncStore { &self.store }
     pub fn store_mut(&mut self) -> &mut SyncStore { &mut self.store }
+
+    /// Registers the embedding UI's wake for cut-off events (see the field).
+    pub fn set_cut_off_notify(&mut self, hook: impl Fn(&str) + Send + Sync + 'static) {
+        self.on_cut_off = Some(Arc::new(hook));
+    }
     pub fn owner(&self) -> &str { &self.config.owner }
 
     pub fn transport_cancellation(&self) -> ClientTransportCancellation { self.transport.cancellation() }
@@ -552,6 +562,17 @@ impl SyncRuntime {
             || matches!(error, SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired")
         {
             let _ = self.store.set_secondary_enabled(false, now_ms);
+            // The primary cut this device off (revoked or blocked): the panel
+            // polls on its own cadence, so wake the owner directly — the same
+            // door-knock courtesy the primary's pairing hook provides.
+            if let Some(hook) = self.on_cut_off.as_ref() {
+                let reason = match error {
+                    SyncError::Revoked(_) => "revoked",
+                    SyncError::Security(_) => "security",
+                    _ => "rejected",
+                };
+                hook(reason);
+            }
         }
     }
 
