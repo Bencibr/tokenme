@@ -86,6 +86,7 @@ function syncErrorMessage(error: string | null): string | null {
 
 function syncScreenFor(snapshot: SyncDevicesSnapshot): Screen {
   if (snapshot.role === "unconfigured" && !snapshot.primary_starting) return "setup";
+  if (snapshot.role === "secondary" && (snapshot.primary_id || snapshot.service_running)) return "overview";
   if (!snapshot.service_running && !snapshot.primary_starting) return "setup";
   return "overview";
 }
@@ -445,7 +446,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
         {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : null}
         {device.role === "secondary" && device.status === "paired" && deviceMeta ? <span className="sync-dev-when">{deviceMeta}</span> : null}
         <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
-          request: { action: "revoke", device_id: device.device_id },
+          request: isSecondary ? { action: "stop" } : { action: "revoke", device_id: device.device_id },
           message: isSecondary && uploadQueued > 0
             ? t("sync.revoke.pending_confirm", { name: hostName, count: uploadQueued })
             : t("sync.revoke.confirm", { name: hostName }),
@@ -590,7 +591,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             </>
           ) : null}
 
-          {screen === "overview" && (snapshot.role !== "unconfigured" || snapshot.primary_starting) && (snapshot.service_running || snapshot.primary_starting) ? (
+          {screen === "overview" && (snapshot.role !== "unconfigured" || snapshot.primary_starting) && (snapshot.service_running || snapshot.primary_starting || snapshot.role === "secondary") ? (
             <>
               {primaryStarting ? <div className="sync-waiting" role="status">{t("sync.primary.starting")}</div> : null}
               <div className="rolecard">
@@ -606,7 +607,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   </div>
                   <div className="role-right">
                     <span className={`role-state role-state-${status.kind}`} aria-live="polite">{status.label}</span>
-                    <button type="button" className="stopbtn" disabled={commandBusy || !snapshot.service_running} onClick={() => {
+                    <button type="button" className="stopbtn" disabled={commandBusy || (!snapshot.service_running && snapshot.role !== "secondary")} onClick={() => {
                       if (isSecondary && uploadQueued > 0) {
                         setPendingConfirm({ request: { action: "stop" }, message: t("sync.stop.pending_confirm", { count: uploadQueued }) });
                         return;
@@ -689,6 +690,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                       <span className={`sync-dev-dot${secondaryRecovering ? " is-paused" : secondaryDegraded ? " is-error" : ""}`} aria-hidden="true" />
                       <span className="sync-dev-name">{snapshot.primary_display_name?.trim() || snapshot.discovered_primaries.find((primary) => primary.primary_id === snapshot.primary_id)?.display_name.trim() || t("sync.role.primary")}<code>{snapshot.endpoint ?? snapshot.primary_id}</code></span>
                       <code>{secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
+                      <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
+                        request: { action: "stop" },
+                        message: uploadQueued > 0
+                          ? t("sync.revoke.pending_confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary"), count: uploadQueued })
+                          : t("sync.revoke.confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary") }),
+                      })}>{t("sync.disconnect")}</button>
                     </div>
                   )}
                 </>

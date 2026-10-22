@@ -7,15 +7,16 @@
 //! 4. Secondary reconnect and multi-generation incremental sync.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
 use usage_device_sync::{
-    hash_bytes, DeviceIdentity, HttpsServerConfig, HttpsSyncServer, HttpsTransportConfig,
-    NetworkCounts, NetworkPackage, NetworkRow, PairingRequest, SignedUpload,
-    SyncStore, Tls13HttpsTransport, UploadEnvelope, WsSyncFrame, PROTOCOL_ID,
-    WS_PROTOCOL_VERSION,
+    deliver_disconnect_notice, hash_bytes, DeviceIdentity, DeviceStatus, HttpsServerConfig,
+    HttpsSyncServer, HttpsTransportConfig, NetworkCounts, NetworkPackage, NetworkRow,
+    PairingRequest, SecondarySyncConfig, SignedUpload, SyncStore, Tls13HttpsTransport,
+    UploadEnvelope, WsSyncFrame, PROTOCOL_ID, WS_PROTOCOL_VERSION,
 };
 
 struct CertFixture {
@@ -735,5 +736,136 @@ fn test_conflicting_desynchronization_triggers_reconcile() {
     }
 
     let _ = ws.close(None);
+    assert!(server_handle.join().unwrap().is_ok());
+}
+
+#[test]
+fn test_secondary_disconnect_notifies_primary_and_halts_communication() {
+    let cert = generate_cert();
+    let primary_id = "primary-disc-test";
+    let temp_dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let index_path = temp_dir.path().join("index.db");
+    let mut store = SyncStore::open(&index_path, primary_id).unwrap();
+
+    let id_path = temp_dir.path().join("sec_identity.json");
+    let sec = DeviceIdentity::load_or_create(&id_path, "sec-disc", "Disconnect-Device").unwrap();
+    let stream_id = pair_secondary(&mut store, &sec, primary_id);
+
+    let config = setup_server_config(&cert, temp_dir.path().join("staging"), 4);
+    let server = HttpsSyncServer::bind(config, store).unwrap();
+    let addr = server.local_addr().unwrap();
+
+    let disconnected_device = Arc::new(std::sync::Mutex::new(None));
+    let disconnected_clone = Arc::clone(&disconnected_device);
+    server.set_disconnect_sink(move |dev_id| {
+        *disconnected_clone.lock().unwrap() = Some(dev_id.to_string());
+    }).unwrap();
+
+    let server_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_stop_clone = Arc::clone(&server_stop);
+    let server_handle = thread::spawn(move || server.run_until(&server_stop_clone));
+
+    let endpoint = format!("https://127.0.0.1:{}", addr.port());
+    let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+        endpoint.clone(),
+        "localhost",
+        cert.cert_der.clone(),
+    )).unwrap();
+
+    let (mut ws, _socket) = transport.connect_ws().unwrap();
+
+    // 1. Authenticate over WebSocket
+    let auth = WsSyncFrame::Auth {
+        device_id: sec.device_id.clone(),
+        origin: sec.origin.clone(),
+        display_name: "Disconnect Device".into(),
+        version: WS_PROTOCOL_VERSION.into(),
+    };
+    ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
+    let auth_ack = ws.read().unwrap();
+    assert!(matches!(
+        serde_json::from_str::<WsSyncFrame>(auth_ack.to_text().unwrap()).unwrap(),
+        WsSyncFrame::AuthAck { status, .. } if status == "connected"
+    ));
+
+    // 2. Upload initial batch before disconnect
+    let gen1 = build_signed_upload(&sec, primary_id, &stream_id, 1, "claude", 5);
+    let push1 = WsSyncFrame::SyncPush {
+        batch_id: "batch-1".into(),
+        envelope: gen1.envelope,
+        signature: gen1.signature.to_vec(),
+        gzip_bytes: gen1.gzip_bytes,
+    };
+    ws.send(tungstenite::Message::Text(serde_json::to_string(&push1).unwrap())).unwrap();
+    let ack1 = ws.read().unwrap();
+    assert!(matches!(
+        serde_json::from_str::<WsSyncFrame>(ack1.to_text().unwrap()).unwrap(),
+        WsSyncFrame::SyncAck { success: true, .. }
+    ));
+
+    // 3. Secondary clicks disconnect: deliver disconnect notice immediately to primary
+    let sec_config = SecondarySyncConfig {
+        primary_id: primary_id.into(),
+        primary_display_name: Some("Primary Mac".into()),
+        endpoint: endpoint.clone(),
+        server_name: "localhost".into(),
+        certificate_der: cert.cert_der.clone(),
+        certificate_pin: hash_bytes(&cert.cert_der),
+        device_id: sec.device_id.clone(),
+        origin: sec.origin.clone(),
+        identity_path: id_path,
+        stream_id: Some(stream_id.clone()),
+        data_epoch: Some(1),
+        expected_generation: Some(1),
+        enabled: true,
+        capture_enabled: true,
+        last_error: None,
+        last_manifest_hash: None,
+        last_gzip_hash: None,
+        last_connected_at_ms: Some(1000),
+        last_ack_generation: None,
+        last_ack_receipt_hash: None,
+    };
+
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    deliver_disconnect_notice(&sec_config, now_ms).unwrap();
+
+    // 4. Verify primary received disconnect notification via sink callback
+    let notified = disconnected_device.lock().unwrap().clone();
+    assert_eq!(notified.as_deref(), Some(sec.device_id.as_str()), "primary must fire disconnect callback");
+
+    // 5. Verify primary state: secondary device is Revoked, stream is inactive
+    let primary_reopen = SyncStore::open(&index_path, primary_id).unwrap();
+    let dev = primary_reopen.device(&sec.device_id).unwrap().expect("device exists");
+    assert_eq!(dev.status, DeviceStatus::Revoked, "primary must mark device revoked");
+
+    // 6. If secondary attempts to push again after disconnect over existing socket, it must fail
+    let gen2 = build_signed_upload(&sec, primary_id, &stream_id, 2, "claude", 2);
+    let push2 = WsSyncFrame::SyncPush {
+        batch_id: "batch-2".into(),
+        envelope: gen2.envelope,
+        signature: gen2.signature.to_vec(),
+        gzip_bytes: gen2.gzip_bytes,
+    };
+    let _ = ws.send(tungstenite::Message::Text(serde_json::to_string(&push2).unwrap()));
+    if let Ok(ack2) = ws.read() {
+        if let Ok(frame) = serde_json::from_str::<WsSyncFrame>(ack2.to_text().unwrap()) {
+            match frame {
+                WsSyncFrame::SyncAck { success, error, .. } => {
+                    assert!(!success, "push after revocation must not succeed");
+                    assert!(error.is_some(), "push after revocation must produce error");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = ws.close(None);
+    server_stop.store(true, std::sync::atomic::Ordering::Release);
     assert!(server_handle.join().unwrap().is_ok());
 }

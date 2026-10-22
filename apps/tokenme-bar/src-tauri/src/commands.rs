@@ -518,13 +518,13 @@ fn retry_disconnect_notifications(index_path: &std::path::Path) -> Result<(), St
     // control mutex. A status read and a new role never wait for this ACK.
     for notice in notices.into_iter().take(2) {
         let result = usage_device_sync::deliver_disconnect_notice(&notice.config, current_ms());
-        let Some(primary_id) = SyncStore::read_status(index_path).map_err(|error| error.to_string())?.primary_id else { continue; };
-        let mut store = SyncStore::open(index_path, primary_id).map_err(|error| error.to_string())?;
-        let error = result.as_ref().err().map(ToString::to_string);
-        store.finish_disconnect_notice(&notice.config.device_id, current_ms(), error.as_deref()).map_err(|error| error.to_string())?;
-        // Retain the key for this primary so re-pairing preserves event IDs.
-        // Metadata only; queue/identity/endpoint details stay out of logs.
-        log_sync_action("disconnect_notify", Instant::now(), error.as_deref());
+        if let Ok(mut store) = SyncStore::open(index_path, notice.config.primary_id.clone()) {
+            let error = result.as_ref().err().map(ToString::to_string);
+            let _ = store.finish_disconnect_notice(&notice.config.device_id, current_ms(), error.as_deref());
+            // Retain the key for this primary so re-pairing preserves event IDs.
+            // Metadata only; queue/identity/endpoint details stay out of logs.
+            log_sync_action("disconnect_notify", Instant::now(), error.as_deref());
+        }
     }
     Ok(())
 }
@@ -854,9 +854,16 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     }).map_err(|error| format!("cannot configure sync runtime logging: {error}"))?;
     if let Some(app) = diagnostics_app {
         let diagnostics_host = server.diagnostics_host();
+        let diag_app = app.clone();
         server.diagnostics_host().set_control_handler(move |tool, arguments| {
-            dispatch_diagnostics_control(app.clone(), diagnostics_host.clone(), tool, arguments)
+            dispatch_diagnostics_control(diag_app.clone(), diagnostics_host.clone(), tool, arguments)
         }).map_err(|e| format!("cannot configure diagnostics control handler: {e}"))?;
+        let refresh_app = app;
+        server.set_disconnect_sink(move |_device_id| {
+            if let Some(channel) = refresh_app.try_state::<EngineChannel>() {
+                let _ = channel.0.send(Msg::Refresh);
+            }
+        }).map_err(|e| format!("cannot configure disconnect listener: {e}"))?;
     }
     let diagnostics = server.diagnostics_handle();
     let address = server.local_addr().map_err(|e| e.to_string())?;
@@ -1471,7 +1478,32 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         invite_expires_at_ms: state.invite_expires_at_ms,
         pairing_pending,
         discovered_primaries: state.discovered_primaries.clone(),
-        devices: snapshot.devices.into_iter().map(sync_device_view).collect(),
+        devices: {
+            let mut devices: Vec<SyncDeviceView> = snapshot.devices.into_iter().map(sync_device_view).collect();
+            if (state.role == "secondary" || (state.role.is_empty() && secondary_config.is_some())) && secondary_config.is_some() {
+                if let Some(config) = &secondary_config {
+                    let primary_origin = config.primary_display_name.clone().unwrap_or_else(|| config.primary_id.clone());
+                    let primary_display_name = config.primary_display_name.clone().unwrap_or_else(|| "Primary".into());
+                    let primary_device = SyncDeviceView {
+                        device_id: config.primary_id.clone(),
+                        origin: primary_origin,
+                        display_name: primary_display_name,
+                        os: "macOS".into(),
+                        role: "primary".into(),
+                        status: if state.runtime.is_some() { "paired".into() } else { "paused".into() },
+                        data_epoch: config.data_epoch.unwrap_or(0),
+                        active_stream_id: config.stream_id.clone(),
+                        last_generation: None,
+                        last_merged_at_ms: config.last_connected_at_ms,
+                        snapshot_complete: panel.download_complete.unwrap_or(false),
+                    };
+                    if !devices.iter().any(|d| d.device_id == config.primary_id) {
+                        devices.insert(0, primary_device);
+                    }
+                }
+            }
+            devices
+        },
         pairing_requests: snapshot.pairing_requests,
     })
 }
@@ -1771,14 +1803,17 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             stop_service(state);
             if was_secondary {
                 if let Some(config) = secondary_config {
-                    // State-only teardown, same seam as the primary's stop: the
-                    // binding row disappears from sync_state.db in milliseconds
-                    // while the ingest engine may hold the index write lock. The
-                    // index-side bookkeeping — the disconnect notice that revokes
-                    // this device on the primary, outbox retirement, journal
-                    // release, capture mirror — runs on a background thread with
-                    // the config captured here, because queue_secondary_disconnect
-                    // reads the row this delete removes.
+                    let delivery_config = config.clone();
+                    let delivery_index = index_path.clone();
+                    thread::spawn(move || {
+                        let started = Instant::now();
+                        let result = usage_device_sync::deliver_disconnect_notice(&delivery_config, current_ms());
+                        let error = result.as_ref().err().map(ToString::to_string);
+                        if let Ok(mut store) = SyncStore::open(&delivery_index, delivery_config.primary_id.clone()) {
+                            let _ = store.finish_disconnect_notice(&delivery_config.device_id, current_ms(), error.as_deref());
+                        }
+                        log_sync_action("disconnect_immediate", started, error.as_deref());
+                    });
                     SyncStore::clear_secondary_config_state(&index_path, &config.primary_id, &config.device_id)
                         .map_err(|error| error.to_string())?;
                     let converge_path = index_path.clone();
@@ -1859,6 +1894,17 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             let config = SyncStore::read_secondary_config(&index_path).map_err(|e| e.to_string())?;
             if let Some(config) = config {
                 stop_service(state);
+                let delivery_config = config.clone();
+                let delivery_index = index_path.clone();
+                thread::spawn(move || {
+                    let started = Instant::now();
+                    let result = usage_device_sync::deliver_disconnect_notice(&delivery_config, current_ms());
+                    let error = result.as_ref().err().map(ToString::to_string);
+                    if let Ok(mut store) = SyncStore::open(&delivery_index, delivery_config.primary_id.clone()) {
+                        let _ = store.finish_disconnect_notice(&delivery_config.device_id, current_ms(), error.as_deref());
+                    }
+                    log_sync_action("disconnect_immediate", started, error.as_deref());
+                });
                 SyncStore::open(&index_path, config.primary_id.clone()).map_err(|error| error.to_string())?
                     .request_secondary_disconnect(current_ms()).map_err(|error| error.to_string())?;
                 clear_pending_pairing()?;
@@ -1946,7 +1992,11 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
         }
         SyncManagementRequest::Revoke { device_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
-            SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.revoke_device(&device_id, current_ms()).map(|_| ()).map_err(|e| e.to_string())
+            SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.revoke_device(&device_id, current_ms()).map(|_| ()).map_err(|e| e.to_string())?;
+            if let Some(channel) = diagnostics_app.as_ref().and_then(|app| app.try_state::<EngineChannel>()) {
+                let _ = channel.0.send(Msg::Refresh);
+            }
+            Ok(())
         }
         }
     })();
