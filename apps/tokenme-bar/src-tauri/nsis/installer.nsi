@@ -429,43 +429,9 @@ FunctionEnd
 
 ; Uninstaller Pages
 ; 1. Confirm uninstall page
-Var DeleteAppDataCheckbox
-Var DeleteAppDataCheckboxState
-!define /ifndef WS_EX_LAYOUTRTL         0x00400000
-!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
-Function un.ConfirmShow ; Add add a `Delete app data` check box
-  ; $1 inner dialog HWND
-  ; $2 window DPI
-  ; $3 style
-  ; $4 x
-  ; $5 y
-  ; $6 width
-  ; $7 height
-  FindWindow $1 "#32770" "" $HWNDPARENT ; Find inner dialog
-  System::Call "user32::GetDpiForWindow(p r1) i .r2"
-  ${If} $(^RTL) = 1
-    StrCpy $3 "${__NSD_CheckBox_EXSTYLE} | ${WS_EX_LAYOUTRTL}"
-    IntOp $4 50 * $2
-  ${Else}
-    StrCpy $3 "${__NSD_CheckBox_EXSTYLE}"
-    IntOp $4 0 * $2
-  ${EndIf}
-  IntOp $5 100 * $2
-  IntOp $6 400 * $2
-  IntOp $7 25 * $2
-  IntOp $4 $4 / 96
-  IntOp $5 $5 / 96
-  IntOp $6 $6 / 96
-  IntOp $7 $7 / 96
-  System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "$(deleteAppData)", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
-  Pop $DeleteAppDataCheckbox
-  SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
-  SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
-FunctionEnd
-!define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave
-Function un.ConfirmLeave
-  SendMessage $DeleteAppDataCheckbox ${BM_GETCHECK} 0 0 $DeleteAppDataCheckboxState
-FunctionEnd
+; No delete-app-data checkbox: uninstall is total by design (see the
+; data-purge block in the uninstall section), so a checkbox offering to
+; keep data would promise a choice that does not exist.
 !define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive
 !insertmacro MUI_UNPAGE_CONFIRM
 
@@ -872,10 +838,18 @@ Section Uninstall
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
   ${EndIf}
 
-  ; Delete app data if the checkbox is selected
-  ; and if not updating
-  ${If} $DeleteAppDataCheckboxState = 1
-  ${AndIf} $UpdateMode <> 1
+  ; Uninstall is total: every data home this product writes goes with it.
+  ; The real homes are NOT the bundle id — the engine puts the usage index,
+  ; sync state, device identity and settings in %APPDATA%\tokenme
+  ; (dirs::data_dir().join("tokenme"), usage-index/src/lib.rs), and logs,
+  ; crash dumps, the pricing cache and TTFT state in %LOCALAPPDATA%\tokenme
+  ; (logging.rs, windows_diagnostics.rs, pricing.rs); the WebView2 profile
+  ; lands under the bundle id, and the tokenme-bar era left a differently
+  ; named local dir. Case-insensitive NTFS folds the TokenMe/tokenme
+  ; spellings. This must run for silent uninstalls too: the confirm page —
+  ; and with it the old checkbox — never shows under /S, which is how data
+  ; survived a quiet uninstall. Only an update-mode uninstall keeps data.
+  ${If} $UpdateMode <> 1
     ; Clear the install location $INSTDIR from registry
     DeleteRegKey SHCTX "${MANUPRODUCTKEY}"
     DeleteRegKey /ifempty SHCTX "${MANUKEY}"
@@ -886,8 +860,11 @@ Section Uninstall
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
 
     SetShellVarContext current
+    RmDir /r "$APPDATA\tokenme"
     RmDir /r "$APPDATA\${BUNDLEID}"
+    RmDir /r "$LOCALAPPDATA\tokenme"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    RmDir /r "$LOCALAPPDATA\tokenme-bar"
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL
