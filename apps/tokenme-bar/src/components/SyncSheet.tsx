@@ -78,6 +78,9 @@ function syncErrorMessage(error: string | null): string | null {
   if (normalized.includes("pairing invite") && normalized.includes("expired")) return t("sync.error.invite_expired");
   if (normalized.includes("invalid pairing invite")) return t("sync.error.invite_invalid");
   if (normalized.includes("pairing request was rejected")) return t("sync.error.rejected");
+  if (normalized.includes("device is revoked")) return t("sync.error.revoked");
+  if (normalized.includes("already paired")) return t("sync.error.relink");
+  if (normalized.includes("secondary sync is disabled")) return t("sync.error.disabled");
   if (normalized.includes("already in use")) return t("sync.error.listener");
   if (normalized.includes("sync protocol") || normalized.includes("update tokenme on the other machine")) return t("sync.error.version");
   if (normalized.includes("busy") || normalized.includes("already running")) return t("sync.error.busy");
@@ -352,7 +355,17 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id && (awaitingApprovalError || (!snapshot.last_error && secondaryConnectingElapsed));
   const secondaryServiceMayChange = snapshot.role === "secondary" && snapshot.service_running;
   const primaryDeviceStateMayChange = snapshot.role === "primary" && snapshot.devices.some((device) => device.role === "secondary" && device.status === "paired");
-  const shouldPoll = primaryStarting || snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
+  // The fast-accepted start leaves role empty until the worker finishes, but
+  // the card it is bringing up is the primary's — without `primaryStarting`
+  // here the badge reads 从端 with the secondary's paired-count line for the
+  // whole starting window.
+  const isPrimary = snapshot.role === "primary" || primaryStarting;
+  const isSecondary = snapshot.role === "secondary";
+  // A running primary service must be watched: a secondary's pairing request
+  // lands in its state db without any panel command, and the pending row only
+  // becomes visible through a status read (the `sync-updated` event covers
+  // the panel with the sheet closed; this covers the open sheet directly).
+  const shouldPoll = primaryStarting || snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange || (isPrimary && (snapshot.service_running || primaryStarting)) || (snapshot.service_running && (hasPendingRequest || awaitingSecondaryApproval));
   const commandBusy = mutationBusy || initializing || discovering;
   const cancelBusy = mutationBusy;
 
@@ -365,7 +378,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     let timer: number | undefined;
     const poll = async () => {
       if (!alive) return;
-      const maxAttempts = primaryStarting || snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange ? Number.POSITIVE_INFINITY : 12;
+      const maxAttempts = primaryStarting || snapshot.pairing_pending || secondaryServiceMayChange || primaryDeviceStateMayChange || (isPrimary && snapshot.service_running) ? Number.POSITIVE_INFINITY : 12;
       if (attempts >= maxAttempts) return;
       if (mutationInFlight.current || pollingInFlight.current || discoveryInFlight.current) {
         timer = window.setTimeout(() => void poll(), 500);
@@ -396,18 +409,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     const pollInterval = primaryStarting ? 1000 : 5000;
     timer = window.setTimeout(() => void poll(), pollInterval);
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [onSnapshot, pollGeneration, primaryDeviceStateMayChange, primaryStarting, secondaryServiceMayChange, shouldPoll, snapshot.pairing_pending]);
+  }, [isPrimary, onSnapshot, pollGeneration, primaryDeviceStateMayChange, primaryStarting, secondaryServiceMayChange, shouldPoll, snapshot.pairing_pending, snapshot.service_running]);
 
-  // The fast-accepted start leaves role empty until the worker finishes, but
-  // the card it is bringing up is the primary's — without `primaryStarting`
-  // here the badge reads 从端 with the secondary's paired-count line for the
-  // whole starting window.
-  const isPrimary = snapshot.role === "primary" || primaryStarting;
-  const isSecondary = snapshot.role === "secondary";
   const secondaryHasError = isSecondary && snapshot.service_running && Boolean(snapshot.last_error);
   const secondaryDegraded = secondaryHasError && hasRecentSecondaryContact(snapshot);
   const secondaryRecovering = secondaryHasError && !secondaryDegraded;
-  const status = syncStatus(snapshot);
+  // While the request is genuinely awaiting the primary's approval the runtime
+  // is healthy and its only "error" is the waiting note itself; the chip must
+  // tell the waiting story, not read 已连接 · 同步异常 over a live wait.
+  const status = awaitingSecondaryApproval ? { kind: "recovering" as const, label: t("sync.state.starting") } : syncStatus(snapshot);
   const pendingRequests = snapshot.pairing_requests.filter((request) => request.status === "pending");
   const connectedDevices = snapshot.devices.filter((device) => device.status !== "revoked");
   const primaryDevices = connectedDevices.filter((device) => device.role === "primary");
@@ -533,7 +543,11 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   {errorDetail ? <details className="sync-error-details"><summary>{t("sync.error.details")}</summary><code>{errorDetail.slice(0, 600)}</code></details> : null}
                 </div>
                 <div className="sync-error-actions">
-                  <button type="button" className="sync-error-btn" disabled={commandBusy} onClick={() => void run({ action: "retry_connect" })}>{t("sync.error.retry")}</button>
+                  {/* retry_connect only manages the secondary side; a primary
+                      error (port in use, bind refused) has no button path —
+                      the recovery loop re-hangs the listener, or the user
+                      fixes the setting. Keep the dismiss. */}
+                  {!isPrimary ? <button type="button" className="sync-error-btn" disabled={commandBusy} onClick={() => void run({ action: "retry_connect" })}>{t("sync.error.retry")}</button> : null}
                   <button type="button" className="sync-error-close" title={t("sync.error.dismiss")} onClick={() => setDismissedError(errorDetail)}><IconClose size={11} /></button>
                 </div>
               </div>

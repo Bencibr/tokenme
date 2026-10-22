@@ -542,6 +542,8 @@ export interface Bridge {
   onReport: (handler: (report: Report) => void) => () => void;
   /** A tray menu entry ("本周"/"今日") asks the panel to focus a period. */
   onTrayPeriod: (handler: (period: PeriodKey) => void) => () => void;
+  /** Panel-visible sync state changed out-of-band; the handler re-reads status. */
+  onSyncUpdated: (handler: () => void) => () => void;
   /** Switch the whole panel's machine scope; the engine re-folds and the next
    *  published report echoes it in `Report.scope`. */
   setReportScope: (scope: MachineScope) => Promise<void>;

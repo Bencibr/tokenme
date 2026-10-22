@@ -165,6 +165,24 @@ export const bridge: Bridge = {
     };
   },
 
+  /** Panel-visible sync state changed out-of-band (a pairing request landed
+   *  on the primary's service thread, an auto-approve fired, a mutation or
+   *  the recovery loop flipped a runtime). Events carry no payload on
+   *  purpose: the handler re-reads status through the ordinary command. */
+  onSyncUpdated(handler: () => void): () => void {
+    if (!inTauri) return () => {};
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void listen("sync-updated", () => handler()).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  },
+
   /** The browser preview has no engine to re-fold the numbers, so this is a
    *  no-op there; the panel only reacts to the report's own scope echo. */
   async setReportScope(scope: MachineScope): Promise<void> {

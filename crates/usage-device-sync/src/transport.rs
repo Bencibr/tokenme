@@ -831,6 +831,9 @@ struct ServerContext {
     active_sockets: Mutex<BTreeMap<u64, TcpStream>>,
     next_socket_id: AtomicU64,
     log_sink: Mutex<Option<Arc<dyn Fn(bool, &str) + Send + Sync>>>,
+    /// Embedding-UI wake for pairing requests that persist out-of-band (fresh
+    /// row, or an auto-approve landing) so the panel need not poll for them.
+    pairing_notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     replay: Mutex<NonceReplayCache>,
 }
 
@@ -1106,6 +1109,7 @@ impl HttpsSyncServer {
             active_sockets: Mutex::new(BTreeMap::new()),
             next_socket_id: AtomicU64::new(1),
             log_sink: Mutex::new(None),
+            pairing_notify: Mutex::new(None),
             replay: Mutex::new(NonceReplayCache::default()),
         };
         Ok(Self { listener, context: Arc::new(context) })
@@ -1123,6 +1127,18 @@ impl HttpsSyncServer {
         sink: impl Fn(bool, &str) + Send + Sync + 'static,
     ) -> Result<(), TransportError> {
         *lock_recover(&self.context.log_sink) = Some(Arc::new(sink));
+        Ok(())
+    }
+
+    /// Registers the embedding UI's wake for pairing requests that persist
+    /// out-of-band of any panel command: a fresh pending row, or an
+    /// auto-approve landing on arrival. The hook runs on the connection
+    /// thread and must be cheap (the panel emits an event and returns).
+    pub fn set_pairing_notify(
+        &self,
+        hook: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), TransportError> {
+        *lock_recover(&self.context.pairing_notify) = Some(Arc::new(hook));
         Ok(())
     }
 
@@ -1459,7 +1475,20 @@ impl ServerContext {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
             let request = HttpRequest { path: head.path.clone(), content_type: head.content_type, body };
             let mut store = lock_recover(&self.store);
-            dispatch_request(&mut store, &request, &self.replay)
+            let dispatched = dispatch_request(&mut store, &request, &self.replay);
+            drop(store);
+            // A pairing request that persisted here (fresh pending row, or the
+            // auto-approve that landed on it) is invisible to the panel until
+            // its next read; wake the embedding UI so approval never waits out
+            // the poll cadence.
+            if head.path == PAIRING_PATH && dispatched.0 == 200 {
+                if let Ok(state) = serde_json::from_slice::<PairingRequestState>(&dispatched.1) {
+                    if state.status == "pending" || state.status == "paired" {
+                        if let Some(hook) = lock_recover(&self.pairing_notify).clone() { hook(); }
+                    }
+                }
+            }
+            dispatched
         };
         let content_type = if status == 200 && head.path == DOWNLOAD_PATH { "application/octet-stream" } else { "application/json" };
         write_response(&mut tls, status, content_type, &response, self.config.max_body_bytes)?;

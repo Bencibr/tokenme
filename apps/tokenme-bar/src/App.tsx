@@ -119,6 +119,33 @@ const [page, setPage] = useState<PageKey>(() => {
     return () => { alive = false; un(); };
   }, []);
 
+  // Sync state can change out-of-band: the primary's service thread pushes
+  // `sync-updated` the moment a pairing request persists (or an auto-approve
+  // lands), and mutations plus the recovery loop push their flips. Re-read
+  // status once per event; the in-flight guard collapses a burst into one
+  // read instead of queueing several against the control-state mutex.
+  const syncReadInFlight = useRef(false);
+  const refreshSyncDevices = useCallback(() => {
+    if (syncReadInFlight.current) return;
+    syncReadInFlight.current = true;
+    void bridge.syncDevices({ action: "status" }).then((v) => {
+      setSyncDevices(v);
+    }).catch(() => {}).finally(() => {
+      syncReadInFlight.current = false;
+    });
+  }, []);
+
+  // Slow fallback for the push: while a role's service is running, a 5s read
+  // catches transitions that predate the event (older peers, anything the
+  // runtime flips silently). Pauses while the sheet is open — the sheet has
+  // its own poll loop for the state the user is looking at.
+  const syncServiceLive = syncDevices.role !== "unconfigured" && syncDevices.service_running && !syncOpen;
+  useEffect(() => {
+    if (!syncServiceLive) return;
+    const timer = window.setInterval(refreshSyncDevices, 5000);
+    return () => window.clearInterval(timer);
+  }, [refreshSyncDevices, syncServiceLive]);
+
   useEffect(() => {
     // The native chrome (tray menu, tooltip, updater copy) cannot see the
     // system locale the way the webview can — hand it the verdict once.
@@ -210,6 +237,7 @@ const [page, setPage] = useState<PageKey>(() => {
       setServers(v);
       setServersLoaded(true);
     });
+    const unSync = bridge.onSyncUpdated(refreshSyncDevices);
     const un = bridge.onReport((r) => {
       setReport(r);
       setError(null);
@@ -235,8 +263,9 @@ const [page, setPage] = useState<PageKey>(() => {
       un();
       unPeriod();
       unServers();
+      unSync();
     };
-  }, []);
+  }, [refreshSyncDevices]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
