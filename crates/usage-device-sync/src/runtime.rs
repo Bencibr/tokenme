@@ -239,6 +239,9 @@ impl SyncRuntime {
             let pass_had_occurrence_progress = self.occurrence_init_progressed;
             let pass_had_primary_download_progress = self.primary_download_progressed;
             total.last_error = pass.last_error;
+            if !pass_had_error && self.secondary_identity.is_some() {
+                let _ = self.store.set_secondary_last_error(None, now_ms());
+            }
             let renew_now = now_ms();
             if !self.renew_lease_if_due(renew_now)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
@@ -314,6 +317,13 @@ impl SyncRuntime {
                 }
                 Err(error) => {
                     let message = error.to_string();
+                    let fatal = is_unrecoverable_sync_error(&message) || entry.attempts >= 4;
+                    if fatal && self.secondary_identity.is_some() {
+                        let _ = self.store.reset_secondary_sync_state(now_ms());
+                        report.retried += 1;
+                        report.last_error = Some(format!("auto-recovering: {message}"));
+                        break;
+                    }
                     self.store.retry_outbox(&self.config.owner, entry.id, now_ms(), &message)?;
                     report.retried += 1;
                     report.last_error = Some(message);
@@ -335,6 +345,9 @@ impl SyncRuntime {
         report.pending = summary.pending;
         report.in_flight = summary.in_flight;
         report.bytes = summary.bytes;
+        if self.secondary_identity.is_some() && report.last_error.is_none() {
+            let _ = self.store.set_secondary_last_error(None, now_ms());
+        }
         Ok(report)
     }
 
@@ -629,9 +642,27 @@ fn retryable_secondary_error(error: &SyncError) -> bool {
         SyncError::Conflict(message) if message == "secondary sync is disabled" => false,
         SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired" => false,
         SyncError::Protocol(_) | SyncError::Auth(_) | SyncError::NotPaired(_) | SyncError::Conflict(_)
-        | SyncError::EpochStale | SyncError::ReconcileRequired => true,
+        | SyncError::EpochStale | SyncError::ReconcileRequired | SyncError::Sqlite(_) | SyncError::Io(_, _)
+        | SyncError::Limit(_) => true,
         _ => false,
     }
+}
+
+fn is_unrecoverable_sync_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("reconcile")
+        || lower.contains("epoch")
+        || lower.contains("generation")
+        || lower.contains("conflict")
+        || lower.contains("stream closed")
+        || lower.contains("stream_closed")
+        || lower.contains("invalid manifest")
+        || lower.contains("decompression")
+        || lower.contains("corrupt")
+        || lower.contains("signature")
+        || lower.contains("package marker")
+        || lower.contains("read package")
+        || lower.contains("unexpected end of file")
 }
 
 fn map_secondary_status_error(error: TransportError) -> SyncError {

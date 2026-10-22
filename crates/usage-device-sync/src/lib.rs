@@ -11,6 +11,9 @@ mod lifecycle;
 mod runtime;
 mod store;
 mod transport;
+pub mod ws;
+
+pub use ws::{WsSyncFrame, WsSecondaryClient, handle_server_websocket, WS_PROTOCOL_VERSION};
 
 pub use diagnostics::{
     diagnostics_tool_registry, DiagnosticsAuditEvent, DiagnosticsAuthority, DiagnosticsCheckResult,
@@ -44,6 +47,6 @@ pub use store::{
 pub use lifecycle::deliver_disconnect_notice;
 pub use runtime::{export_index_snapshot, export_index_snapshots, export_index_snapshots_from_snapshot, LocalSnapshot, RuntimeRunReport, SyncRuntime, SyncRuntimeConfig};
 pub use transport::{
-    ensure_server_certificate, load_pem_certificate, load_pem_private_key, ClientTransportCancellation, DeviceSyncTransport, HttpsServerConfig,
+    ensure_server_certificate, load_pem_certificate, load_pem_private_key, ClientSocketGuard, ClientTransportCancellation, DeviceSyncTransport, HttpsServerConfig,
     HttpsSyncServer, HttpsSyncServerHandle, HttpsTransportConfig, ParsedEndpoint, Tls13HttpsTransport, TransportError,
 };

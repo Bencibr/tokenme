@@ -45,6 +45,7 @@ pub struct TrayState {
 pub enum SyncManagementRequest {
     Status,
     Discover,
+    RetryConnect,
     StartPrimary { bind: Option<String>, advertise_host: Option<String>, allow_lan: bool },
     SetPrimaryDataSharing { enabled: bool },
     StartSecondary,
@@ -75,6 +76,7 @@ fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
         None => "snapshot",
         Some(SyncManagementRequest::Status) => "status",
         Some(SyncManagementRequest::Discover) => "discover",
+        Some(SyncManagementRequest::RetryConnect) => "retry_connect",
         Some(SyncManagementRequest::StartPrimary { .. }) => "start_primary",
         Some(SyncManagementRequest::SetPrimaryDataSharing { .. }) => "set_primary_data_sharing",
         Some(SyncManagementRequest::StartSecondary) => "start_secondary",
@@ -1713,6 +1715,25 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
         SyncManagementRequest::Discover => {
             Err("mDNS discovery must run asynchronously".into())
         }
+        SyncManagementRequest::RetryConnect => {
+            state.last_error = None;
+            state.pending_pairing_attempted = false;
+            let secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| error.to_string())?;
+            if let Some(config) = secondary_config {
+                if let Ok(mut store) = SyncStore::open(&index_path, config.primary_id.clone()) {
+                    let _ = store.set_secondary_last_error(None, current_ms());
+                }
+                reap_runtime(state);
+                if state.runtime.is_none() && config.enabled {
+                    let _ = start_secondary_runtime(state);
+                }
+            }
+            if let Some(pending) = read_pending_pairing()? {
+                let _ = resume_pending_pairing(state, &index_path, pending);
+            }
+            state.phase = SyncPhase::Success;
+            Ok(())
+        }
         SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan } => start_primary(state, bind, advertise_host, allow_lan, diagnostics_app),
         SyncManagementRequest::SetPrimaryDataSharing { enabled } => {
             if state.role != "primary" { return Err("only the primary can change data sharing".into()); }
@@ -1795,7 +1816,7 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
                     thread::spawn(move || {
                         let started = Instant::now();
                         let outcome = (|| {
-                            let mut store = match SyncStore::open(&converge_path, converge_primary.clone()) {
+                            let store = match SyncStore::open(&converge_path, converge_primary.clone()) {
                                 Ok(store) => store,
                                 Err(error) => return Err(format!("cannot open sync store: {error}")),
                             };
@@ -2762,7 +2783,7 @@ mod sync_tests {
         assert!(std::sync::Arc::ptr_eq(&control.interrupt, &control.state.lock().unwrap().interrupt));
     }
 
-    use super::{advertised_endpoint_host, clear_primary_state, merge_discovered_primary, pairing_invite_needs_renewal, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, SyncPhase, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
+    use super::{advertised_endpoint_host, clear_primary_state, merge_discovered_primary, pairing_invite_needs_renewal, primary_endpoint, rearm_pending_pairing_retry, run_sync_action, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, SyncPhase, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
 
@@ -2863,6 +2884,27 @@ mod sync_tests {
         assert_eq!(sync_action_name(None), "snapshot");
         assert_eq!(sync_action_name(Some(&request)), "pair");
         assert_eq!(sync_action_name(Some(&SyncManagementRequest::Discover)), "discover");
+        assert_eq!(sync_action_name(Some(&SyncManagementRequest::RetryConnect)), "retry_connect");
+        assert_eq!(sync_action_name(Some(&SyncManagementRequest::ResetSecondary)), "reset_secondary");
+    }
+
+    #[test]
+    fn retry_connect_resets_error_and_restores_success_phase() {
+        let mut state = SyncControlState {
+            last_error: Some("WebSocket connection lost: broken pipe".into()),
+            pending_pairing_attempted: true,
+            phase: SyncPhase::Error,
+            ..SyncControlState::default()
+        };
+        assert!(state.last_error.is_some());
+        assert!(state.pending_pairing_attempted);
+        assert_eq!(state.phase, SyncPhase::Error);
+
+        let result = run_sync_action(&mut state, SyncManagementRequest::RetryConnect, None);
+        assert!(result.is_ok());
+        assert_eq!(state.last_error, None);
+        assert!(!state.pending_pairing_attempted);
+        assert_eq!(state.phase, SyncPhase::Success);
     }
 
     #[test]

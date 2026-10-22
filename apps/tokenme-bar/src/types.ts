@@ -379,6 +379,7 @@ export type DiagnosticsManagementRequest =
 export type SyncManagementRequest =
   | { action: "status" }
   | { action: "discover" }
+  | { action: "retry_connect" }
   | { action: "start_primary"; bind?: string | null; advertise_host?: string | null; allow_lan: boolean }
   | { action: "set_primary_data_sharing"; enabled: boolean }
   | { action: "start_secondary" }

@@ -42,7 +42,7 @@ use sha2::{Digest, Sha256};
 
 use usage_core::{origin_ok, Error, Result, SyncRecord};
 
-use crate::{call_kind_of, call_kind_str, now_ms, sql_err, Index};
+use crate::{call_kind_of, call_kind_str, now_ms, sql_err, Index, ORIGIN_SQL};
 
 /// The bundle format version. A reader that does not know this exact string
 /// refuses the file — a mismatched JSONL shape must fail loud, never half-merge.
@@ -401,7 +401,15 @@ impl Index {
                     calls: calls.remove(&id).unwrap_or_default(),
                 };
                 row.key = match dedupe_key {
-                    Some(k) => k,
+                    Some(k) => {
+                        let prefix = format!("linux:{origin}:");
+                        let mix_prefix = format!("mix:{origin}:");
+                        if k.starts_with(&prefix) || k.starts_with(&mix_prefix) {
+                            k
+                        } else {
+                            format!("{prefix}{k}")
+                        }
+                    }
                     None => {
                         let canonical = canonical_of(&row);
                         let n = seen_canonical.entry(canonical.clone()).or_insert(0);
@@ -620,8 +628,17 @@ impl Index {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let row: ExportRow = serde_json::from_str(&line)
+                let mut row: ExportRow = serde_json::from_str(&line)
                     .map_err(|e| Error::Sync(format!("{file_name}: bad row at line {}: {e}", rows_out + 1)))?;
+                let prefix = format!("linux:{origin}:");
+                let mix_prefix = format!("mix:{origin}:");
+                if !row.key.starts_with(&prefix) && !row.key.starts_with(&mix_prefix) {
+                    if let Some(rest) = row.key.strip_prefix("mix:") {
+                        row.key = format!("mix:{origin}:{rest}");
+                    } else {
+                        row.key = format!("{prefix}{}", row.key);
+                    }
+                }
                 rows_out += 1;
                 if rows_out > manifest.rows.saturating_add(ROW_CAP_SLACK) {
                     return Err(Error::Sync(format!(
@@ -697,19 +714,24 @@ impl Index {
         // write it (new, or the growth predicate accepts). Rows the predicate
         // refuses keep the stored (larger) counts and count as deduped,
         // exactly like a log replay.
+        let e_origin_sql = ORIGIN_SQL.replace("source", "e.source");
         tx.execute(
-            "UPDATE sync_batch SET is_new = 1 \
-             WHERE NOT EXISTS(SELECT 1 FROM event e WHERE e.dedupe_key = sync_batch.key)",
-            [],
+            &format!(
+                "UPDATE sync_batch SET is_new = 1 \
+                 WHERE NOT EXISTS(SELECT 1 FROM event e WHERE ({e_origin_sql}) = ?1 AND e.dedupe_key = sync_batch.key)"
+            ),
+            params![origin],
         )
         .map_err(sql_err)?;
         tx.execute(
-            "UPDATE sync_batch SET applied = 1 WHERE is_new = 1 OR \
-                 (in_tok + cc_tok + cr_tok + out_tok) > \
-                 COALESCE((SELECT COALESCE(e.in_tok,0)+COALESCE(e.cc_tok,0)+COALESCE(e.cr_tok,0) \
-                           +COALESCE(e.out_tok,0)+COALESCE(e.credits,0) \
-                           FROM event e WHERE e.dedupe_key = sync_batch.key), 0)",
-            [],
+            &format!(
+                "UPDATE sync_batch SET applied = 1 WHERE is_new = 1 OR \
+                     (in_tok + cc_tok + cr_tok + out_tok) > \
+                     COALESCE((SELECT COALESCE(e.in_tok,0)+COALESCE(e.cc_tok,0)+COALESCE(e.cr_tok,0) \
+                               +COALESCE(e.out_tok,0)+COALESCE(e.credits,0) \
+                               FROM event e WHERE ({e_origin_sql}) = ?1 AND e.dedupe_key = sync_batch.key), 0)"
+            ),
+            params![origin],
         )
         .map_err(sql_err)?;
 
@@ -718,11 +740,13 @@ impl Index {
         let mut affected_ts: Vec<i64> = {
             let mut stmt = tx
                 .prepare(
-                    "SELECT e.ts_ms FROM sync_batch b JOIN event e ON e.dedupe_key = b.key \
-                     WHERE b.applied = 1 AND b.is_new = 0",
+                    &format!(
+                        "SELECT e.ts_ms FROM sync_batch b JOIN event e ON ({e_origin_sql}) = ?1 AND e.dedupe_key = b.key \
+                         WHERE b.applied = 1 AND b.is_new = 0"
+                    ),
                 )
                 .map_err(sql_err)?;
-            let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).map_err(sql_err)?;
+            let rows = stmt.query_map(params![origin], |r| r.get::<_, i64>(0)).map_err(sql_err)?;
             rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?
         };
 
@@ -738,14 +762,17 @@ impl Index {
             )
             .map_err(sql_err)? as u64;
 
+        let ev_origin_sql = ORIGIN_SQL.replace("source", "event.source");
         let updated = tx
             .execute(
-                "UPDATE event SET ts_ms = b.ts_ms, session = b.session, project = b.project, \
-                     model = b.model, meter = b.meter, in_tok = b.in_tok, cc_tok = b.cc_tok, \
-                     cr_tok = b.cr_tok, out_tok = b.out_tok, reason_tok = b.reason_tok, \
-                     credits = b.credits, source = 'linux:' || ?1 || ':' || b.source \
-                 FROM sync_batch b \
-                 WHERE event.dedupe_key = b.key AND b.applied = 1 AND b.is_new = 0",
+                &format!(
+                    "UPDATE event SET ts_ms = b.ts_ms, session = b.session, project = b.project, \
+                         model = b.model, meter = b.meter, in_tok = b.in_tok, cc_tok = b.cc_tok, \
+                         cr_tok = b.cr_tok, out_tok = b.out_tok, reason_tok = b.reason_tok, \
+                         credits = b.credits, source = 'linux:' || ?1 || ':' || b.source \
+                     FROM sync_batch b \
+                     WHERE ({ev_origin_sql}) = ?1 AND event.dedupe_key = b.key AND b.applied = 1 AND b.is_new = 0"
+                ),
                 params![origin],
             )
             .map_err(sql_err)? as u64;
@@ -765,12 +792,14 @@ impl Index {
         {
             let mut stmt = tx
                 .prepare(
-                    "SELECT e.id, b.calls FROM sync_batch b JOIN event e ON e.dedupe_key = b.key \
-                     WHERE b.applied = 1",
+                    &format!(
+                        "SELECT e.id, b.calls FROM sync_batch b JOIN event e ON ({e_origin_sql}) = ?1 AND e.dedupe_key = b.key \
+                         WHERE b.applied = 1"
+                    ),
                 )
                 .map_err(sql_err)?;
             let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .query_map(params![origin], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
                 .map_err(sql_err)?;
             let mut ins = tx
                 .prepare(
@@ -794,9 +823,11 @@ impl Index {
         // ---- reconciliation, by key (window sums would wedge on stale rows) --
         let missing: i64 = tx
             .query_row(
-                "SELECT count(*) FROM sync_batch b \
-                 WHERE NOT EXISTS(SELECT 1 FROM event e WHERE e.dedupe_key = b.key)",
-                [],
+                &format!(
+                    "SELECT count(*) FROM sync_batch b \
+                     WHERE NOT EXISTS(SELECT 1 FROM event e WHERE ({e_origin_sql}) = ?1 AND e.dedupe_key = b.key)"
+                ),
+                params![origin],
                 |r| r.get(0),
             )
             .map_err(sql_err)?;
@@ -810,15 +841,17 @@ impl Index {
         // must be <= the stored row's total *including* credits.
         let unexplained: i64 = tx
             .query_row(
-                "SELECT count(*) FROM sync_batch b JOIN event e ON e.dedupe_key = b.key \
-                 WHERE NOT (\
-                     COALESCE(e.in_tok,0) = b.in_tok AND COALESCE(e.cc_tok,0) = b.cc_tok \
-                     AND COALESCE(e.cr_tok,0) = b.cr_tok AND COALESCE(e.out_tok,0) = b.out_tok \
-                     AND COALESCE(e.reason_tok,0) = b.reason_tok AND COALESCE(e.credits,0) = b.credits) \
-                 AND NOT ((b.in_tok + b.cc_tok + b.cr_tok + b.out_tok) <= \
-                     COALESCE(e.in_tok,0)+COALESCE(e.cc_tok,0)+COALESCE(e.cr_tok,0) \
-                     +COALESCE(e.out_tok,0)+COALESCE(e.credits,0))",
-                [],
+                &format!(
+                    "SELECT count(*) FROM sync_batch b JOIN event e ON ({e_origin_sql}) = ?1 AND e.dedupe_key = b.key \
+                     WHERE NOT (\
+                         COALESCE(e.in_tok,0) = b.in_tok AND COALESCE(e.cc_tok,0) = b.cc_tok \
+                         AND COALESCE(e.cr_tok,0) = b.cr_tok AND COALESCE(e.out_tok,0) = b.out_tok \
+                         AND COALESCE(e.reason_tok,0) = b.reason_tok AND COALESCE(e.credits,0) = b.credits) \
+                     AND NOT ((b.in_tok + b.cc_tok + b.cr_tok + b.out_tok) <= \
+                         COALESCE(e.in_tok,0)+COALESCE(e.cc_tok,0)+COALESCE(e.cr_tok,0) \
+                         +COALESCE(e.out_tok,0)+COALESCE(e.credits,0))"
+                ),
+                params![origin],
                 |r| r.get(0),
             )
             .map_err(sql_err)?;
@@ -1073,14 +1106,14 @@ mod tests {
         let rep = export_to(&src, dir.path(), "o1");
         let r = import(&mut tgt, &rep);
         assert_eq!((r.inserted, r.updated), (0, 1));
-        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key='claude#k1'"), 200);
+        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key='linux:o1:claude#k1'"), 200);
 
         // Shrink: 200 -> 50 => predicate refuses, stored stays 200.
         src.conn().execute("UPDATE event SET in_tok = 50 WHERE dedupe_key = 'claude#k1'", []).unwrap();
         let rep = export_to(&src, dir.path(), "o1");
         let r = import(&mut tgt, &rep);
         assert_eq!((r.inserted, r.updated, r.deduped), (0, 0, 5));
-        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key='claude#k1'"), 200);
+        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key='linux:o1:claude#k1'"), 200);
 
         // Credits asymmetry on k3 (300 tokens + 5 credits stored): 302 tokens
         // alone is <= 300+5, so it must NOT grow.
@@ -1088,13 +1121,13 @@ mod tests {
         let rep = export_to(&src, dir.path(), "o1");
         let r = import(&mut tgt, &rep);
         assert_eq!(r.updated, 0);
-        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key='claude#k3'"), 300);
+        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key='linux:o1:claude#k3'"), 300);
         // 306 tokens > 300+5 => grows now.
         src.conn().execute("UPDATE event SET in_tok = 306 WHERE dedupe_key = 'claude#k3'", []).unwrap();
         let rep = export_to(&src, dir.path(), "o1");
         let r = import(&mut tgt, &rep);
         assert_eq!(r.updated, 1);
-        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key='claude#k3'"), 306);
+        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key='linux:o1:claude#k3'"), 306);
     }
 
     /// The F1 regression: a Linux-side purge leaves stale rows on the display
@@ -1263,5 +1296,68 @@ mod tests {
         assert_eq!(rec.window_hi_ms, rep.window_hi_ms);
         assert_eq!(rec.file, "tokenme-linux-origin-1.jsonl.gz");
         assert_eq!(rec.sha256.as_deref(), Some(rep.sha256.as_str()));
+    }
+
+    #[test]
+    fn multiple_linux_origins_with_same_dedupe_keys_do_not_collide_or_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        // Server 1 (alpha): has trae turn 1 with 100 tokens, and codex with 10 tokens.
+        let src1 = Index::open_in_memory().unwrap();
+        seed(&src1, "trae", "s-trae", ts(4), Some("trae#1"), 100.0, 10.0, 0.0, &[]);
+        seed(&src1, "codex", "s-codex", ts(4), None, 10.0, 2.0, 0.0, &[]);
+
+        // Server 2 (beta): has the EXACT SAME local dedupe_key "trae#1" with 200 tokens, and codex with 20 tokens.
+        let src2 = Index::open_in_memory().unwrap();
+        seed(&src2, "trae", "s-trae", ts(3), Some("trae#1"), 200.0, 20.0, 0.0, &[]);
+        seed(&src2, "codex", "s-codex", ts(3), None, 20.0, 4.0, 0.0, &[]);
+
+        // Target (display machine / Mac): also has its own local "trae#1" with 50 tokens.
+        let mut tgt = Index::open_in_memory().unwrap();
+        seed(&tgt, "trae", "s-trae", ts(5), Some("trae#1"), 50.0, 5.0, 0.0, &[]);
+
+        let rep1 = export_to(&src1, dir.path(), "server-alpha");
+        let rep2 = export_to(&src2, dir.path(), "server-beta");
+
+        let imp1 = import(&mut tgt, &rep1);
+        assert_eq!((imp1.inserted, imp1.updated, imp1.deduped), (2, 0, 0));
+
+        let imp2 = import(&mut tgt, &rep2);
+        assert_eq!((imp2.inserted, imp2.updated, imp2.deduped), (2, 0, 0));
+
+        // Target now holds 5 events: 1 local, 2 from server-alpha, 2 from server-beta.
+        assert_eq!(tgt.event_count().unwrap(), 5);
+
+        // Verify dedupe_keys on target are all isolated and scoped:
+        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key = 'trae#1'"), 50);
+        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key = 'linux:server-alpha:trae#1'"), 100);
+        assert_eq!(one_i64(&tgt, "SELECT in_tok FROM event WHERE dedupe_key = 'linux:server-beta:trae#1'"), 200);
+
+        // Sources are properly attributed:
+        assert_eq!(one_i64(&tgt, "SELECT count(*) FROM event WHERE source LIKE 'linux:server-alpha:%'"), 2);
+        assert_eq!(one_i64(&tgt, "SELECT count(*) FROM event WHERE source LIKE 'linux:server-beta:%'"), 2);
+        assert_eq!(one_i64(&tgt, "SELECT count(*) FROM event WHERE source NOT LIKE 'linux:%'"), 1);
+
+        // Idempotent re-import does not clobber or alter anything:
+        let re_imp1 = import(&mut tgt, &rep1);
+        assert_eq!((re_imp1.inserted, re_imp1.updated, re_imp1.deduped), (0, 0, 2));
+        assert_eq!(tgt.event_count().unwrap(), 5);
+
+        // Scoped reporting:
+        let plan = usage_core::AggregatePlan::build(usage_core::report::now_ms(), 5);
+        let facts_alpha = tgt.report_facts(&plan, &MachineScope::Origin { name: "server-alpha".into() }).unwrap();
+        let alpha_in: f64 = facts_alpha.rollup.iter().filter(|r| r.origin == "server-alpha").map(|r| r.counts.input).sum();
+        assert_eq!(alpha_in.round() as i64, 110);
+
+        let facts_beta = tgt.report_facts(&plan, &MachineScope::Origin { name: "server-beta".into() }).unwrap();
+        let beta_in: f64 = facts_beta.rollup.iter().filter(|r| r.origin == "server-beta").map(|r| r.counts.input).sum();
+        assert_eq!(beta_in.round() as i64, 220);
+
+        let facts_local = tgt.report_facts(&plan, &MachineScope::Local).unwrap();
+        let local_in: f64 = facts_local.rollup.iter().filter(|r| r.origin.is_empty()).map(|r| r.counts.input).sum();
+        assert_eq!(local_in.round() as i64, 50);
+
+        let facts_all = tgt.report_facts(&plan, &MachineScope::All).unwrap();
+        let all_in: f64 = facts_all.rollup.iter().map(|r| r.counts.input).sum();
+        assert_eq!(all_in.round() as i64, 380);
     }
 }

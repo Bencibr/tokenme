@@ -19,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tungstenite.workspace = true
 usage-core.workspace = true
 usage-index.workspace = true
 

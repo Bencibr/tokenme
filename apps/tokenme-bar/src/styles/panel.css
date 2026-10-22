@@ -4538,6 +4538,56 @@
   line-height: 1.45;
 }
 
+.sync-error-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s2);
+  width: 100%;
+}
+
+.sync-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.sync-error-btn {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent);
+  border-radius: var(--r-sm);
+  color: var(--bad);
+  font-size: 11px;
+  padding: 1px 7px;
+  cursor: pointer;
+  line-height: 1.4;
+  font-family: inherit;
+}
+
+.sync-error-btn:hover {
+  background: color-mix(in srgb, var(--bad) 15%, transparent);
+}
+
+.sync-error-close {
+  background: transparent;
+  border: none;
+  color: var(--bad);
+  padding: 2px 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.75;
+  border-radius: var(--r-sm);
+  font-family: inherit;
+}
+
+.sync-error-close:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--bad) 15%, transparent);
+}
+
 .sync-error-copy {
   display: grid;
   gap: 3px;

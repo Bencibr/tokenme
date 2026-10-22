@@ -741,8 +741,10 @@ fn ingest<R: Runtime>(
 fn import_sync_dir(index: &mut Index) -> bool {
     let Some(dir) = usage_index::default_sync_dir() else { return false };
     let Ok(entries) = std::fs::read_dir(&dir) else { return false };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
     let mut merged = false;
-    for entry in entries.flatten() {
+    for entry in entries {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
             continue;
