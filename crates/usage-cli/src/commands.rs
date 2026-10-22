@@ -1815,7 +1815,7 @@ pub fn sync_upload(
     let mut transport_config = HttpsTransportConfig::pinned(endpoint, server_name, cert_der);
     transport_config.pinned_certificate_sha256 = pin;
     let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|e| e.to_string())?;
-    let receipt = transport.upload(&upload).map_err(|e| format!("strict sync upload failed: {e}"))?;
+    let receipt = transport.ws_upload(&upload).map_err(|e| format!("strict sync upload failed: {e}"))?;
     if ctx.g.json {
         print_json(&receipt);
     } else {

@@ -328,17 +328,13 @@ impl SyncRuntime {
                     self.store.retry_outbox(&self.config.owner, entry.id, now_ms(), "sync stopped before upload")?;
                     break;
                 }
-                // The resident WebSocket goes first; ANY failure falls back to the
-                // one-shot HTTP upload. The primary's import is idempotent per
-                // envelope — a package whose manifest+gzip hashes already have a
-                // receipt returns that receipt without re-importing — so a push
-                // the primary imported before its ack was lost is safely re-sent
-                // over HTTP.
+                // The resident WebSocket is the only upload path. The primary's
+                // import is idempotent per envelope — a package whose
+                // manifest+gzip hashes already have a receipt returns that
+                // receipt without re-importing — so a push the primary
+                // imported before its ack was lost is safely re-sent.
                 let upload = entry.signed_upload();
-                let result = self.transport.ws_upload(&upload).or_else(|ws_error| {
-                    eprintln!("tokenme sync: ws upload fell back to http: {ws_error}");
-                    self.transport.upload(&upload)
-                });
+                let result = self.transport.ws_upload(&upload);
                 match result {
                     Ok(receipt) => {
                         report.uploaded += 1;

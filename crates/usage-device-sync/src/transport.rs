@@ -32,7 +32,7 @@ use crate::diagnostics::{
 use crate::protocol::{
     hash_bytes, verify_private_file, AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest,
     AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest, PrimaryDownloadPage,
-    SignedUpload, StreamOpenReceipt, UploadEnvelope, MAX_AUTH_REQUEST_AGE_MS,
+    SignedUpload, StreamOpenReceipt, MAX_AUTH_REQUEST_AGE_MS,
     MAX_AUTH_REQUEST_FUTURE_SKEW_MS, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES, MAX_STRING_BYTES,
 };
 use crate::{ImportReceipt, PairingRequestState, SyncError, SyncStore};
@@ -47,14 +47,11 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_STAGING_QUOTA_BYTES: usize = 512 * 1024 * 1024;
 const MAX_GLOBAL_CONCURRENT: usize = 16;
-const MAX_DEVICE_CONCURRENT: usize = 4;
 const MAX_CONTROL_BODY_BYTES: usize = 64 * 1024;
 const MAX_PAIRING_PER_IP: usize = 5;
 const PAIRING_WINDOW: Duration = Duration::from_secs(60);
 const DISCOVERY_INVITE_TTL_MS: i64 = 5 * 60 * 1000;
 const MAX_TRACKED_PAIRING_IPS: usize = 1024;
-const UPLOAD_MAGIC: &[u8; 8] = b"TMSYNC01";
-const UPLOAD_WIRE_VERSION: u8 = 2;
 /// The HTTP wire contract. A peer that cannot name this major version is
 /// rejected before its request body is consumed, so an upgraded primary and a
 /// stale secondary fail with an actionable 426 instead of importing half a
@@ -77,7 +74,6 @@ const MAX_REPLAY_ENTRIES: usize = 16_384;
 // signed request it belongs to can still pass the freshness check.
 const REPLAY_RETENTION_MS: i64 =
     MAX_AUTH_REQUEST_AGE_MS + MAX_AUTH_REQUEST_FUTURE_SKEW_MS + 60_000;
-const UPLOAD_PATH: &str = "/v1/upload";
 const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
 const STATUS_PATH: &str = "/v1/status";
@@ -415,15 +411,6 @@ impl Drop for ClientSocketGuard {
     }
 }
 
-/// Client-side transport contract shared by the future CLI and Panel
-/// lifecycle code. The implementation below is the real TLS1.3 HTTPS path;
-/// there is no NotImplemented transport in this crate anymore.
-pub trait DeviceSyncTransport {
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    fn upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, Self::Error>;
-}
-
 impl Tls13HttpsTransport {
     pub fn new(config: HttpsTransportConfig) -> Result<Self, TransportError> {
         config.validate()?;
@@ -551,11 +538,12 @@ impl Tls13HttpsTransport {
                 Ok(receipt)
             }
             crate::ws::WsSyncFrame::SyncAck { success: false, error, .. } => {
-                // A rejection still leaves a live socket — but the runtime's
-                // fallback must reach the primary over HTTP right away, and on
-                // a one-slot server the open leg IS the blocker (new
-                // connections are shut down while slots are held). Drop it so
-                // the fallback cannot starve behind the leg that just failed.
+                // A rejection is a protocol-level answer, not a broken socket —
+                // but the next attempt should meet the primary with a fresh
+                // handshake anyway, and on a one-slot server the open leg IS
+                // the blocker (new connections are shut down while slots are
+                // held). Drop it so the retry cannot starve behind the leg
+                // that just failed.
                 *ws_guard = None;
                 Err(TransportError::Protocol(error.unwrap_or_else(|| "sync failed on primary".into())))
             }
@@ -567,7 +555,10 @@ impl Tls13HttpsTransport {
     }
 
     pub fn ws_upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
-        self.try_ws_upload(upload)
+        // A cancelled transport must surface as `Cancelled` exactly like the
+        // retired one-shot HTTP upload did, even when the interrupt lands in
+        // the middle of a frame read instead of before a syscall.
+        self.try_ws_upload(upload).map_err(|error| self.map_cancelled(error))
     }
 
     /// Drops the cached WebSocket, if any. The upload leg holds the socket only
@@ -577,12 +568,6 @@ impl Tls13HttpsTransport {
     /// next pass's status/download calls always find a free slot.
     pub fn ws_close(&mut self) {
         *lock_recover(&self.ws_client) = None;
-    }
-
-    pub fn upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
-        let prefix = encode_upload_prefix(upload)?;
-        let response = self.request_upload(&prefix, &upload.gzip_bytes)?;
-        response.json()
     }
 
     /// Sends the pairing secret only after TLS1.3 is complete and the peer
@@ -692,39 +677,14 @@ impl Tls13HttpsTransport {
         }
         let (mut stream, _socket) = self.connect()?;
         self.check_cancelled()?;
-        let content_type = if path == UPLOAD_PATH { "application/octet-stream" } else { "application/json" };
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{WIRE_VERSION_HEADER}: {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}\r\nConnection: close\r\n\r\n",
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{WIRE_VERSION_HEADER}: {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}\r\nConnection: close\r\n\r\n",
             self.config.server_name, body.len()
         );
         stream.write_all(request.as_bytes()).map_err(|error| self.map_io(error))?;
         stream.write_all(&body).map_err(|error| self.map_io(error))?;
         stream.flush().map_err(|error| self.map_io(error))?;
         read_response(&mut stream, self.config.max_response_bytes).map_err(|error| self.map_cancelled(error))
-    }
-
-    fn request_upload(&self, prefix: &[u8], gzip: &[u8]) -> Result<HttpResponse, TransportError> {
-        let body_len = prefix.len().checked_add(gzip.len()).ok_or(TransportError::Limit)?;
-        if body_len > DEFAULT_BODY_BYTES { return Err(TransportError::Limit); }
-        let (mut stream, _socket) = self.connect()?;
-        self.check_cancelled()?;
-        let request = format!(
-            "POST {UPLOAD_PATH} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {body_len}\r\n{WIRE_VERSION_HEADER}: {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
-            self.config.server_name
-        );
-        stream.write_all(request.as_bytes()).map_err(|error| self.map_io(error))?;
-        stream.write_all(prefix).map_err(|error| self.map_io(error))?;
-        stream.flush().map_err(|error| self.map_io(error))?;
-
-        let head = read_response_head(&mut stream).map_err(|error| self.map_cancelled(error))?;
-        if head.status == 100 {
-            self.check_cancelled()?;
-            stream.write_all(gzip).map_err(|error| self.map_io(error))?;
-            stream.flush().map_err(|error| self.map_io(error))?;
-            read_response(&mut stream, self.config.max_response_bytes).map_err(|error| self.map_cancelled(error))
-        } else {
-            read_response_body(&mut stream, head, self.config.max_response_bytes).map_err(|error| self.map_cancelled(error))
-        }
     }
 
     fn connect(&self) -> Result<(StreamOwned<ClientConnection, DeadlineTcpStream>, ClientSocketGuard), TransportError> {
@@ -769,14 +729,6 @@ impl Tls13HttpsTransport {
 
     fn map_cancelled(&self, error: TransportError) -> TransportError {
         if self.cancel.load(AtomicOrdering::Acquire) { TransportError::Cancelled } else { error }
-    }
-}
-
-impl DeviceSyncTransport for Tls13HttpsTransport {
-    type Error = TransportError;
-
-    fn upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, Self::Error> {
-        Tls13HttpsTransport::upload(self, upload)
     }
 }
 
@@ -974,34 +926,24 @@ fn with_claimed_nonce<T>(
 
 struct GateState {
     active: usize,
-    staged_bytes: usize,
-    device_active: BTreeMap<String, usize>,
 }
 
 struct ConcurrencyGate {
     state: Mutex<GateState>,
     changed: Condvar,
     max_concurrent: usize,
-    staging_quota_bytes: usize,
 }
 
 struct ConnectionPermit {
     gate: Arc<ConcurrencyGate>,
 }
 
-struct DevicePermit {
-    gate: Arc<ConcurrencyGate>,
-    device_id: String,
-    staged_bytes: usize,
-}
-
 impl ConcurrencyGate {
     fn new(config: &HttpsServerConfig) -> Self {
         Self {
-            state: Mutex::new(GateState { active: 0, staged_bytes: 0, device_active: BTreeMap::new() }),
+            state: Mutex::new(GateState { active: 0 }),
             changed: Condvar::new(),
             max_concurrent: config.max_concurrent,
-            staging_quota_bytes: config.staging_quota_bytes,
         }
     }
 
@@ -1013,36 +955,12 @@ impl ConcurrencyGate {
         state.active += 1;
         Ok(Some(ConnectionPermit { gate: Arc::clone(self) }))
     }
-
-    fn acquire_device(self: &Arc<Self>, device_id: &str, bytes: usize) -> Result<DevicePermit, TransportError> {
-        if bytes > self.staging_quota_bytes { return Err(TransportError::Limit); }
-        let mut state = lock_recover(&self.state);
-        let active = state.device_active.get(device_id).copied().unwrap_or(0);
-        if active >= MAX_DEVICE_CONCURRENT || state.staged_bytes.saturating_add(bytes) > self.staging_quota_bytes {
-            return Err(TransportError::Busy);
-        }
-        *state.device_active.entry(device_id.to_string()).or_default() += 1;
-        state.staged_bytes += bytes;
-        Ok(DevicePermit { gate: Arc::clone(self), device_id: device_id.to_string(), staged_bytes: bytes })
-    }
 }
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         let mut state = lock_recover(&self.gate.state);
         state.active = state.active.saturating_sub(1);
-        self.gate.changed.notify_all();
-    }
-}
-
-impl Drop for DevicePermit {
-    fn drop(&mut self) {
-        let mut state = lock_recover(&self.gate.state);
-        state.staged_bytes = state.staged_bytes.saturating_sub(self.staged_bytes);
-        if let Some(active) = state.device_active.get_mut(&self.device_id) {
-            *active = active.saturating_sub(1);
-            if *active == 0 { state.device_active.remove(&self.device_id); }
-        }
         self.gate.changed.notify_all();
     }
 }
@@ -1407,80 +1325,6 @@ impl ServerContext {
         }
         let (status, response) = if head.known_path.is_none() {
             (404, serde_json::to_vec(&WireError { message: "unknown sync endpoint".into() }).unwrap_or_else(|_| b"{\"message\":\"not found\"}".to_vec()))
-        } else if head.path == UPLOAD_PATH {
-            let metadata = match read_upload_metadata(&mut tls, head.content_length, self.config.max_body_bytes, deadline, &self.cancel) {
-                Ok(metadata) => metadata,
-                Err(TransportError::Unsupported(message)) => {
-                    self.respond_and_close(&mut tls, 426, &message, 0)?;
-                    return Ok(());
-                }
-                Err(error) => return Err(error),
-            };
-            let authorize_started = Instant::now();
-            let authorized = lock_recover(&self.store)
-                .authorize_upload_metadata(&metadata.envelope, &metadata.signature)
-                .map_err(TransportError::State);
-            if let Err(error) = authorized {
-                if matches!(&error, TransportError::State(SyncError::Sqlite(_))) {
-                    let code = transport_error_code(&error);
-                    let detail = match &error {
-                        TransportError::State(SyncError::Sqlite(message)) => format!(" sqlite={message}"),
-                        _ => String::new(),
-                    };
-                    self.log_event(true, &format!(
-                        "sync: action=upload_authorize outcome=error error_code={code}{detail} total_ms={}",
-                        authorize_started.elapsed().as_millis(),
-                    ));
-                }
-                let (status, message) = match &error {
-                    TransportError::State(error) => (status_for_error(error), safe_error_message(error)),
-                    _ => (400, "request rejected".into()),
-                };
-                (status, serde_json::to_vec(&WireError { message }).unwrap_or_else(|_| b"{\"message\":\"request rejected\"}".to_vec()))
-            } else {
-                match self.gate.acquire_device(&metadata.envelope.device_id, metadata.gzip_len) {
-                    Err(TransportError::Limit) => (413, serde_json::to_vec(&WireError { message: "sync package exceeds the staging quota".into() }).unwrap_or_else(|_| b"{\"message\":\"sync package exceeds staging quota\"}".to_vec())),
-                    Err(TransportError::Busy) => (503, serde_json::to_vec(&WireError { message: "sync service is busy; retry later".into() }).unwrap_or_else(|_| b"{\"message\":\"sync service is busy; retry later\"}".to_vec())),
-                    Err(error) => return Err(error),
-                    Ok(_device) => {
-                        if head.expect_continue { write_continue(&mut tls)?; }
-                        let staged = stage_upload(&mut tls, &metadata, &self.config.staging_dir, deadline, &self.cancel)?;
-                        let import_started = Instant::now();
-                        let result = (|| {
-                            if self.cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
-                            let file = OpenOptions::new().read(true).open(&staged).map_err(TransportError::from)?;
-                            let mut store = lock_recover(&self.store);
-                            if self.cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
-                            store.import_network_reader_strict(&metadata.envelope, &metadata.signature, file, metadata.gzip_len, now_ms()).map_err(TransportError::State)
-                        })();
-                        let cleanup = fs::remove_file(&staged).map_err(TransportError::from);
-                        if let Err(error) = cleanup { return Err(error); }
-                        match result {
-                            Ok(receipt) => {
-                                self.log_event(false, &format!(
-                                    "sync: action=upload_import outcome=ok generation={} gzip_bytes={} rows={} inserted={} updated={} deduped={} total_ms={}",
-                                    receipt.generation, metadata.gzip_len, receipt.rows, receipt.inserted,
-                                    receipt.updated, receipt.deduped, import_started.elapsed().as_millis(),
-                                ));
-                                (200, serde_json::to_vec(&receipt).map_err(|e| TransportError::Protocol(e.to_string()))?)
-                            }
-                            Err(TransportError::State(error)) => {
-                                let code = sync_error_code(&error);
-                                let detail = match &error {
-                                    SyncError::Sqlite(message) => format!(" sqlite={message}"),
-                                    _ => String::new(),
-                                };
-                                self.log_event(true, &format!(
-                                    "sync: action=upload_import outcome=error error_code={code}{detail} gzip_bytes={} total_ms={}",
-                                    metadata.gzip_len, import_started.elapsed().as_millis(),
-                                ));
-                                (status_for_error(&error), serde_json::to_vec(&WireError { message: safe_error_message(&error) }).unwrap_or_else(|_| b"{\"message\":\"request rejected\"}".to_vec()))
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                }
-            }
         } else if (head.path == PAIRING_PATH || head.path == PAIRING_INVITE_PATH) && !self.pairing_limiter.allow(peer.ip()) {
             (429, serde_json::to_vec(&WireError { message: "pairing rate limit exceeded; retry later".into() }).unwrap_or_else(|_| b"{\"message\":\"pairing rate limit exceeded\"}".to_vec()))
         } else if head.path == DIAGNOSTICS_MCP_PATH {
@@ -1752,7 +1596,6 @@ struct HttpRequestHead {
     content_type: String,
     content_length: usize,
     known_path: Option<()>,
-    expect_continue: bool,
     wire_version: Option<(u16, u16)>,
     is_websocket: bool,
     raw_header: Vec<u8>,
@@ -1796,7 +1639,7 @@ impl<'a, R: Read> LimitedReader<'a, R> {
     fn new(inner: &'a mut R, remaining: usize, deadline: Instant, cancel: &'a AtomicBool) -> Self { Self { inner, remaining, deadline, cancel } }
 
     fn read_exact(&mut self, target: &mut [u8]) -> Result<(), TransportError> {
-        if target.len() > self.remaining { return Err(TransportError::Protocol("HTTP body ended inside upload metadata".into())); }
+        if target.len() > self.remaining { return Err(TransportError::Protocol("HTTP body ended before the announced content-length".into())); }
         let mut offset = 0;
         while offset < target.len() {
             if self.cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
@@ -1808,23 +1651,6 @@ impl<'a, R: Read> LimitedReader<'a, R> {
         }
         Ok(())
     }
-
-    fn read_chunk(&mut self, target: &mut [u8]) -> Result<usize, TransportError> {
-        if self.remaining == 0 { return Ok(0); }
-        if self.cancel.load(AtomicOrdering::Acquire) { return Err(TransportError::Cancelled); }
-        if Instant::now() >= self.deadline { return Err(TransportError::Timeout); }
-        let size = target.len().min(self.remaining);
-        let n = self.inner.read(&mut target[..size]).map_err(TransportError::from)?;
-        if n == 0 { return Err(TransportError::Protocol("unexpected end of HTTP body".into())); }
-        self.remaining -= n;
-        Ok(n)
-    }
-}
-
-struct UploadMetadata {
-    envelope: UploadEnvelope,
-    signature: [u8; 64],
-    gzip_len: usize,
 }
 
 #[derive(Debug)]
@@ -1847,55 +1673,6 @@ impl HttpResponse {
         }
         serde_json::from_slice(&self.body).map_err(|e| TransportError::Protocol(format!("invalid JSON response: {e}")))
     }
-}
-
-fn encode_upload_prefix(upload: &SignedUpload) -> Result<Vec<u8>, TransportError> {
-    let envelope = &upload.envelope;
-    for (label, value) in [
-        ("protocol_id", envelope.protocol_id.as_bytes()),
-        ("primary_id", envelope.primary_id.as_bytes()),
-        ("device_id", envelope.device_id.as_bytes()),
-        ("origin", envelope.origin.as_bytes()),
-        ("stream_id", envelope.stream_id.as_bytes()),
-    ] {
-        if value.is_empty() || value.len() > MAX_STRING_BYTES {
-            return Err(TransportError::Limit);
-        }
-        let _ = label;
-    }
-    if envelope.manifest_bytes.is_empty() || envelope.manifest_bytes.len() > MAX_MANIFEST_BYTES {
-        return Err(TransportError::Limit);
-    }
-    if upload.gzip_bytes.len() > MAX_COMPRESSED_BYTES {
-        return Err(TransportError::Limit);
-    }
-    let mut body = Vec::with_capacity(256 + envelope.manifest_bytes.len());
-    body.extend_from_slice(UPLOAD_MAGIC);
-    body.push(UPLOAD_WIRE_VERSION);
-    for value in [
-        envelope.protocol_id.as_bytes(), envelope.primary_id.as_bytes(), envelope.device_id.as_bytes(),
-        envelope.origin.as_bytes(), envelope.stream_id.as_bytes(), &envelope.manifest_bytes,
-    ] {
-        let len = u32::try_from(value.len()).map_err(|_| TransportError::Limit)?;
-        body.extend_from_slice(&len.to_be_bytes());
-        body.extend_from_slice(value);
-    }
-    body.extend_from_slice(&envelope.data_epoch.to_be_bytes());
-    body.extend_from_slice(&envelope.generation.to_be_bytes());
-    body.extend_from_slice(&envelope.gzip_sha256);
-    body.extend_from_slice(&upload.signature);
-    body.extend_from_slice(&(upload.gzip_bytes.len() as u64).to_be_bytes());
-    Ok(body)
-}
-
-#[cfg(test)]
-fn encode_upload(upload: &SignedUpload) -> Result<Vec<u8>, TransportError> {
-    let mut body = encode_upload_prefix(upload)?;
-    body.extend_from_slice(&upload.gzip_bytes);
-    if body.len() > DEFAULT_BODY_BYTES {
-        return Err(TransportError::Limit);
-    }
-    Ok(body)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2253,14 +2030,13 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST or WebSocket GET is supported".into()));
     }
     let known_path = match path {
-        WS_SYNC_PATH | "/v1/sync/ws" | UPLOAD_PATH | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        WS_SYNC_PATH | "/v1/sync/ws" | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
     let mut transfer_encoding = false;
     let mut content_type = None;
     let mut host = None;
-    let mut expect_continue = false;
     let mut wire_version = None;
     for header in request.headers.iter() {
         let name = header.name;
@@ -2278,11 +2054,6 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         } else if name.eq_ignore_ascii_case("host") {
             if host.is_some() || value.trim().is_empty() { return Err(TransportError::Protocol("request lacks a valid host".into())); }
             host = Some(value.trim().to_string());
-        } else if name.eq_ignore_ascii_case("expect") {
-            if expect_continue || !value.trim().eq_ignore_ascii_case("100-continue") {
-                return Err(TransportError::Protocol("unsupported Expect header".into()));
-            }
-            expect_continue = true;
         } else if name.eq_ignore_ascii_case(WIRE_VERSION_HEADER) {
             if wire_version.is_some() { return Err(TransportError::Protocol("duplicate wire version header".into())); }
             wire_version = Some(parse_wire_version(value.trim())?);
@@ -2295,19 +2066,16 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
     let content_type = content_type.unwrap_or_default().split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
     if known_path.is_some() && !is_ws {
         if content_length.is_none() { return Err(TransportError::Protocol("known endpoint lacks content-length".into())); }
-        let limit = if path == UPLOAD_PATH {
-            max_body
-        } else if path == DIAGNOSTICS_MCP_PATH {
+        let limit = if path == DIAGNOSTICS_MCP_PATH {
             max_body.min(MAX_DIAGNOSTICS_BODY_BYTES)
         } else {
             MAX_CONTROL_BODY_BYTES
         };
         if length > limit { return Err(TransportError::Limit); }
-        let expected = if path == UPLOAD_PATH { "application/octet-stream" } else { "application/json" };
-        if content_type != expected { return Err(TransportError::Protocol(format!("unexpected content-type for {path}"))); }
+        if content_type != "application/json" { return Err(TransportError::Protocol(format!("unexpected content-type for {path}"))); }
     }
     if Instant::now() >= deadline { return Err(TransportError::Timeout); }
-    Ok(HttpRequestHead { path: path.to_string(), content_type, content_length: length, known_path, expect_continue, wire_version, is_websocket: is_ws, raw_header: header })
+    Ok(HttpRequestHead { path: path.to_string(), content_type, content_length: length, known_path, wire_version, is_websocket: is_ws, raw_header: header })
 }
 
 fn parse_wire_version(value: &str) -> Result<(u16, u16), TransportError> {
@@ -2328,66 +2096,6 @@ fn read_body<S: Read>(stream: &mut S, length: usize, deadline: Instant, cancel: 
     Ok(body)
 }
 
-fn read_upload_metadata<S: Read>(stream: &mut S, body_len: usize, max_body: usize, deadline: Instant, cancel: &AtomicBool) -> Result<UploadMetadata, TransportError> {
-    if body_len > max_body { return Err(TransportError::Limit); }
-    let mut reader = LimitedReader::new(stream, body_len, deadline, cancel);
-    let mut magic = [0u8; 8];
-    reader.read_exact(&mut magic)?;
-    if &magic != UPLOAD_MAGIC { return Err(TransportError::Protocol("unsupported upload wire magic".into())); }
-    let mut version = [0u8; 1];
-    reader.read_exact(&mut version)?;
-    if version[0] != UPLOAD_WIRE_VERSION {
-        return Err(TransportError::Unsupported(format!(
-            "peer sent upload body version {}; this build requires {UPLOAD_WIRE_VERSION}. Update TokenMe on the other machine.",
-            version[0],
-        )));
-    }
-    let protocol_id = String::from_utf8(read_wire_field(&mut reader, MAX_STRING_BYTES, "protocol_id")?)
-        .map_err(|_| TransportError::Protocol("protocol_id is not UTF-8".into()))?;
-    let primary_id = String::from_utf8(read_wire_field(&mut reader, MAX_STRING_BYTES, "primary_id")?)
-        .map_err(|_| TransportError::Protocol("primary_id is not UTF-8".into()))?;
-    let device_id = String::from_utf8(read_wire_field(&mut reader, MAX_STRING_BYTES, "device_id")?)
-        .map_err(|_| TransportError::Protocol("device_id is not UTF-8".into()))?;
-    let origin = String::from_utf8(read_wire_field(&mut reader, MAX_STRING_BYTES, "origin")?)
-        .map_err(|_| TransportError::Protocol("origin is not UTF-8".into()))?;
-    let stream_id = String::from_utf8(read_wire_field(&mut reader, MAX_STRING_BYTES, "stream_id")?)
-        .map_err(|_| TransportError::Protocol("stream_id is not UTF-8".into()))?;
-    let manifest_bytes = read_wire_field(&mut reader, MAX_MANIFEST_BYTES, "manifest")?;
-    let data_epoch = read_u64(&mut reader)?;
-    let generation = read_u64(&mut reader)?;
-    let mut gzip_sha256 = [0u8; 32];
-    reader.read_exact(&mut gzip_sha256)?;
-    let mut signature = [0u8; 64];
-    reader.read_exact(&mut signature)?;
-    let gzip_len = read_u64(&mut reader)?;
-    let gzip_len = usize::try_from(gzip_len).map_err(|_| TransportError::Limit)?;
-    if gzip_len > MAX_COMPRESSED_BYTES || gzip_len != reader.remaining { return Err(TransportError::Limit); }
-    Ok(UploadMetadata { envelope: UploadEnvelope { protocol_id, primary_id, device_id, origin, stream_id, data_epoch, generation, manifest_bytes, gzip_sha256 }, signature, gzip_len })
-}
-
-fn read_wire_field<R: Read>(reader: &mut LimitedReader<'_, R>, max: usize, label: &str) -> Result<Vec<u8>, TransportError> {
-    let len = usize::try_from(read_u32(reader)?).map_err(|_| TransportError::Limit)?;
-    if len > max { return Err(TransportError::Limit); }
-    let mut value = vec![0u8; len];
-    reader.read_exact(&mut value).map_err(|error| match error {
-        TransportError::Protocol(_) => TransportError::Protocol(format!("truncated upload {label}")),
-        other => other,
-    })?;
-    Ok(value)
-}
-
-fn read_u32<R: Read>(reader: &mut LimitedReader<'_, R>) -> Result<u32, TransportError> {
-    let mut bytes = [0u8; 4];
-    reader.read_exact(&mut bytes)?;
-    Ok(u32::from_be_bytes(bytes))
-}
-
-fn read_u64<R: Read>(reader: &mut LimitedReader<'_, R>) -> Result<u64, TransportError> {
-    let mut bytes = [0u8; 8];
-    reader.read_exact(&mut bytes)?;
-    Ok(u64::from_be_bytes(bytes))
-}
-
 fn sweep_stale_staging(directory: &Path, stale_after: Duration, now: SystemTime) -> usize {
     let Ok(entries) = fs::read_dir(directory) else { return 0; };
     let mut removed = 0;
@@ -2405,34 +2113,6 @@ fn sweep_stale_staging(directory: &Path, stale_after: Duration, now: SystemTime)
         }
     }
     removed
-}
-
-fn stage_upload<S: Read>(stream: &mut S, metadata: &UploadMetadata, directory: &Path, deadline: Instant, cancel: &AtomicBool) -> Result<PathBuf, TransportError> {
-    let mut random = [0u8; 16];
-    getrandom::fill(&mut random).map_err(|e| TransportError::Config(format!("cannot create staging name: {e}")))?;
-    let name = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    let path = directory.join(format!("upload-{name}.part"));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&path).map_err(TransportError::from)?;
-    let result = (|| {
-        crate::protocol::set_private_file(&file, &path).map_err(TransportError::State)?;
-        let mut reader = LimitedReader::new(stream, metadata.gzip_len, deadline, cancel);
-        let mut buffer = [0u8; 64 * 1024];
-        while reader.remaining > 0 {
-            let n = reader.read_chunk(&mut buffer)?;
-            file.write_all(&buffer[..n]).map_err(TransportError::from)?;
-        }
-        file.sync_all().map_err(TransportError::from)
-    })();
-    drop(file);
-    if result.is_err() { let _ = fs::remove_file(&path); }
-    result.map(|_| path)
 }
 
 fn read_response<S: Read>(stream: &mut S, max_response: usize) -> Result<HttpResponse, TransportError> {
@@ -2505,11 +2185,6 @@ fn write_response<S: Write>(stream: &mut S, status: u16, content_type: &str, bod
     let reason = match status { 200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 408 => "Request Timeout", 409 => "Conflict", 413 => "Payload Too Large", 426 => "Upgrade Required", 429 => "Too Many Requests", 503 => "Service Unavailable", _ => "Error" };
     write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{WIRE_VERSION_HEADER}: {WIRE_VERSION_MAJOR}.{WIRE_VERSION_MINOR}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).map_err(TransportError::from)?;
     stream.write_all(body).map_err(TransportError::from)?;
-    stream.flush().map_err(TransportError::from)
-}
-
-fn write_continue<S: Write>(stream: &mut S) -> Result<(), TransportError> {
-    stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").map_err(TransportError::from)?;
     stream.flush().map_err(TransportError::from)
 }
 
@@ -2693,7 +2368,7 @@ mod tests {
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(1));
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.upload(&upload).unwrap();
+        let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
         assert!(handle.join().unwrap().is_ok());
     }
@@ -2872,21 +2547,11 @@ mod tests {
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(1));
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.upload(&entry.signed_upload()).unwrap();
+        let receipt = client.ws_upload(&entry.signed_upload()).unwrap();
         sender.ack_outbox("sender-runtime", outbox_id, &receipt, 2).unwrap();
         assert_eq!(sender.outbox_summary().unwrap().pending, 0);
         assert_eq!(sender.outbox_summary().unwrap().in_flight, 0);
         assert!(handle.join().unwrap().is_ok());
-    }
-
-    #[test]
-    fn upload_wire_is_binary_and_does_not_base64_the_gzip() {
-        let device = DeviceIdentity::create("linux", "Linux").unwrap();
-        let (_, upload) = package(&device);
-        let body = encode_upload(&upload).unwrap();
-        assert!(body.starts_with(UPLOAD_MAGIC));
-        assert_ne!(body.first(), Some(&b'{'));
-        assert!(body.windows(upload.gzip_bytes.len()).any(|window| window == upload.gzip_bytes.as_slice()));
     }
 
     #[test]
@@ -3003,7 +2668,7 @@ mod tests {
         thread::sleep(Duration::from_millis(25));
 
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.upload(&upload).unwrap();
+        let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
         assert!(handle.join().unwrap().is_ok(), "a request-scoped store failure must not stop the listener");
     }
@@ -3024,7 +2689,7 @@ mod tests {
         thread::sleep(Duration::from_millis(25));
 
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.upload(&upload).unwrap();
+        let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
         assert!(handle.join().unwrap().is_ok(), "a panicking handler must not stop the listener");
     }
@@ -3045,7 +2710,7 @@ mod tests {
         let handle = thread::spawn(move || server.run_connections(1));
 
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.upload(&upload).unwrap();
+        let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
         assert!(handle.join().unwrap().is_ok(), "a poisoned lock must not take the listener down");
     }
@@ -3065,65 +2730,9 @@ mod tests {
         thread::sleep(Duration::from_millis(25));
 
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.upload(&upload).unwrap();
+        let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
         assert!(handle.join().unwrap().is_ok());
-    }
-
-    #[test]
-    fn upload_rejection_is_returned_after_metadata_before_gzip_body() {
-        let cert = cert();
-        let device = DeviceIdentity::create("preflight-reject", "Linux").unwrap();
-        let (_, mut upload) = package(&device);
-        upload.gzip_bytes = vec![0x5a; 4 * 1024 * 1024];
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let observed_body_bytes = Arc::new(AtomicU64::new(u64::MAX));
-        let observed = Arc::clone(&observed_body_bytes);
-        let tls_cert = cert.cert_der.clone();
-        let tls_key = cert.key_der.clone();
-        let handle = thread::spawn(move || {
-            let (tcp, _) = listener.accept().unwrap();
-            tcp.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-            let config = HttpsServerConfig {
-                bind_addr: addr,
-                certificate_der: tls_cert,
-                private_key_der: tls_key,
-                allow_lan: false,
-                allowed_peer_ips: vec![],
-                max_body_bytes: DEFAULT_BODY_BYTES,
-                max_concurrent: 1,
-                staging_dir: std::env::temp_dir().join(format!("tokenme-sync-preflight-{}", now_ms())),
-                idle_timeout: DEFAULT_IDLE_TIMEOUT,
-                total_timeout: DEFAULT_TOTAL_TIMEOUT,
-                staging_quota_bytes: DEFAULT_STAGING_QUOTA_BYTES,
-            };
-            let connection = ServerConnection::new(Arc::new(super::server_config(&config).unwrap())).unwrap();
-            let mut stream = StreamOwned::new(connection, tcp);
-            let cancel = AtomicBool::new(false);
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let head = read_request_head(&mut stream, DEFAULT_BODY_BYTES, deadline, &cancel).unwrap();
-            assert!(head.expect_continue);
-            let _metadata = read_upload_metadata(&mut stream, head.content_length, DEFAULT_BODY_BYTES, deadline, &cancel).unwrap();
-            write_response(&mut stream, 403, "application/json", br#"{"message":"device is not authorized"}"#, MAX_RESPONSE_BYTES).unwrap();
-            let mut extra = [0u8; 8192];
-            let received = match stream.read(&mut extra) {
-                Ok(bytes) => bytes as u64,
-                Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::UnexpectedEof) => 0,
-                Err(error) => panic!("unexpected post-rejection read error: {error}"),
-            };
-            observed.store(received, AtomicOrdering::Release);
-        });
-
-        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
-            format!("https://127.0.0.1:{}", addr.port()),
-            "localhost",
-            cert.cert_der,
-        )).unwrap();
-        assert!(matches!(client.upload(&upload), Err(TransportError::HttpStatus { status: 403, .. })));
-        handle.join().unwrap();
-        assert_eq!(observed_body_bytes.load(AtomicOrdering::Acquire), 0);
     }
 
     #[test]
@@ -3171,7 +2780,7 @@ mod tests {
         )).unwrap();
         let cancellation = client.cancellation();
         let (tx, rx) = std::sync::mpsc::channel();
-        let join = thread::spawn(move || tx.send(client.upload(&upload)).unwrap());
+        let join = thread::spawn(move || tx.send(client.ws_upload(&upload)).unwrap());
         thread::sleep(Duration::from_millis(50));
         cancellation.cancel();
         let result = rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -3323,7 +2932,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_mismatch_happens_before_http_request() {
+    fn pin_mismatch_happens_before_any_request_bytes() {
         let actual = cert();
         let expected = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
@@ -3334,7 +2943,7 @@ mod tests {
         let mut config = HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", expected.cert_der);
         config.trust_anchors_der.push(actual.cert_der);
         let mut client = Tls13HttpsTransport::new(config).unwrap();
-        assert!(matches!(client.upload(&upload), Err(TransportError::PinMismatch)));
+        assert!(matches!(client.ws_upload(&upload), Err(TransportError::PinMismatch)));
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -3512,7 +3121,7 @@ mod tests {
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(1));
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.upload(&upload).unwrap();
+        let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
         assert!(handle.join().unwrap().is_ok());
     }
