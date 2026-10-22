@@ -47,6 +47,24 @@ interface Props {
   serverOrigins?: Set<string>;
 }
 
+/** The one rule for "is this origin a machine we manage right now": a
+ *  registered device that was not revoked, else an origin backed by a
+ *  configured server. Everything else the index remembers — an old collector
+ *  bundle, a manual import — is history, not a machine. The scope menu and the
+ *  header's sync badge both ask this, so they cannot disagree about which
+ *  machines exist. */
+export function isManagedOrigin(
+  origin: string,
+  devices: SyncDeviceView[] | undefined,
+  serverOrigins: Set<string> | undefined,
+): boolean {
+  const device = devices?.find((d) => d.origin === origin);
+  if (device) return device.status !== "revoked";
+  // The server list is still loading: keep the origin until it resolves, so a
+  // configured server does not blink out and back in on every boot.
+  return serverOrigins === undefined || serverOrigins.has(origin);
+}
+
 /** The one new control: switching scope re-folds the whole panel. Renders
  *  nothing when the index holds no imported origins — the panel then looks
  *  exactly the way it did before this feature existed. */
@@ -81,13 +99,9 @@ export function ScopeDropdown({
 
   const registered = new Map((devices ?? []).map((device) => [device.origin, device]));
   // 选择器只展示可管理的来源；历史手动导入仍留在索引里，但不冒充机器。
-  const machineRows = [...machines].filter((machine) => {
-    if (machine.origin === "") return true;
-    const device = registered.get(machine.origin);
-    if (device) return device.status !== "revoked";
-    // shortcut: server list is loading, keep rows until it resolves to avoid SSH flicker.
-    return serverOrigins === undefined || serverOrigins.has(machine.origin);
-  });
+  const machineRows = [...machines].filter(
+    (machine) => machine.origin === "" || isManagedOrigin(machine.origin, devices, serverOrigins),
+  );
   for (const device of devices ?? []) {
     if (device.status !== "revoked" && !machineRows.some((machine) => machine.origin === device.origin)) {
       machineRows.push({ origin: device.origin, today_tokens: 0 });

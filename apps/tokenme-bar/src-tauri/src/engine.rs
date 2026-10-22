@@ -292,7 +292,6 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
 
     // An index that cannot be opened is not a quiet day either: every pass would
     // return without publishing and the webview would sit on "indexing" forever.
-    let shared = app.state::<Shared>();
     let mut index = match Index::open_recovering_corruption(index_path()) {
         Ok((index, true)) => {
             crate::logging::error(
@@ -361,56 +360,11 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
         }
     }
 
-    // The whole-file integrity guard runs here, after the panel has its numbers
-    // and before the scan writes anything: a damaged image still heals as a
-    // quarantine + re-ingest on every launch, it just no longer sits in front of
-    // the first render (0.4 s warm, 3.6 s cold on this machine's 170 MB index).
-    if let Some(index_handle) = index.take() {
-        let checked = Instant::now();
-        match index_handle.verify_integrity() {
-            Ok((healthy, true)) => {
-                index = Some(healthy);
-                crate::logging::error(
-                    "integrity: the index image was damaged — quarantined and recreated empty, \
-                     the first scan rebuilds it from the source logs",
-                );
-            }
-            Ok((healthy, false)) => {
-                index = Some(healthy);
-                crate::logging::info(&format!(
-                    "integrity: index image verified in {} ms",
-                    checked.elapsed().as_millis()
-                ));
-            }
-            Err(e) => {
-                // The damaged file could not be moved aside, so there is nothing
-                // better to work with than it: keep the handle the next open
-                // gives back and say out loud that the image is bad.
-                index = match Index::open_recovering_corruption(index_path()) {
-                    Ok((index, true)) => {
-                        crate::logging::error(
-                            "integrity: the damaged device-sync image was preserved and a new index was created for local re-scan",
-                        );
-                        Some(index)
-                    }
-                    Ok((index, false)) => Some(index),
-                    Err(open_error) => {
-                        app.state::<Shared>().set_startup_error(format!(
-                            "index could not be repaired; local usage is unavailable until it is repaired: {open_error}"
-                        ));
-                        crate::logging::error(&format!(
-                            "integrity: reopening the index after failure also failed: {open_error}"
-                        ));
-                        None
-                    }
-                };
-                crate::logging::error(&format!(
-                    "integrity: the index image is damaged and could not be replaced ({e}) — \
-                     numbers may be wrong until it heals"
-                ));
-            }
-        }
-    }
+    // SQLite WAL already guarantees crash-safe atomic transactions.
+    // Running full `PRAGMA integrity_check` on every launch is an anti-pattern:
+    // it scales linearly with DB size (~10s on 623MB, ~30s on 1GB).
+    // The handle opened above is used directly; corruption is caught on actual
+    // read/write failure and handled via existing recovery paths.
 
     // The last discovered file list per tool. Passes that are neither
     // privileged nor TTL-expired restat this snapshot instead of walking every
@@ -662,11 +616,12 @@ fn ingest<R: Runtime>(
 
     let cutoff = cutoff_ms();
     let filter = DateFilter::new(Some(cutoff), None);
-    // Discover scoping: privileged passes and expired snapshots walk every
-    // tree; a file-change wake walks only the tool that owns the woken root;
-    // every other tool restats its previous list — a couple of stats per file,
-    // no walk. A file the watcher missed surfaces within one SNAPSHOT_TTL.
-    let full = matches!(reason, "initial scan" | "manual refresh" | "cadence timer")
+    // Discover scoping: privileged passes (initial scan, manual refresh) and
+    // expired snapshots walk every tree; cadence timer restats the cached list
+    // unless the TTL expired; a file-change wake walks only the tool that owns
+    // the woken root. Every other tool restats its previous list — a couple of
+    // stats per file, no walk. A file the watcher missed surfaces within SNAPSHOT_TTL.
+    let full = matches!(reason, "initial scan" | "manual refresh")
         || snapshot_at.elapsed() >= SNAPSHOT_TTL
         || snapshot.is_empty();
     let woken: HashSet<&str> = detected

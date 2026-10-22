@@ -80,7 +80,7 @@ fn main() {
     if !matches!(
         command,
         Cmd::Detect | Cmd::Index { .. } | Cmd::Icons | Cmd::DiagnosticsStdio | Cmd::Import { .. } | Cmd::Export { .. }
-            | Cmd::Sync { action: SyncCmd::Status | SyncCmd::Run | SyncCmd::Stop | SyncCmd::Invite { .. } | SyncCmd::Pair { .. } | SyncCmd::Approve { .. } | SyncCmd::OpenStream { .. } | SyncCmd::Serve { .. } }
+            | Cmd::Sync { action: SyncCmd::Status | SyncCmd::Run | SyncCmd::Stop | SyncCmd::Reset | SyncCmd::Invite { .. } | SyncCmd::Pair { .. } | SyncCmd::Approve { .. } | SyncCmd::OpenStream { .. } | SyncCmd::Serve { .. } }
     ) {
         if let Err(msg) = ctx.prepare() {
             fail(&msg);
@@ -111,6 +111,7 @@ fn main() {
         Cmd::Sync { action: SyncCmd::Status } => commands::sync_status(&ctx),
         Cmd::Sync { action: SyncCmd::Run } => commands::sync_run(&mut ctx),
         Cmd::Sync { action: SyncCmd::Stop } => commands::sync_stop(&ctx),
+        Cmd::Sync { action: SyncCmd::Reset } => commands::sync_reset(&ctx),
         Cmd::Sync { action: SyncCmd::Invite { endpoint, pin_sha256, certificate, server_name, expires_at_ms, primary_id } } => commands::sync_invite(&ctx, endpoint, pin_sha256, certificate, server_name, expires_at_ms, primary_id),
         Cmd::Sync { action: SyncCmd::Pair { invite, endpoint, server_name, trust_cert, pin_sha256, invite_id, invite_secret_hex, identity, origin, os } } => commands::sync_pair(&ctx, invite, endpoint, server_name, trust_cert, pin_sha256, invite_id, invite_secret_hex, identity, origin, os),
         Cmd::Sync { action: SyncCmd::Approve { request_id, primary_id } } => commands::sync_approve(&ctx, request_id, primary_id),

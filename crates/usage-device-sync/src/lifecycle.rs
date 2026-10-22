@@ -13,7 +13,7 @@ pub fn deliver_disconnect_notice(config: &SecondarySyncConfig, now_ms: i64) -> R
     if identity.device_id != config.device_id || identity.origin != config.origin {
         return Err(TransportError::Config("disconnect identity does not match the retired binding".into()));
     }
-    let request = AuthenticatedStatusRequest::new_at(&identity, config.primary_id.clone(), false, now_ms).map_err(TransportError::State)?;
+    let request = AuthenticatedStatusRequest::new_disconnect_at(&identity, config.primary_id.clone(), now_ms).map_err(TransportError::State)?;
     let mut transport_config = HttpsTransportConfig::pinned(&config.endpoint, &config.server_name, config.certificate_der.clone());
     transport_config.pinned_certificate_sha256 = config.certificate_pin;
     transport_config.connect_timeout = Duration::from_secs(1);
@@ -132,15 +132,18 @@ mod tests {
         let id = request(&mut primary, &identity, 10);
         let status = AuthenticatedStatusRequest::new_at(&identity, "primary-1", false, 20).unwrap();
         assert_eq!(primary.authenticated_status(&status, 20).unwrap().status, "pending");
+        assert!(primary.disconnect_device(&status, 20).is_err(), "a status request must not double as a disconnect notice");
         let stranger = DeviceIdentity::create("fixture-host", "Stranger").unwrap();
-        let mut forged = AuthenticatedStatusRequest::new_at(&stranger, "primary-1", false, 20).unwrap();
+        let mut forged = AuthenticatedStatusRequest::new_disconnect_at(&stranger, "primary-1", 20).unwrap();
         forged.device_id = identity.device_id.clone();
         assert!(primary.authenticated_status(&forged, 20).is_err());
         assert!(primary.disconnect_device(&forged, 20).is_err());
-        primary.disconnect_device(&status, 20).unwrap();
+        let disconnect = AuthenticatedStatusRequest::new_disconnect_at(&identity, "primary-1", 20).unwrap();
+        primary.disconnect_device(&disconnect, 20).unwrap();
         assert!(primary.approve_pairing(&id, 21).is_err(), "cancelled requests cannot be approved later");
         assert_eq!(primary.authenticated_status(&status, 21).unwrap().status, "rejected");
-        primary.disconnect_device(&status, 22).unwrap();
+        let disconnect = AuthenticatedStatusRequest::new_disconnect_at(&identity, "primary-1", 22).unwrap();
+        primary.disconnect_device(&disconnect, 22).unwrap();
         let id = request(&mut primary, &identity, 30);
         let expired = AuthenticatedStatusRequest::new_at(&identity, "primary-1", false, 60_030).unwrap();
         assert_eq!(primary.authenticated_status(&expired, 60_030).unwrap().status, "expired");
@@ -189,18 +192,21 @@ mod tests {
     }
 
     #[test]
-    fn occupied_listener_port_falls_back_on_the_same_interface() {
+    fn occupied_listener_port_is_a_loud_configuration_error_not_a_silent_rebind() {
         let dir = test_dir();
         let (_, config, key) = fixture(dir.path());
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let server = HttpsSyncServer::bind_with_host_fallback(HttpsServerConfig {
+        let port = occupied.local_addr().unwrap().port();
+        let error = HttpsSyncServer::bind_with_host(HttpsServerConfig {
             bind_addr: occupied.local_addr().unwrap(), certificate_der: config.certificate_der, private_key_der: key,
             allow_lan: false, allowed_peer_ips: vec![], max_body_bytes: crate::MAX_COMPRESSED_BYTES, max_concurrent: 1,
             staging_dir: dir.path().join("staging"), idle_timeout: Duration::from_secs(2), total_timeout: Duration::from_secs(4),
             staging_quota_bytes: 512 * 1024 * 1024,
-        }, SyncStore::open_in_memory("primary-1").unwrap(), crate::DiagnosticsHost::default()).unwrap();
-        assert_ne!(server.local_addr().unwrap().port(), occupied.local_addr().unwrap().port());
-        assert_eq!(server.local_addr().unwrap().ip(), occupied.local_addr().unwrap().ip());
+        }, SyncStore::open_in_memory("primary-1").unwrap(), crate::DiagnosticsHost::default())
+            .err().expect("an occupied port must fail instead of silently moving");
+        let TransportError::Config(message) = error else { panic!("expected a configuration error, got {error:?}") };
+        assert!(message.contains("already in use"), "{message}");
+        assert!(message.contains(&port.to_string()), "{message}");
     }
 
     #[test]
@@ -260,12 +266,12 @@ mod tests {
         let request_id = request(&mut store, &identity, 2);
         store.approve_pairing(&request_id, 3).unwrap();
         config.primary_id = "primary-2".into();
-        store.index().conn().execute_batch("CREATE TRIGGER fail_secondary BEFORE INSERT ON device_sync_secondary_config BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+        store.state.execute_batch("CREATE TRIGGER fail_secondary BEFORE INSERT ON device_sync_secondary_config BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
         assert!(store.transition_to_secondary(&config, 4).is_err());
         assert_eq!(store.primary_id(), "primary-1");
         assert!(store.primary_config().unwrap().is_some());
         assert_eq!(store.device(&identity.device_id).unwrap().unwrap().status, DeviceStatus::Paired);
-        store.index().conn().execute_batch("DROP TRIGGER fail_secondary").unwrap();
+        store.state.execute_batch("DROP TRIGGER fail_secondary").unwrap();
         store.transition_to_secondary(&config, 5).unwrap();
         assert_eq!(store.primary_id(), "primary-2");
         assert!(store.primary_config().unwrap().is_none());

@@ -20,7 +20,7 @@ use usage_device_sync::{hash_bytes, ClientTransportCancellation, DeviceIdentity,
 
 use crate::engine::{EngineChannel, Msg, Shared};
 use crate::{bubble, panel};
-use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Theme, TrayMode};
+use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Settings, Theme, TrayMode};
 use crate::tray;
 
 const DEFAULT_PRIMARY_BIND: &str = "0.0.0.0:47821";
@@ -53,6 +53,10 @@ pub enum SyncManagementRequest {
     /// secondary while retaining local usage and sync history.
     SwitchToSecondary,
     Unpair,
+    /// Forget the secondary's stream checkpoints, outbox and ACK progress,
+    /// then recover a fresh stream and sync from scratch. Local events and the
+    /// pairing are kept.
+    ResetSecondary,
     CreateInvite { expires_at_ms: Option<i64> },
     Pair { invite: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
     PairDiscovered { primary_id: String, endpoint: String, certificate_pin: String, origin: Option<String>, display_name: Option<String>, os: Option<String> },
@@ -77,6 +81,7 @@ fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
         Some(SyncManagementRequest::Stop) => "stop",
         Some(SyncManagementRequest::SwitchToSecondary) => "switch_to_secondary",
         Some(SyncManagementRequest::Unpair) => "unpair",
+        Some(SyncManagementRequest::ResetSecondary) => "reset_secondary",
         Some(SyncManagementRequest::CreateInvite { .. }) => "create_invite",
         Some(SyncManagementRequest::Pair { .. }) => "pair",
         Some(SyncManagementRequest::PairDiscovered { .. }) => "pair_discovered",
@@ -113,6 +118,28 @@ fn log_sync_action(action: &str, started: Instant, error: Option<&str>) {
         None => format!("sync: action={action} total_ms={} outcome=ok", started.elapsed().as_millis()),
     };
     if error.is_some() { crate::logging::error(&message); } else { crate::logging::info(&message); }
+}
+
+async fn save_settings_async(settings: &Settings) -> Result<(), String> {
+    let settings = settings.clone();
+    tauri::async_runtime::spawn_blocking(move || settings.save())
+        .await
+        .map_err(|error| format!("settings worker stopped: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+async fn mutate_settings_async<F>(app: &AppHandle, mutate: F) -> Result<Settings, String>
+where
+    F: FnOnce(&mut Settings),
+{
+    let settings = {
+        let shared = app.state::<Shared>();
+        let mut guard = shared.settings.lock().map_err(|_| "settings busy".to_string())?;
+        mutate(&mut guard);
+        guard.clone()
+    };
+    save_settings_async(&settings).await?;
+    Ok(settings)
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +195,7 @@ struct SyncControlState {
     last_error: Option<String>,
     discovery_error: Option<String>,
     phase: SyncPhase,
+    primary_starting: bool,
     last_checked_at_ms: Option<i64>,
     discovered_primaries: Vec<DiscoveredPrimaryView>,
     pending_pairing_attempted: bool,
@@ -178,7 +206,7 @@ struct SyncControlState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SyncPhase { Idle, Running, Success, Error, Cancelled, Offline }
+enum SyncPhase { Idle, Running, Success, Error, Cancelled }
 
 impl Default for SyncPhase {
     fn default() -> Self { Self::Idle }
@@ -192,7 +220,6 @@ impl SyncPhase {
             Self::Success => "success",
             Self::Error => "error",
             Self::Cancelled => "cancelled",
-            Self::Offline => "offline",
         }
     }
 }
@@ -327,6 +354,7 @@ pub struct SyncDevicesView {
     pub primary_display_name: Option<String>,
     pub role: String,
     pub service_running: bool,
+    pub primary_starting: bool,
     pub primary_data_sharing_enabled: bool,
     pub service_health: Option<String>,
     pub endpoint: Option<String>,
@@ -534,6 +562,7 @@ fn clear_primary_state(state: &mut SyncControlState) {
     state.invite_expires_at_ms = None;
     state.last_error = None;
     state.discovery_error = None;
+    state.primary_starting = false;
     state.phase = SyncPhase::Idle;
 }
 
@@ -612,14 +641,14 @@ fn cancel_pending_pairing(index_path: &std::path::Path) -> Result<(), String> {
     clear_pending_pairing()
 }
 
-fn send_pending_pairing(state: &SyncControlState, pending: &PendingPairing) -> Result<(), String> {
+fn send_pending_pairing(interrupt: &SyncInterrupt, pending: &PendingPairing) -> Result<(), String> {
     pending.request.verify().map_err(|error| format!("pending pairing is invalid: {error}"))?;
     let mut transport_config = HttpsTransportConfig::pinned(
         pending.endpoint.clone(), pending.server_name.clone(), pending.certificate_der.clone(),
     );
     transport_config.pinned_certificate_sha256 = pending.certificate_pin;
     let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|error| error.to_string())?;
-    state.interrupt.install(&transport);
+    interrupt.install(&transport);
     let response = transport.send_pairing_request(&pending.request).map_err(|error| format!("pairing request failed: {error}"))?;
     match response.status.as_str() {
         "pending" | "approved" => Ok(()),
@@ -636,13 +665,13 @@ fn pairing_invite_needs_renewal(error: &str) -> bool {
         || error.contains("pairing invite was concurrently claimed")
 }
 
-fn renew_pending_pairing(state: &SyncControlState, pending: &PendingPairing, identity: &DeviceIdentity) -> Result<PendingPairing, String> {
+fn renew_pending_pairing(interrupt: &SyncInterrupt, pending: &PendingPairing, identity: &DeviceIdentity) -> Result<PendingPairing, String> {
     let mut transport_config = HttpsTransportConfig::pinned(
         pending.endpoint.clone(), pending.server_name.clone(), pending.certificate_der.clone(),
     );
     transport_config.pinned_certificate_sha256 = pending.certificate_pin;
     let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|error| error.to_string())?;
-    state.interrupt.install(&transport);
+    interrupt.install(&transport);
     let (invite, certificate_der) = transport.request_pairing_invite(&pending.primary_id, &pending.endpoint)
         .map_err(|error| format!("cannot renew pairing invite: {error}"))?;
     let certificate_pin = parse_pin(&invite.certificate_pin)?;
@@ -734,7 +763,10 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
 }
 
 fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_host: Option<String>, allow_lan: bool, diagnostics_app: Option<AppHandle>) -> Result<(), String> {
+    let started = Instant::now();
+    let stage = |name: &str, at: Instant| crate::logging::info(&format!("sync: action=start_primary stage={name} elapsed_ms={}", at.elapsed().as_millis()));
     let index_path = sync_index_path()?;
+    stage("path", started);
     reap_service(state);
     if state.service.is_some() { return Ok(()); }
     if state.runtime.is_some() {
@@ -752,6 +784,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let directory = sync_dir()?;
     let identity_path = directory.join("primary-identity.json");
     let identity = DeviceIdentity::load_or_create(&identity_path, "primary", "TokenMe primary").map_err(|e| format!("cannot create primary identity: {e}"))?;
+    stage("identity", started);
     let share_data_with_secondaries = SyncStore::read_primary_config(&index_path)
         .map_err(|error| format!("cannot read primary sharing preference: {error}"))?
         .filter(|config| config.primary_id == identity.device_id)
@@ -759,6 +792,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let cert_path = directory.join("server-cert.pem");
     let key_path = directory.join("server-key.pem");
     let (certificate_der, private_key_der) = usage_device_sync::ensure_server_certificate(&cert_path, &key_path, "localhost").map_err(|e| format!("cannot create private sync certificate: {e}"))?;
+    stage("cert", started);
     let bind_text = bind.unwrap_or_else(|| DEFAULT_PRIMARY_BIND.into());
     let bind_addr: std::net::SocketAddr = bind_text.parse().map_err(|e| format!("sync bind address is invalid: {e}"))?;
     if allow_lan && bind_addr.ip().is_loopback() {
@@ -775,7 +809,12 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
     let existing_primary_id = SyncStore::read_status(&index_path).map_err(|error| format!("cannot read sync role: {error}"))?.primary_id;
     let current_primary_id = existing_primary_id.unwrap_or_else(|| identity.device_id.clone());
-    let mut store = SyncStore::open(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
+    // Deferred open: no journal release, no capture mirror write — those are
+    // index write transactions that queue for seconds behind the ingest
+    // engine, and the start's banner must not wait for them. The background
+    // start_converge pass performs them once the listener is up.
+    let mut store = SyncStore::open_deferred(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
+    stage("store_open", started);
     if current_primary_id != identity.device_id {
         store.rotate_primary_id(identity.device_id.clone(), current_ms()).map_err(|e| format!("cannot switch sync role: {e}"))?;
         if let Some(config) = &secondary_config {
@@ -794,7 +833,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         diagnostics_host.set_check_runner(move |checks| crate::diagnostics::run_remote_checks(app.clone(), checks))
             .map_err(|e| format!("cannot configure diagnostics check runner: {e}"))?;
     }
-    let server = usage_device_sync::HttpsSyncServer::bind_with_host_fallback(HttpsServerConfig {
+    let server = usage_device_sync::HttpsSyncServer::bind_with_host(HttpsServerConfig {
         bind_addr,
         certificate_der: certificate_der.clone(),
         private_key_der,
@@ -807,6 +846,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         total_timeout: std::time::Duration::from_secs(600),
         staging_quota_bytes: 512 * 1024 * 1024,
     }, store, diagnostics_host).map_err(|e| format!("cannot start sync listener: {e}"))?;
+    stage("listener_bind", started);
     server.set_log_sink(|is_error, message| {
         if is_error { crate::logging::error(message); } else { crate::logging::info(message); }
     }).map_err(|error| format!("cannot configure sync runtime logging: {error}"))?;
@@ -819,20 +859,46 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let diagnostics = server.diagnostics_handle();
     let address = server.local_addr().map_err(|e| e.to_string())?;
     let endpoint = format!("https://{endpoint_host}:{}", address.port());
-    let mut persisted = SyncStore::open(&index_path, identity.device_id.clone()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
-    // Pin the readable downlink origin (this machine's hostname) before the
-    // listener can serve a page, so secondaries see a name, not a device id.
-    persisted.pin_primary_export_origin(&usage_index::hostname()).map_err(|e| format!("cannot pin the primary export origin: {e}"))?;
-    persisted.save_primary_config(&PrimarySyncConfig {
-        primary_id: identity.device_id.clone(),
-        // Persist the port actually bound; `:0` is valid for tests and must
-        // not come back as an unusable endpoint after an app restart.
-        bind_addr: address.to_string(),
-        advertise_host: Some(host),
-        allow_lan,
-        enabled: true,
-        share_data_with_secondaries,
-    }, current_ms()).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
+    // The role row lives in sync_state.db: persist it without opening the
+    // usage index, so a start cannot wait out the ingest engine's write lock
+    // just to record its own config. `:0` is valid for tests and must not
+    // come back as an unusable endpoint after an app restart.
+    SyncStore::write_primary_config_state(
+        &index_path,
+        &identity.device_id,
+        &PrimarySyncConfig {
+            primary_id: identity.device_id.clone(),
+            bind_addr: address.to_string(),
+            advertise_host: Some(host),
+            allow_lan,
+            enabled: true,
+            share_data_with_secondaries,
+        },
+        current_ms(),
+    ).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
+    stage("persist_config", started);
+    // Index-side convergence the start no longer waits for: the readable
+    // downlink origin pin (this machine's hostname, so secondaries see a name,
+    // not a device id) plus the journal release and capture mirror refresh a
+    // full open performs. Secondaries cannot attach before pairing, so a pin
+    // landing seconds after the banner clears still precedes every reader.
+    {
+        let converge_path = index_path.clone();
+        let converge_primary = identity.device_id.clone();
+        thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = (|| {
+                let mut store = match SyncStore::open(&converge_path, converge_primary) {
+                    Ok(store) => store,
+                    Err(error) => return Err(format!("cannot open sync store: {error}")),
+                };
+                store.pin_primary_export_origin(&usage_index::hostname())
+                    .map_err(|error| format!("cannot pin the primary export origin: {error}"))?;
+                Ok(())
+            })();
+            log_sync_action("start_converge", started, outcome.as_ref().err().map(String::as_str));
+        });
+    }
     let mdns = if allow_lan {
         let certificate_pin = hex_bytes(&hash_bytes(&certificate_der));
         match register_mdns_primary(&identity.device_id, &certificate_pin, &endpoint) {
@@ -1125,13 +1191,6 @@ fn merge_discovered_primary(results: &mut Vec<DiscoveredPrimaryView>, candidate:
     results.push(candidate);
 }
 
-fn mdns_address_is_routable(address: &std::net::IpAddr) -> bool {
-    match address {
-        std::net::IpAddr::V4(address) => !address.is_loopback() && !address.is_unspecified() && !address.is_link_local(),
-        std::net::IpAddr::V6(address) => !address.is_loopback() && !address.is_unspecified() && !address.is_unicast_link_local(),
-    }
-}
-
 fn apply_discovery_result(state: &mut SyncControlState, result: Result<Vec<DiscoveredPrimaryView>, String>, started: Instant) {
     // A new discovery attempt supersedes a failed pairing attempt; do not
     // carry that stale error back into the discovery sheet snapshot.
@@ -1255,14 +1314,15 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         state.discovery_error = Some(error);
     }
     let index_path = sync_index_path()?;
-    let mut secondary_config = SyncStore::read_secondary_config(&index_path).map_err(|error| format!("cannot read secondary sync configuration: {error}"))?;
-    let primary_config = SyncStore::read_primary_config(&index_path).map_err(|error| format!("cannot read primary sync configuration: {error}"))?;
+    // One state read and one index read answer the whole poll: role configs,
+    // registry, outbox totals and snapshot cursors. Opening each field through
+    // its own connection queued every five-second tick behind writers ~10 times.
+    let panel = SyncStore::read_panel_state(&index_path)
+        .map_err(|error| format!("cannot read device sync state: {error}"))?;
+    let mut secondary_config = panel.secondary_config.clone();
+    let primary_config = panel.primary_config.clone();
     if let Some(config) = secondary_config.clone() {
-        let pending_disconnect = SyncStore::open(&index_path, config.primary_id.clone())
-            .map_err(|error| format!("cannot open secondary sync state: {error}"))?
-            .secondary_disconnect_requested()
-            .map_err(|error| format!("cannot read pending secondary disconnect: {error}"))?;
-        if pending_disconnect {
+        if panel.disconnect_requested {
             stop_service(state);
             // Migrate a stop requested by an older build without blocking on
             // its failed network notification again.
@@ -1273,7 +1333,14 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         }
     }
     let pending_pairing = if secondary_config.is_none() { read_pending_pairing()? } else { None };
-    let restore_secondary = secondary_config.is_some()
+    // The start worker persists its config before it registers the service,
+    // so a status poll in that window would see a role row with no service
+    // and try to start a listener/runtime a second time — against the port
+    // the worker already bound. `primary_starting` marks that window for both
+    // restore paths: a primary being started must not resurrect a secondary
+    // binding either.
+    let restore_secondary = !state.primary_starting
+        && secondary_config.is_some()
         && (state.role.is_empty() || (state.role == "secondary" && state.runtime.is_none()));
     if restore_secondary {
         if let Some(config) = &secondary_config {
@@ -1307,9 +1374,13 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
             }
         }
     }
-    let restore_primary = primary_config.is_some()
-        && (state.role.is_empty() || (state.role == "primary" && state.service.is_none()));
-    if restore_primary {
+    // The start worker persists its config before it registers the service,
+    // so a status poll in that window would see a role row with no service
+    // and try to start the listener a second time — against the port the
+    // worker already bound. `primary_starting` marks that window.
+    let restore_primary = !state.primary_starting
+        && primary_config.is_some()
+        && (state.role.is_empty() || (state.role == "primary" && state.service.is_none()));    if restore_primary {
         if let Some(config) = &primary_config {
             state.role = "primary".into();
             state.primary_id = Some(config.primary_id.clone());
@@ -1330,6 +1401,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     // clean and let the next pairing attempt report its own result.
     if state.role.is_empty() && secondary_config.is_none() && primary_config.is_none() && read_pending_pairing()?.is_none() {
         state.last_error = None;
+        if state.phase == SyncPhase::Error { state.phase = SyncPhase::Idle; }
     }
     if state.runtime.is_some() {
         // The runtime can clear its persisted error between the first config
@@ -1340,14 +1412,18 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     }
     if state.role == "secondary" {
         state.last_error = secondary_config.as_ref().and_then(|config| config.last_error.clone());
-    } else if state.role == "secondary" && state.last_error.is_none() && secondary_config.as_ref().is_some_and(|config| !config.enabled) {
-        state.phase = SyncPhase::Offline;
-    } else if state.role == "primary" && state.service.is_none() && primary_config.as_ref().is_some_and(|config| !config.enabled) {
-        state.phase = SyncPhase::Offline;
+        if state.last_error.is_none() && state.runtime.as_ref().is_some_and(|runtime| runtime.join.as_ref().is_none_or(|join| !join.is_finished())) {
+            if state.phase == SyncPhase::Error { state.phase = SyncPhase::Success; }
+        }
     }
-    let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
+    if state.role == "primary" {
+        if state.service.as_ref().is_some_and(|service| matches!(service.diagnostics.health(), "ready" | "running") && service.join.as_ref().is_none_or(|join| !join.is_finished())) {
+            state.last_error = None;
+            if state.phase == SyncPhase::Error { state.phase = SyncPhase::Success; }
+        }
+    }
+    let snapshot = panel.status.clone();
     let primary_id = state.primary_id.clone().or(snapshot.primary_id.clone()).or_else(|| secondary_config.as_ref().map(|config| config.primary_id.clone()));
-    let summary = SyncStore::read_outbox_summary(&index_path).ok();
     let endpoint = state.endpoint.clone()
         .or_else(|| secondary_config.as_ref().map(|config| config.endpoint.clone()))
         .or_else(|| primary_config.as_ref().and_then(primary_endpoint));
@@ -1357,8 +1433,8 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         .or_else(|| (!state.role.is_empty()).then(|| "stopped".into()));
     let stream_id = secondary_config.as_ref().and_then(|config| config.stream_id.clone());
     let data_epoch = secondary_config.as_ref().and_then(|config| config.data_epoch);
-    let upload_complete = secondary_config.as_ref().and_then(|config| SyncStore::read_upload_cursor_complete(&index_path, config));
-    let download_complete = secondary_config.as_ref().and_then(|config| SyncStore::read_download_cursor_complete(&index_path, &config.primary_id));
+    let upload_complete = secondary_config.as_ref().and(panel.upload_complete);
+    let download_complete = secondary_config.as_ref().and(panel.download_complete);
     let last_error = if state.role == "secondary" {
         secondary_config.as_ref().and_then(|config| config.last_error.clone())
     } else {
@@ -1366,14 +1442,13 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     };
     state.last_checked_at_ms = Some(current_ms());
     let pairing_pending = secondary_config.is_none() && read_pending_pairing()?.is_some();
-    let primary_data_sharing_enabled = SyncStore::read_primary_config(&index_path)
-        .map_err(|error| format!("cannot refresh primary sharing preference: {error}"))?
-        .is_some_and(|config| config.share_data_with_secondaries);
+    let primary_data_sharing_enabled = primary_config.as_ref().is_some_and(|config| config.share_data_with_secondaries);
     Ok(SyncDevicesView {
         primary_id,
         primary_display_name: secondary_config.as_ref().and_then(|config| config.primary_display_name.clone()),
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
         service_running: state.service.is_some() || state.runtime.is_some(),
+        primary_starting: state.primary_starting,
         primary_data_sharing_enabled,
         service_health,
         endpoint,
@@ -1382,9 +1457,9 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         data_epoch,
         upload_complete,
         download_complete,
-        pending: summary.as_ref().map(|s| s.pending).unwrap_or(0),
-        in_flight: summary.as_ref().map(|s| s.in_flight).unwrap_or(0),
-        pending_bytes: summary.as_ref().map(|s| s.bytes).unwrap_or(0),
+        pending: panel.outbox.pending,
+        in_flight: panel.outbox.in_flight,
+        pending_bytes: panel.outbox.bytes,
         last_error,
         discovery_error: state.discovery_error.clone(),
         last_connected_at_ms: secondary_config.as_ref().and_then(|config| config.last_connected_at_ms),
@@ -1399,18 +1474,29 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     })
 }
 
-/// Restore an explicitly enabled sync role before the WebView asks for its
-/// first snapshot. A disabled config is an intentional user stop and must not
-/// be treated as an autostart request.
+/// Restore an explicitly enabled sync role at boot. A disabled config is an
+/// intentional user stop and must not be treated as an autostart request.
+/// The restore snapshot can wait behind the ingest engine's index.db write
+/// lock for the whole of `store_open`/`persist_config` (23 s measured while
+/// it still ran on the main thread during setup), so the snapshot must never
+/// run inline here: kick the same locked-state restore the recovery loop
+/// performs onto a worker and return immediately. `ensure_sync_recovery_loop`
+/// is started first so its periodic tick re-arms anything the one-shot misses;
+/// `start_primary`/`start_secondary_runtime` are idempotent behind the
+/// control-state mutex, and a webview `sync_devices` read simply queues on
+/// that mutex until the restore finishes, so overlap is a wait, not a race.
 pub fn restore_sync_on_launch(app: &tauri::AppHandle) {
     ensure_sync_recovery_loop(app);
     let Some(control) = app.try_state::<SyncControl>() else { return; };
-    let Ok(mut state) = control.state.lock() else { return; };
-    if let Err(error) = sync_snapshot(&mut state, Some(app.clone()), true) {
-        state.last_error = Some(error);
-        state.phase = SyncPhase::Error;
-        return;
-    }
+    let state_ref = Arc::clone(&control.state);
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(mut state) = state_ref.lock() else { return; };
+        if let Err(error) = sync_snapshot(&mut state, Some(worker_app), true) {
+            state.last_error = Some(error);
+            state.phase = SyncPhase::Error;
+        }
+    });
 }
 
 fn rearm_pending_pairing_retry(state: &mut SyncControlState) {
@@ -1486,9 +1572,12 @@ fn pair_secondary_with_details(
     // delayed notification must never revoke a freshly approved connection.
     let delivery_lock = Arc::clone(&state.disconnect_delivery);
     let _delivery = delivery_lock.lock().map_err(|_| "disconnect delivery state is busy".to_string())?;
-    for notice in SyncStore::read_disconnect_notices(index_path, i64::MAX).map_err(|error| error.to_string())?
-        .into_iter().filter(|notice| notice.config.primary_id == primary_id)
-    {
+    let notices = SyncStore::read_disconnect_notices(index_path, i64::MAX).map_err(|error| error.to_string())?
+        .into_iter().filter(|notice| notice.config.primary_id == primary_id).collect::<Vec<_>>();
+    // Network delivery is intentionally performed before the control-state lock
+    // is acquired by the caller. This helper runs on the pairing worker's
+    // temporary state, never on the shared state mutex.
+    for notice in notices {
         usage_device_sync::deliver_disconnect_notice(&notice.config, current_ms())
             .map_err(|error| format!("cannot finish the previous disconnect before re-pairing: {error}"))?;
         if let Some(bound) = SyncStore::read_status(index_path).map_err(|error| error.to_string())?.primary_id {
@@ -1522,7 +1611,7 @@ fn pair_secondary_with_details(
     // Persist before the network write. The same request_id is idempotent on
     // the primary, so a crash after acceptance can be retried safely.
     write_pending_pairing(&pending)?;
-    if let Err(error) = send_pending_pairing(state, &pending) {
+    if let Err(error) = send_pending_pairing(&state.interrupt, &pending) {
         return Err(error);
     }
     let config = SecondarySyncConfig {
@@ -1561,12 +1650,12 @@ fn resume_pending_pairing(state: &mut SyncControlState, index_path: &std::path::
     if identity.device_id != pending.request.device_id || identity.origin != pending.request.origin {
         return Err("pending pairing identity does not match the stored request".into());
     }
-    let pending = match send_pending_pairing(state, &pending) {
+    let pending = match send_pending_pairing(&state.interrupt, &pending) {
         Ok(()) => pending,
         Err(error) if pairing_invite_needs_renewal(&error) => {
-            let renewed = renew_pending_pairing(state, &pending, &identity)?;
+            let renewed = renew_pending_pairing(&state.interrupt, &pending, &identity)?;
             write_pending_pairing(&renewed)?;
-            send_pending_pairing(state, &renewed)?;
+            send_pending_pairing(&state.interrupt, &renewed)?;
             renewed
         }
         Err(error) => return Err(error),
@@ -1608,6 +1697,17 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
         let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
         match action {
         SyncManagementRequest::Status => {
+            let secondary_error = SyncStore::read_secondary_config(&index_path)
+                .map_err(|error| error.to_string())?
+                .and_then(|config| config.last_error);
+            let service_healthy = state.service.as_ref().is_some_and(|service| matches!(service.diagnostics.health(), "ready" | "running"));
+            let runtime_healthy = state.runtime.as_ref().is_some_and(|runtime| runtime.join.as_ref().is_some_and(|join| !join.is_finished()));
+            if service_healthy || (runtime_healthy && secondary_error.is_none()) {
+                state.last_error = secondary_error;
+                state.phase = SyncPhase::Success;
+            } else if secondary_error.is_some() {
+                state.last_error = secondary_error;
+            }
             Ok(())
         },
         SyncManagementRequest::Discover => {
@@ -1619,8 +1719,9 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             let config = SyncStore::read_primary_config(&index_path)
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "primary sync is not configured".to_string())?;
-            let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
-            store.set_primary_data_sharing(enabled, current_ms()).map_err(|error| error.to_string())
+            // State-only write: never opens the usage index, so the toggle
+            // cannot queue behind the ingest engine's write lock.
+            SyncStore::write_primary_data_sharing(&index_path, &config.primary_id, enabled, current_ms()).map_err(|error| error.to_string())
         }
         SyncManagementRequest::StartSecondary => {
             let config = SyncStore::read_secondary_config(&index_path)
@@ -1649,8 +1750,30 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             stop_service(state);
             if was_secondary {
                 if let Some(config) = secondary_config {
-                    let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
-                    store.request_secondary_disconnect(current_ms()).map_err(|error| error.to_string())?;
+                    // State-only teardown, same seam as the primary's stop: the
+                    // binding row disappears from sync_state.db in milliseconds
+                    // while the ingest engine may hold the index write lock. The
+                    // index-side bookkeeping — the disconnect notice that revokes
+                    // this device on the primary, outbox retirement, journal
+                    // release, capture mirror — runs on a background thread with
+                    // the config captured here, because queue_secondary_disconnect
+                    // reads the row this delete removes.
+                    SyncStore::clear_secondary_config_state(&index_path, &config.primary_id, &config.device_id)
+                        .map_err(|error| error.to_string())?;
+                    let converge_path = index_path.clone();
+                    thread::spawn(move || {
+                        let started = Instant::now();
+                        let outcome = (|| {
+                            let mut store = match SyncStore::open(&converge_path, config.primary_id.clone()) {
+                                Ok(store) => store,
+                                Err(error) => return Err(format!("cannot open sync store: {error}")),
+                            };
+                            store.queue_secondary_disconnect(&config, current_ms())
+                                .map_err(|error| format!("cannot queue the disconnect notice: {error}"))?;
+                            Ok(())
+                        })();
+                        log_sync_action("stop_converge", started, outcome.as_ref().err().map(String::as_str));
+                    });
                 }
                 clear_secondary_state(state);
             } else {
@@ -1661,8 +1784,30 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
                 cancel_pending_pairing(&index_path)?;
                 clear_pending_pairing()?;
                 if let Some(config) = primary_config {
-                    let mut store = SyncStore::open(&index_path, config.primary_id).map_err(|error| error.to_string())?;
-                    store.clear_primary_config(current_ms()).map_err(|error| error.to_string())?;
+                    // State-only teardown: never opens the usage index, so the
+                    // stop button cannot queue behind the ingest write lock.
+                    // The index-side convergence (unpaired timestamp, capture
+                    // mirror, journal release) runs on a background thread and
+                    // re-converges via the recovery loop if the lock wins.
+                    SyncStore::clear_primary_config_state(&index_path, &config.primary_id).map_err(|error| error.to_string())?;
+                    let converge_path = index_path.clone();
+                    let converge_primary = config.primary_id.clone();
+                    thread::spawn(move || {
+                        let started = Instant::now();
+                        let outcome = (|| {
+                            let mut store = match SyncStore::open(&converge_path, converge_primary.clone()) {
+                                Ok(store) => store,
+                                Err(error) => return Err(format!("cannot open sync store: {error}")),
+                            };
+                            store.index().conn().execute(
+                                "INSERT INTO meta(key, value) VALUES('device_sync_last_primary_unpaired_at_ms', ?1)
+                                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                                [current_ms().to_string()],
+                            ).map_err(|error| format!("cannot record the unpaired timestamp: {error}"))?;
+                            Ok(())
+                        })();
+                        log_sync_action("stop_converge", started, outcome.as_ref().err().map(String::as_str));
+                    });
                 }
                 clear_primary_state(state);
             }
@@ -1705,6 +1850,28 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             }
             Ok(())
         },
+        SyncManagementRequest::ResetSecondary => {
+            let config = SyncStore::read_secondary_config(&index_path)
+                .map_err(|error| format!("cannot read secondary sync configuration: {error}"))?
+                .ok_or_else(|| "pair this device before resetting secondary sync".to_string())?;
+            let was_running = state.runtime.is_some();
+            // The runtime holds the scheduler lease and an in-memory outbox
+            // view; dropping it joins the thread and releases the lease before
+            // the reset deletes its rows.
+            stop_service(state);
+            let mut store = SyncStore::open(&index_path, config.primary_id.clone()).map_err(|error| error.to_string())?;
+            store.reset_secondary_sync_state(current_ms()).map_err(|error| error.to_string())?;
+            store.set_secondary_last_error(None, current_ms()).map_err(|error| error.to_string())?;
+            drop(store);
+            if was_running {
+                if let Err(error) = start_secondary_runtime(state) {
+                    let mut rollback = SyncStore::open(&index_path, config.primary_id).map_err(|open_error| open_error.to_string())?;
+                    let _ = rollback.set_secondary_last_error(Some(error.as_str()), current_ms());
+                    return Err(error);
+                }
+            }
+            Ok(())
+        }
         SyncManagementRequest::CreateInvite { expires_at_ms } => {
             let primary_id = state_primary_id(state, &snapshot)?;
             let endpoint = state.endpoint.clone().ok_or_else(|| "start the primary service before creating an invite".to_string())?;
@@ -1820,6 +1987,134 @@ pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>
         log_sync_action(action, started, result.as_ref().err().map(String::as_str));
         return result;
     }
+    let pairing_request = match request.as_ref() {
+        Some(SyncManagementRequest::Pair { invite, origin, display_name, os }) => Some(SyncManagementRequest::Pair {
+            invite: invite.clone(), origin: origin.clone(), display_name: display_name.clone(), os: os.clone(),
+        }),
+        Some(SyncManagementRequest::PairDiscovered { primary_id, endpoint, certificate_pin, origin, display_name, os }) => Some(SyncManagementRequest::PairDiscovered {
+            primary_id: primary_id.clone(), endpoint: endpoint.clone(), certificate_pin: certificate_pin.clone(),
+            origin: origin.clone(), display_name: display_name.clone(), os: os.clone(),
+        }),
+        _ => None,
+    };
+    if let Some(pairing_request) = pairing_request {
+        let state_ref = Arc::clone(&control.state);
+        let interrupt = control.interrupt.clone();
+        let delivery_lock = {
+            let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+            reap_service(&mut state);
+            if state.service.is_some() { return Err("stop the primary sync service before pairing this device as a secondary".into()); }
+            if state.runtime.is_some() || state.role == "secondary" {
+                return Err("this device is already paired; unpair it before using a new invite".into());
+            }
+            state.phase = SyncPhase::Running;
+            Arc::clone(&state.disconnect_delivery)
+        };
+        let worker_app = app.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let index_path = sync_index_path()?;
+            let details = match pairing_request {
+                SyncManagementRequest::Pair { invite, origin, display_name, os } => {
+                    let details = PairingInvite::parse_url(&invite).map_err(|e| format!("invalid pairing invite: {e}"))?;
+                    let certificate_der = details.certificate_der.clone().ok_or_else(|| "invite does not contain the public server certificate; ask the primary for a fresh invite".to_string())?;
+                    (details, certificate_der, origin, display_name, os)
+                }
+                SyncManagementRequest::PairDiscovered { primary_id, endpoint, certificate_pin, origin, display_name, os } => {
+                    let pin = parse_pin(&certificate_pin)?;
+                    let mut transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned_hash(endpoint.clone(), "localhost", pin)).map_err(|e| e.to_string())?;
+                    interrupt.install(&transport);
+                    let (invite, certificate_der, primary_display_name) = transport.request_pairing_invite_with_primary_name(&primary_id, &endpoint)
+                        .map_err(|e| format!("cannot obtain a secure pairing invite: {e}"))?;
+                    (PairingInviteDetails {
+                        invite, primary_id: Some(primary_id), server_name: Some("localhost".into()), primary_display_name,
+                        certificate_der: Some(certificate_der.clone()),
+                    }, certificate_der, origin, display_name, os)
+                }
+                _ => unreachable!(),
+            };
+            let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
+            let mut temp = SyncControlState::default();
+            temp.interrupt = interrupt.clone();
+            temp.disconnect_delivery = delivery_lock;
+            let (details, certificate_der, origin, display_name, os) = details;
+            pair_secondary_with_details(&mut temp, &index_path, &snapshot, details, certificate_der, origin, display_name, os)?;
+            let runtime = temp.runtime.take();
+            let endpoint = temp.endpoint.take();
+            let primary_id = temp.primary_id.take();
+            let certificate_pin = temp.certificate_pin.take();
+            let mut state = state_ref.lock().map_err(|_| "sync management state is busy".to_string())?;
+            if state.service.is_some() || state.runtime.is_some() || !state.role.is_empty() {
+                drop(runtime);
+                return Err("sync state changed while pairing was in progress".into());
+            }
+            state.role = "secondary".into();
+            state.primary_id = primary_id;
+            state.endpoint = endpoint;
+            state.certificate_pin = certificate_pin;
+            state.runtime = runtime;
+            state.last_error = None;
+            state.phase = SyncPhase::Success;
+            sync_snapshot(&mut state, Some(worker_app), false)
+        }).await.map_err(|_| "sync management worker stopped".to_string())?;
+        crate::logging::sync_event(action, result.is_ok(), result.as_ref().err().map(|_| "handler_failed"));
+        eprintln!("tokenme sync: action={action} total_ms={}", started.elapsed().as_millis());
+        log_sync_action(action, started, result.as_ref().err().map(String::as_str));
+        return result;
+    }
+    if matches!(request.as_ref(), Some(SyncManagementRequest::StartPrimary { .. })) {
+        // The full start waits behind ingest write locks for minutes on a busy
+        // index. Accept immediately, flip to a visible starting state, and let
+        // the blocking work finish in a worker; the sheet's existing poll
+        // loop and the recovery thread publish the final state.
+        {
+            let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+            if state.primary_starting {
+                let error = Err("primary sync is already starting".into());
+                crate::logging::sync_event(action, false, Some("operation_busy"));
+                log_sync_action(action, started, error.as_ref().err().map(String::as_str));
+                return error;
+            }
+            state.primary_starting = true;
+            state.last_error = None;
+            state.phase = SyncPhase::Running;
+        }
+        let state_ref = Arc::clone(&control.state);
+        let worker_app = app.clone();
+        let start_request = match request.as_ref() {
+            Some(SyncManagementRequest::StartPrimary { bind, advertise_host, allow_lan }) => SyncManagementRequest::StartPrimary {
+                bind: bind.clone(), advertise_host: advertise_host.clone(), allow_lan: *allow_lan,
+            },
+            _ => unreachable!("guarded above"),
+        };
+        let initial_view = {
+            let mut state = control.state.lock().map_err(|_| "sync management state is busy".to_string())?;
+            sync_snapshot(&mut state, Some(app.clone()), false)
+        }?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let started_worker = Instant::now();
+            let outcome = (|| {
+                let mut state = state_ref.lock().map_err(|_| "sync management state is busy".to_string())?;
+                let result = run_sync_action(&mut state, start_request, Some(worker_app.clone()));
+                let view = sync_snapshot(&mut state, Some(worker_app.clone()), false);
+                result?;
+                view.map(|_| ())
+            })();
+            let error = outcome.as_ref().err().cloned();
+            if let Ok(mut state) = state_ref.lock() {
+                state.primary_starting = false;
+                if let Some(message) = &error {
+                    state.last_error = Some(message.clone());
+                    state.phase = SyncPhase::Error;
+                }
+            }
+            crate::logging::sync_event("start_primary_worker", outcome.is_ok(), outcome.as_ref().err().map(|_| "handler_failed"));
+            log_sync_action("start_primary_worker", started_worker, outcome.as_ref().err().map(String::as_str));
+            eprintln!("tokenme sync: action=start_primary_worker total_ms={}", started_worker.elapsed().as_millis());
+        });
+        crate::logging::sync_event(action, true, None);
+        log_sync_action(action, started, None);
+        return Ok(initial_view);
+    }
     let state_ref = Arc::clone(&control.state);
     let worker_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -1896,7 +2191,7 @@ pub async fn set_tray_mode(app: AppHandle, mode: TrayMode) -> Result<(), String>
     // Persist after the repaint: disk IO never sits between the click and the
     // menubar, and a failed write still leaves this session working.
     let settings = app.state::<Shared>().settings();
-    settings.save().map_err(|e| e.to_string())?;
+    save_settings_async(&settings).await?;
     Ok(())
 }
 
@@ -1915,13 +2210,10 @@ pub async fn get_quota_order(app: AppHandle) -> Result<QuotaOrder, String> {
 /// never a report.
 #[tauri::command]
 pub async fn set_quota_order(app: AppHandle, order: QuotaOrder) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.quota_tools = order.tools;
-    settings.quota_rows = order.rows;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| {
+        s.quota_tools = order.tools;
+        s.quota_rows = order.rows;
+    }).await.map(|_| ())
 }
 
 /// The drag order of the quota section: tool ids for the groups,
@@ -2107,12 +2399,7 @@ pub async fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
 /// persisting it here is what makes the choice survive a relaunch.
 #[tauri::command]
 pub async fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.theme = theme;
-    settings.clone().save().map_err(|e| e.to_string())?;
+    mutate_settings_async(&app, |s| s.theme = theme).await?;
     // the native backing must follow, or the window strip under the sheet
     // flashes the old theme's colour for the lifetime of the panel
     #[cfg(target_os = "macos")]
@@ -2154,44 +2441,24 @@ pub fn open_log_dir() -> Result<(), String> {
 /// webview re-render from its own state.
 #[tauri::command]
 pub async fn set_hide_unused_tools(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.hide_unused_tools = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.hide_unused_tools = on).await.map(|_| ())
 }
 
 #[tauri::command]
 pub async fn set_hide_unused_quota(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.hide_unused_quota = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.hide_unused_quota = on).await.map(|_| ())
 }
 
 #[tauri::command]
 pub async fn set_hide_unused_estimation(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.hide_unused_estimation = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.hide_unused_estimation = on).await.map(|_| ())
 }
 
 /// The host-exit pause: stop probing a tool's quota once its application has
 /// exited; the last known answer stays on screen until it runs again.
 #[tauri::command]
 pub async fn set_host_exit_pause(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".to_string());
-    };
-    settings.host_exit_pause = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.host_exit_pause = on).await.map(|_| ())
 }
 
 /// The auto-check-in guarantee: on, the host-exit pause stops applying to the
@@ -2202,14 +2469,7 @@ pub async fn set_host_exit_pause(app: AppHandle, on: bool) -> Result<(), String>
 /// change lands within one cadence tick.
 #[tauri::command]
 pub async fn set_auto_checkin(app: AppHandle, on: bool) -> Result<(), String> {
-    {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".to_string());
-        };
-        settings.auto_checkin = on;
-        settings.clone().save().map_err(|e| e.to_string())?;
-    }
+    mutate_settings_async(&app, |s| s.auto_checkin = on).await?;
     // The switch is the probes' master gate now: it takes effect this pass,
     // not on the next settings re-read, so a fresh pass runs with it.
     usage_quota::set_auto_checkin_enabled(on);
@@ -2227,12 +2487,7 @@ pub async fn set_auto_checkin(app: AppHandle, on: bool) -> Result<(), String> {
 /// frontend reads it from settings, not from the report.
 #[tauri::command]
 pub async fn set_quota_polling(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.quota_polling = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.quota_polling = on).await.map(|_| ())
 }
 
 /// One tool's own switch — the only lever for the probes with no host mapping.
@@ -2240,16 +2495,13 @@ pub async fn set_quota_polling(app: AppHandle, on: bool) -> Result<(), String> {
 /// every time the registry gains a probe).
 #[tauri::command]
 pub async fn set_tool_polling(app: AppHandle, tool: String, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.quota_probes_off.retain(|t| *t != tool);
-    if !on {
-        settings.quota_probes_off.push(tool);
-        settings.quota_probes_off.sort();
-    }
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| {
+        s.quota_probes_off.retain(|t| *t != tool);
+        if !on {
+            s.quota_probes_off.push(tool);
+            s.quota_probes_off.sort();
+        }
+    }).await.map(|_| ())
 }
 
 /// Which banner lines fire. Delivery policy only: the tier machine keeps
@@ -2257,12 +2509,7 @@ pub async fn set_tool_polling(app: AppHandle, tool: String, on: bool) -> Result<
 /// retro-fire a line crossed while it was off.
 #[tauri::command]
 pub async fn set_notify_tiers(app: AppHandle, tiers: NotifyTier) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.notify_tiers = tiers;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.notify_tiers = tiers).await.map(|_| ())
 }
 
 /// Which lead time should announce an expiring vendor package. The UI only
@@ -2273,62 +2520,37 @@ pub async fn set_plan_expiry_notify_days(app: AppHandle, days: Option<u8>) -> Re
     if days.is_some_and(|n| !matches!(n, 1 | 3 | 5)) {
         return Err("plan expiry reminder must be 1, 3, 5, or disabled".into());
     }
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.plan_expiry_notify_days = days;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.plan_expiry_notify_days = days).await.map(|_| ())
 }
 
 /// One tool's banner mute, same exclusion-list shape as the polling switches.
 #[tauri::command]
 pub async fn set_tool_muted(app: AppHandle, tool: String, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.notify_muted.retain(|t| *t != tool);
-    if on {
-        settings.notify_muted.push(tool);
-        settings.notify_muted.sort();
-    }
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| {
+        s.notify_muted.retain(|t| *t != tool);
+        if on {
+            s.notify_muted.push(tool);
+            s.notify_muted.sort();
+        }
+    }).await.map(|_| ())
 }
 
 /// Dollar figures render at all — the switch the settings sheet flips.
 #[tauri::command]
 pub async fn set_show_money(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let Ok(mut settings) = shared.settings.lock() else {
-        return Err("settings busy".into());
-    };
-    settings.show_money = on;
-    settings.clone().save().map_err(|e| e.to_string())
+    mutate_settings_async(&app, |s| s.show_money = on).await.map(|_| ())
 }
 
 /// Persist the gauge direction without waking probes or clearing cached answers.
 #[tauri::command]
 pub async fn set_quota_display_mode(app: AppHandle, mode: QuotaDisplayMode) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
-    let mut next = settings.clone();
-    next.quota_display_mode = mode;
-    next.save().map_err(|e| e.to_string())?;
-    *settings = next;
-    Ok(())
+    mutate_settings_async(&app, |s| s.quota_display_mode = mode).await.map(|_| ())
 }
 
 /// Persist the optional local quota-cycle token summary without changing probes.
 #[tauri::command]
 pub async fn set_show_cycle_tokens(app: AppHandle, on: bool) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
-    let mut next = settings.clone();
-    next.show_cycle_tokens = on;
-    next.save().map_err(|e| e.to_string())?;
-    *settings = next;
-    Ok(())
+    mutate_settings_async(&app, |s| s.show_cycle_tokens = on).await.map(|_| ())
 }
 
 #[tauri::command]
@@ -2346,7 +2568,7 @@ pub fn set_ttft_enabled(app: AppHandle, on: bool) -> Result<(), String> {
     ttft.set_enabled(on)?;
     let mut next = settings.clone();
     next.ttft_enabled = on;
-    if let Err(error) = next.clone().save() {
+    if let Err(error) = next.save().map_err(|error| error.to_string()) {
         let _ = ttft.set_enabled(previous);
         return Err(error.to_string());
     }
@@ -2364,7 +2586,7 @@ pub fn set_performance_monitoring(app: AppHandle, on: bool) -> Result<(), String
     crate::performance::set_enabled(on).map_err(|error| error.to_string())?;
     let mut next = settings.clone();
     next.performance_monitoring = on;
-    if let Err(error) = next.clone().save() {
+    if let Err(error) = next.save().map_err(|error| error.to_string()) {
         let _ = crate::performance::set_enabled(previous);
         return Err(error.to_string());
     }
@@ -2377,14 +2599,7 @@ pub fn set_performance_monitoring(app: AppHandle, on: bool) -> Result<(), String
 /// the frontend bridge stays platform-neutral; non-Windows is a no-op.
 #[tauri::command]
 pub async fn set_bubble_enabled(app: AppHandle, on: bool) -> Result<(), String> {
-    {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".into());
-        };
-        settings.bubble_enabled = on;
-        settings.clone().save().map_err(|e| e.to_string())?;
-    }
+    mutate_settings_async(&app, |s| s.bubble_enabled = on).await?;
     bubble::set_enabled(&app, on);
     if !on { crate::pet_notice::dismiss(&app, None); }
     Ok(())
@@ -2394,14 +2609,8 @@ pub async fn set_bubble_enabled(app: AppHandle, on: bool) -> Result<(), String> 
 #[tauri::command]
 pub async fn set_bubble_skin(app: AppHandle, skin: BubbleSkin) -> Result<(), String> {
     {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".into());
-        };
-        let mut next = settings.clone();
-        next.bubble_skin = skin.clone();
-        next.save().map_err(|e| e.to_string())?;
-        *settings = next;
+        let skin_clone = skin.clone();
+        mutate_settings_async(&app, |s| s.bubble_skin = skin_clone).await?;
     }
     app.emit("bubble-skin-changed", skin).map_err(|e| e.to_string())
 }
@@ -2412,10 +2621,8 @@ pub async fn set_pet_preferences(app:AppHandle, prefs:crate::settings::PetPrefer
     let mut prefs = prefs;
     prefs.rest_interval_minutes = prefs.rest_interval_minutes.clamp(15,180);
     {
-        let shared = app.state::<Shared>();
-        let mut settings = shared.settings.lock().map_err(|_| "settings busy")?;
-        let mut next = settings.clone(); next.pet_companion = prefs.clone();
-        next.save().map_err(|e| e.to_string())?; *settings = next;
+        let prefs_clone = prefs.clone();
+        mutate_settings_async(&app, |s| s.pet_companion = prefs_clone).await?;
     }
     if crate::pet_notice::get_pet_notice(app.clone()).is_some_and(|n|
         if n.kind == crate::pet_notice::Kind::Rest { !prefs.rest_reminders } else { !prefs.greetings }) {
@@ -2433,13 +2640,6 @@ pub fn show_panel(app: AppHandle) {
     } else {
         panel::hide(&app);
     }
-}
-
-/// The panel's own visibility, as the hide/show paths record it.
-fn panel_hidden(app: &AppHandle) -> bool {
-    app.get_webview_window(crate::panel::LABEL)
-        .and_then(|w| w.is_visible().ok())
-        != Some(true)
 }
 
 /// Dismisses the panel while keeping the native and Rust visibility state in
@@ -2493,14 +2693,7 @@ pub async fn checkin_now(tool: String) -> Result<CheckinResult, String> {
 /// uses it instead of the old value's remaining timeout.
 #[tauri::command]
 pub async fn set_refresh_secs(app: AppHandle, secs: u64) -> Result<(), String> {
-    {
-        let shared = app.state::<Shared>();
-        let Ok(mut settings) = shared.settings.lock() else {
-            return Err("settings busy".into());
-        };
-        settings.refresh_secs = secs.clamp(10, 3600);
-        settings.clone().save().map_err(|e| e.to_string())?;
-    }
+    mutate_settings_async(&app, |s| s.refresh_secs = secs.clamp(10, 3600)).await?;
     if let Some(channel) = app.try_state::<EngineChannel>() {
         let _ = channel.0.send(Msg::Refresh);
     }
@@ -2569,7 +2762,7 @@ mod sync_tests {
         assert!(std::sync::Arc::ptr_eq(&control.interrupt, &control.state.lock().unwrap().interrupt));
     }
 
-    use super::{advertised_endpoint_host, clear_primary_state, mdns_address_is_routable, merge_discovered_primary, pairing_invite_needs_renewal, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, SyncPhase, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
+    use super::{advertised_endpoint_host, clear_primary_state, merge_discovered_primary, pairing_invite_needs_renewal, primary_endpoint, rearm_pending_pairing_retry, sync_action_name, sync_error_code, DiscoveredPrimaryView, SyncControlState, SyncManagementRequest, SyncPhase, DEFAULT_PRIMARY_BIND, MDNS_SERVICE_TYPE};
     use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
     use std::time::{Duration, Instant};
 
@@ -2613,14 +2806,6 @@ mod sync_tests {
         merge_discovered_primary(&mut results, DiscoveredPrimaryView { service_name: "two".into(), primary_id: "same".into(), display_name: "Two".into(), endpoint: "https://192.168.1.3:47821".into(), certificate_pin: "b".repeat(64), identity_conflict: false });
         assert_eq!(results.len(), 1);
         assert!(results[0].identity_conflict);
-    }
-
-    #[test]
-    fn mdns_discovery_ignores_loopback_and_link_local_addresses() {
-        assert!(!mdns_address_is_routable(&"127.0.0.1".parse().unwrap()));
-        assert!(!mdns_address_is_routable(&"fe80::1".parse().unwrap()));
-        assert!(mdns_address_is_routable(&"192.168.101.66".parse().unwrap()));
-        assert!(mdns_address_is_routable(&"2001:db8::66".parse().unwrap()));
     }
 
     #[test]

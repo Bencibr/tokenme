@@ -16,9 +16,11 @@
 //! while it runs), an expired token, a moved endpoint — each is an empty vec,
 //! and the panel keeps the last answer.
 
+#[cfg(windows)]
 use base64::Engine as _;
 use serde_json::{json, Value};
 
+#[cfg(windows)]
 use super::crypto;
 
 /// The meter behind `https://www.codebuddy.cn/profile/plans-usage`. The two
@@ -26,8 +28,10 @@ use super::crypto;
 /// bearer token where codebuddy.cn's own web session would be needed.
 const METER_URL: &str = "https://www.workbuddy.cn/billing/meter/get-user-resource";
 /// The desktop IDE's roaming profile (the `Local State` + `state.vscdb` pair).
+#[cfg(windows)]
 const SUPPORT_DIR: &str = "CodeBuddy CN";
 /// The cached CN login: account envelope plus the bearer token.
+#[cfg(windows)]
 const TOKEN_SECRET_KEY: &str = r#"secret://{"extensionId":"tencent-cloud.coding-copilot","key":"planning-genie.new.accessTokencn"}"#;
 
 pub struct CodeBuddyQuota;

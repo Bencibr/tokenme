@@ -22,7 +22,7 @@ mod ingest;
 mod sync;
 mod watcher;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -239,7 +239,6 @@ CREATE TABLE IF NOT EXISTS sync_occurrence(
     updated_ms   INTEGER NOT NULL,
     PRIMARY KEY(source_key, base_hash, ordinal)
 );
-CREATE INDEX IF NOT EXISTS sync_occurrence_lookup ON sync_occurrence(source_key, base_hash, ordinal);
 CREATE TABLE IF NOT EXISTS sync_event_occurrence(
     event_id      INTEGER PRIMARY KEY,
     occurrence_id TEXT NOT NULL UNIQUE
@@ -253,7 +252,6 @@ CREATE TABLE IF NOT EXISTS sync_event_identity(
     identity      TEXT NOT NULL UNIQUE,
     occurrence_id TEXT
 );
-CREATE INDEX IF NOT EXISTS sync_event_identity_cursor ON sync_event_identity(identity, event_id);
 CREATE TABLE IF NOT EXISTS sync_dirty(
     identity       TEXT PRIMARY KEY,
     source_key     TEXT NOT NULL,
@@ -266,6 +264,10 @@ CREATE TABLE IF NOT EXISTS sync_dirty(
     updated_ms     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sync_dirty_source ON sync_dirty(source_key, event_ts_ms);
+-- The change feed orders by revision and stops at a page boundary. Without
+-- this index every page scans and sorts the whole journal (25 ms at 390k
+-- rows, per page, for a full initial drain).
+CREATE INDEX IF NOT EXISTS sync_dirty_revision ON sync_dirty(revision, identity);
 "#;
 
 pub(crate) const INSERT_EVENT: &str = "INSERT OR IGNORE INTO event(\
@@ -600,72 +602,53 @@ pub(crate) fn persist_sync_event_identity(
     Ok(())
 }
 
-/// Sync's durable event mirror is opt-in.  The table is created by the
-/// device-sync migration, so a normal/unpaired index keeps the old ingest
-/// footprint and never serializes every event just in case pairing happens.
+/// Sync's durable event mirror is opt-in.  Device pairing/configuration state
+/// lives in the dedicated `sync_state.db` (the device-sync split), so the
+/// capture switch is mirrored into this index's `meta` table by SyncStore on
+/// every config/pairing change; ingest reads only the mirror and never has to
+/// open the state database.
+///
+/// Both roles consume the journal: a secondary uploads it, and a primary's
+/// downlink change feed serves revisions past each paired device's cursor
+/// (the identity-ordered event scan cannot carry a late update whose key sorts
+/// behind the cursor).  Journal only while a consumer exists, otherwise every
+/// dirty row would pin its event against prune with nobody left to ACK it.
 pub(crate) fn sync_dirty_enabled(tx: &Transaction<'_>) -> Result<bool> {
-    let table_exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_secondary_config')",
-        [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    if !table_exists {
-        return Ok(false);
-    }
-    // `enabled` is the network scheduler switch.  Once a secondary is paired,
-    // capture must remain on while that switch is false, otherwise stop/resume
-    // can lose changes made before the old identity cursor.  The fallback keeps
-    // hand-built/older test tables compatible until the additive store
-    // migration has added `capture_enabled`.
-    let has_capture_enabled = {
-        let mut statement = tx.prepare("PRAGMA table_info(device_sync_secondary_config)").map_err(sql_err)?;
-        let names = statement.query_map([], |row| row.get::<_, String>(1)).map_err(sql_err)?;
-        names.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?.iter().any(|name| name == "capture_enabled")
-    };
-    let column = if has_capture_enabled { "capture_enabled" } else { "enabled" };
-    let enabled: Option<i64> = tx.query_row(
-        &format!("SELECT {column} FROM device_sync_secondary_config WHERE config_key = 'secondary'"),
+    let mirror: Option<String> = tx.query_row(
+        "SELECT value FROM meta WHERE key = 'device_sync_capture_enabled'",
         [], |row| row.get(0),
     ).optional().map_err(sql_err)?;
-    let primary_table_exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_primary_config')",
-        [], |row| row.get(0),
-    ).map_err(sql_err)?;
-    let primary_configured = if primary_table_exists {
-        tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM device_sync_primary_config WHERE config_key = 'primary')",
-            [], |row| row.get(0),
-        ).map_err(sql_err)?
-    } else { false };
-    // Keep a local-only change journal while a primary is configured, even
-    // when network sharing is off, so re-enabling cannot skip offline edits.
-    Ok(enabled == Some(1) || primary_configured)
+    Ok(mirror.as_deref() == Some("1"))
 }
 
 pub(crate) fn mark_sync_dirty(
-    tx: &Transaction<'_>, identity: &str, source_key: &str, occurrence_id: Option<&str>,
+    tx: &Transaction<'_>, enabled: bool, identity: &str, source_key: &str, occurrence_id: Option<&str>,
     event_id: i64, event_ts_ms: i64, now_ms: i64,
 ) -> Result<()> {
-    if !sync_dirty_enabled(tx)? {
+    if !enabled {
         return Ok(());
     }
     if event_id <= 0 {
         return Err(Error::Sync("sync dirty event id is invalid".into()));
     }
-    let current: Option<String> = tx.query_row(
-        "SELECT value FROM meta WHERE key = 'device_sync_dirty_revision'",
+    // One statement allocates the revision. Reading the counter and writing it
+    // back doubled the metadata traffic of every dirty event; the guard makes
+    // a corrupt counter behave like the old read-and-validate path (no row,
+    // hence the explicit error instead of a silent reset to 1).
+    let revision: Option<String> = tx.query_row(
+        "INSERT INTO meta(key, value) VALUES('device_sync_dirty_revision', '1')
+         ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+         WHERE value GLOB '[0-9]*' AND value NOT GLOB '*[^0-9]*'
+         RETURNING value",
         [], |row| row.get(0),
     ).optional().map_err(sql_err)?;
-    let next = current.as_deref().unwrap_or("0").parse::<i64>()
-        .map_err(|_| Error::Sync("device sync dirty revision is corrupt".into()))?
-        .checked_add(1)
-        .ok_or_else(|| Error::Sync("device sync dirty revision overflow".into()))?;
+    let next = revision
+        .ok_or_else(|| Error::Sync("device sync dirty revision is corrupt".into()))?
+        .parse::<i64>()
+        .map_err(|_| Error::Sync("device sync dirty revision is corrupt".into()))?;
     if next <= 0 {
         return Err(Error::Sync("device sync dirty revision is invalid".into()));
     }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_dirty_revision', ?1)",
-        params![next.to_string()],
-    ).map_err(sql_err)?;
     let old_json_bytes: i64 = tx.query_row(
         "SELECT COALESCE(length(event_json), 0) FROM sync_dirty WHERE identity = ?1",
         params![identity], |row| row.get(0),
@@ -685,19 +668,19 @@ pub(crate) fn mark_sync_dirty(
     Ok(())
 }
 
-fn adjust_sync_dirty_json_bytes(tx: &Transaction<'_>, delta: i64) -> Result<()> {
-    let current: i64 = tx.query_row(
+fn adjust_sync_dirty_json_bytes(conn: &Connection, delta: i64) -> Result<()> {
+    let current: i64 = conn.query_row(
         "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'device_sync_dirty_json_bytes'), 0)",
         [], |row| row.get(0),
     ).map_err(sql_err)?;
     let next = match current.checked_add(delta).filter(|value| *value >= 0) {
         Some(next) => next,
-        None => tx.query_row(
+        None => conn.query_row(
             "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty",
             [], |row| row.get(0),
         ).map_err(sql_err)?,
     };
-    tx.execute(
+    conn.execute(
         "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![next.to_string()],
@@ -729,32 +712,115 @@ fn prune_stale_sync_event_identities(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn load_event_tx(tx: &Transaction<'_>, event_id: i64) -> Result<UsageEvent> {
-    let (tool, ts_ms, session, project, model, meter, input, cache_creation, cache_read, output, reasoning, credits, dedupe_key, source):
-        (String, i64, String, Option<String>, Option<String>, String, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<String>, String) = tx.query_row(
-        &format!("SELECT {SELECT_EVENT_COLS} FROM event WHERE id = ?1"), params![event_id],
-        |row| Ok((
-            row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?,
-            row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?,
-            row.get(13)?, row.get(14)?,
-        )),
-    ).optional().map_err(sql_err)?.ok_or_else(|| Error::Sync(format!("event {event_id} disappeared while marking sync dirty")))?;
-    let mut calls_stmt = tx.prepare("SELECT kind, name FROM call WHERE event_id = ?1 ORDER BY kind, name").map_err(sql_err)?;
-    let calls = calls_stmt.query_map(params![event_id], |row| Ok(Call { kind: call_kind_of(&row.get::<_, String>(0)?), name: row.get(1)? }))
-        .map_err(sql_err)?.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?;
-    let quota: Option<QuotaSample> = tx.query_row(
-        "SELECT used_percent, window_minutes, resets_at_ms, label FROM quota WHERE event_id = ?1",
-        params![event_id],
-        |row| Ok(QuotaSample { used_percent: row.get(0)?, window_minutes: row.get(1)?, resets_at_ms: row.get(2)?, label: row.get(3)?, id: None }),
-    ).optional().map_err(sql_err)?;
+/// Retained dirty rows are the only protection a local change has from prune
+/// until an ACK clears them.  A dirty row that points at a deleted event can
+/// never be packaged again (and `load_event_tx` would fail the whole page), so
+/// open-time repairs reconcile the journal the same way they reconcile the
+/// identity projection.  Rows with only the legacy JSON fallback have no
+/// event reference and stay until an export consumes them.
+fn prune_dangling_sync_dirty(conn: &Connection) -> Result<()> {
+    // Sum only the rows about to leave, and only their legacy JSON payload
+    // (current rows store X''). A full-table sum here rescanned every dirty
+    // row whenever a single dangling reference was removed.
+    let removed_json_bytes: i64 = conn.query_row(
+        "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty
+          WHERE event_id IS NOT NULL AND length(event_json) > 0
+            AND NOT EXISTS(SELECT 1 FROM event e WHERE e.id = sync_dirty.event_id)",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    let removed = conn.execute(
+        "DELETE FROM sync_dirty
+          WHERE event_id IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM event e WHERE e.id = sync_dirty.event_id)",
+        [],
+    ).map_err(sql_err)?;
+    if removed > 0 {
+        adjust_sync_dirty_json_bytes(conn, -removed_json_bytes)?;
+    }
+    Ok(())
+}
+
+fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageEvent> {
+    let input: Option<f64> = row.get(7)?;
+    let cache_creation: Option<f64> = row.get(8)?;
+    let cache_read: Option<f64> = row.get(9)?;
+    let output: Option<f64> = row.get(10)?;
+    let reasoning: Option<f64> = row.get(11)?;
+    let credits: Option<f64> = row.get(12)?;
+    let meter: String = row.get(6)?;
     Ok(UsageEvent {
-        tool, ts_ms, session, project, model,
+        tool: row.get(1)?, ts_ms: row.get(2)?, session: row.get(3)?,
+        project: row.get(4)?, model: row.get(5)?,
         counts: TokenCounts {
-            input: input.unwrap_or(0.0), cache_creation: cache_creation.unwrap_or(0.0), cache_read: cache_read.unwrap_or(0.0),
-            output: output.unwrap_or(0.0), reasoning: reasoning.unwrap_or(0.0), credits: credits.unwrap_or(0.0),
+            input: input.unwrap_or(0.0), cache_creation: cache_creation.unwrap_or(0.0),
+            cache_read: cache_read.unwrap_or(0.0), output: output.unwrap_or(0.0),
+            reasoning: reasoning.unwrap_or(0.0), credits: credits.unwrap_or(0.0),
         },
-        meter: meter_of(&meter), dedupe_key, calls, quota, source,
+        meter: meter_of(&meter), dedupe_key: row.get(13)?, calls: Vec::new(), quota: None,
+        source: row.get(14)?,
     })
+}
+
+/// Loads a whole page with one statement per side table. The old per-row
+/// helper prepared three statements per event — 768 for a 256-row page — and
+/// each prepare re-parsed the SQL. Chunking keeps the bind count under the
+/// limit for the full-export path while preserving the caller's order.
+pub(crate) fn load_events_tx(tx: &Transaction<'_>, ids: &[i64]) -> Result<Vec<UsageEvent>> {
+    if ids.is_empty() { return Ok(Vec::new()); }
+    if ids.len() > 256 {
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(256) { out.extend(load_events_tx(tx, chunk)?); }
+        return Ok(out);
+    }
+    let placeholders = std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(",");
+    let mut by_id = HashMap::with_capacity(ids.len());
+    {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT {SELECT_EVENT_COLS} FROM event WHERE id IN ({placeholders})"
+        )).map_err(sql_err)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
+            Ok((row.get::<_, i64>(0)?, event_from_row(row)?))
+        }).map_err(sql_err)?;
+        for row in rows { let (id, event) = row.map_err(sql_err)?; by_id.insert(id, event); }
+    }
+    {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT event_id, kind, name FROM call WHERE event_id IN ({placeholders}) ORDER BY event_id, kind, name"
+        )).map_err(sql_err)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
+            Ok((row.get::<_, i64>(0)?, Call { kind: call_kind_of(&row.get::<_, String>(1)?), name: row.get(2)? }))
+        }).map_err(sql_err)?;
+        for row in rows {
+            let (id, call) = row.map_err(sql_err)?;
+            if let Some(event) = by_id.get_mut(&id) { event.calls.push(call); }
+        }
+    }
+    {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT event_id, used_percent, window_minutes, resets_at_ms, label FROM quota WHERE event_id IN ({placeholders})"
+        )).map_err(sql_err)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
+            Ok((row.get::<_, i64>(0)?, QuotaSample {
+                used_percent: row.get(1)?, window_minutes: row.get(2)?, resets_at_ms: row.get(3)?,
+                label: row.get(4)?, id: None,
+            }))
+        }).map_err(sql_err)?;
+        for row in rows {
+            let (id, quota) = row.map_err(sql_err)?;
+            if let Some(event) = by_id.get_mut(&id) { event.quota = Some(quota); }
+        }
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(by_id.remove(id)
+            .ok_or_else(|| Error::Sync(format!("event {id} disappeared while marking sync dirty")))?);
+    }
+    Ok(out)
+}
+
+pub(crate) fn load_event_tx(tx: &Transaction<'_>, event_id: i64) -> Result<UsageEvent> {
+    let mut events = load_events_tx(tx, &[event_id])?;
+    events.pop().ok_or_else(|| Error::Sync(format!("event {event_id} disappeared while marking sync dirty")))
 }
 
 fn load_sync_dirty_event_tx(
@@ -871,7 +937,7 @@ impl Index {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match Self::open_connection(&path) {
+        match Self::open_connection_with_busy_timeout(&path, 5_000) {
             Ok(index) => Ok(index),
             Err(err) if err.is_corruption() => {
                 // A device-sync index is no longer disposable cache: it can
@@ -927,11 +993,15 @@ impl Index {
     /// uses this entry point because replacing a damaged database would lose
     /// remote history, receipts, trust and pending outbox state.
     pub fn open_preserving_corruption(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_preserving_corruption_with_busy_timeout(path, 5_000)
+    }
+
+    pub fn open_preserving_corruption_with_busy_timeout(path: impl Into<PathBuf>, busy_timeout_ms: i64) -> Result<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        Self::open_connection(&path)
+        Self::open_connection_with_busy_timeout(&path, busy_timeout_ms)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -940,8 +1010,14 @@ impl Index {
     }
 
     fn open_connection(path: &Path) -> Result<Self> {
+        Self::open_connection_with_busy_timeout(path, 5_000)
+    }
+
+    fn open_connection_with_busy_timeout(path: &Path, busy_timeout_ms: i64) -> Result<Self> {
         let conn = Connection::open(path).map_err(|e| Error::io(path, std::io::Error::other(e)))?;
-        Self::setup(conn, Some(path.to_path_buf()))
+        conn.busy_timeout(std::time::Duration::from_millis(busy_timeout_ms as u64)).map_err(sql_err)?;
+        let index = Self::setup(conn, Some(path.to_path_buf()))?;
+        Ok(index)
     }
 
     /// `PRAGMA quick_check` — the whole file, read once.
@@ -999,8 +1075,11 @@ impl Index {
     pub(crate) fn setup(conn: Connection, path: Option<PathBuf>) -> Result<Self> {
         // WAL + NORMAL: a reporting query never blocks behind an ingest write,
         // and a crash at worst loses the last ingest (which is re-derivable).
+        // The busy timeout itself is chosen by the opener before setup runs, so
+        // a sync-owned connection keeps its short budget even inside schema
+        // migration; this batch only fixes durability and journaling.
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
         )
         .map_err(sql_err)?;
         drop_legacy_rollup(&conn)?;
@@ -1027,13 +1106,10 @@ impl Index {
             .map_err(sql_err)?;
         }
         ensure_sync_dirty_columns(&conn)?;
-        // Additive sync identity rows are a projection of event.  Old repair
-        // paths may delete local events without knowing this newer table; trim
-        // only orphan mappings, never the stable occurrence registry.
-        conn.execute(
-            "DELETE FROM sync_event_identity WHERE NOT EXISTS(SELECT 1 FROM event WHERE event.id = sync_event_identity.event_id)",
-            [],
-        ).map_err(sql_err)?;
+        // Additive sync identities are reconciled below only when a one-shot
+        // compatibility repair actually changed event rows. Running this
+        // orphan scan on every open duplicated that repair work and cost 3.6s
+        // on the 457k-row identity projection.
         let index_id: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key = 'index_id'", [], |r| r.get(0))
             .optional()
@@ -1063,6 +1139,11 @@ impl Index {
         // deliberately not a SCHEMA_VERSION bump: the `sync:` memos in meta
         // survive a wipe and would strand every merged bundle as "already
         // imported" (see that constant).
+        // Any repair below rewrote or removed event rows; the identity and
+        // dirty-journal reconciliation at the end of setup only has work to do
+        // when one actually fired. The scans otherwise touch half a million
+        // rows on every cold open of a large index.
+        let mut repairs_applied = 0usize;
         const REPAIR_CUMULATIVE_RESCAN: &str = "repair:cumulative-rescan-1";
         let repaired: Option<String> = conn
             .query_row(
@@ -1073,6 +1154,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if repaired.is_none() {
+            repairs_applied += 1;
             conn.execute(
                 "DELETE FROM file_state WHERE tool IN \
                  ('dsh', 'hermes', 'funide', 'joycode', 'claude', 'atomcode')",
@@ -1104,6 +1186,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if reseeded.is_none() {
+            repairs_applied += 1;
             conn.execute(
                 "DELETE FROM call WHERE event_id IN \
                  (SELECT id FROM event WHERE tool = 'antigravity' AND source NOT LIKE 'linux:%')",
@@ -1154,6 +1237,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if ide_split.is_none() {
+            repairs_applied += 1;
             // New-key twins go first: a build that already re-read a store
             // under the prefixed loader holds `antigravity*#<session>#<id>`
             // beside the old spelling, and re-keying the old spelling would
@@ -1214,6 +1298,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if split.is_none() {
+            repairs_applied += 1;
             // instr, not a slash-pinned LIKE: Windows source keys carry
             // backslashes, and the split happened on those machines too.
             // The new-key twins go first: a build that already re-read the CN
@@ -1271,6 +1356,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if dsh_proj.is_none() {
+            repairs_applied += 1;
             const DSH_PROJ_ROWS: &str =
                 "(SELECT id FROM event WHERE tool = 'dsh' AND dedupe_key LIKE '%#proj' \
                  AND source NOT LIKE 'linux:%')";
@@ -1567,6 +1653,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if trae_key.is_none() {
+            repairs_applied += 1;
             const TRAE_LOCAL_ROWS: &str = "(SELECT id FROM event \
                  WHERE tool IN ('trae', 'trae_cn') AND source NOT LIKE 'linux:%')";
             conn.execute(&format!("DELETE FROM call WHERE event_id IN ({TRAE_LOCAL_ROWS})"), [])
@@ -1598,6 +1685,7 @@ impl Index {
             "SELECT value FROM meta WHERE key = ?1", params![REPAIR_WORKBUDDY_SPLIT], |r| r.get(0),
         ).optional().map_err(sql_err)?;
         if buddy_split.is_none() {
+            repairs_applied += 1;
             let tx = conn.unchecked_transaction().map_err(sql_err)?;
             const CN_STORE: &str = "source NOT LIKE 'linux:%' AND instr(replace(source, char(92), '/'), '/.workbuddy/') > 0";
             let twins = format!(
@@ -1631,6 +1719,7 @@ impl Index {
             "SELECT value FROM meta WHERE key = ?1", params![REPAIR_QODER_SPLIT], |r| r.get(0),
         ).optional().map_err(sql_err)?;
         if qoder_split.is_none() {
+            repairs_applied += 1;
             let tx = conn.unchecked_transaction().map_err(sql_err)?;
             let cn_path = |col: &str| format!(
                 "{col} NOT LIKE 'linux:%' AND (instr(lower(replace({col}, char(92), '/')), '/.qoder-cn/') > 0 \
@@ -1659,8 +1748,17 @@ impl Index {
         // All compatibility repairs above may have removed or re-keyed event
         // rows.  Reconcile the additive identity projection after those
         // mutations, rather than waiting for the next ingest to encounter a
-        // UNIQUE(identity) error.
-        prune_stale_sync_event_identities(&conn)?;
+        // UNIQUE(identity) error. The reconciliation scans every projected
+        // row, so it runs only when a repair actually fired — a steady-state
+        // open of a large index must not pay seconds for cleanup it does not
+        // need (4.3 s warm on 457k identities, measured).
+        if repairs_applied > 0 {
+            prune_stale_sync_event_identities(&conn)?;
+        }
+        // This query is indexed by event_id and remains cheap in steady state;
+        // unlike identity reconciliation it must run on every open to prevent
+        // a deleted event from pinning the dirty journal indefinitely.
+        prune_dangling_sync_dirty(&conn)?;
         let max_workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, 16))
             .unwrap_or(4);
@@ -1747,6 +1845,25 @@ impl Index {
         &self.conn
     }
 
+    /// Adjusts this connection's lock wait without changing other Index
+    /// connections. Device sync uses a short budget so UI actions fail fast;
+    /// foreground ingest keeps its normal five-second budget.
+    pub fn set_busy_timeout_ms(&self, timeout_ms: i64) -> Result<()> {
+        if timeout_ms < 0 { return Err(Error::Sqlite("busy timeout must be non-negative".into())); }
+        self.conn
+            .execute_batch(&format!("PRAGMA busy_timeout={timeout_ms};"))
+            .map_err(sql_err)
+    }
+
+    /// Attach the destructive device-sync state database. The caller owns the
+    /// migration/schema; this method only opens the second file on the same
+    /// SQLite connection so cross-file sync transactions remain atomic.
+    pub fn attach_sync_state(&self, path: &Path, busy_timeout_ms: i64) -> Result<()> {
+        if busy_timeout_ms < 0 { return Err(Error::Sqlite("busy timeout must be non-negative".into())); }
+        let escaped = path.to_string_lossy().replace('\'', "''");
+        self.conn.execute_batch(&format!("ATTACH DATABASE '{escaped}' AS sync; PRAGMA sync.busy_timeout={busy_timeout_ms};")).map_err(sql_err)
+    }
+
     /// Runs an ACK-bearing device-sync write on this same SQLite connection.
     /// The generic error keeps protocol errors distinguishable from SQLite
     /// failures while receipt, event, call and rollup writes share one commit.
@@ -1755,27 +1872,17 @@ impl Index {
         E: From<Error>,
         F: FnOnce(&rusqlite::Transaction<'_>) -> std::result::Result<T, E>,
     {
-        self.conn
-            .execute_batch("PRAGMA synchronous=FULL;")
-            .map_err(|e| E::from(sql_err(e)))?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| E::from(sql_err(e)))?;
-        let result = match f(&tx) {
+        match f(&tx) {
             Ok(value) => tx.commit().map(|()| value).map_err(|e| E::from(sql_err(e))),
             Err(error) => {
                 let _ = tx.rollback();
                 Err(error)
             }
-        };
-        // Restore the reporting connection's normal local-ingest durability.
-        if let Err(error) = self.conn.execute_batch("PRAGMA synchronous=NORMAL;") {
-            if result.is_ok() {
-                return Err(E::from(sql_err(error)));
-            }
         }
-        result
     }
 
     pub fn meta_value(&self, key: &str) -> Result<Option<String>> {
@@ -1860,7 +1967,11 @@ impl Index {
             .map_err(sql_err)?;
         tx.execute("DELETE FROM file_state", []).map_err(sql_err)?;
         tx.execute("DELETE FROM event_rollup", []).map_err(sql_err)?;
-        tx.execute("DELETE FROM meta WHERE key = 'device_sync_occurrence_init_event_id'", []).map_err(sql_err)?;
+        // Dirty rows point at deleted event ids; the re-ingest below re-marks
+        // every rebuilt local event.  Leaving them would make the next ingest
+        // fail with "event disappeared while marking sync dirty".
+        tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?;
+        tx.execute("DELETE FROM meta WHERE key IN ('device_sync_occurrence_init_event_id', 'device_sync_dirty_json_bytes')", []).map_err(sql_err)?;
         tx.commit().map_err(sql_err)
     }
 
@@ -1872,7 +1983,8 @@ impl Index {
                  DELETE FROM file_state; DELETE FROM event_rollup; \
                  DELETE FROM cumulative_state; \
                  DELETE FROM sync_event_occurrence; DELETE FROM sync_event_identity; \
-                 DELETE FROM meta WHERE key = 'device_sync_occurrence_init_event_id';",
+                 DELETE FROM sync_dirty; \
+                 DELETE FROM meta WHERE key IN ('device_sync_occurrence_init_event_id', 'device_sync_dirty_json_bytes');",
             )
             .map_err(sql_err)?;
         Ok(())
@@ -2045,7 +2157,7 @@ impl Index {
         let event_limit = max_rows.saturating_sub(dirty_events.len());
         let event_sql = format!(
             "SELECT m.identity, m.occurrence_id, m.event_id
-               FROM sync_event_identity m INDEXED BY sync_event_identity_cursor
+               FROM sync_event_identity m
                CROSS JOIN event e ON e.id = m.event_id
                WHERE ({ORIGIN_SQL}) = '' AND e.ts_ms >= ?1 AND e.ts_ms < ?2
                 AND m.identity > ?3
@@ -2057,9 +2169,10 @@ impl Index {
                 params![coverage_lo_ms, coverage_hi_ms, identity_lower_bound, event_limit as i64],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?)),
             ).map_err(sql_err)?;
-            for row in rows {
-                let (identity, occurrence_id, event_id) = row.map_err(sql_err)?;
-                let event = load_event_tx(&tx, event_id)?;
+            let page_rows = rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?;
+            let page_ids = page_rows.iter().map(|row| row.2).collect::<Vec<_>>();
+            let page_events = load_events_tx(&tx, &page_ids)?;
+            for ((identity, occurrence_id, _), event) in page_rows.into_iter().zip(page_events) {
                 let encoded_len = serde_json::to_vec(&event).map_err(|error| Error::Sync(format!("encode sync event: {error}")))?.len();
                 if encoded_len > SYNC_SNAPSHOT_MAX_ROW_BYTES {
                     return Err(Error::Sync(format!("sync event row exceeds {SYNC_SNAPSHOT_MAX_ROW_BYTES} bytes")));
@@ -2078,7 +2191,7 @@ impl Index {
             tx.query_row(
                 &format!("SELECT NOT EXISTS(
                     SELECT 1
-                      FROM sync_event_identity m INDEXED BY sync_event_identity_cursor
+                      FROM sync_event_identity m
                       CROSS JOIN event e ON e.id = m.event_id
                      WHERE ({ORIGIN_SQL}) = '' AND e.ts_ms >= ?1 AND e.ts_ms < ?2
                        AND m.identity > ?3
@@ -2150,12 +2263,11 @@ impl Index {
             };
             if event_ids.is_empty() { break; }
             after_id = *event_ids.last().ok_or_else(|| Error::Sync("empty sync event page".into()))?;
-            for id in event_ids {
-                events.push(load_event_tx(&tx, id)?);
-                if events.len() > SYNC_SNAPSHOT_MAX_EVENTS {
-                    return Err(Error::Sync(format!("sync snapshot exceeds {} events", SYNC_SNAPSHOT_MAX_EVENTS)));
-                }
+            let page = load_events_tx(&tx, &event_ids)?;
+            if events.len().saturating_add(page.len()) > SYNC_SNAPSHOT_MAX_EVENTS {
+                return Err(Error::Sync(format!("sync snapshot exceeds {} events", SYNC_SNAPSHOT_MAX_EVENTS)));
             }
+            events.extend(page);
         }
         tx.commit().map_err(sql_err)?;
         Ok(SyncSnapshot { coverage_lo_ms, coverage_hi_ms, events, dirty_events })
@@ -2167,6 +2279,22 @@ impl Index {
         if limit == 0 || limit > 256 {
             return Err(Error::Sync("sync occurrence page must be in 1..=256".into()));
         }
+        // Steady state has nothing left to map. Answer from a read so an idle
+        // caller (every download page, every upload pass) does not open an
+        // IMMEDIATE write transaction and pay its commit.
+        let after_id: i64 = self.conn.query_row(
+            "SELECT value FROM meta WHERE key = 'device_sync_occurrence_init_event_id'",
+            [], |row| row.get::<_, String>(0),
+        ).optional().map_err(sql_err)?.and_then(|value| value.parse().ok()).unwrap_or(0);
+        let has_missing: bool = self.conn.query_row(
+            &format!("SELECT EXISTS(
+                SELECT 1 FROM event e
+                 LEFT JOIN sync_event_identity i ON i.event_id = e.id
+                WHERE e.id > ?1 AND ({ORIGIN_SQL}) = '' AND i.event_id IS NULL
+            )"),
+            params![after_id], |row| row.get(0),
+        ).map_err(sql_err)?;
+        if !has_missing { return Ok(true); }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql_err)?;
         let after_id: i64 = tx.query_row(
             "SELECT value FROM meta WHERE key = 'device_sync_occurrence_init_event_id'",
@@ -2188,8 +2316,8 @@ impl Index {
         }
         let mut used = BTreeMap::<[u8; 32], BTreeSet<i64>>::new();
         let mut cache = SyncOccurrencePageCache::default();
-        for id in &ids {
-            let event = load_event_tx(&tx, *id)?;
+        let events = load_events_tx(&tx, &ids)?;
+        for (id, event) in ids.iter().zip(events) {
             let occurrence_id = if event.dedupe_key.as_deref().is_none_or(|key| key.is_empty()) {
                 if let Some(existing) = tx.query_row(
                     "SELECT occurrence_id FROM sync_event_occurrence WHERE event_id = ?1",
@@ -2502,37 +2630,37 @@ impl Index {
              WHERE d.event_id = e.id OR (d.event_id IS NULL AND d.source_key = e.source AND d.event_ts_ms = e.ts_ms
                AND (e.dedupe_key IS NULL OR d.identity = 'key:' || e.dedupe_key))
         )";
+        // Compute the doomed id set once into a temp table: evaluating
+        // PRUNEABLE per side table re-ran the retention predicate five times
+        // over `event` in the same transaction. The temp table lives and dies
+        // with this connection, so nothing leaks between passes.
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS doomed_event(id INTEGER PRIMARY KEY);
+             DELETE FROM doomed_event;",
+        ).map_err(sql_err)?;
+        tx.execute(
+            &format!("INSERT INTO doomed_event(id) SELECT e.id FROM event e WHERE {PRUNEABLE}"),
+            params![cutoff_ms],
+        ).map_err(sql_err)?;
         // The doomed rows' ts span decides which rollup days need recomputing;
         // read it before the deletes, inside the same transaction.
         let doomed: (Option<i64>, Option<i64>) = tx
             .query_row(
-                &format!("SELECT min(e.ts_ms), max(e.ts_ms) FROM event e WHERE {PRUNEABLE}"),
-                params![cutoff_ms],
+                "SELECT min(ts_ms), max(ts_ms) FROM event WHERE id IN (SELECT id FROM doomed_event)",
+                [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(sql_err)?;
-        tx.execute(
-            &format!("DELETE FROM sync_event_identity WHERE event_id IN (SELECT e.id FROM event e WHERE {PRUNEABLE})"),
-            params![cutoff_ms],
-        )
-        .map_err(sql_err)?;
-        tx.execute(
-            &format!("DELETE FROM sync_event_occurrence WHERE event_id IN (SELECT e.id FROM event e WHERE {PRUNEABLE})"),
-            params![cutoff_ms],
-        )
-        .map_err(sql_err)?;
-        tx.execute(
-            &format!("DELETE FROM call WHERE event_id IN (SELECT e.id FROM event e WHERE {PRUNEABLE})"),
-            params![cutoff_ms],
-        )
-        .map_err(sql_err)?;
-        tx.execute(
-            &format!("DELETE FROM quota WHERE event_id IN (SELECT e.id FROM event e WHERE {PRUNEABLE})"),
-            params![cutoff_ms],
-        )
-        .map_err(sql_err)?;
-        let removed =
-            tx.execute(&format!("DELETE FROM event AS e WHERE {PRUNEABLE}"), params![cutoff_ms]).map_err(sql_err)?;
+        for table in ["sync_event_identity", "sync_event_occurrence", "call", "quota"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE event_id IN (SELECT id FROM doomed_event)"),
+                [],
+            )
+            .map_err(sql_err)?;
+        }
+        let removed = tx
+            .execute("DELETE FROM event WHERE id IN (SELECT id FROM doomed_event)", [])
+            .map_err(sql_err)?;
         // Nothing removed, nothing to fix; and absent doomed rows there is no
         // span to iterate.
         if removed > 0 {
@@ -2604,6 +2732,12 @@ fn ensure_sync_dirty_columns(conn: &Connection) -> Result<()> {
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS sync_dirty_event ON sync_dirty(event_id);
+         CREATE INDEX IF NOT EXISTS sync_dirty_revision ON sync_dirty(revision, identity);
+         -- Both indexes duplicated a primary/unique index and cost 92 MB on a
+         -- real 457k-identity index; the planner reaches the same plan without
+         -- them.
+         DROP INDEX IF EXISTS sync_occurrence_lookup;
+         DROP INDEX IF EXISTS sync_event_identity_cursor;
          INSERT OR IGNORE INTO meta(key, value)
          SELECT 'device_sync_dirty_json_bytes', COALESCE(sum(length(event_json)), 0) FROM sync_dirty;",
     ).map_err(sql_err)?;
@@ -2673,10 +2807,13 @@ mod tests {
 
     #[test]
     fn memory_index_starts_empty_and_versioned() {
-        let idx = Index::open_in_memory().unwrap();
+        let mut idx = Index::open_in_memory().unwrap();
         assert_eq!(idx.event_count().unwrap(), 0);
         assert_eq!(idx.meta_value("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION));
         assert!(idx.meta_value("index_id").unwrap().is_some());
+        assert_eq!(idx.conn.query_row::<i64, _, _>("PRAGMA synchronous", [], |row| row.get(0)).unwrap(), 1);
+        idx.with_network_transaction(|_| Ok::<_, Error>(())).unwrap();
+        assert_eq!(idx.conn.query_row::<i64, _, _>("PRAGMA synchronous", [], |row| row.get(0)).unwrap(), 1);
     }
 
     #[test]
@@ -2708,19 +2845,96 @@ mod tests {
     }
 
     #[test]
-    fn configured_primary_keeps_local_change_journal_even_when_sharing_is_off() {
+    fn primary_journals_only_while_a_paired_device_can_consume_the_change_feed() {
         let mut idx = Index::open_in_memory().unwrap();
+        // Pairing/configuration state lives in the dedicated sync_state.db; the
+        // capture switch reaches ingest through the meta mirror SyncStore
+        // maintains. A mirror of "1" stands in for a paired consumer here.
         idx.conn.execute_batch(
-            "CREATE TABLE device_sync_secondary_config(config_key TEXT PRIMARY KEY, capture_enabled INTEGER);
-             CREATE TABLE device_sync_primary_config(config_key TEXT PRIMARY KEY);
-             INSERT INTO device_sync_primary_config(config_key) VALUES('primary');
-             INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
-             VALUES('codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'local-row');",
+            "INSERT INTO meta(key, value) VALUES('device_sync_capture_enabled', '1');
+             INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES(1, 'codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'local-row');",
         ).unwrap();
         let tx = idx.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
-        mark_sync_dirty(&tx, "key:local-row", "local.jsonl", None, 1, 10, 11).unwrap();
+        mark_sync_dirty(&tx, true, "key:local-row", "local.jsonl", None, 1, 10, 11).unwrap();
         tx.commit().unwrap();
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |row| row.get(0)).unwrap(), 1,
+            "a paired device pulls the downlink change feed");
+
+        idx.conn.execute_batch(
+            "UPDATE meta SET value = '0' WHERE key = 'device_sync_capture_enabled';
+             INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES(2, 'codex', 12, 'session', 'tokens', 1, 'local.jsonl', 'other-row');",
+        ).unwrap();
+        let tx = idx.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        mark_sync_dirty(&tx, false, "key:other-row", "local.jsonl", None, 2, 12, 13).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |row| row.get(0)).unwrap(), 1,
+            "with no paired consumer the journal must stay empty");
+        assert_eq!(idx.prune(2_000).unwrap(), 1, "the unjournaled event is ordinary retention data");
+        idx.conn.execute("DELETE FROM sync_dirty", []).unwrap();
+        assert_eq!(idx.prune(2_000).unwrap(), 1, "releasing the journal releases its event");
+    }
+
+    #[test]
+    fn clear_and_rebuild_paths_drop_stale_dirty_rows() {
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.conn.execute_batch(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'local-row');
+             INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:local-row', 'local.jsonl', '{}', 1, 10, 7, 11, 11);
+             INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', '2');
+             INSERT INTO meta(key, value) VALUES('device_sync_dirty_revision', '7');",
+        ).unwrap();
+        idx.clear().unwrap();
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |row| row.get(0)).unwrap(), 0);
+        let bytes: Option<String> = idx.conn.query_row("SELECT value FROM meta WHERE key = 'device_sync_dirty_json_bytes'", [], |row| row.get(0)).optional().unwrap();
+        assert!(bytes.is_none());
+        let revision: String = idx.conn.query_row("SELECT value FROM meta WHERE key = 'device_sync_dirty_revision'", [], |row| row.get(0)).unwrap();
+        assert_eq!(revision, "7", "revisions stay monotonic across a clear");
+    }
+
+    #[test]
+    fn dirty_rows_hold_their_event_against_prune_until_the_journal_is_cleared() {
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.conn.execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'kept')",
+            [],
+        ).unwrap();
+        let event_id = idx.conn.last_insert_rowid();
+        idx.conn.execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:kept', 'local.jsonl', X'', ?1, 10, 1, 1, 1)",
+            params![event_id],
+        ).unwrap();
+        assert_eq!(idx.prune(2_000).unwrap(), 0, "an un-ACKed change must survive the retention cutoff");
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM event", [], |row| row.get(0)).unwrap(), 1);
+        idx.conn.execute("DELETE FROM sync_dirty", []).unwrap();
+        assert_eq!(idx.prune(2_000).unwrap(), 1, "once the journal is ACKed the event is ordinary retention data");
+    }
+
+    #[test]
+    fn open_time_cleanup_drops_dirty_rows_whose_event_disappeared() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.conn.execute_batch(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'gone');
+             INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:gone', 'local.jsonl', X'', 1, 10, 1, 1, 1);
+             INSERT INTO sync_dirty(identity, source_key, event_json, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:legacy', 'legacy.jsonl', '{}', 1, 1, 1, 1);
+             INSERT OR REPLACE INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', '2');
+             DELETE FROM event WHERE dedupe_key = 'gone';",
+        ).unwrap();
+        let idx = Index::setup(idx.conn, None).unwrap();
         assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |row| row.get(0)).unwrap(), 1);
+        assert_eq!(idx.conn.query_row::<String, _, _>("SELECT identity FROM sync_dirty", [], |row| row.get(0)).unwrap(), "key:legacy");
+        assert_eq!(idx.conn.query_row::<String, _, _>(
+            "SELECT value FROM meta WHERE key = 'device_sync_dirty_json_bytes'", [], |row| row.get(0),
+        ).unwrap(), "2", "the byte counter follows the rows that remain");
+        assert_eq!(idx.event_count().unwrap(), 0);
     }
 
     #[test]
@@ -2738,7 +2952,7 @@ mod tests {
         }
         let sql = format!(
             "EXPLAIN QUERY PLAN SELECT m.identity, m.occurrence_id, m.event_id
-               FROM sync_event_identity m INDEXED BY sync_event_identity_cursor
+               FROM sync_event_identity m
                CROSS JOIN event e ON e.id = m.event_id
               WHERE ({ORIGIN_SQL}) = '' AND e.ts_ms >= ?1 AND e.ts_ms < ?2
                 AND m.identity > ?3
@@ -2757,7 +2971,7 @@ mod tests {
         let mut stmt = idx.conn.prepare(&sql).unwrap();
         let details = stmt.query_map(params![window_lo, window_hi, "", 256_i64], |row| row.get::<_, String>(3)).unwrap()
             .collect::<std::result::Result<Vec<_>, _>>().unwrap();
-        assert!(details.iter().any(|detail| detail.contains("sync_event_identity_cursor") && detail.contains("identity>")), "identity range was not selected: {details:?}");
+        assert!(details.iter().any(|detail| detail.contains("sqlite_autoindex_sync_event_identity_1") && detail.contains("identity>")), "identity range was not selected: {details:?}");
         assert!(details.iter().any(|detail| detail.contains("SEARCH e USING INTEGER PRIMARY KEY")), "event lookup was not driven by the identity row: {details:?}");
         assert!(!details.iter().any(|detail| detail.contains("event_ts")), "window pagination must not drive from the event timestamp index: {details:?}");
         assert!(!details.iter().any(|detail| detail.contains("TEMP B-TREE")), "window pagination must not sort a full temporary result: {details:?}");
@@ -2765,7 +2979,7 @@ mod tests {
         let done_sql = format!(
             "EXPLAIN QUERY PLAN SELECT NOT EXISTS(
                 SELECT 1
-                  FROM sync_event_identity m INDEXED BY sync_event_identity_cursor
+                  FROM sync_event_identity m
                   CROSS JOIN event e ON e.id = m.event_id
                  WHERE ({ORIGIN_SQL}) = '' AND e.ts_ms >= ?1 AND e.ts_ms < ?2
                    AND m.identity > ?3
@@ -2774,7 +2988,7 @@ mod tests {
         let mut stmt = idx.conn.prepare(&done_sql).unwrap();
         let done_details = stmt.query_map(params![window_lo, window_hi, ""], |row| row.get::<_, String>(3)).unwrap()
             .collect::<std::result::Result<Vec<_>, _>>().unwrap();
-        assert!(done_details.iter().any(|detail| detail.contains("sync_event_identity_cursor") && detail.contains("identity>")), "event_done did not use the identity range: {done_details:?}");
+        assert!(done_details.iter().any(|detail| detail.contains("sqlite_autoindex_sync_event_identity_1") && detail.contains("identity>")), "event_done did not use the identity range: {done_details:?}");
         assert!(done_details.iter().any(|detail| detail.contains("SEARCH e USING INTEGER PRIMARY KEY")), "event_done was not driven by the identity row: {done_details:?}");
         assert!(!done_details.iter().any(|detail| detail.contains("event_ts")), "event_done must not drive from the event timestamp index: {done_details:?}");
         assert!(!done_details.iter().any(|detail| detail.contains("TEMP B-TREE")), "event_done must not materialize a temporary sort: {done_details:?}");
@@ -2954,6 +3168,14 @@ mod tests {
 
     /// The common case: a healthy index verifies without touching the file, so
     /// the guard costs nothing but the read it has to do.
+    #[test]
+    fn sync_connection_busy_timeout_can_be_lowered_without_changing_the_index_api() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.set_busy_timeout_ms(500).unwrap();
+        let timeout: i64 = idx.conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0)).unwrap();
+        assert_eq!(timeout, 500);
+    }
+
     #[test]
     fn a_healthy_index_verifies_without_replacing_anything() {
         let dir = tempfile::tempdir().unwrap();

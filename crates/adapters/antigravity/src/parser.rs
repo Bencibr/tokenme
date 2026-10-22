@@ -49,8 +49,10 @@ pub(crate) const U_OUT_A: u32 = 9;
 pub(crate) const U_OUT_B: u32 = 10;
 pub(crate) const U_RESPONSE_ID: u32 = 11;
 /// Inside `#9`, the per-generation timing message.
+#[cfg(test)]
 pub(crate) const T_UNSET: u32 = 2;
 pub(crate) const T_TIMESTAMP: u32 = 4;
+#[cfg(test)]
 pub(crate) const T_OPAQUE: u32 = 10;
 /// Inside `steps.metadata`: the turn's own Timestamp, the usage message whose
 /// `#11` is the same responseId `gen_metadata` writes, and the gen-index box.
@@ -150,7 +152,7 @@ pub(crate) struct Generation {
 
 /// Decodes one `gen_metadata.data` blob. The timestamp argument is retained for
 /// fixture compatibility; modern timestamps come from the `steps` table.
-pub(crate) fn decode_generation(idx: i64, blob: &[u8], _lifetime: Option<Lifetime>) -> Result<Decoded, Skip> {
+pub(crate) fn decode_generation(idx: i64, blob: &[u8]) -> Result<Decoded, Skip> {
     let chat_model = bytes_field(blob, F_CHAT_MODEL).ok_or(Skip::NoChatModel)?;
     // A torn envelope means the fields past the break were never reachable, so
     // nothing about the row can be trusted: say where it stopped and drop it.
@@ -305,12 +307,14 @@ pub(crate) fn proto_timestamp_ms(ts: &[u8]) -> Option<i64> {
 /// stops being actionable. The trade is deliberate: rejecting a real stamp only
 /// restores the conservative fallback dating, while accepting a wrong one
 /// silently corrupts day buckets with no correction path.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Lifetime {
     pub start_ms: i64,
     pub end_ms: i64,
 }
 
+#[cfg(test)]
 impl Lifetime {
     /// An hour of tolerance each side: the created-at and the turn stamp come off
     /// one clock, so that much absorbs a clock adjustment or a database copied
@@ -335,6 +339,7 @@ impl Lifetime {
 /// this machine `#9.#10` is a well-formed `{#1, #4}` cache message (208 / 256 000,
 /// 30 254 / 256 000 — a cached-token count beside a context limit), so guessing
 /// over eight raw bytes would only ever manufacture dates out of non-time fields.
+#[cfg(test)]
 pub(crate) fn inferred_timestamp_ms(timing: &[u8], lifetime: Option<Lifetime>) -> Option<i64> {
     // The sentinel is the only evidence that this is the new layout; without it an
     // absent `#4` means "no stamp", not "go and guess field 10".
@@ -353,6 +358,7 @@ pub(crate) fn inferred_timestamp_ms(timing: &[u8], lifetime: Option<Lifetime>) -
 /// plausible window the second / millisecond / microsecond / nanosecond ranges
 /// are disjoint, so at most one unit yields a date and an unrelated payload (an
 /// id, a hash, a token count) falls through to `None`.
+#[cfg(test)]
 pub(crate) fn epoch_scalar_to_ms(value: u64) -> Option<i64> {
     if value == u64::MAX {
         return None;
@@ -508,11 +514,11 @@ mod tests {
     }
 
     fn gen(idx: i64, chat_model: &[u8]) -> Generation {
-        decode_generation(idx, &blob(chat_model), None).expect("decodes").generation
+        decode_generation(idx, &blob(chat_model)).expect("decodes").generation
     }
 
     fn decoded(idx: i64, chat_model: &[u8]) -> Decoded {
-        decode_generation(idx, &blob(chat_model), None).expect("decodes")
+        decode_generation(idx, &blob(chat_model)).expect("decodes")
     }
 
     /// One `#17` item: a RetryInfo whose `#2` is the attempt's usage message.
@@ -567,10 +573,10 @@ mod tests {
 
     #[test]
     fn an_empty_or_zero_usage_message_is_not_a_billable_event() {
-        assert_eq!(decode_generation(0, &blob(&tag_bytes(CM_USAGE, &[])), None), Err(Skip::NotBillable));
-        assert_eq!(decode_generation(0, &blob(&[]), None), Err(Skip::NotBillable));
+        assert_eq!(decode_generation(0, &blob(&tag_bytes(CM_USAGE, &[]))), Err(Skip::NotBillable));
+        assert_eq!(decode_generation(0, &blob(&[])), Err(Skip::NotBillable));
         assert_eq!(
-            decode_generation(0, &blob(&chat_model(&usage(0, 0, 0, 0, "r"), &[], Some("m"))), None),
+            decode_generation(0, &blob(&chat_model(&usage(0, 0, 0, 0, "r"), &[], Some("m")))),
             Err(Skip::NotBillable),
             "a turn that reported nothing has nothing to bill"
         );
@@ -578,8 +584,8 @@ mod tests {
 
     #[test]
     fn a_row_without_a_chat_model_is_not_a_generation() {
-        assert_eq!(decode_generation(0, &tag_varint(2, 7), None), Err(Skip::NoChatModel));
-        assert_eq!(decode_generation(0, &[], None), Err(Skip::NoChatModel));
+        assert_eq!(decode_generation(0, &tag_varint(2, 7)), Err(Skip::NoChatModel));
+        assert_eq!(decode_generation(0, &[]), Err(Skip::NoChatModel));
     }
 
     #[test]
@@ -587,7 +593,7 @@ mod tests {
         let mut u = tag_varint(U_PREFIX, 1071);
         u.extend(tag_varint(U_INPUT, IMPLAUSIBLE_TOKENS));
         u.extend(tag_varint(U_OUTPUT_TOTAL, 5));
-        let err = decode_generation(3, &blob(&tag_bytes(CM_USAGE, &u)), None).unwrap_err();
+        let err = decode_generation(3, &blob(&tag_bytes(CM_USAGE, &u))).unwrap_err();
         assert!(matches!(err, Skip::OutOfRange(pos) if pos > 0), "{err:?}");
         // 3 bytes of `#4.1` (tag + a 1071 varint), then `#4.2`'s tag and its
         // 6-byte 1e12: the offset sits just past the stage that cannot be real.
@@ -599,17 +605,17 @@ mod tests {
         let mut cm = chat_model(&usage(1, 0, 1, 0, "r"), &[], Some("m"));
         cm.extend([0x42, 0x7f]); // field 8, "127 bytes follow": nothing does
         let cm_break = cm.len() - 2;
-        assert_eq!(decode_generation(4, &blob(&cm), None), Err(Skip::Truncated(cm_break)));
+        assert_eq!(decode_generation(4, &blob(&cm)), Err(Skip::Truncated(cm_break)));
         let mut tail = tag_bytes(CM_USAGE, &usage(1, 0, 1, 0, "r"));
         tail.extend([0x12, 0x10]);
-        assert_eq!(decode_generation(4, &blob(&tail), None), Err(Skip::Truncated(tail.len() - 2)));
+        assert_eq!(decode_generation(4, &blob(&tail)), Err(Skip::Truncated(tail.len() - 2)));
     }
 
     #[test]
     fn garbage_blobs_are_skipped_and_never_panic() {
         for n in 0..96u8 {
             let buf: Vec<u8> = (0..n).map(|i| i.wrapping_mul(251).wrapping_add(3)).collect();
-            let _ = decode_generation(0, &buf, None);
+            let _ = decode_generation(0, &buf);
             let _ = step_stamp(&buf);
             let _ = conversation_meta(&buf);
             let _ = counts_for(&Stages::default());
@@ -796,7 +802,7 @@ mod tests {
         };
         let mut cm = chat_model(&usage(7454, 186932, 400, 96, "r-main"), &timing, Some("gemini-3.6-flash"));
         cm.extend(tag_bytes(CM_RETRIES, &retry(&usage(3865, 93462, 350, 48, "r-retry"))));
-        let d = decode_generation(65, &blob(&cm), None).expect("decodes");
+        let d = decode_generation(65, &blob(&cm)).expect("decodes");
         assert_eq!(d.retries.len(), 1, "the distinct id is a distinct call");
         let r = &d.retries[0];
         assert_eq!(r.response_id.as_deref(), Some("r-retry"));

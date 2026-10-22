@@ -176,8 +176,11 @@ pub fn run() {
             // telling different stories.
             bubble::configure(&handle)?;
             engine_start(handle.clone(), rx);
-            // Restore a user-enabled sync role before the first WebView
-            // snapshot; an explicit Stop remains persisted as disabled.
+            // Restore a user-enabled sync role (an explicit Stop stays
+            // persisted as disabled). The restore snapshot runs on a worker —
+            // it can wait out the ingest engine's index.db write lock — so
+            // this returns immediately and never stalls setup on the main
+            // thread; the recovery loop re-arms it afterwards.
             commands::restore_sync_on_launch(&handle);
             servers::hub::start(
                 handle.clone(),

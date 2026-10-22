@@ -25,6 +25,17 @@ use crate::{
 const DEFAULT_LEASE_TTL_MS: i64 = 15 * 60 * 1000;
 const DEFAULT_POLL_MS: u64 = 5_000;
 const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 4;
+// A fresh backup can owe tens of thousands of identity rows. One 256-row batch
+// per five-second poll left the first sync materializing for half an hour, so
+// each pass runs a few batches while it is already holding the index lock.
+const HISTORY_INIT_BATCHES_PER_PASS: usize = 4;
+const HISTORY_INIT_BATCH_ROWS: usize = 256;
+// While the primary materializes historical identities it serves an empty
+// preparing page. Poll that state like a progress bar: fast enough to finish
+// initialization promptly, slow enough that the secondary is not a busy loop.
+const PREPARING_POLL: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+const POLL_JITTER_PERCENT: u64 = 20;
 
 #[derive(Debug, Clone)]
 pub struct SyncRuntimeConfig {
@@ -66,8 +77,14 @@ pub struct SyncRuntime {
     primary_data_sharing: bool,
     primary_download_progressed: bool,
     primary_download_more: bool,
+    primary_download_preparing: bool,
+    primary_download_complete: bool,
     occurrences_initialized: bool,
     occurrence_init_progressed: bool,
+    /// Last instant the scheduler lease was actually rewritten. Renewing on
+    /// every pass committed a write transaction twice per 5 s poll while the
+    /// 15-minute lease was nowhere near expiry.
+    lease_renewed_at_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +95,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, occurrences_initialized: false, occurrence_init_progressed: false }
+        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0 }
     }
 
     pub fn new_secondary(
@@ -87,7 +104,7 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, occurrences_initialized: false, occurrence_init_progressed: false }
+        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0 }
     }
 
     pub fn new_secondary_with_display_name(
@@ -132,9 +149,13 @@ impl SyncRuntime {
         if !self.store.acquire_scheduler_lease(&self.config.owner, first_now, self.config.lease_ttl_ms)? {
             return Err(SyncError::Security("another sync runtime owns the scheduler lease".into()));
         }
+        self.lease_renewed_at_ms = first_now;
         let result = (|| {
             self.store.recover_inflight_outbox(&self.config.owner, first_now)?;
             let _ = self.prepare_secondary(&mut now_ms)?;
+            // A standalone pass must ask the primary again; only the resident
+            // scheduler may skip a downlink it already finished in this burst.
+            self.primary_download_complete = false;
             self.run_owned_once(None, &mut now_ms)
         })();
         if let Err(error) = &result {
@@ -160,6 +181,7 @@ impl SyncRuntime {
         if !self.store.acquire_scheduler_lease(&self.config.owner, first_now, self.config.lease_ttl_ms)? {
             return Err(SyncError::Security("another sync runtime owns the scheduler lease".into()));
         }
+        self.lease_renewed_at_ms = first_now;
         if let Err(error) = self.store.recover_inflight_outbox(&self.config.owner, first_now) {
             let _ = self.store.release_scheduler_lease(&self.config.owner);
             return Err(error);
@@ -170,8 +192,9 @@ impl SyncRuntime {
             self.occurrence_init_progressed = false;
             self.primary_download_progressed = false;
             self.primary_download_more = false;
+            self.primary_download_preparing = false;
             let lease_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, lease_now, self.config.lease_ttl_ms)? {
+            if !self.renew_lease_if_due(lease_now)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
                 return Err(SyncError::Security("sync scheduler lease was lost before preparing the next pass".into()));
             }
@@ -217,7 +240,7 @@ impl SyncRuntime {
             let pass_had_primary_download_progress = self.primary_download_progressed;
             total.last_error = pass.last_error;
             let renew_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, renew_now, self.config.lease_ttl_ms)? {
+            if !self.renew_lease_if_due(renew_now)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
                 return Err(SyncError::Security("sync scheduler lease was lost".into()));
             }
@@ -232,13 +255,29 @@ impl SyncRuntime {
                 continue;
             }
             let started = std::time::Instant::now();
-            let interval = self.config.poll_interval.saturating_mul(1_u32 << consecutive_errors.min(4)).min(Duration::from_secs(60));
+            let interval = idle_interval(self.config.poll_interval, self.primary_download_preparing, pass_had_error, consecutive_errors);
+            // The timed pass is the one that discovers new primary data; the
+            // fast catch-up continuations above must not re-poll a downlink
+            // that already reported itself complete in this burst.
+            self.primary_download_complete = false;
             while started.elapsed() < interval && !stop.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(50).min(interval));
             }
         }
         let _ = self.store.release_scheduler_lease(&self.config.owner);
         Ok(total)
+    }
+
+    /// Renews at most once per half TTL. A renew that is not due still answers
+    /// `true`: the lease cannot be taken by another owner before it expires.
+    fn renew_lease_if_due(&mut self, now_ms: i64) -> SyncResult<bool> {
+        let half_ttl = self.config.lease_ttl_ms / 2;
+        if self.lease_renewed_at_ms != 0 && now_ms.saturating_sub(self.lease_renewed_at_ms) < half_ttl {
+            return Ok(true);
+        }
+        let renewed = self.store.renew_scheduler_lease(&self.config.owner, now_ms, self.config.lease_ttl_ms)?;
+        if renewed { self.lease_renewed_at_ms = now_ms; }
+        Ok(renewed)
     }
 
     fn run_owned_once(&mut self, stop: Option<&AtomicBool>, now_ms: &mut impl FnMut() -> i64) -> SyncResult<RuntimeRunReport> {
@@ -267,7 +306,7 @@ impl SyncRuntime {
                 Ok(receipt) => {
                     report.uploaded += 1;
                     let commit_now = now_ms();
-                    if !self.store.renew_scheduler_lease(&self.config.owner, commit_now, self.config.lease_ttl_ms)? {
+                    if !self.renew_lease_if_due(commit_now)? {
                         return Err(SyncError::Security("sync scheduler lease was lost before ACK".into()));
                     }
                     self.store.ack_outbox(&self.config.owner, entry.id, &receipt, commit_now)?;
@@ -282,7 +321,7 @@ impl SyncRuntime {
                 }
             }
         }
-        if self.secondary_identity.is_some() && self.primary_data_sharing {
+        if self.secondary_identity.is_some() && self.primary_data_sharing && !self.primary_download_complete {
             match self.download_primary_pages(stop, now_ms) {
                 Ok(complete) => self.primary_download_more = !complete,
                 Err(error) => {
@@ -308,15 +347,21 @@ impl SyncRuntime {
                 &identity, self.store.primary_id().to_string(), cursor.last_identity.clone(),
                 cursor.last_dirty_revision, now_ms(),
             )?;
-            let page = self.transport.download_primary_page(&request)
-                .map_err(|error| SyncError::Protocol(format!("primary download request failed: {error}")))?;
+            let page = self.transport.download_primary_page(&request).map_err(|error| match error {
+                TransportError::Unsupported(message) => SyncError::Unsupported(message),
+                error => SyncError::Protocol(format!("primary download request failed: {error}")),
+            })?;
             if !page.enabled {
                 self.primary_data_sharing = false;
                 return Ok(true);
             }
             self.store.apply_primary_download_page(&page, now_ms())?;
-            self.primary_download_progressed = true;
-            if page.complete { return Ok(true); }
+            // A preparing page is an empty marker: the primary is still
+            // materializing identities and the cursor did not move, so this
+            // pass made no catch-up progress.
+            self.primary_download_preparing = page.preparing;
+            if !page.preparing { self.primary_download_progressed = true; }
+            if page.complete { self.primary_download_complete = true; return Ok(true); }
         }
         Ok(false)
     }
@@ -340,7 +385,7 @@ impl SyncRuntime {
         let mut catchup_complete = true;
         if had_stream && !has_pending {
             let snapshot_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, snapshot_now, self.config.lease_ttl_ms)? {
+            if !self.renew_lease_if_due(snapshot_now)? {
                 return Err(SyncError::Security("sync scheduler lease was lost before snapshot".into()));
             }
             catchup_complete = self.enqueue_local_snapshot(&config, &identity, snapshot_now)?;
@@ -349,62 +394,95 @@ impl SyncRuntime {
         let request = AuthenticatedStatusRequest::new_at_with_checkpoint(
             &identity, config.primary_id.clone(), true, config.last_ack_generation, request_now,
         )?;
-        let status = self.transport.status(&request).map_err(map_secondary_status_error)?;
-        self.store.mark_secondary_connected(now_ms())?;
-        self.primary_data_sharing = status.primary_data_sharing;
-        if let Some(name) = status.primary_display_name.as_deref() {
-            if config.primary_display_name.as_deref() != Some(name) {
-                if let Err(error) = self.store.set_secondary_primary_display_name(name, now_ms()) {
-                    eprintln!("tokenme sync: primary display-name cache failed: {error}");
+        let status_result = self.transport.status(&request).map_err(map_secondary_status_error);
+        // A checkpoint the primary no longer has a receipt for makes the
+        // status call itself fail with 409.  The primary is reachable, and
+        // that answer is precisely the recovery handshake's input.
+        if matches!(&status_result, Ok(_) | Err(SyncError::ReconcileRequired)) {
+            self.store.mark_secondary_connected(now_ms())?;
+        }
+        let status = match status_result {
+            Ok(status) => Some(status),
+            Err(SyncError::ReconcileRequired) => None,
+            Err(error) => return Err(error),
+        };
+        // A local reset deliberately forgot the stream while the primary still
+        // holds its highwater: adopting that stream again would replay
+        // generation 1 against a stream expecting N+1 forever. The recovery
+        // handshake freezes it and mints a fresh one instead.
+        let mut recover = status.is_none() || self.store.secondary_needs_recovery()?;
+        if let Some(status) = status.as_ref() {
+            self.primary_data_sharing = status.primary_data_sharing;
+            if let Some(name) = status.primary_display_name.as_deref() {
+                if config.primary_display_name.as_deref() != Some(name) {
+                    if let Err(error) = self.store.set_secondary_primary_display_name(name, now_ms()) {
+                        eprintln!("tokenme sync: primary display-name cache failed: {error}");
+                    }
+                }
+            }
+            match status.status.as_str() {
+                "paired" => {}
+                "pending" => return Err(SyncError::NotPaired("pairing request is awaiting approval".into())),
+                "rejected" => return Err(SyncError::NotPaired("pairing request was rejected".into())),
+                "expired" => return Err(SyncError::NotPaired("pairing invite expired".into())),
+                "paused" => return Err(SyncError::Conflict("primary paused this device".into())),
+                "revoked" => return Err(SyncError::Revoked(identity.device_id.clone())),
+                "reconcile_required" => recover = true,
+                other => return Err(SyncError::Protocol(format!("primary returned unknown device status {other:?}"))),
+            }
+            // A cursor, stream or epoch the primary no longer recognizes is
+            // the recovery handshake's job, not a terminal error: the primary
+            // freezes the old stream and issues a fresh one.  Any other
+            // validation failure is reported as-is.
+            recover = recover || match validate_secondary_status(&config, status, local_has_history) {
+                Ok(()) => false,
+                Err(SyncError::ReconcileRequired) | Err(SyncError::EpochStale) => true,
+                Err(error) => return Err(error),
+            };
+            if let Some(display_name) = self.secondary_display_name.clone() {
+                if status.display_name.as_deref().is_some_and(|current| current != display_name) {
+                    match AuthenticatedDisplayNameRequest::new_at(&identity, config.primary_id.clone(), display_name, now_ms()) {
+                        Ok(update) => if let Err(error) = self.transport.update_display_name(&update) {
+                            eprintln!("tokenme sync: display-name refresh failed: {error}");
+                        },
+                        Err(error) => eprintln!("tokenme sync: display-name refresh request was rejected locally: {error}"),
+                    }
                 }
             }
         }
-        match status.status.as_str() {
-            "paired" => {}
-            "pending" => return Err(SyncError::NotPaired("pairing request is awaiting approval".into())),
-            "rejected" => return Err(SyncError::NotPaired("pairing request was rejected".into())),
-            "expired" => return Err(SyncError::NotPaired("pairing invite expired".into())),
-            "paused" => return Err(SyncError::Conflict("primary paused this device".into())),
-            "revoked" => return Err(SyncError::Revoked(identity.device_id.clone())),
-            "reconcile_required" => return Err(SyncError::ReconcileRequired),
-            other => return Err(SyncError::Protocol(format!("primary returned unknown device status {other:?}"))),
-        }
-        validate_secondary_status(&config, &status, local_has_history)?;
-        if let Some(display_name) = self.secondary_display_name.clone() {
-            if status.display_name.as_deref().is_some_and(|current| current != display_name) {
-                match AuthenticatedDisplayNameRequest::new_at(&identity, config.primary_id.clone(), display_name, now_ms()) {
-                    Ok(update) => if let Err(error) = self.transport.update_display_name(&update) {
-                        eprintln!("tokenme sync: display-name refresh failed: {error}");
-                    },
-                    Err(error) => eprintln!("tokenme sync: display-name refresh request was rejected locally: {error}"),
-                }
+        let receipt = if recover {
+            self.transport.recover(&request).map_err(|error| SyncError::Protocol(format!("secondary stream recovery failed: {error}")))?
+        } else {
+            let status = status.as_ref().expect("a non-recovering status pass has a status");
+            match (status.active_stream_id.clone(), status.expected_generation) {
+                (Some(stream_id), Some(expected_generation)) => StreamOpenReceipt {
+                    primary_id: status.primary_id.clone(),
+                    device_id: status.device_id.clone(),
+                    stream_id,
+                    data_epoch: status.data_epoch,
+                    expected_generation,
+                },
+                (None, None) => self.transport.recover(&request).map_err(|error| SyncError::Protocol(format!("secondary stream recovery failed: {error}")))?,
+                _ => return Err(SyncError::Security("primary returned an incomplete stream status".into())),
             }
-        }
-        let receipt = match (status.active_stream_id, status.expected_generation) {
-            (Some(stream_id), Some(expected_generation)) => StreamOpenReceipt {
-                primary_id: status.primary_id,
-                device_id: status.device_id,
-                stream_id,
-                data_epoch: status.data_epoch,
-                expected_generation,
-            },
-            (None, None) => self.transport.recover(&request).map_err(|error| SyncError::Protocol(format!("secondary stream recovery failed: {error}")))?,
-            _ => return Err(SyncError::Security("primary returned an incomplete stream status".into())),
         };
         let stream_now = now_ms();
-        if !self.store.renew_scheduler_lease(&self.config.owner, stream_now, self.config.lease_ttl_ms)? {
+        if !self.renew_lease_if_due(stream_now)? {
             return Err(SyncError::Security("sync scheduler lease was lost before stream update".into()));
         }
-        self.store.update_secondary_stream(&receipt, stream_now)?;
-        if !had_stream && !has_pending {
+        if recover {
+            self.store.adopt_recovered_stream(&receipt, stream_now)?;
+        } else {
+            self.store.update_secondary_stream(&receipt, stream_now)?;
+        }
+        if recover || (!had_stream && !has_pending) {
             let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
             let snapshot_now = now_ms();
-            if !self.store.renew_scheduler_lease(&self.config.owner, snapshot_now, self.config.lease_ttl_ms)? {
+            if !self.renew_lease_if_due(snapshot_now)? {
                 return Err(SyncError::Security("sync scheduler lease was lost before snapshot".into()));
             }
             catchup_complete = self.enqueue_local_snapshot(&config, &identity, snapshot_now)?;
         }
-        self.store.set_secondary_last_error(None, now_ms())?;
         Ok(catchup_complete && !has_pending)
     }
 
@@ -412,7 +490,7 @@ impl SyncRuntime {
         if self.secondary_identity.is_none() { return; }
         let message = error.to_string();
         let _ = self.store.set_secondary_last_error(Some(&message), now_ms);
-        if matches!(error, SyncError::Revoked(_) | SyncError::ReconcileRequired | SyncError::EpochStale | SyncError::Security(_))
+        if matches!(error, SyncError::Revoked(_) | SyncError::Security(_))
             || matches!(error, SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired")
         {
             let _ = self.store.set_secondary_enabled(false, now_ms);
@@ -423,9 +501,15 @@ impl SyncRuntime {
         let historical_ready = if self.occurrences_initialized {
             true
         } else {
-            let complete = self.store.index_mut().ensure_sync_occurrences_page(256).map_err(SyncError::from)?;
-            if !complete { self.occurrence_init_progressed = true; }
-            if complete { self.occurrences_initialized = true; }
+            let mut complete = false;
+            for _ in 0..HISTORY_INIT_BATCHES_PER_PASS {
+                complete = self.store.index_mut().ensure_sync_occurrences_page(HISTORY_INIT_BATCH_ROWS).map_err(SyncError::from)?;
+                if complete {
+                    self.occurrences_initialized = true;
+                    break;
+                }
+                self.occurrence_init_progressed = true;
+            }
             complete
         };
         let mut cursor = self.store.snapshot_cursor(config)?;
@@ -460,6 +544,21 @@ impl SyncRuntime {
                 let row = network_row(dirty.event.clone(), dirty.occurrence_id.clone())?;
                 rows_by_identity.insert(dirty_identity.clone(), row);
             }
+            // Journal every dirty row in this page straight from the map that
+            // produced its package row.  Re-deriving the identity from the
+            // serialized row could miss a repaired/duplicated identity, and a
+            // dirty row with no journal entry is never cleared by ACK — it
+            // would pin its event against prune forever.
+            let journal = dirty_by_identity.iter().map(|(identity_key, dirty)| {
+                let row = rows_by_identity.get(identity_key)
+                    .ok_or_else(|| SyncError::Protocol("dirty page row disappeared before journalling".into()))?;
+                Ok(DirtyJournalInput {
+                    identity: dirty.identity.clone(),
+                    revision: dirty.revision,
+                    kind: "event_snapshot".into(),
+                    row: row.clone(),
+                })
+            }).collect::<SyncResult<Vec<_>>>()?;
             let mut rows = rows_by_identity.into_values().collect::<Vec<_>>();
             rows.sort_by(|left, right| left.identity_material().unwrap_or("").cmp(right.identity_material().unwrap_or("")));
             let complete = page.events_done && page.dirty_done;
@@ -479,14 +578,6 @@ impl SyncRuntime {
                 config.origin.clone(), usage_index::INDEX_SCHEMA_VERSION, window_lo_ms, window_hi_ms,
                 &rows, now_ms, complete,
             )?;
-            let journal = dirty_by_identity.into_iter().filter_map(|(identity_key, dirty)| {
-                rows.iter().find(|row| sync_dirty_identity(row) == identity_key).map(|row| DirtyJournalInput {
-                    identity: dirty.identity,
-                    revision: dirty.revision,
-                    kind: "event_snapshot".into(),
-                    row: row.clone(),
-                })
-            }).collect::<Vec<_>>();
             match self.store.enqueue_snapshot_page_auto(
                 config, package, &journal, &identity.signing_key, page.next_identity.as_deref(),
                 page.next_dirty_revision, complete, now_ms,
@@ -501,14 +592,6 @@ impl SyncRuntime {
             if complete { return Ok(true); }
         }
         Ok(false)
-    }
-}
-
-fn sync_dirty_identity(row: &NetworkRow) -> String {
-    match (&row.key, &row.occurrence_id) {
-        (Some(key), _) => format!("key:{key}"),
-        (None, Some(occurrence)) => format!("occ:{occurrence}"),
-        _ => String::new(),
     }
 }
 
@@ -545,7 +628,8 @@ fn retryable_secondary_error(error: &SyncError) -> bool {
     match error {
         SyncError::Conflict(message) if message == "secondary sync is disabled" => false,
         SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired" => false,
-        SyncError::Protocol(_) | SyncError::Auth(_) | SyncError::NotPaired(_) | SyncError::Conflict(_) => true,
+        SyncError::Protocol(_) | SyncError::Auth(_) | SyncError::NotPaired(_) | SyncError::Conflict(_)
+        | SyncError::EpochStale | SyncError::ReconcileRequired => true,
         _ => false,
     }
 }
@@ -553,6 +637,7 @@ fn retryable_secondary_error(error: &SyncError) -> bool {
 fn map_secondary_status_error(error: TransportError) -> SyncError {
     match error {
         TransportError::HttpStatus { status: 409, message } if message.contains("reconciliation is required") => SyncError::ReconcileRequired,
+        TransportError::Unsupported(message) => SyncError::Unsupported(message),
         error => SyncError::Protocol(format!("secondary status request failed: {error}")),
     }
 }
@@ -634,6 +719,27 @@ pub(crate) fn network_row(event: UsageEvent, occurrence_id: Option<String>) -> S
     })
 }
 
+fn idle_interval(poll_interval: Duration, preparing: bool, pass_had_error: bool, consecutive_errors: u32) -> Duration {
+    let base = if preparing && !pass_had_error {
+        PREPARING_POLL.min(poll_interval)
+    } else {
+        poll_interval.saturating_mul(1_u32 << consecutive_errors.min(6))
+    };
+    jittered(base.min(RETRY_MAX))
+}
+
+/// Spreads retry and poll instants so devices that lost the same primary do
+/// not reconnect in lockstep. A missing RNG keeps the caller's interval.
+fn jittered(interval: Duration) -> Duration {
+    let millis = interval.as_millis().min(u64::MAX as u128) as u64;
+    let span = millis.saturating_mul(POLL_JITTER_PERCENT) / 100;
+    if span == 0 { return interval; }
+    let mut random = [0u8; 8];
+    if getrandom::fill(&mut random).is_err() { return interval; }
+    let offset = u64::from_le_bytes(random) % (2 * span + 1);
+    Duration::from_millis(millis.saturating_sub(span).saturating_add(offset).max(1))
+}
+
 fn current_time_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
@@ -705,6 +811,45 @@ mod tests {
         }
     }
 
+    /// A budgeted server loop outlives the requests under test; empty TCP
+    /// connections drain the remaining budget so the listener can exit.
+    fn drain_server(addr: std::net::SocketAddr, thread: thread::JoinHandle<Result<(), crate::TransportError>>) {
+        for _ in 0..64 {
+            if std::net::TcpStream::connect(addr).is_err() { break; }
+        }
+        assert!(thread.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn poll_jitter_stays_inside_the_configured_band() {
+        for interval in [Duration::from_millis(5), Duration::from_millis(500), Duration::from_secs(300)] {
+            let millis = interval.as_millis() as u64;
+            let span = millis * POLL_JITTER_PERCENT / 100;
+            for _ in 0..200 {
+                let jittered = jittered(interval);
+                assert!(jittered.as_millis() as u64 >= millis - span, "{jittered:?} below the band of {interval:?}");
+                assert!(jittered.as_millis() as u64 <= millis + span, "{jittered:?} above the band of {interval:?}");
+            }
+        }
+        assert_eq!(jittered(Duration::from_millis(4)), Duration::from_millis(4));
+    }
+
+    #[test]
+    fn preparing_downloads_poll_quickly_while_failures_back_off_to_the_cap() {
+        let preparing = idle_interval(Duration::from_secs(5), true, false, 0);
+        assert!(preparing >= Duration::from_millis(400) && preparing <= Duration::from_millis(600), "{preparing:?}");
+        let capped_by_user_poll = idle_interval(Duration::from_millis(200), true, false, 0);
+        assert!(capped_by_user_poll <= Duration::from_millis(240), "{capped_by_user_poll:?}");
+        // A failing primary is not a preparing primary: pass_had_error wins.
+        let failing_while_preparing = idle_interval(Duration::from_secs(5), true, true, 0);
+        assert!(failing_while_preparing >= Duration::from_secs(4), "{failing_while_preparing:?}");
+        let capped = idle_interval(Duration::from_secs(60), false, true, 10);
+        assert!(capped >= Duration::from_secs(240) && capped <= Duration::from_secs(360), "{capped:?}");
+        // The default 5s cadence must still reach the documented 5-minute cap.
+        let default_capped = idle_interval(Duration::from_secs(5), false, true, 10);
+        assert!(default_capped >= Duration::from_secs(240) && default_capped <= Duration::from_secs(360), "{default_capped:?}");
+    }
+
     #[test]
     fn secondary_runtime_uses_its_own_store_to_snapshot_and_ack() {
         let device = DeviceIdentity::create("runtime-secondary", "Secondary").unwrap();
@@ -750,6 +895,99 @@ mod tests {
         let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, first_now + 10_000).unwrap();
         assert_eq!(runtime.transport.status(&status_request).unwrap().display_name.as_deref(), Some("Current host"));
         assert!(server_thread.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn secondary_runtime_recovers_a_purged_receipt_with_a_fresh_stream() {
+        let device = DeviceIdentity::create("runtime-recovery", "Secondary").unwrap();
+        // The primary is file-backed so the test can purge a receipt between
+        // passes while the server holds its own connection to the same store.
+        let primary_dir = tempfile::tempdir().unwrap();
+        let primary_path = primary_dir.path().join("index.db");
+        let mut primary_admin = SyncStore::open(&primary_path, "primary-1").unwrap();
+        let invite = primary_admin.create_pairing_invite("https://localhost:47821", &"1".repeat(64), i64::MAX).unwrap();
+        let request = PairingRequest::new(&invite, &device, "linux").unwrap();
+        let state = primary_admin.receive_pairing_request(&request, 1).unwrap();
+        primary_admin.approve_pairing(&state.request_id, 2).unwrap();
+        let stream = primary_admin.open_stream_for_registered(&device.device_id, 3).unwrap();
+
+        let (cert_der, key_der) = certificate();
+        let staging = tempfile::tempdir().unwrap();
+        let server = crate::HttpsSyncServer::bind(
+            server_config(&cert_der, &key_der, staging.path().join("staging")),
+            SyncStore::open(&primary_path, "primary-1").unwrap(),
+        ).unwrap();
+        let addr = server.local_addr().unwrap();
+        let server_thread = thread::spawn(move || server.run_connections(32));
+
+        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
+        let identity_dir = tempfile::tempdir().unwrap();
+        let first_now = usage_core::report::now_ms();
+        secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
+            certificate_pin: hash_bytes(&cert_der), certificate_der: cert_der.clone(),
+            identity_path: identity_dir.path().join("secondary-identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }, first_now).unwrap();
+        secondary.index_mut().conn().execute(
+            "INSERT INTO event(id, tool, ts_ms, session, meter, dedupe_key, source) VALUES(1, 'codex', ?1, 'recovery-session', 'tokens', 'recovery-row', 'live.jsonl')",
+            rusqlite::params![first_now],
+        ).unwrap();
+        secondary.index_mut().conn().execute(
+            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(1, 'key:recovery-row', NULL)",
+            [],
+        ).unwrap();
+        secondary.index_mut().conn().execute(
+            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
+             VALUES('key:recovery-row', 'live.jsonl', X'', 1, ?1, 1, ?1, ?1)",
+            rusqlite::params![first_now],
+        ).unwrap();
+
+        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
+        )).unwrap();
+        let mut runtime = SyncRuntime::new_secondary(
+            secondary, transport, SyncRuntimeConfig::new("secondary-recovery-owner").unwrap(), device.clone(),
+        );
+        let first = runtime.run_once_with_clock(|| first_now).unwrap();
+        assert_eq!(first.acknowledged, 1);
+        let before = runtime.store().secondary_config().unwrap().unwrap();
+        assert_eq!(before.stream_id.as_deref(), Some(stream.stream_id.as_str()));
+        assert_eq!(before.last_ack_generation, Some(1));
+
+        // Losing the ACKed receipt is the primary-side reconcile trigger; the
+        // next status call itself answers 409 and the client must repair it
+        // without a manual step.
+        primary_admin.purge_receipt(&device.device_id, &stream.stream_id, 1).unwrap();
+        let second = runtime.run_once_with_clock(|| first_now + 5_000).unwrap();
+        assert_eq!(second.acknowledged, 1, "recovery must re-send a fresh generation-1 snapshot");
+        let after = runtime.store().secondary_config().unwrap().unwrap();
+        assert_ne!(after.stream_id.as_deref(), Some(stream.stream_id.as_str()));
+        assert_eq!(after.data_epoch, Some(1));
+        assert_eq!(after.last_ack_generation, Some(1));
+        assert_eq!(after.last_error, None);
+        assert_eq!(runtime.store().outbox_summary().unwrap().pending, 0);
+        assert_eq!(runtime.store().snapshot_cursor(&after).unwrap().completion_generation, Some(1));
+
+        let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, first_now + 6_000).unwrap();
+        let status = runtime.transport.status(&status_request).unwrap();
+        assert_eq!(status.status, "paired");
+        assert_eq!(status.active_stream_id.as_deref(), after.stream_id.as_deref());
+        assert_eq!(status.expected_generation, Some(2), "the recovered stream must have accepted generation 1");
+        let old_active: i64 = primary_admin.index().conn().query_row(
+            "SELECT active FROM device_stream WHERE device_id = ?1 AND stream_id = ?2",
+            rusqlite::params![device.device_id, stream.stream_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(old_active, 0, "the recovered-from stream stays frozen");
+        let receipts: i64 = primary_admin.index().conn().query_row(
+            "SELECT count(*) FROM device_receipt WHERE device_id = ?1 AND stream_id = ?2",
+            rusqlite::params![device.device_id, after.stream_id.clone().unwrap()], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(receipts, 1);
+        drain_server(addr, server_thread);
     }
 
     #[test]
@@ -807,6 +1045,69 @@ mod tests {
     }
 
     #[test]
+    fn preparing_primary_download_is_not_progress_and_keeps_the_cursor() {
+        let device = DeviceIdentity::create("runtime-preparing", "Secondary").unwrap();
+        let (mut primary, _) = paired_primary(&device);
+        let now = usage_core::report::now_ms();
+        primary.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, now).unwrap();
+        // More events than one pass can materialize: four download requests,
+        // each running four identity batches.
+        let rows = usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4 * MAX_SNAPSHOT_PAGES_PER_PASS + 200;
+        for index in 0..rows {
+            primary.index().conn().execute(
+                "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+                 VALUES('codex', ?1, 'primary-session', 'tokens', 1, 'local.jsonl', ?2)",
+                rusqlite::params![now - 1_000 - index as i64, format!("preparing-{index:05}")],
+            ).unwrap();
+        }
+
+        let (cert_der, key_der) = certificate();
+        let staging = tempfile::tempdir().unwrap();
+        let server = crate::HttpsSyncServer::bind(
+            server_config(&cert_der, &key_der, staging.path().join("staging")), primary,
+        ).unwrap();
+        let addr = server.local_addr().unwrap();
+        let server_thread = thread::spawn(move || server.run_connections(12));
+
+        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
+        let identity_dir = tempfile::tempdir().unwrap();
+        secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
+            certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(),
+            identity_path: identity_dir.path().join("secondary-identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }, now).unwrap();
+        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
+        )).unwrap();
+        let mut runtime = SyncRuntime::new_secondary(
+            secondary, transport, SyncRuntimeConfig::new("secondary-preparing-test").unwrap(), device,
+        );
+
+        let report = runtime.run_once_with_clock(|| now + 10).unwrap();
+        assert_eq!(report.acknowledged, 1, "the paired stream still receives the empty upload");
+        assert_eq!(report.last_error, None);
+        assert!(runtime.primary_download_preparing);
+        assert!(!runtime.primary_download_progressed, "an empty preparing marker is not catch-up progress");
+        assert!(runtime.primary_download_more, "the pass must be continued after a preparing page");
+        assert!(!runtime.primary_download_complete);
+        let cursor = runtime.store().primary_download_cursor().unwrap();
+        assert!(!cursor.complete);
+        assert_eq!(cursor.last_identity, None);
+        assert_eq!(cursor.last_dirty_revision, 0);
+        assert_eq!(runtime.store().index().event_count().unwrap(), 0);
+        assert_eq!(runtime.store().secondary_config().unwrap().unwrap().last_error, None);
+        drain_server(addr, server_thread);
+    }
+
+    #[test]
     fn secondary_runtime_uploads_dirty_rows_before_historical_identity_catchup() {
         let device = DeviceIdentity::create("runtime-incremental", "Secondary").unwrap();
         let primary = paired_primary_without_stream(&device);
@@ -826,24 +1127,28 @@ mod tests {
             last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
             last_ack_generation: None, last_ack_receipt_hash: None,
         }, first_now).unwrap();
-        for id in 1..=257_i64 {
+        // One more history row than the upload side materializes per pass
+        // (four identity batches).
+        let missing = usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4 + 1;
+        for id in 1..=missing as i64 {
             secondary.index_mut().conn().execute(
                 "INSERT INTO event(id, tool, ts_ms, session, meter, source) VALUES(?1, 'codex', ?2, ?3, 'tokens', 'history.jsonl')",
                 rusqlite::params![id, first_now, format!("history-{id}")],
             ).unwrap();
         }
+        let dirty_id = missing as i64 + 1;
         secondary.index_mut().conn().execute(
-            "INSERT INTO event(id, tool, ts_ms, session, meter, dedupe_key, source) VALUES(258, 'codex', ?1, 'live', 'tokens', 'live-row', 'live.jsonl')",
-            rusqlite::params![first_now],
+            "INSERT INTO event(id, tool, ts_ms, session, meter, dedupe_key, source) VALUES(?1, 'codex', ?2, 'live', 'tokens', 'live-row', 'live.jsonl')",
+            rusqlite::params![dirty_id, first_now],
         ).unwrap();
         secondary.index_mut().conn().execute(
-            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(258, 'key:live-row', NULL)",
-            [],
+            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(?1, 'key:live-row', NULL)",
+            rusqlite::params![dirty_id],
         ).unwrap();
         secondary.index_mut().conn().execute(
             "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
-             VALUES('key:live-row', 'live.jsonl', X'', 258, ?1, 1, ?1, ?1)",
-            rusqlite::params![first_now],
+             VALUES('key:live-row', 'live.jsonl', X'', ?1, ?2, 1, ?2, ?2)",
+            rusqlite::params![dirty_id, first_now],
         ).unwrap();
 
         let server_thread = thread::spawn(move || server.run_connections(3));
@@ -857,7 +1162,7 @@ mod tests {
             "SELECT value FROM meta WHERE key = 'device_sync_occurrence_init_event_id'",
             [], |row| row.get::<_, String>(0),
         ).unwrap().parse().unwrap();
-        assert_eq!(initialized_to, 256);
+        assert_eq!(initialized_to, (usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4) as i64);
         let config = runtime.store().secondary_config().unwrap().unwrap();
         assert!(!runtime.store().snapshot_cursor(&config).unwrap().complete);
         assert!(server_thread.join().unwrap().is_ok());

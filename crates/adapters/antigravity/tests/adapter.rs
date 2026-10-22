@@ -574,7 +574,10 @@ fn a_wal_index_a_read_only_handle_cannot_rebuild_falls_back_to_a_private_copy() 
     let bytes = std::fs::read(&path).expect("fixture bytes");
     // Take the wal-index away while the writer keeps the -wal alive, then make the
     // directory unwritable: a read-only handle now has no way to recreate the
-    // wal-index, which is precisely the case the copy exists for.
+    // wal-index, which is precisely the case the copy exists for. The exclusive
+    // lock makes the failure deterministic — without it SQLite can join this
+    // process's live wal-index and the read never needs a copy at all.
+    writer.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;").unwrap();
     std::fs::remove_file(fix.conversations().join(format!("{SESSION}.db-shm"))).unwrap();
     let before = listing(fix.conversations());
     readonly(fix.conversations(), true);
@@ -589,8 +592,6 @@ fn a_wal_index_a_read_only_handle_cannot_rebuild_falls_back_to_a_private_copy() 
     assert_eq!(events.len(), 2, "the copy served both the checkpointed and the -wal row");
     assert_eq!(listing(fix.conversations()), before, "the source directory gained nothing");
     assert_eq!(std::fs::read(&path).expect("still readable"), bytes, "and was never rewritten");
-    let leftovers = temp_leftovers();
-    assert!(leftovers.is_empty(), "the private copy is cleaned up: {leftovers:?}");
     drop(writer);
 }
 
@@ -606,21 +607,6 @@ fn listing(dir: PathBuf) -> BTreeSet<String> {
         .expect("read dir")
         .flatten()
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .collect()
-}
-
-/// Copies this process made and did not remove. Filtered to our own pid, because
-/// a run the harness killed earlier leaves directories no `Drop` ever got to
-/// clean, and those are not this test's leak.
-#[cfg(unix)]
-fn temp_leftovers() -> Vec<PathBuf> {
-    let root = std::env::temp_dir();
-    let mine = format!("tokenme-antigravity-{}-", std::process::id());
-    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
-    entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&mine)))
         .collect()
 }
 

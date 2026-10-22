@@ -15,6 +15,7 @@ import { Header } from "./components/Header";
 import { Heatmap } from "./components/Heatmap";
 import { QuotaStrip } from "./components/QuotaStrip";
 import { RankedList } from "./components/RankedList";
+import { isManagedOrigin } from "./components/ScopeDropdown";
 import { Sessions } from "./components/Sessions";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { ServerSheet } from "./components/ServerSheet";
@@ -82,7 +83,7 @@ const [page, setPage] = useState<PageKey>(() => {
   const [serversLoaded, setServersLoaded] = useState(false);
   const [serversOpen, setServersOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
-  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, primary_display_name: null, role: "unconfigured", service_running: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [] });
+  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, primary_display_name: null, role: "unconfigured", service_running: false, primary_starting: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [] });
   // The sheet's own close guard (a running install must not be dismissed) —
   // Escape asks through this ref instead of closing the sheet blind.
   const serverCloseRef = useRef<() => void>(() => {});
@@ -408,8 +409,22 @@ const [page, setPage] = useState<PageKey>(() => {
     const hours = Number(new URLSearchParams(location.search).get("sync"));
     return Number.isFinite(hours) && hours > 0 ? hours : null;
   }, []);
+  // The scope menu and the sync badge compare indexed origins with configured
+  // SSH servers; an indexed origin can be historical/manual data even when
+  // this set is empty. Hooks rule: above the boot screen's early return.
+  const serverOrigins = useMemo(
+    () => (serversLoaded ? new Set(servers.map((s) => s.name)) : undefined),
+    [servers, serversLoaded],
+  );
   const sync = useMemo(() => {
-    const all = [...(report?.syncs ?? [])].sort((a, b) => b.imported_at_ms - a.imported_at_ms);
+    // Only a machine that exists right now — a paired device or a configured
+    // server — earns the badge. The index also remembers bundles from machines
+    // long since removed, and "no data today" about one of those is noise:
+    // same rule as the scope menu, so the badge never names a machine the
+    // menu does not list.
+    const all = (report?.syncs ?? [])
+      .filter((r) => isManagedOrigin(r.origin, syncDevices.devices, serverOrigins))
+      .sort((a, b) => b.imported_at_ms - a.imported_at_ms);
     // The badge says whose numbers these are: under a machine scope it reports
     // that machine's merge only, and the local scope has no import to report.
     const records = scope.kind === "origin" ? all.filter((r) => r.origin === scope.name) : scope.kind === "local" ? [] : all;
@@ -439,7 +454,7 @@ const [page, setPage] = useState<PageKey>(() => {
         age: i === 0 ? relativeTime(importedAt, now) : relativeTime(r.imported_at_ms, now),
       })),
     };
-  }, [report, now, syncPin, scope]);
+  }, [report, now, syncPin, scope, syncDevices, serverOrigins]);
 
   // The tools page lists every *detected* source, not just the ones that
   // billed this window: a credits-only tool that metered nothing here, or a
@@ -480,14 +495,6 @@ const [page, setPage] = useState<PageKey>(() => {
     const w = report[period];
     return new Set(w.breakdown.tools.filter((t) => t.sessions > 0).map((t) => t.key));
   }, [report, period]);
-
-  // The scope menu compares indexed origins with configured SSH servers; an
-  // indexed origin can be historical/manual data even when this set is empty.
-  // Hooks rule: above the boot screen's early return, like `tools`.
-  const serverOrigins = useMemo(
-    () => (serversLoaded ? new Set(servers.map((s) => s.name)) : undefined),
-    [servers, serversLoaded],
-  );
 
   if (!report) {
     // "indexing" is the backend sentinel for "first scan still running"; the

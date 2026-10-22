@@ -7,16 +7,18 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::thread;
+use std::time::Duration;
 
 use chrono::{Datelike, Local, TimeZone};
 use base64::Engine as _;
 use serde::Deserialize;
 use usage_core::{summarize, CallKind, DateFilter, Item, Meter, Summary, UsageEvent, Window};
 use usage_device_sync::{
-    hash_bytes, identity_bytes, DeviceIdentity, DiagnosticsGrant, DiagnosticsMcpRequest, DiagnosticsRequestAuth,
-    DiagnosticsService, HttpsServerConfig, HttpsTransportConfig, NetworkCall, NetworkCounts,
-    NetworkPackage, NetworkRow, PairingInvite, PairingRequest, SignedUpload,
-    SyncRuntime, SyncRuntimeConfig, SyncStore, Tls13HttpsTransport,
+    hash_bytes, identity_bytes, ClientTransportCancellation, DeviceIdentity, DiagnosticsGrant,
+    DiagnosticsMcpRequest, DiagnosticsRequestAuth, DiagnosticsService, HttpsServerConfig,
+    HttpsTransportConfig, NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite,
+    PairingRequest, RuntimeRunReport, SignedUpload, SyncRuntime, SyncRuntimeConfig, SyncStore,
+    Tls13HttpsTransport,
 };
 use usage_index::{retention_cutoff, IngestReport};
 
@@ -1914,24 +1916,36 @@ pub fn sync_run(ctx: &mut Ctx) -> Result<(), String> {
     let mut config_store = SyncStore::open(&ctx.db_path, config.primary_id.clone()).map_err(|error| error.to_string())?;
     if !config.enabled { config_store.set_secondary_enabled(true, ctx.now_ms).map_err(|error| error.to_string())?; }
     drop(config_store);
-    let identity = DeviceIdentity::load_or_create(
-        config.identity_path.clone(), config.origin.clone(), "tokenme-cli secondary",
-    ).map_err(|error| format!("cannot load secondary identity: {error}"))?;
-    if identity.device_id != config.device_id || identity.origin != config.origin {
-        return Err("secondary identity does not match the paired device configuration".into());
-    }
-    let mut transport_config = HttpsTransportConfig::pinned(
-        config.endpoint.clone(), config.server_name.clone(), config.certificate_der.clone(),
-    );
-    transport_config.pinned_certificate_sha256 = config.certificate_pin;
-    let transport = Tls13HttpsTransport::new(transport_config).map_err(|error| error.to_string())?;
-    let store = SyncStore::open(&ctx.db_path, config.primary_id.clone()).map_err(|error| error.to_string())?;
-    let owner = format!("cli-secondary-{}", identity.device_id);
-    let runtime_config = SyncRuntimeConfig::new(owner).map_err(|error| error.to_string())?;
-    let cancellation = transport.cancellation();
-    let runtime = SyncRuntime::new_secondary(store, transport, runtime_config, identity);
+    let db_path = ctx.db_path.clone();
+    let primary_id = config.primary_id.clone();
+    // Rebuild the whole runtime for every supervised attempt: a failed store
+    // handle or transport is not reused, and the binding is re-read so a
+    // revoked/unpaired device stops instead of being restarted forever.
+    let factory_db = db_path.clone();
+    let build_runtime = move || -> Result<(SyncRuntime, ClientTransportCancellation), String> {
+        let config = SyncStore::read_secondary_config(&factory_db)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "no secondary sync configuration; pair this device first".to_string())?;
+        if !config.enabled { return Err("secondary sync is disabled".into()); }
+        let identity = DeviceIdentity::load_or_create(
+            config.identity_path.clone(), config.origin.clone(), "tokenme-cli secondary",
+        ).map_err(|error| format!("cannot load secondary identity: {error}"))?;
+        if identity.device_id != config.device_id || identity.origin != config.origin {
+            return Err("secondary identity does not match the paired device configuration".into());
+        }
+        let mut transport_config = HttpsTransportConfig::pinned(
+            config.endpoint.clone(), config.server_name.clone(), config.certificate_der.clone(),
+        );
+        transport_config.pinned_certificate_sha256 = config.certificate_pin;
+        let transport = Tls13HttpsTransport::new(transport_config).map_err(|error| error.to_string())?;
+        let cancellation = transport.cancellation();
+        let store = SyncStore::open(&factory_db, config.primary_id.clone()).map_err(|error| error.to_string())?;
+        let owner = format!("cli-secondary-{}", identity.device_id);
+        let runtime_config = SyncRuntimeConfig::new(owner).map_err(|error| error.to_string())?;
+        Ok((SyncRuntime::new_secondary(store, transport, runtime_config, identity), cancellation))
+    };
     let adapters = std::mem::take(&mut ctx.adapters);
-    run_secondary_service(runtime, cancellation, config.primary_id, ctx.db_path.clone(), ctx.g.json, adapters)
+    run_secondary_service(build_runtime, primary_id, db_path, ctx.g.json, adapters)
 }
 
 pub fn sync_stop(ctx: &Ctx) -> Result<(), String> {
@@ -1964,6 +1978,33 @@ pub fn sync_stop(ctx: &Ctx) -> Result<(), String> {
     {
         Err("sync stop control plane is unsupported on this platform".into())
     }
+}
+
+pub fn sync_reset(ctx: &Ctx) -> Result<(), String> {
+    let config = SyncStore::read_secondary_config(&ctx.db_path)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "this device is not a paired secondary; only a secondary keeps stream/outbox checkpoints to reset".to_string())?;
+    // The resident runtime holds the scheduler lease and an in-memory view of
+    // the outbox; deleting rows under it would let the next pass resurrect
+    // half of the old sequence. Stop it first.
+    if secondary_runtime_status(&ctx.db_path) {
+        return Err("secondary sync runtime is running; run `tokenme sync stop` before `tokenme sync reset`".into());
+    }
+    let mut store = SyncStore::open(&ctx.db_path, config.primary_id.clone()).map_err(|error| error.to_string())?;
+    let summary = store.reset_secondary_sync_state(ctx.now_ms).map_err(|error| error.to_string())?;
+    if ctx.g.json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "device_id": summary.device_id,
+            "discarded_packages": summary.discarded_packages,
+            "discarded_journal_rows": summary.discarded_journal_rows,
+            "events_kept": store.index().event_count().map_err(|error| error.to_string())?,
+            "next": "run `tokenme sync run` to recover a fresh stream and re-sync",
+        })).map_err(|error| error.to_string())?);
+    } else {
+        println!("reset {}: {} package(s), {} journal row(s) discarded; local events kept", summary.device_id, summary.discarded_packages, summary.discarded_journal_rows);
+        println!("next: `tokenme sync run` recovers a fresh stream and re-sends the full local projection");
+    }
+    Ok(())
 }
 
 fn secondary_runtime_status(db_path: &std::path::Path) -> bool {
@@ -2013,28 +2054,100 @@ fn bind_secondary_control(db_path: &std::path::Path) -> Result<(std::os::unix::n
     Ok((listener, path))
 }
 
+/// Restart backoff for resident sync services: 1, 2, 4, ... up to 60 s. A
+/// repeated failure must not become a hot loop, and a healthy run resets it.
+fn restart_delay(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(6);
+    (Duration::from_secs(1) * (1_u32 << exponent)).min(Duration::from_secs(60))
+}
+
+/// Sleeps in short slices so `sync stop` is honored during a restart backoff.
+fn sleep_until_retry(stop: &AtomicBool, delay: Duration) -> bool {
+    let deadline = std::time::Instant::now() + delay;
+    while !stop.load(Ordering::Acquire) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() { return true; }
+        thread::sleep(left.min(Duration::from_millis(100)));
+    }
+    false
+}
+
+/// The binding is re-read before every restart: a revoked/unpaired device
+/// disables its config, which is the terminal signal. Everything else — a
+/// transient SQLite failure, a lost lease, a panic — gets a new runtime.
+fn secondary_binding_enabled(db_path: &std::path::Path) -> bool {
+    SyncStore::read_secondary_config(db_path).ok().flatten().is_some_and(|config| config.enabled)
+}
+
 #[cfg(unix)]
 fn run_secondary_service(
-    runtime: SyncRuntime, cancellation: usage_device_sync::ClientTransportCancellation,
+    mut build_runtime: impl FnMut() -> Result<(SyncRuntime, ClientTransportCancellation), String> + Send + 'static,
     primary_id: String, db_path: PathBuf, json: bool,
     adapters: Vec<Box<dyn usage_core::SourceAdapter>>,
 ) -> Result<(), String> {
     let (listener, path) = bind_secondary_control(&db_path)?;
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    let join = thread::spawn(move || {
-        let mut runtime = runtime;
-        runtime.run_until_with_ingest(&thread_stop, usage_core::report::now_ms, |store| {
-            let filter = DateFilter::new(Some(retention_cutoff(usage_core::report::now_ms())), None);
-            let options = usage_index::IngestOptions {
-                force: false,
-                claim_wait: std::time::Duration::from_millis(500),
+    let cancel_slot: Arc<std::sync::Mutex<Option<ClientTransportCancellation>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let slot = Arc::clone(&cancel_slot);
+    let worker_db = db_path.clone();
+    let join = thread::spawn(move || -> Result<RuntimeRunReport, String> {
+        let mut failures = 0_u32;
+        loop {
+            if thread_stop.load(Ordering::Acquire) { return Ok(RuntimeRunReport::default()); }
+            let (mut runtime, cancellation) = match build_runtime() {
+                Ok(built) => built,
+                Err(error) => {
+                    if !secondary_binding_enabled(&worker_db) { return Err(error); }
+                    failures = failures.saturating_add(1);
+                    let delay = restart_delay(failures);
+                    eprintln!("tokenme: secondary sync runtime could not start ({error}); retrying in {}s", delay.as_secs());
+                    if !sleep_until_retry(&thread_stop, delay) { return Ok(RuntimeRunReport::default()); }
+                    continue;
+                }
             };
-            if let Err(error) = store.index_mut().ingest_with(&adapters, &filter, &options) {
-                eprintln!("tokenme: resident sync ingest failed ({error}); pending local data was retained");
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cancellation);
+            let started = std::time::Instant::now();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.run_until_with_ingest(&thread_stop, usage_core::report::now_ms, |store| {
+                    let filter = DateFilter::new(Some(retention_cutoff(usage_core::report::now_ms())), None);
+                    let options = usage_index::IngestOptions {
+                        force: false,
+                        claim_wait: std::time::Duration::from_millis(500),
+                    };
+                    if let Err(error) = store.index_mut().ingest_with(&adapters, &filter, &options) {
+                        eprintln!("tokenme: resident sync ingest failed ({error}); pending local data was retained");
+                    }
+                    Ok(())
+                })
+            }));
+            if thread_stop.load(Ordering::Acquire) {
+                return match outcome {
+                    Ok(Ok(report)) => Ok(report),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Err("secondary runtime stopped after a panic".into()),
+                };
             }
-            Ok(())
-        })
+            match outcome {
+                Ok(Ok(report)) => {
+                    if !secondary_binding_enabled(&worker_db) { return Ok(report); }
+                    eprintln!("tokenme: secondary sync runtime stopped unexpectedly; restarting");
+                }
+                Ok(Err(error)) => {
+                    if !secondary_binding_enabled(&worker_db) { return Err(error.to_string()); }
+                    eprintln!("tokenme: secondary sync runtime failed ({error}); restarting");
+                }
+                Err(_) => {
+                    if !secondary_binding_enabled(&worker_db) { return Err("secondary runtime panicked".into()); }
+                    eprintln!("tokenme: secondary sync runtime panicked; restarting");
+                }
+            }
+            failures = if started.elapsed() >= Duration::from_secs(60) { 0 } else { failures.saturating_add(1) };
+            let delay = restart_delay(failures);
+            eprintln!("tokenme: retrying secondary sync in {}s", delay.as_secs());
+            if !sleep_until_retry(&thread_stop, delay) { return Ok(RuntimeRunReport::default()); }
+        }
     });
     eprintln!("tokenme: secondary sync runtime started; stop with `tokenme sync stop`");
     let mut stop_requested = false;
@@ -2084,15 +2197,16 @@ fn run_secondary_service(
         while !join.is_finished() && std::time::Instant::now() < deadline {
             thread::sleep(std::time::Duration::from_millis(20));
         }
-        if !join.is_finished() { cancellation.cancel(); }
-    } else {
-        cancellation.cancel();
+    }
+    if !join.is_finished() {
+        let cancellation = cancel_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        if let Some(cancellation) = cancellation { cancellation.cancel(); }
     }
     let joined = join.join().map_err(|_| "secondary runtime thread panicked".to_string());
     let cleanup = std::fs::remove_file(&path).map_err(|error| format!("cannot remove secondary control socket: {error}"));
     if let Some(error) = control_error { return Err(error); }
     cleanup?;
-    let result = joined?.map_err(|error| error.to_string());
+    let result = joined?;
     if stop_requested {
         let mut store = SyncStore::open(&db_path, primary_id).map_err(|error| error.to_string())?;
         store.set_secondary_enabled(false, usage_core::report::now_ms()).map_err(|error| error.to_string())?;
@@ -2105,10 +2219,11 @@ fn run_secondary_service(
 
 #[cfg(windows)]
 fn run_secondary_service(
-    runtime: SyncRuntime, cancellation: usage_device_sync::ClientTransportCancellation,
+    mut build_runtime: impl FnMut() -> Result<(SyncRuntime, ClientTransportCancellation), String> + Send + 'static,
     primary_id: String, db_path: PathBuf, json: bool,
     adapters: Vec<Box<dyn usage_core::SourceAdapter>>,
 ) -> Result<(), String> {
+    let (runtime, cancellation) = build_runtime()?;
     let stop = Arc::new(AtomicBool::new(false));
     let control = crate::windows_control::start(&db_path, Arc::clone(&stop), cancellation.clone())?;
     let runtime_stop = Arc::clone(&stop);
@@ -2144,7 +2259,7 @@ fn run_secondary_service(
 
 #[cfg(all(not(unix), not(windows)))]
 fn run_secondary_service(
-    _runtime: SyncRuntime, _cancellation: usage_device_sync::ClientTransportCancellation,
+    _build_runtime: impl FnMut() -> Result<(SyncRuntime, ClientTransportCancellation), String> + Send + 'static,
     _primary_id: String, _db_path: PathBuf, _json: bool,
     _adapters: Vec<Box<dyn usage_core::SourceAdapter>>,
 ) -> Result<(), String> {
@@ -2300,16 +2415,55 @@ pub fn sync_serve(ctx: &Ctx, bind: String, cert: Option<PathBuf>, key: Option<Pa
     let key_path = key.unwrap_or_else(|| root.join("primary-key.pem"));
     let (certificate_der, private_key_der) = usage_device_sync::ensure_server_certificate(&cert_path, &key_path, "localhost")
         .map_err(|error| format!("cannot prepare private primary certificate: {error}"))?;
-    let store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| e.to_string())?;
-    let server = usage_device_sync::HttpsSyncServer::bind(HttpsServerConfig {
-        bind_addr, certificate_der, private_key_der, allow_lan, allowed_peer_ips: Vec::new(),
-        max_body_bytes: usage_device_sync::MAX_COMPRESSED_BYTES, max_concurrent: 1,
-        staging_dir: ctx.db_path.with_file_name("device-sync-staging"),
-        idle_timeout: std::time::Duration::from_secs(30), total_timeout: std::time::Duration::from_secs(600),
-        staging_quota_bytes: 512 * 1024 * 1024,
-    }, store).map_err(|e| e.to_string())?;
-    eprintln!("tokenme: sync primary listening on {}", server.local_addr().map_err(|e| e.to_string())?);
-    server.run().map_err(|e| e.to_string())
+    let staging_dir = ctx.db_path.with_file_name("device-sync-staging");
+    let mut failures = 0_u32;
+    loop {
+        // Reopen both the database and the listener on every attempt: the
+        // previous server consumed its store, and a half-broken handle must
+        // not be reused by the retry.
+        let store = match SyncStore::open(&ctx.db_path, primary_id.clone()) {
+            Ok(store) => store,
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                let delay = restart_delay(failures);
+                eprintln!("tokenme: cannot open the sync database ({error}); retrying in {}s", delay.as_secs());
+                thread::sleep(delay);
+                continue;
+            }
+        };
+        let server = match usage_device_sync::HttpsSyncServer::bind(HttpsServerConfig {
+            bind_addr, certificate_der: certificate_der.clone(), private_key_der: private_key_der.clone(),
+            allow_lan, allowed_peer_ips: Vec::new(),
+            max_body_bytes: usage_device_sync::MAX_COMPRESSED_BYTES, max_concurrent: 1,
+            staging_dir: staging_dir.clone(),
+            idle_timeout: Duration::from_secs(30), total_timeout: Duration::from_secs(600),
+            staging_quota_bytes: 512 * 1024 * 1024,
+        }, store) {
+            Ok(server) => server,
+            Err(error) if error.is_terminal() => return Err(error.to_string()),
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                let delay = restart_delay(failures);
+                eprintln!("tokenme: cannot start the sync primary ({error}); retrying in {}s", delay.as_secs());
+                thread::sleep(delay);
+                continue;
+            }
+        };
+        eprintln!("tokenme: sync primary listening on {}", server.local_addr().map_err(|e| e.to_string())?);
+        let started = std::time::Instant::now();
+        match server.run() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is_terminal() => return Err(error.to_string()),
+            Err(error) => {
+                // A listener that served for a while is not a crash loop; give
+                // the next attempt a fresh backoff budget.
+                failures = if started.elapsed() >= Duration::from_secs(60) { 0 } else { failures.saturating_add(1) };
+                let delay = restart_delay(failures);
+                eprintln!("tokenme: sync primary stopped ({error}); restarting in {}s", delay.as_secs());
+                thread::sleep(delay);
+            }
+        }
+    }
 }
 
 fn parse_sha256(value: &str) -> Result<[u8; 32], String> {
@@ -2502,4 +2656,28 @@ pub fn codex_doctor(ctx: &Ctx) -> Result<(), String> {
     println!("notes: the replay re-parses every rollout from scratch — the index side is what the panel");
     println!("shows; a MISMATCH means the indexer counted some call twice or dropped it.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_backoff_doubles_to_a_ceiling_and_survives_overflow() {
+        assert_eq!(restart_delay(0), Duration::from_secs(1));
+        assert_eq!(restart_delay(1), Duration::from_secs(1));
+        assert_eq!(restart_delay(2), Duration::from_secs(2));
+        assert_eq!(restart_delay(3), Duration::from_secs(4));
+        assert_eq!(restart_delay(7), Duration::from_secs(60));
+        assert_eq!(restart_delay(u32::MAX), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_restart_sleep_is_interrupted_by_stop() {
+        let stop = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        assert!(!sleep_until_retry(&stop, Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_secs(1), "stop must not wait for the full backoff");
+        assert!(sleep_until_retry(&AtomicBool::new(false), Duration::from_millis(20)));
+    }
 }

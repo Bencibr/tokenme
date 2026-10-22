@@ -318,6 +318,50 @@ mod tests {
         assert_eq!(count(&conn), 2, "committed-but-uncheckpointed rows are visible");
     }
 
+    /// The fallback exists for a read-only handle that cannot get a wal-index:
+    /// the copy carries the `-wal` rows, leaves the source untouched, and its
+    /// directory goes away with the handle. Driven through `open` so the whole
+    /// ladder runs, but with the writer locked so `try_open` must fail — left to
+    /// timing, SQLite can join this process's live wal-index and skip the copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_copy_serves_the_wal_and_is_removed_with_its_handle() {
+        use std::collections::BTreeSet;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let conversations = dir.path().join("conversations");
+        std::fs::create_dir_all(&conversations).unwrap();
+        let db = conversations.join("c.db");
+        {
+            let first = Connection::open(&db).unwrap();
+            first
+                .execute_batch("CREATE TABLE gen_metadata (idx integer PRIMARY KEY, data blob); INSERT INTO gen_metadata VALUES (1, x'0801');")
+                .unwrap();
+        }
+        let writer = Connection::open(&db).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=wal; PRAGMA wal_autocheckpoint=0;").unwrap();
+        writer.execute("INSERT INTO gen_metadata VALUES (2, x'0802')", []).unwrap();
+        writer.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;").unwrap();
+        std::fs::remove_file(conversations.join("c.db-shm")).unwrap();
+        let listing = || -> BTreeSet<std::ffi::OsString> {
+            std::fs::read_dir(&conversations).unwrap().flatten().map(|e| e.file_name()).collect()
+        };
+        let before = listing();
+        let bytes = std::fs::read(&db).unwrap();
+        std::fs::set_permissions(&conversations, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let handle = open(&db).expect("the copy provides a handle");
+        let copy_dir = handle._copy.as_ref().expect("the handle is the private copy").dir.clone();
+        assert_eq!(count(handle.conn()), 2, "the -wal row is served");
+        assert_eq!(listing(), before, "the source directory gained nothing");
+        assert_eq!(std::fs::read(&db).unwrap(), bytes, "and the database was never rewritten");
+        drop(handle);
+        assert!(!copy_dir.exists(), "the copy leaves with the handle");
+
+        std::fs::set_permissions(&conversations, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(writer);
+    }
+
     fn count(conn: &Connection) -> i64 {
         conn.query_row("SELECT count(*) FROM gen_metadata", [], |r| r.get(0)).unwrap()
     }

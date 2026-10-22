@@ -44,6 +44,11 @@ const PAIRING_DOMAIN: &[u8] = b"tokenme-device-sync/pairing/v1";
 const STATUS_DOMAIN: &[u8] = b"tokenme-device-sync/status/v1";
 const DISPLAY_NAME_DOMAIN: &[u8] = b"tokenme-device-sync/display-name/v1";
 const DOWNLOAD_DOMAIN: &[u8] = b"tokenme-device-sync/download/v1";
+// A status request and a disconnect notice share one struct shape. The
+// purpose is signed so a captured status request cannot be replayed as a
+// disconnect (which would revoke the device).
+pub(crate) const STATUS_PURPOSE: &str = "status";
+pub(crate) const DISCONNECT_PURPOSE: &str = "disconnect";
 pub(crate) const MAX_AUTH_REQUEST_AGE_MS: i64 = 10 * 60 * 1000;
 pub(crate) const MAX_AUTH_REQUEST_FUTURE_SKEW_MS: i64 = 60 * 1000;
 
@@ -815,13 +820,25 @@ fn add_sums(sums: &mut NetworkSums, counts: &NetworkCounts) -> SyncResult<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PairingInvite {
     pub invite_id: String,
     pub endpoint: String,
     pub certificate_pin: String,
     pub expires_at_ms: i64,
     pub secret: Vec<u8>,
+}
+
+impl std::fmt::Debug for PairingInvite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("PairingInvite")
+            .field("invite_id", &self.invite_id)
+            .field("endpoint", &self.endpoint)
+            .field("certificate_pin", &self.certificate_pin)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -937,7 +954,7 @@ fn decode_hex(value: &str, label: &str) -> SyncResult<Vec<u8>> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingRequest {
     pub request_id: String,
     pub invite_id: String,
@@ -949,6 +966,20 @@ pub struct PairingRequest {
     pub public_key: [u8; 32],
     #[serde(with = "signature_serde")]
     pub signature: [u8; 64],
+}
+
+impl std::fmt::Debug for PairingRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("PairingRequest")
+            .field("request_id", &self.request_id)
+            .field("invite_id", &self.invite_id)
+            .field("device_id", &self.device_id)
+            .field("origin", &self.origin)
+            .field("display_name", &self.display_name)
+            .field("os", &self.os)
+            .field("invite_secret", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl PairingRequest {
@@ -999,6 +1030,7 @@ pub struct StreamOpenReceipt {
 #[serde(deny_unknown_fields)]
 pub struct AuthenticatedStatusRequest {
     pub protocol_id: String,
+    pub purpose: String,
     pub primary_id: String,
     pub device_id: String,
     pub origin: String,
@@ -1027,11 +1059,33 @@ impl AuthenticatedStatusRequest {
         checkpoint_generation: Option<u64>,
         issued_at_ms: i64,
     ) -> SyncResult<Self> {
+        Self::new_with_purpose(identity, primary_id, want_recovery, checkpoint_generation, issued_at_ms, STATUS_PURPOSE)
+    }
+
+    /// A disconnect notice is signed under its own purpose, so a captured
+    /// status request cannot be replayed to revoke the device.
+    pub fn new_disconnect_at(
+        identity: &DeviceIdentity,
+        primary_id: impl Into<String>,
+        issued_at_ms: i64,
+    ) -> SyncResult<Self> {
+        Self::new_with_purpose(identity, primary_id, false, None, issued_at_ms, DISCONNECT_PURPOSE)
+    }
+
+    fn new_with_purpose(
+        identity: &DeviceIdentity,
+        primary_id: impl Into<String>,
+        want_recovery: bool,
+        checkpoint_generation: Option<u64>,
+        issued_at_ms: i64,
+        purpose: &str,
+    ) -> SyncResult<Self> {
         if checkpoint_generation.is_some_and(|generation| generation == 0 || generation > i64::MAX as u64) {
             return Err(SyncError::Invalid("checkpoint generation must start at 1".into()));
         }
         let mut request = Self {
             protocol_id: PROTOCOL_ID.into(),
+            purpose: purpose.into(),
             primary_id: primary_id.into(),
             device_id: identity.device_id.clone(),
             origin: identity.origin.clone(),
@@ -1046,7 +1100,8 @@ impl AuthenticatedStatusRequest {
     }
 
     pub fn verify(&self, public_key: &VerifyingKey) -> SyncResult<()> {
-        if self.protocol_id != PROTOCOL_ID || self.primary_id.is_empty() || self.device_id.is_empty() || self.origin.is_empty()
+        if self.protocol_id != PROTOCOL_ID || !matches!(self.purpose.as_str(), STATUS_PURPOSE | DISCONNECT_PURPOSE)
+            || self.primary_id.is_empty() || self.device_id.is_empty() || self.origin.is_empty()
             || self.checkpoint_generation.is_some_and(|generation| generation == 0 || generation > i64::MAX as u64) {
             return Err(SyncError::Auth("invalid authenticated status request".into()));
         }
@@ -1066,7 +1121,7 @@ impl AuthenticatedStatusRequest {
             checkpoint[1..].copy_from_slice(&generation.to_be_bytes());
         }
         identity_bytes(STATUS_DOMAIN, &[
-            self.protocol_id.as_bytes(), self.primary_id.as_bytes(), self.device_id.as_bytes(),
+            self.protocol_id.as_bytes(), self.purpose.as_bytes(), self.primary_id.as_bytes(), self.device_id.as_bytes(),
             self.origin.as_bytes(), &self.nonce, &self.issued_at_ms.to_be_bytes(), if self.want_recovery { b"1" } else { b"0" }, &checkpoint,
         ])
     }
@@ -1387,6 +1442,21 @@ mod tests {
         request.checkpoint_generation = Some(8);
         assert!(matches!(request.verify(&public_key), Err(SyncError::Auth(_))));
         assert!(matches!(AuthenticatedStatusRequest::new_at_with_checkpoint(&identity, "primary-1", false, Some(0), 10), Err(SyncError::Invalid(_))));
+    }
+
+    #[test]
+    fn the_signed_purpose_separates_a_status_request_from_a_disconnect_notice() {
+        let identity = DeviceIdentity::create("purpose-signature", "Linux").unwrap();
+        let public_key = identity.signing_key.verifying_key();
+        let status = AuthenticatedStatusRequest::new_at(&identity, "primary-1", false, 10).unwrap();
+        let disconnect = AuthenticatedStatusRequest::new_disconnect_at(&identity, "primary-1", 10).unwrap();
+        assert_eq!(status.purpose, STATUS_PURPOSE);
+        assert_eq!(disconnect.purpose, DISCONNECT_PURPOSE);
+        status.verify(&public_key).unwrap();
+        disconnect.verify(&public_key).unwrap();
+        let mut replayed = status.clone();
+        replayed.purpose = DISCONNECT_PURPOSE.into();
+        assert!(matches!(replayed.verify(&public_key), Err(SyncError::Auth(_))), "relabelling a captured status request must break its signature");
     }
 
     #[test]

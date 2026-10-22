@@ -81,65 +81,6 @@ fn app_parent() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Remove updater backups and manually renamed TokenMe bundles from the
-/// install directory before LaunchServices or UserNotifications can discover
-/// them as additional identities.
-#[cfg(target_os = "macos")]
-pub fn cleanup_stale_copies() {
-    let Some(parent) = app_parent() else { return };
-    let current = std::env::current_exe().ok().and_then(|exe| {
-        let mut dir = exe.parent()?.to_path_buf();
-        loop {
-            if dir.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")) {
-                return Some(dir);
-            }
-            dir = dir.parent()?.to_path_buf();
-        }
-    });
-    let Ok(entries) = std::fs::read_dir(&parent) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if current.as_ref().is_some_and(|p| p == &path) || !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-        if !is_stale_copy_name(name) || !has_tokenme_bundle_id(&path) {
-            continue;
-        }
-        unregister_bundle(&path);
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => crate::logging::info(&format!("install: removed stale app copy {}", path.display())),
-            Err(e) => crate::logging::error(&format!("install: stale app copy {} could not be removed: {e}", path.display())),
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn unregister_bundle(path: &std::path::Path) {
-    let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-        .arg("-u")
-        .arg(path)
-        .status();
-}
-
-#[cfg(target_os = "macos")]
-fn is_stale_copy_name(name: &str) -> bool {
-    [
-        ".tokenme-previous.app",
-        "TokenMe.app.previous",
-        "tokenme.app.previous",
-    ]
-    .iter()
-    .any(|prefix| name == *prefix || name.starts_with(&format!("{prefix}.")))
-}
-
-#[cfg(target_os = "macos")]
-fn has_tokenme_bundle_id(app: &std::path::Path) -> bool {
-    std::fs::read(app.join("Contents/Info.plist"))
-        .map(|raw| raw.windows(b"dev.tokenme.bar".len()).any(|w| w == b"dev.tokenme.bar"))
-        .unwrap_or(false)
-}
-
 fn agent() -> ureq_client::Agent {
     ureq_client::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(30)))
@@ -624,15 +565,6 @@ mod tests {
         assert!(script.contains("open retry failed too"));
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn stale_copy_names_are_limited_to_known_backup_forms() {
-        assert!(is_stale_copy_name("TokenMe.app.previous"));
-        assert!(is_stale_copy_name("TokenMe.app.previous.20261011175347"));
-        assert!(is_stale_copy_name(".tokenme-previous.app"));
-        assert!(!is_stale_copy_name("TokenMe.app"));
-        assert!(!is_stale_copy_name("TokenMe.app.backup"));
-    }
 }
 
 #[cfg(test)]

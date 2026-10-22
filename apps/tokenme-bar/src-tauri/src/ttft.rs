@@ -361,7 +361,10 @@ fn start_codex_scanner(state: TtftState) {
             } else {
                 was_enabled = false;
             }
-            std::thread::sleep(Duration::from_secs(5));
+            // An idle scanner does not need a 5 s heartbeat: while TTFT is
+            // off, a 60 s wake to notice the enable flip costs nothing and
+            // keeps two threads from stat-ing rollout trees all day.
+            std::thread::sleep(Duration::from_secs(if enabled { 5 } else { 60 }));
         }
     });
 }
@@ -430,7 +433,7 @@ fn start_dsh_scanner(state: TtftState) {
             } else {
                 was_enabled = false;
             }
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_secs(if enabled { 5 } else { 60 }));
         }
     });
 }

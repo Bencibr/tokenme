@@ -118,6 +118,11 @@ pub fn handle_connection<F>(mut stream: TcpStream, mut on_sample: F) -> io::Resu
 where
     F: FnMut(Vec<TtftSample>),
 {
+    // The listener polls in nonblocking mode, and macOS hands that flag to the
+    // accepted socket (Linux does not). Every read below expects to block until
+    // its timeout; inherited nonblocking would turn the first read into EAGAIN
+    // and close the connection unanswered when the request has not arrived yet.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -491,32 +496,55 @@ mod tests {
         assert!(listener.local_addr().unwrap().ip().is_loopback());
     }
 
+    /// The listener polls nonblocking, and on macOS the accepted socket inherits
+    /// that flag. A request that has not reached the socket at accept time must
+    /// still be answered — the handler has to switch the connection back to
+    /// blocking instead of failing its first read with EAGAIN.
+    #[test]
+    fn a_connection_accepted_before_its_request_arrives_is_still_answered() {
+        let listener = bind_loopback(0).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(pair) => break pair,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(10)),
+                Err(error) => panic!("accept: {error}"),
+            }
+        };
+        let responder = thread::spawn(move || {
+            // Deliberately after accept: the server's first read has nothing to
+            // consume yet, which is exactly the state an inherited O_NONBLOCK
+            // cannot handle.
+            thread::sleep(Duration::from_millis(50));
+            let mut client = client;
+            write!(client, "POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").unwrap();
+            client.write_all(b"{}").unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            response
+        });
+        handle_connection(stream, |_samples| {}).unwrap();
+        let response = responder.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response:?}");
+    }
+
     #[test]
     fn server_accepts_bounded_otlp_post_and_emits_only_metric_metadata() {
         let (tx, rx) = std::sync::mpsc::channel();
         let server = start_server(0, move |samples| { let _ = tx.send(samples); }).unwrap();
         let body = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"claude_code.llm_request","startTimeUnixNano":"1759880000000000000","endTimeUnixNano":"1759880001137000000","attributes":[{"key":"ttft_ms","value":{"intValue":"137"}},{"key":"first_content_ms","value":{"intValue":"139"}},{"key":"gen_ai.usage.output_tokens","value":{"intValue":"250"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-sonnet"}},{"key":"prompt","value":{"stringValue":"private user content"}}]}]}]}]}"#;
-        // The accept loop polls on a 20ms nonblocking cycle, and under the
-        // gate's load a sibling test can starve it past the backlog's patience
-        // — the kernel then RSTs the queued connection mid-read. One reconnect
-        // rides that out; a reset can only mean the POST was never processed,
-        // so the retry cannot double-deliver a sample batch.
+        // One attempt on purpose: the handler now forces the accepted socket
+        // back to blocking, so a dropped or unanswered POST is a real defect
+        // rather than accept-loop starvation, and a retry would hide it.
+        let mut client = TcpStream::connect(server.local_addr()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        write!(client, "POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        client.write_all(body).unwrap();
         let mut response = String::new();
-        for attempt in 0..3 {
-            response.clear();
-            let mut client = TcpStream::connect(server.local_addr()).unwrap();
-            client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            write!(client, "POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
-            client.write_all(body).unwrap();
-            match client.read_to_string(&mut response) {
-                Ok(_) => break,
-                Err(e) if e.kind() == io::ErrorKind::ConnectionReset && attempt < 2 => {
-                    thread::sleep(Duration::from_millis(250));
-                }
-                Err(e) => panic!("otlp post failed: {e}"),
-            }
-        }
-        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {response:?}");
         let samples = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(samples.len(), 1);
         let sample = &samples[0];

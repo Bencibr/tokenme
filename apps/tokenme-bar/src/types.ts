@@ -385,6 +385,7 @@ export type SyncManagementRequest =
   | { action: "stop" }
   | { action: "switch_to_secondary" }
   | { action: "unpair" }
+  | { action: "reset_secondary" }
   | { action: "create_invite"; expires_at_ms?: number | null }
   | { action: "pair"; invite: string; origin?: string | null; display_name?: string | null; os?: string | null }
   | { action: "pair_discovered"; primary_id: string; endpoint: string; certificate_pin: string; origin?: string | null; display_name?: string | null; os?: string | null }
@@ -432,6 +433,8 @@ export interface SyncDevicesSnapshot {
   primary_display_name: string | null;
   role: SyncDeviceRole | "unconfigured";
   service_running: boolean;
+  /** Primary listener is being started in a background worker. */
+  primary_starting: boolean;
   primary_data_sharing_enabled: boolean;
   service_health: string | null;
   endpoint: string | null;
@@ -450,7 +453,7 @@ export interface SyncDevicesSnapshot {
   last_error: string | null;
   discovery_error: string | null;
   last_connected_at_ms: number | null;
-  operation_state: "idle" | "running" | "success" | "error" | "cancelled" | "offline";
+  operation_state: "idle" | "running" | "success" | "error" | "cancelled";
   last_checked_at_ms: number | null;
   invite_url: string | null;
   invite_expires_at_ms: number | null;

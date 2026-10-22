@@ -36,8 +36,9 @@ interface Props {
   page: PageKey;
   onPage: (page: PageKey) => void;
   onClose?: () => void;
-  /** Machine-sync health: the newest bundle merged from each origin machine.
-   *  Null when no bundle was ever imported (most users). */
+  /** Machine-sync health: the newest bundle merged from each origin machine
+   *  that still exists (a paired device or a configured server). Null when no
+   *  such machine ever delivered one (most users). */
   sync?: {
     latest: { origin: string; rows: number };
     age: string;
@@ -203,8 +204,8 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
       </div>
       {/* Its own line, not another item in the stats: the badge names a machine,
           how fresh its merge is and how many rows came in, so it wraps to a
-          second row of numbers all by itself — and it is silent until a bundle
-          has actually been imported. */}
+          second row of numbers all by itself — and it is silent until a machine
+          that is still configured has actually delivered a bundle. */}
       {sync ? (
         <div className="hdr-sync">
           <span className="sync" data-stale={sync.stale || undefined} title={syncTip(sync)}>

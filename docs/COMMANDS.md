@@ -158,7 +158,7 @@ tokenme import bundle.jsonl.gz --dry-run   # 解析 + 合并 + 对账，然后�
 
 菜单栏这边通常用不着它：面板引擎每轮自动合并 `~/tokenme-sync`，并按机器显示 **多端同步 / Multi-device sync** 徽标与最近一次合并（超过 24 小时转警示色）。
 
-## sync run / sync stop / sync status
+## sync run / sync stop / sync reset / sync status
 
 `sync pair --invite '<完整 tokenme://device-pair 邀请>'` 是从设备的首选入口。它在证书 pin 校验成功后发送配对请求，并把 endpoint、server name、证书、pin、主设备绑定和本地 identity 路径保存到用户数据目录；普通用户不需要填写 stream 或 generation。批准后，`sync run` 在前台运行唯一的 secondary runtime：每轮先摄取本机事件，再按本机 origin 生成稳定快照，在同一 SQLite 事务中分配 generation/payload revision、写 journal 和不可变 outbox，最后通过 pinned TLS 1.3 上传并 ACK。
 
@@ -166,9 +166,12 @@ tokenme import bundle.jsonl.gz --dry-run   # 解析 + 合并 + 对账，然后�
 tokenme sync run       # Ubuntu/Linux/Windows 用户级常驻入口；前台运行，可由 systemd --user 监督
 tokenme sync status    # 查看设备、stream/epoch、运行状态、待传量、最后连接和错误
 tokenme sync stop      # 通过用户私有本地控制通道请求停止，不删除配置或待传 outbox
+tokenme sync reset     # 停止后清除 stream/outbox/ACK 检查点，恢复新 stream 并从零重传/重拉；保留本机事件与配对
 ```
 
-`sync stop/status` 使用用户私有本地控制通道：macOS/Linux 是 `device-sync/secondary-runtime.sock`（目录 `0700`、socket `0600`），Windows 是按数据库路径派生的 named pipe，并设置为当前用户 SID 的 DACL 且拒绝远程客户端；两者都不是 loopback TCP 控制面。运行时异常退出会回收控制通道，待传包仍保留，下一次显式 `sync run` 或面板恢复可以继续。Windows 的 named pipe 已通过本机长驻启动、延迟连接、`status`、`stop` 和 CLI 集成测试；跨用户拒绝仍需第二个 Windows 账号实测。
+`sync reset` 保留本机用量记录和配对，只清掉与旧 stream 绑定的上传包、journal、generation/ACK 检查点和主端历史下载游标；下一次 `sync run` 通过恢复握手作废旧 stream、换取新 stream，然后重传完整本地快照并从第一条 identity 重新下载主端历史。运行中的 runtime 会先被拒绝，需先 `sync stop`，避免删除它仍在内存中持有的队列。
+
+`sync run` 和 `sync serve` 都带进程级自监督：runtime、数据库句柄或监听器异常会按 1、2、4…最多 60 秒退避重建；持续健康运行 60 秒后重置退避。撤销、解除配对或显式 disabled 是终止条件，不会无限重启。`sync stop/status` 使用用户私有本地控制通道：macOS/Linux 是 `device-sync/secondary-runtime.sock`（目录 `0700`、socket `0600`），Windows 是按数据库路径派生的 named pipe，并设置为当前用户 SID 的 DACL 且拒绝远程客户端；两者都不是 loopback TCP 控制面。运行时异常退出会回收控制通道，待传包仍保留，下一次显式 `sync run` 或面板恢复可以继续。Windows 的 named pipe 已通过本机长驻启动、延迟连接、`status`、`stop` 和 CLI 集成测试；跨用户拒绝仍需第二个 Windows 账号实测。
 
 Panel 的设备同步面板提供对应的主端启动/停止、证书和邀请生成、二维码文件保存、从端二维码识别或粘贴邀请/配对、批准/拒绝、暂停/恢复/撤销/解除配对，以及从端后台 runtime 启停。主端停止后可以直接识别新邀请切换为从端；从端停止后可以配置监听地址直接切换为主端。切换会隔离旧 trust、stream、receipt 和待传包，但保留本机用量历史。跨设备监听还需要填写对外地址；面板会拒绝把回环或未指定地址写进邀请。主端启动使用用户私有目录自动保存 identity 与证书；从端配对配置会在 Panel 重启后按 `enabled` 状态恢复，显式停止会持久化为 disabled。`sync run/stop/status` 是 Ubuntu 等无面板机器的同一 runtime 入口。
 主端开启允许局域网后还会发布 `_tokenme-sync._tcp.local.` mDNS 候选；扫描只展示 endpoint、设备 ID 和证书 pin，不广播 invite secret。面板点击候选的“一键配对”会先用 pin 校验的 TLS 请求 5 分钟一次性邀请，再发送签名请求并等待主端批准；扫描或发布遇到本地网络权限、UDP 5353、监听端口错误时会在面板提示并保留二维码/完整邀请回退。停止主端会注销广播，重启只恢复持久化为 enabled 的角色。
