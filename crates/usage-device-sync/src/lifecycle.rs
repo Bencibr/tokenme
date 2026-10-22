@@ -60,6 +60,7 @@ mod tests {
         let cert = CertificateParams::new(vec!["localhost".into()]).unwrap().self_signed(&key).unwrap();
         let certificate_der = cert.der().to_vec();
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: identity.device_id.clone(), origin: identity.origin.clone(),
             endpoint: "https://127.0.0.1:1".into(), server_name: "localhost".into(),
             certificate_pin: hash_bytes(&certificate_der), certificate_der, identity_path: dir.join("identity.json"),
@@ -261,6 +262,7 @@ mod tests {
         let (identity, mut config, _) = fixture(dir.path());
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         store.save_primary_config(&crate::PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(), advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: false, share_data_with_secondaries: false,
         }, 1).unwrap();
         let request_id = request(&mut store, &identity, 2);

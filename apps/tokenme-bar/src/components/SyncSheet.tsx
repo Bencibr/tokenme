@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DiscoveredPrimaryView, SyncDevicesSnapshot, SyncManagementRequest } from "../types";
 import { bridge } from "../lib/bridge";
 import { t } from "../lib/i18n";
-import { IconBack, IconCheck, IconClose, IconDevicePlatform, IconMonitorDown, IconRadioTower, IconWarn } from "./Icons";
+import { IconBack, IconClose, IconDevicePlatform, IconMonitorDown, IconRadioTower, IconWarn } from "./Icons";
 
 async function copyText(value: string): Promise<boolean> {
   try {
@@ -21,7 +21,7 @@ async function copyText(value: string): Promise<boolean> {
   }
 }
 
-type Screen = "setup" | "discovery" | "confirm" | "done" | "overview";
+type Screen = "setup" | "discovery" | "confirm" | "waiting" | "overview";
 
 type PendingConfirmation = {
   message: string;
@@ -77,6 +77,7 @@ function syncErrorMessage(error: string | null): string | null {
   if (normalized.includes("database") || normalized.includes("sqlite") || normalized.includes("corrupt")) return t("sync.error.database");
   if (normalized.includes("pairing invite") && normalized.includes("expired")) return t("sync.error.invite_expired");
   if (normalized.includes("invalid pairing invite")) return t("sync.error.invite_invalid");
+  if (normalized.includes("pairing request was rejected")) return t("sync.error.rejected");
   if (normalized.includes("already in use")) return t("sync.error.listener");
   if (normalized.includes("sync protocol") || normalized.includes("update tokenme on the other machine")) return t("sync.error.version");
   if (normalized.includes("busy") || normalized.includes("already running")) return t("sync.error.busy");
@@ -112,6 +113,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // toggle flips locally at click speed and reconciles when the write lands.
   const [shareOverride, setShareOverride] = useState<boolean | null>(null);
   const shareBusy = useRef(false);
+  // Same optimistic-override pattern as the share switch for the primary's
+  // auto-approve setting: the write is state-only and fast, but the click
+  // must still read back instantly.
+  const [autoApproveOverride, setAutoApproveOverride] = useState<boolean | null>(null);
+  const autoApproveBusy = useRef(false);
+  // Set when the primary rejects a pairing this sheet is waiting on, so the
+  // role-teardown lifecycle below lands the user back on the scan page
+  // instead of the role selection.
+  const rejectedScanReturn = useRef(false);
   const discoveryInFlight = useRef(false);
   const manualDiscoveryRequested = useRef(false);
   const operationGeneration = useRef(0);
@@ -188,6 +198,27 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       .finally(() => {
         if (mounted.current) setShareOverride(null);
         shareBusy.current = false;
+      });
+  };
+
+  const toggleAutoApprove = (on: boolean) => {
+    if (!mounted.current || autoApproveBusy.current) return;
+    autoApproveBusy.current = true;
+    setAutoApproveOverride(on);
+    setError(null);
+    void bridge.syncDevices({ action: "set_primary_auto_approve", enabled: on })
+      .then((next) => {
+        if (!mounted.current) return;
+        setError(null);
+        onSnapshot(next);
+      })
+      .catch((e) => {
+        if (!mounted.current) return;
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (mounted.current) setAutoApproveOverride(null);
+        autoApproveBusy.current = false;
       });
   };
 
@@ -273,6 +304,19 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     const enteredRoleSelection = roleSelection && (wasRole !== snapshot.role || wasRunning !== snapshot.service_running);
     const enteredRunningState = !roleSelection && (wasRole !== snapshot.role || wasRunning !== snapshot.service_running);
     if (enteredRoleSelection) {
+      if (rejectedScanReturn.current) {
+        // A rejected pairing returns to the scan page, not the role
+        // selection: the error banner above tells why, and the back button
+        // still reaches the role cards.
+        rejectedScanReturn.current = false;
+        setPickedRole("secondary");
+        setConfirmTarget(null);
+        setManualInviteOpen(false);
+        setInviteOpen(false);
+        setInviteCopied(false);
+        setScreen("discovery");
+        return;
+      }
       manualDiscoveryRequested.current = false;
       setPickedRole(null);
       setConfirmTarget(null);
@@ -385,6 +429,21 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     : snapshot.download_complete === false
       ? t("sync.prog.running")
       : t("sync.prog.wait_share");
+  const rejectedByPrimary = errorDetail?.toLowerCase().includes("pairing request was rejected") ?? false;
+
+  // The waiting screen ends exactly two ways: a live stream means the primary
+  // approved and sync is up (enter the device list); a rejection returns to
+  // the scan page with the mapped error banner telling the story. The
+  // rejectedScanReturn flag keeps the role teardown from bouncing the sheet
+  // to the role-selection cards while that banner is the whole point.
+  useEffect(() => {
+    if (screen !== "waiting") return;
+    if (snapshot.stream_id) { setScreen("overview"); return; }
+    if (rejectedByPrimary) {
+      rejectedScanReturn.current = true;
+      setScreen("discovery");
+    }
+  }, [screen, snapshot.stream_id, rejectedByPrimary]);
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {
@@ -399,7 +458,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
 
   const pairConfirmed = () => {
     if (!confirmTarget) return;
-    void run({ action: "pair_discovered", primary_id: confirmTarget.primary_id, endpoint: confirmTarget.endpoint, certificate_pin: confirmTarget.certificate_pin, origin: null, display_name: null, os: null }, () => setScreen("done"));
+    void run({ action: "pair_discovered", primary_id: confirmTarget.primary_id, endpoint: confirmTarget.endpoint, certificate_pin: confirmTarget.certificate_pin, origin: null, display_name: null, os: null }, () => setScreen("waiting"));
   };
 
   const pairWithInvite = () => {
@@ -408,7 +467,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     void run({ action: "pair", invite, origin: null, display_name: null, os: null }, () => {
       setManualInvite("");
       setManualInviteOpen(false);
-      setScreen("done");
+      setScreen("waiting");
     });
   };
 
@@ -578,14 +637,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
             </>
           ) : null}
 
-          {screen === "done" ? (
+          {screen === "waiting" ? (
             <>
-              <div className="sync-done">
-                <div className="sync-done-ok"><IconCheck size={16} /></div>
-                <div className="sync-done-label">{t("sync.done.title")}</div>
+              <div className="sync-scan" role="status">
+                <div className="sync-dualring" aria-hidden="true"><i /><i /></div>
+                <div>{t("sync.pairing.waiting_primary")}</div>
+                <div>{t("sync.pairing.waiting_hint")}</div>
               </div>
               <div className="sync-btnrow">
-                <button type="button" className="btn-accent" onClick={() => setScreen("overview")}>{t("sync.done.next")}</button>
+                <button type="button" className="btn-quiet" disabled={commandBusy} onClick={() => setPendingConfirm({ request: { action: "unpair" }, message: t("sync.pairing.cancel_confirm") })}>{t("sync.pairing.cancel_wait")}</button>
               </div>
             </>
           ) : null}
@@ -618,18 +678,32 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   </div>
                 </div>
                 {isPrimary ? (
-                  <label className="sync-share-setting">
-                    <input
-                      type="checkbox"
-                      checked={shareOverride ?? snapshot.primary_data_sharing_enabled}
-                      disabled={commandBusy}
-                      onChange={(event) => toggleSharing(event.currentTarget.checked)}
-                    />
-                    <span className="sync-share-copy">
-                      <strong>{t("sync.share.title")}</strong>
-                      <small>{t("sync.share.hint")}</small>
-                    </span>
-                  </label>
+                  <>
+                    <label className="sync-share-setting">
+                      <input
+                        type="checkbox"
+                        checked={shareOverride ?? snapshot.primary_data_sharing_enabled}
+                        disabled={commandBusy}
+                        onChange={(event) => toggleSharing(event.currentTarget.checked)}
+                      />
+                      <span className="sync-share-copy">
+                        <strong>{t("sync.share.title")}</strong>
+                        <small>{t("sync.share.hint")}</small>
+                      </span>
+                    </label>
+                    <label className="sync-share-setting">
+                      <input
+                        type="checkbox"
+                        checked={autoApproveOverride ?? snapshot.primary_auto_approve_enabled}
+                        disabled={commandBusy}
+                        onChange={(event) => toggleAutoApprove(event.currentTarget.checked)}
+                      />
+                      <span className="sync-share-copy">
+                        <strong>{t("sync.autoapprove.title")}</strong>
+                        <small>{t("sync.autoapprove.hint")}</small>
+                      </span>
+                    </label>
+                  </>
                 ) : null}
               </div>
               {isSecondary && awaitingSecondaryApproval ? <div className="sync-waiting">{t("sync.pairing.waiting_primary")}</div> : null}
@@ -687,6 +761,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   {primaryDevices.length ? primaryDevices.map((device) => deviceRow(device)) : (
                     <div className="sync-dev" key={snapshot.primary_id}>
                       <span className={`sync-dev-dot${secondaryRecovering ? " is-paused" : secondaryDegraded ? " is-error" : ""}`} aria-hidden="true" />
+                      <span className="sync-dev-platform" role="img" aria-label={snapshot.primary_os || "unknown system"} title={snapshot.primary_os || "unknown system"}><IconDevicePlatform os={snapshot.primary_os ?? ""} size={14} /></span>
                       <span className="sync-dev-name">{snapshot.primary_display_name?.trim() || snapshot.discovered_primaries.find((primary) => primary.primary_id === snapshot.primary_id)?.display_name.trim() || t("sync.role.primary")}<code>{snapshot.endpoint ?? snapshot.primary_id}</code></span>
                       <code>{secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
                     </div>

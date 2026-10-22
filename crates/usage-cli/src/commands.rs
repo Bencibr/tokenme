@@ -2340,7 +2340,7 @@ pub fn sync_pair(
         let state = transport.send_pairing_request(&request).map_err(|error| format!("pairing request failed: {error}"))?;
         let mut store = SyncStore::open(&ctx.db_path, primary_id.clone()).map_err(|error| error.to_string())?;
         store.save_secondary_config(&usage_device_sync::SecondarySyncConfig {
-            primary_id, primary_display_name: details.primary_display_name, device_id: identity.device_id.clone(), origin: identity.origin.clone(), endpoint: details.invite.endpoint,
+            primary_id, primary_display_name: details.primary_display_name, primary_os: details.primary_os, device_id: identity.device_id.clone(), origin: identity.origin.clone(), endpoint: details.invite.endpoint,
             server_name, certificate_der, certificate_pin: pin, identity_path, stream_id: None, data_epoch: None,
             expected_generation: None, enabled: true, capture_enabled: true, last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
             last_ack_generation: None, last_ack_receipt_hash: None,

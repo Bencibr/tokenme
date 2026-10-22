@@ -894,6 +894,7 @@ mod tests {
         let identity_dir = tempfile::tempdir().unwrap();
         let identity_path = identity_dir.path().join("secondary-identity.json");
         secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
             certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(), identity_path,
@@ -955,6 +956,7 @@ mod tests {
         let identity_dir = tempfile::tempdir().unwrap();
         let first_now = usage_core::report::now_ms();
         secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
             certificate_pin: hash_bytes(&cert_der), certificate_der: cert_der.clone(),
@@ -1027,6 +1029,7 @@ mod tests {
         let (mut primary, _) = paired_primary(&device);
         let now = usage_core::report::now_ms();
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -1048,6 +1051,7 @@ mod tests {
         let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
         let identity_dir = tempfile::tempdir().unwrap();
         secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
             certificate_pin: hash_bytes(&cert_der), certificate_der: cert_der.clone(),
@@ -1081,6 +1085,7 @@ mod tests {
         let (mut primary, _) = paired_primary(&device);
         let now = usage_core::report::now_ms();
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -1107,6 +1112,7 @@ mod tests {
         let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
         let identity_dir = tempfile::tempdir().unwrap();
         secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
             certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(),
@@ -1151,6 +1157,7 @@ mod tests {
         let identity_path = identity_dir.path().join("secondary-identity.json");
         let first_now = usage_core::report::now_ms();
         secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
             certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(), identity_path,
@@ -1278,6 +1285,7 @@ mod tests {
     #[test]
     fn remote_highwater_rollback_or_same_generation_hash_change_requires_reconcile() {
         let mut config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: "device-1".into(), origin: "origin-1".into(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1], certificate_pin: hash_bytes(&[1]),
             identity_path: std::path::PathBuf::from("identity.json"), stream_id: Some("stream-1".into()), data_epoch: Some(1), expected_generation: Some(3), enabled: true, capture_enabled: true,
@@ -1303,6 +1311,7 @@ mod tests {
     #[test]
     fn first_pairing_adopts_primary_stream_without_local_history() {
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: "device-1".into(), origin: "origin-1".into(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1], certificate_pin: hash_bytes(&[1]),
             identity_path: std::path::PathBuf::from("identity.json"), stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,

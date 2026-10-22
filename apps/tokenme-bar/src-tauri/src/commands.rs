@@ -48,6 +48,9 @@ pub enum SyncManagementRequest {
     RetryConnect,
     StartPrimary { bind: Option<String>, advertise_host: Option<String>, allow_lan: bool },
     SetPrimaryDataSharing { enabled: bool },
+    /// Auto-approve incoming pairing requests instead of queueing them for a
+    /// manual tap on the pending list.
+    SetPrimaryAutoApprove { enabled: bool },
     StartSecondary,
     Stop,
     /// Clear a stopped primary role so this device can be paired as a
@@ -79,6 +82,7 @@ fn sync_action_name(request: Option<&SyncManagementRequest>) -> &'static str {
         Some(SyncManagementRequest::RetryConnect) => "retry_connect",
         Some(SyncManagementRequest::StartPrimary { .. }) => "start_primary",
         Some(SyncManagementRequest::SetPrimaryDataSharing { .. }) => "set_primary_data_sharing",
+        Some(SyncManagementRequest::SetPrimaryAutoApprove { .. }) => "set_primary_auto_approve",
         Some(SyncManagementRequest::StartSecondary) => "start_secondary",
         Some(SyncManagementRequest::Stop) => "stop",
         Some(SyncManagementRequest::SwitchToSecondary) => "switch_to_secondary",
@@ -254,6 +258,8 @@ struct PendingPairing {
     primary_id: String,
     #[serde(default)]
     primary_display_name: Option<String>,
+    #[serde(default)]
+    primary_os: Option<String>,
     endpoint: String,
     server_name: String,
     certificate_der: Vec<u8>,
@@ -354,10 +360,15 @@ pub struct SyncDeviceView {
 pub struct SyncDevicesView {
     pub primary_id: Option<String>,
     pub primary_display_name: Option<String>,
+    /// Secondary only: the primary's OS as it advertised itself at pairing,
+    /// for the platform icon on the device list. Absent on old pairings.
+    pub primary_os: Option<String>,
     pub role: String,
     pub service_running: bool,
     pub primary_starting: bool,
     pub primary_data_sharing_enabled: bool,
+    /// Primary only: pairing requests are approved on arrival while on.
+    pub primary_auto_approve_enabled: bool,
     pub service_health: Option<String>,
     pub endpoint: Option<String>,
     pub certificate_pin: Option<String>,
@@ -633,7 +644,7 @@ fn cancel_pending_pairing(index_path: &std::path::Path) -> Result<(), String> {
     let bound = SyncStore::read_status(index_path).map_err(|error| error.to_string())?.primary_id.unwrap_or_else(|| pending.primary_id.clone());
     let mut store = SyncStore::open(index_path, bound).map_err(|error| error.to_string())?;
     store.queue_secondary_disconnect(&SecondarySyncConfig {
-        primary_id: pending.primary_id, primary_display_name: pending.primary_display_name, device_id: pending.request.device_id, origin: pending.request.origin,
+        primary_id: pending.primary_id, primary_display_name: pending.primary_display_name, primary_os: pending.primary_os, device_id: pending.request.device_id, origin: pending.request.origin,
         endpoint: pending.endpoint, server_name: pending.server_name,
         certificate_der: pending.certificate_der, certificate_pin: pending.certificate_pin, identity_path,
         stream_id: None, data_epoch: None, expected_generation: None, enabled: false, capture_enabled: false,
@@ -685,6 +696,7 @@ fn renew_pending_pairing(interrupt: &SyncInterrupt, pending: &PendingPairing, id
         request,
         primary_id: pending.primary_id.clone(),
         primary_display_name: pending.primary_display_name.clone(),
+        primary_os: pending.primary_os.clone(),
         endpoint: invite.endpoint,
         server_name: pending.server_name.clone(),
         certificate_der,
@@ -875,6 +887,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
             allow_lan,
             enabled: true,
             share_data_with_secondaries,
+            auto_approve_pairing: false,
         },
         current_ms(),
     ).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
@@ -1445,13 +1458,16 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     state.last_checked_at_ms = Some(current_ms());
     let pairing_pending = secondary_config.is_none() && read_pending_pairing()?.is_some();
     let primary_data_sharing_enabled = primary_config.as_ref().is_some_and(|config| config.share_data_with_secondaries);
+    let primary_auto_approve_enabled = primary_config.as_ref().is_some_and(|config| config.auto_approve_pairing);
     Ok(SyncDevicesView {
         primary_id,
         primary_display_name: secondary_config.as_ref().and_then(|config| config.primary_display_name.clone()),
+        primary_os: secondary_config.as_ref().and_then(|config| config.primary_os.clone()),
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
         service_running: state.service.is_some() || state.runtime.is_some(),
         primary_starting: state.primary_starting,
         primary_data_sharing_enabled,
+        primary_auto_approve_enabled,
         service_health,
         endpoint,
         certificate_pin,
@@ -1567,6 +1583,7 @@ fn pair_secondary_with_details(
     }
     let primary_id = details.primary_id.clone().ok_or_else(|| "pairing response did not include the primary id".to_string())?;
     let primary_display_name = details.primary_display_name.clone();
+    let primary_os = details.primary_os.clone();
     let certificate_pin = parse_pin(&details.invite.certificate_pin)?;
     if hash_bytes(&certificate_der) != certificate_pin { return Err("pairing certificate does not match its advertised pin".into()); }
     let directory = sync_dir()?;
@@ -1604,6 +1621,7 @@ fn pair_secondary_with_details(
         request,
         primary_id: primary_id.clone(),
         primary_display_name: primary_display_name.clone(),
+        primary_os: primary_os.clone(),
         endpoint: details.invite.endpoint.clone(),
         server_name: server_name.clone(),
         certificate_der: certificate_der.clone(),
@@ -1617,7 +1635,7 @@ fn pair_secondary_with_details(
         return Err(error);
     }
     let config = SecondarySyncConfig {
-        primary_id: primary_id.clone(), primary_display_name, device_id: identity.device_id.clone(), origin: identity.origin.clone(),
+        primary_id: primary_id.clone(), primary_display_name, primary_os, device_id: identity.device_id.clone(), origin: identity.origin.clone(),
         endpoint: details.invite.endpoint.clone(), server_name, certificate_der, certificate_pin,
         identity_path, stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
         last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
@@ -1665,7 +1683,7 @@ fn resume_pending_pairing(state: &mut SyncControlState, index_path: &std::path::
     let bound = SyncStore::read_status(index_path).map_err(|error| error.to_string())?.primary_id.unwrap_or_else(|| pending.primary_id.clone());
     let mut store = SyncStore::open(index_path, bound).map_err(|error| error.to_string())?;
     let config = SecondarySyncConfig {
-        primary_id: pending.primary_id.clone(), primary_display_name: pending.primary_display_name.clone(), device_id: identity.device_id.clone(), origin: identity.origin.clone(),
+        primary_id: pending.primary_id.clone(), primary_display_name: pending.primary_display_name.clone(), primary_os: pending.primary_os.clone(), device_id: identity.device_id.clone(), origin: identity.origin.clone(),
         endpoint: pending.endpoint.clone(), server_name: pending.server_name.clone(),
         certificate_der: pending.certificate_der.clone(), certificate_pin: pending.certificate_pin,
         identity_path, stream_id: None, data_epoch: None, expected_generation: None,
@@ -1743,6 +1761,15 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             // State-only write: never opens the usage index, so the toggle
             // cannot queue behind the ingest engine's write lock.
             SyncStore::write_primary_data_sharing(&index_path, &config.primary_id, enabled, current_ms()).map_err(|error| error.to_string())
+        }
+        SyncManagementRequest::SetPrimaryAutoApprove { enabled } => {
+            if state.role != "primary" { return Err("only the primary can change auto-approve".into()); }
+            let config = SyncStore::read_primary_config(&index_path)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "primary sync is not configured".to_string())?;
+            // State-only write for the same reason as the share toggle: the
+            // flip must land at click speed even under the index write lock.
+            SyncStore::write_primary_auto_approve(&index_path, &config.primary_id, enabled, current_ms()).map_err(|error| error.to_string())
         }
         SyncManagementRequest::StartSecondary => {
             let config = SyncStore::read_secondary_config(&index_path)
@@ -1902,7 +1929,7 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             let expires = expires_at_ms.unwrap_or_else(|| current_ms().saturating_add(15 * 60 * 1000));
             let invite = store.create_pairing_invite(endpoint, pin, expires).map_err(|e| e.to_string())?;
             state.invite_url = Some(invite.url_with_primary_name(
-                &primary_id, "localhost", &certificate_der, &usage_index::hostname(),
+                &primary_id, "localhost", &certificate_der, &usage_index::hostname(), Some(std::env::consts::OS),
             ).map_err(|e| e.to_string())?);
             state.invite_expires_at_ms = Some(invite.expires_at_ms);
             Ok(())
@@ -1916,8 +1943,8 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             let pin = parse_pin(&certificate_pin)?;
             let mut transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned_hash(endpoint.clone(), "localhost", pin)).map_err(|e| e.to_string())?;
             state.interrupt.install(&transport);
-            let (invite, certificate_der, primary_display_name) = transport.request_pairing_invite_with_primary_name(&primary_id, &endpoint).map_err(|e| format!("cannot obtain a secure pairing invite: {e}"))?;
-            pair_secondary_with_details(state, &index_path, &snapshot, PairingInviteDetails { invite, primary_id: Some(primary_id), server_name: Some("localhost".into()), primary_display_name, certificate_der: Some(certificate_der.clone()) }, certificate_der, origin, display_name, os)
+            let (invite, certificate_der, primary_display_name, primary_os) = transport.request_pairing_invite_with_primary_name(&primary_id, &endpoint).map_err(|e| format!("cannot obtain a secure pairing invite: {e}"))?;
+            pair_secondary_with_details(state, &index_path, &snapshot, PairingInviteDetails { invite, primary_id: Some(primary_id), server_name: Some("localhost".into()), primary_display_name, primary_os, certificate_der: Some(certificate_der.clone()) }, certificate_der, origin, display_name, os)
         }
         SyncManagementRequest::Approve { request_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
@@ -2044,10 +2071,10 @@ pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>
                     let pin = parse_pin(&certificate_pin)?;
                     let mut transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned_hash(endpoint.clone(), "localhost", pin)).map_err(|e| e.to_string())?;
                     interrupt.install(&transport);
-                    let (invite, certificate_der, primary_display_name) = transport.request_pairing_invite_with_primary_name(&primary_id, &endpoint)
+                    let (invite, certificate_der, primary_display_name, primary_os) = transport.request_pairing_invite_with_primary_name(&primary_id, &endpoint)
                         .map_err(|e| format!("cannot obtain a secure pairing invite: {e}"))?;
                     (PairingInviteDetails {
-                        invite, primary_id: Some(primary_id), server_name: Some("localhost".into()), primary_display_name,
+                        invite, primary_id: Some(primary_id), server_name: Some("localhost".into()), primary_display_name, primary_os,
                         certificate_der: Some(certificate_der.clone()),
                     }, certificate_der, origin, display_name, os)
                 }

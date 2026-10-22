@@ -582,7 +582,7 @@ impl Tls13HttpsTransport {
     /// The primary still requires the normal signed pairing request and an
     /// explicit approval after this method returns.
     pub fn request_pairing_invite(&mut self, primary_id: &str, endpoint: &str) -> Result<(PairingInvite, Vec<u8>), TransportError> {
-        let (invite, certificate_der, _) = self.request_pairing_invite_with_primary_name(primary_id, endpoint)?;
+        let (invite, certificate_der, _, _) = self.request_pairing_invite_with_primary_name(primary_id, endpoint)?;
         Ok((invite, certificate_der))
     }
 
@@ -590,7 +590,7 @@ impl Tls13HttpsTransport {
         &mut self,
         primary_id: &str,
         endpoint: &str,
-    ) -> Result<(PairingInvite, Vec<u8>, Option<String>), TransportError> {
+    ) -> Result<(PairingInvite, Vec<u8>, Option<String>, Option<String>), TransportError> {
         let body = serde_json::to_vec(&WirePairingInviteRequest { primary_id: primary_id.to_string(), endpoint: endpoint.to_string() })
             .map_err(|e| TransportError::Protocol(format!("encode discovery pairing request: {e}")))?;
         let response = self.request(PAIRING_INVITE_PATH, body)?;
@@ -1880,20 +1880,25 @@ struct WirePairingInvite {
     certificate_der_b64: String,
     #[serde(default)]
     primary_display_name: Option<String>,
+    /// The primary's OS, added so the secondary can render the platform icon
+    /// for its primary. Optional on the wire: pairings against an older
+    /// primary simply leave it unset.
+    #[serde(default)]
+    primary_os: Option<String>,
 }
 
 impl WirePairingInvite {
-    fn from_invite(invite: &PairingInvite, certificate_der: &[u8], primary_display_name: String) -> Self {
+    fn from_invite(invite: &PairingInvite, certificate_der: &[u8], primary_display_name: String, primary_os: String) -> Self {
         let b64 = base64::engine::general_purpose::STANDARD;
         Self {
             invite_id: invite.invite_id.clone(), endpoint: invite.endpoint.clone(),
             certificate_pin: invite.certificate_pin.clone(), expires_at_ms: invite.expires_at_ms,
             secret_b64: b64.encode(&invite.secret), certificate_der_b64: b64.encode(certificate_der),
-            primary_display_name: Some(primary_display_name),
+            primary_display_name: Some(primary_display_name), primary_os: Some(primary_os),
         }
     }
 
-    fn into_invite(self) -> Result<(PairingInvite, Vec<u8>, Option<String>), TransportError> {
+    fn into_invite(self) -> Result<(PairingInvite, Vec<u8>, Option<String>, Option<String>), TransportError> {
         let b64 = base64::engine::general_purpose::STANDARD;
         let secret = b64.decode(self.secret_b64).map_err(|e| TransportError::Protocol(format!("pairing invite secret encoding: {e}")))?;
         let certificate_der = b64.decode(self.certificate_der_b64).map_err(|e| TransportError::Protocol(format!("pairing certificate encoding: {e}")))?;
@@ -1906,9 +1911,12 @@ impl WirePairingInvite {
         if let Some(name) = self.primary_display_name.as_deref() {
             crate::protocol::valid_text("primary_display_name", name, false).map_err(|e| TransportError::Protocol(e.to_string()))?;
         }
+        if let Some(os) = self.primary_os.as_deref() {
+            crate::protocol::valid_text("primary_os", os, false).map_err(|e| TransportError::Protocol(e.to_string()))?;
+        }
         parse_endpoint(&self.endpoint)?;
         crate::protocol::validate_certificate_pin(&self.certificate_pin).map_err(|e| TransportError::Protocol(e.to_string()))?;
-        Ok((PairingInvite { invite_id: self.invite_id, endpoint: self.endpoint, certificate_pin: self.certificate_pin, expires_at_ms: self.expires_at_ms, secret }, certificate_der, self.primary_display_name))
+        Ok((PairingInvite { invite_id: self.invite_id, endpoint: self.endpoint, certificate_pin: self.certificate_pin, expires_at_ms: self.expires_at_ms, secret }, certificate_der, self.primary_display_name, self.primary_os))
     }
 }
 
@@ -1934,7 +1942,7 @@ fn issue_pairing_invite(store: &mut SyncStore, request: WirePairingInviteRequest
     }
     let pin = hex_bytes(&hash_bytes(certificate_der));
     let invite = store.create_pairing_invite(request.endpoint, pin, now_ms().saturating_add(DISCOVERY_INVITE_TTL_MS))?;
-    serde_json::to_vec(&WirePairingInvite::from_invite(&invite, certificate_der, usage_index::hostname())).map_err(|e| SyncError::Protocol(format!("encode discovery pairing response: {e}")))
+    serde_json::to_vec(&WirePairingInvite::from_invite(&invite, certificate_der, usage_index::hostname(), std::env::consts::OS.into())).map_err(|e| SyncError::Protocol(format!("encode discovery pairing response: {e}")))
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -2631,6 +2639,7 @@ mod tests {
         let pending = store.receive_pairing_request(&pairing, 1).unwrap();
         store.approve_pairing(&pending.request_id, 2).unwrap();
         store.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,

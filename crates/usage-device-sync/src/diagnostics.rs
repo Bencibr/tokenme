@@ -701,7 +701,7 @@ impl DiagnosticsHost {
     /// operation is visible through `diagnostics.get_operation` so an MCP
     /// client can observe completion after the host schedules the action.
     pub fn begin_control_operation(&self, action: &str, started_at_ms: i64) -> Result<String, DiagnosticsError> {
-        if !matches!(action, "sync.start_primary" | "sync.stop_primary" | "sync.stop_secondary" | "sync.discover" | "sync.pair" | "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request" | "sync.pause" | "sync.resume" | "sync.revoke_device" | "sync.refresh" | "ui.open_sync_sheet" | "ui.focus_device" | "ui.click_panel") {
+        if !matches!(action, "sync.start_primary" | "sync.stop_primary" | "sync.stop_secondary" | "sync.discover" | "sync.set_primary_auto_approve" | "sync.pair" | "sync.approve_pairing" | "sync.reject_pairing" | "sync.clear_expired_request" | "sync.pause" | "sync.resume" | "sync.revoke_device" | "sync.refresh" | "ui.open_sync_sheet" | "ui.focus_device" | "ui.click_panel") {
             return Err(DiagnosticsError::UnknownTool);
         }
         let mut random = [0u8; 16];

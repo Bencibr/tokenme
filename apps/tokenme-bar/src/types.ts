@@ -382,6 +382,7 @@ export type SyncManagementRequest =
   | { action: "retry_connect" }
   | { action: "start_primary"; bind?: string | null; advertise_host?: string | null; allow_lan: boolean }
   | { action: "set_primary_data_sharing"; enabled: boolean }
+  | { action: "set_primary_auto_approve"; enabled: boolean }
   | { action: "start_secondary" }
   | { action: "stop" }
   | { action: "switch_to_secondary" }
@@ -432,11 +433,16 @@ export interface DiscoveredPrimaryView {
 export interface SyncDevicesSnapshot {
   primary_id: string | null;
   primary_display_name: string | null;
+  /** Secondary only: the primary's OS as advertised at pairing, for the
+   *  platform icon. `null` on pairings made before the field travelled. */
+  primary_os: string | null;
   role: SyncDeviceRole | "unconfigured";
   service_running: boolean;
   /** Primary listener is being started in a background worker. */
   primary_starting: boolean;
   primary_data_sharing_enabled: boolean;
+  /** Primary only: pairing requests are approved on arrival while on. */
+  primary_auto_approve_enabled: boolean;
   service_health: string | null;
   endpoint: string | null;
   certificate_pin: string | null;

@@ -223,6 +223,12 @@ pub struct SecondarySyncConfig {
     pub primary_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_display_name: Option<String>,
+    /// The primary's OS as it advertised itself during pairing. Drives the
+    /// platform icon on the secondary's device list; absent on pairings made
+    /// before the field travelled, and then the UI falls back to a generic
+    /// device glyph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_os: Option<String>,
     pub device_id: String,
     pub origin: String,
     pub endpoint: String,
@@ -266,6 +272,11 @@ pub struct PrimarySyncConfig {
     pub enabled: bool,
     #[serde(default, alias = "allow_secondary_read")]
     pub share_data_with_secondaries: bool,
+    /// Auto-approve incoming pairing requests instead of queueing them for a
+    /// manual tap. Off by default: a primary that turns it on is choosing
+    /// convenience over the invite-only trust review.
+    #[serde(default)]
+    pub auto_approve_pairing: bool,
 }
 
 impl PrimarySyncConfig {
@@ -290,6 +301,7 @@ impl SecondarySyncConfig {
             return Err(SyncError::Security("secondary config targets another primary".into()));
         }
         if let Some(name) = self.primary_display_name.as_deref() { valid_text("primary_display_name", name, false)?; }
+        if let Some(os) = self.primary_os.as_deref() { valid_text("primary_os", os, false)?; }
         for (label, value) in [
             ("primary_id", self.primary_id.as_str()),
             ("device_id", self.device_id.as_str()),
@@ -927,6 +939,19 @@ impl SyncStore {
         })
     }
 
+    pub fn set_primary_auto_approve(&mut self, enabled: bool, now_ms: i64) -> SyncResult<()> {
+        Self::state_tx(&mut self.state, |tx| {
+            let changed = tx.execute(
+                "UPDATE device_sync_primary_config
+                    SET auto_approve_pairing = ?1, updated_at_ms = ?2
+                  WHERE config_key = 'primary' AND primary_id = ?3",
+                params![if enabled { 1_i64 } else { 0_i64 }, now_ms, self.primary_id],
+            ).map_err(sql_err)?;
+            if changed != 1 { return Err(SyncError::NotFound("primary sync configuration".into())); }
+            Ok(())
+        })
+    }
+
     /// State-only write for the panel's share toggle: opens just the dedicated
     /// state database, never the usage index, so the toggle lands in
     /// milliseconds even while the ingest engine holds the index write lock.
@@ -947,6 +972,32 @@ impl SyncStore {
             let changed = tx.execute(
                 "UPDATE device_sync_primary_config
                     SET share_data_with_secondaries = ?1, updated_at_ms = ?2
+                  WHERE config_key = 'primary' AND primary_id = ?3",
+                params![if enabled { 1_i64 } else { 0_i64 }, now_ms, primary_id],
+            ).map_err(sql_err)?;
+            if changed != 1 { return Err(SyncError::NotFound("primary sync configuration".into())); }
+            Ok(())
+        })
+    }
+
+    /// State-only twin of `set_primary_auto_approve`: the panel's toggle must
+    /// never queue behind the ingest engine's index write lock, and the flag
+    /// lives in sync_state.db alone.
+    pub fn write_primary_auto_approve(
+        path: impl AsRef<std::path::Path>,
+        primary_id: &str,
+        enabled: bool,
+        now_ms: i64,
+    ) -> SyncResult<()> {
+        validate_identifier("primary_id", primary_id)?;
+        let state_path = sync_state_path(path.as_ref())?;
+        let mut state = Connection::open(&state_path).map_err(sql_err)?;
+        state.busy_timeout(std::time::Duration::from_millis(500)).map_err(sql_err)?;
+        migrate_state(&mut state, primary_id)?;
+        Self::state_tx(&mut state, |tx| {
+            let changed = tx.execute(
+                "UPDATE device_sync_primary_config
+                    SET auto_approve_pairing = ?1, updated_at_ms = ?2
                   WHERE config_key = 'primary' AND primary_id = ?3",
                 params![if enabled { 1_i64 } else { 0_i64 }, now_ms, primary_id],
             ).map_err(sql_err)?;
@@ -1801,7 +1852,7 @@ impl SyncStore {
         valid_text("display_name", &request.display_name, false)?;
         valid_text("os", &request.os, false)?;
         let request = request.clone();
-        Self::state_tx(&mut self.state, |tx| {
+        let state = Self::state_tx(&mut self.state, |tx| {
             // Expired requests no longer consume the bounded pending queue.
             tx.execute(
                 "UPDATE device_pairing_request SET status = 'expired'
@@ -1865,7 +1916,19 @@ impl SyncStore {
                 params![request.request_id, request.invite_id, hash_bytes(&request.invite_secret).as_slice(), request.device_id, request.origin, request.display_name, request.os, request.public_key.as_slice(), request.signature.as_slice(), now_ms],
             ).map_err(sql_err)?;
             Ok(PairingRequestState { request_id: request.request_id, invite_id: request.invite_id, device_id: request.device_id, origin: request.origin, display_name: request.display_name, os: request.os, status: "pending".into() })
-        })
+        })?;
+        // Auto-approve is a primary-side setting: when it is on, a fresh
+        // pending request is approved on arrival, so the secondary pairs
+        // without waiting for a human tap. An approval failure leaves the
+        // request pending — the manual list still works, and the error is
+        // visible there instead of failing an already-accepted request.
+        if state.status == "pending" && self.primary_config()?.is_some_and(|config| config.auto_approve_pairing) {
+            match self.approve_pairing(&state.request_id, now_ms) {
+                Ok(_) => return Ok(PairingRequestState { status: "paired".into(), ..state }),
+                Err(error) => eprintln!("tokenme sync: auto-approve failed, the request stays pending: {error}"),
+            }
+        }
+        Ok(state)
     }
 
     pub fn pairing_requests(&self) -> SyncResult<Vec<PairingRequestState>> {
@@ -3133,8 +3196,8 @@ fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, 
             config_key, primary_id, device_id, origin, endpoint, server_name,
             certificate_der, certificate_pin, identity_path, stream_id, data_epoch,
             expected_generation, enabled, capture_enabled, last_error, last_manifest_hash, last_gzip_hash,
-            last_connected_at_ms, last_ack_generation, last_ack_receipt_hash, primary_display_name, updated_at_ms
-         ) VALUES('secondary', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+            last_connected_at_ms, last_ack_generation, last_ack_receipt_hash, primary_display_name, primary_os, updated_at_ms
+         ) VALUES('secondary', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             config.primary_id, config.device_id, config.origin, config.endpoint,
             config.server_name, config.certificate_der, config.certificate_pin.as_slice(),
@@ -3143,7 +3206,7 @@ fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, 
             if config.enabled { 1_i64 } else { 0_i64 }, if config.capture_enabled { 1_i64 } else { 0_i64 }, config.last_error,
             config.last_manifest_hash.map(|value| value.to_vec()), config.last_gzip_hash.map(|value| value.to_vec()),
             config.last_connected_at_ms, config.last_ack_generation.map(|value| value as i64),
-            config.last_ack_receipt_hash.map(|value| value.to_vec()), config.primary_display_name, now_ms,
+            config.last_ack_receipt_hash.map(|value| value.to_vec()), config.primary_display_name, config.primary_os, now_ms,
         ],
     ).map_err(sql_err)?;
     Ok::<_, SyncError>(())
@@ -3204,8 +3267,8 @@ fn upsert_primary_config_tx(tx: &rusqlite::Transaction<'_>, config: &PrimarySync
     tx.execute(
         "INSERT INTO device_sync_primary_config(
             config_key, primary_id, bind_addr, advertise_host, allow_lan, enabled,
-            share_data_with_secondaries, updated_at_ms
-         ) VALUES('primary', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            share_data_with_secondaries, auto_approve_pairing, updated_at_ms
+         ) VALUES('primary', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(config_key) DO UPDATE SET
             primary_id = excluded.primary_id,
             bind_addr = excluded.bind_addr,
@@ -3213,12 +3276,14 @@ fn upsert_primary_config_tx(tx: &rusqlite::Transaction<'_>, config: &PrimarySync
             allow_lan = excluded.allow_lan,
             enabled = excluded.enabled,
             share_data_with_secondaries = excluded.share_data_with_secondaries,
+            auto_approve_pairing = excluded.auto_approve_pairing,
             updated_at_ms = excluded.updated_at_ms",
         params![
             config.primary_id, config.bind_addr, config.advertise_host,
             if config.allow_lan { 1_i64 } else { 0_i64 },
             if config.enabled { 1_i64 } else { 0_i64 },
-            if config.share_data_with_secondaries { 1_i64 } else { 0_i64 }, now_ms,
+            if config.share_data_with_secondaries { 1_i64 } else { 0_i64 },
+            if config.auto_approve_pairing { 1_i64 } else { 0_i64 }, now_ms,
         ],
     ).map_err(sql_err)?;
     Ok(())
@@ -3390,11 +3455,13 @@ fn migrate_state(state: &mut Connection, primary_id: &str) -> SyncResult<()> {
                  FROM device_pairing_request;",
         ).map_err(sql_err)?;
         ensure_column(&tx, "device_sync_primary_config", "share_data_with_secondaries", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&tx, "device_sync_primary_config", "auto_approve_pairing", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&tx, "device_sync_secondary_config", "last_connected_at_ms", "INTEGER")?;
         ensure_column(&tx, "device_sync_secondary_config", "last_ack_generation", "INTEGER")?;
         ensure_column(&tx, "device_sync_secondary_config", "last_ack_receipt_hash", "BLOB")?;
         ensure_column(&tx, "device_sync_secondary_config", "capture_enabled", "INTEGER NOT NULL DEFAULT 1")?;
         ensure_column(&tx, "device_sync_secondary_config", "primary_display_name", "TEXT")?;
+        ensure_column(&tx, "device_sync_secondary_config", "primary_os", "TEXT")?;
         ensure_column(&tx, "device_sync_secondary_config", "needs_recovery", "INTEGER NOT NULL DEFAULT 0")?;
         // A primary's downlink is a journal consumer: each request carries the
         // secondary's persisted dirty cursor, which ACKs every revision at or
@@ -3548,12 +3615,17 @@ fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncC
     if !exists { return Ok(None); }
     let (current_sharing, legacy_sharing) = primary_sharing_columns(conn)?;
     let sharing_column = if current_sharing { "share_data_with_secondaries" } else if legacy_sharing { "allow_secondary_read" } else { "0" };
-    let sql = format!("SELECT primary_id, bind_addr, advertise_host, allow_lan, enabled, {sharing_column}
+    let auto_approve_column = {
+        let mut statement = conn.prepare("PRAGMA table_info(device_sync_primary_config)").map_err(sql_err)?;
+        let names = statement.query_map([], |row| row.get::<_, String>(1)).map_err(sql_err)?.collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
+        if names.iter().any(|name| name == "auto_approve_pairing") { "auto_approve_pairing" } else { "0" }
+    };
+    let sql = format!("SELECT primary_id, bind_addr, advertise_host, allow_lan, enabled, {sharing_column}, {auto_approve_column}
                        FROM device_sync_primary_config WHERE config_key = 'primary'");
-    let row: Option<(String, String, Option<String>, i64, i64, i64)> = conn.query_row(
-        &sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    let row: Option<(String, String, Option<String>, i64, i64, i64, i64)> = conn.query_row(
+        &sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
     ).optional().map_err(sql_err)?;
-    let Some((primary_id, bind_addr, advertise_host, allow_lan, enabled, sharing)) = row else { return Ok(None); };
+    let Some((primary_id, bind_addr, advertise_host, allow_lan, enabled, sharing, auto_approve)) = row else { return Ok(None); };
     let allow_lan = match allow_lan {
         0 => false,
         1 => true,
@@ -3569,7 +3641,13 @@ fn read_primary_config_conn(conn: &Connection) -> SyncResult<Option<PrimarySyncC
         1 => true,
         value => return Err(SyncError::Security(format!("primary data sharing flag is invalid: {value}"))),
     };
-    let config = PrimarySyncConfig { primary_id: primary_id.clone(), bind_addr, advertise_host, allow_lan, enabled, share_data_with_secondaries };
+    let auto_approve_pairing = match auto_approve {
+        0 => false,
+        1 => true,
+        value => return Err(SyncError::Security(format!("primary auto-approve flag is invalid: {value}"))),
+    };
+    let config = PrimarySyncConfig {
+        primary_id: primary_id.clone(), bind_addr, advertise_host, allow_lan, enabled, share_data_with_secondaries, auto_approve_pairing };
     config.validate(&primary_id)?;
     Ok(Some(config))
 }
@@ -3599,25 +3677,26 @@ fn read_secondary_config_conn(conn: &Connection) -> SyncResult<Option<SecondaryS
         "SELECT primary_id, device_id, origin, endpoint, server_name, certificate_der,
                 certificate_pin, identity_path, stream_id, data_epoch, expected_generation,
                 enabled, last_error, last_manifest_hash, last_gzip_hash,
-                {}, {}, {}, {}, {}
+                {}, {}, {}, {}, {}, {}
            FROM device_sync_secondary_config WHERE config_key = 'secondary'",
         optional("last_connected_at_ms"),
         optional("last_ack_generation"),
         optional("last_ack_receipt_hash"),
         optional("capture_enabled"),
         optional("primary_display_name"),
+        optional("primary_os"),
     );
     let row: Option<(
         String, String, String, String, String, Vec<u8>, Vec<u8>, String,
         Option<String>, Option<i64>, Option<i64>, i64, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>,
-        Option<i64>, Option<i64>, Option<Vec<u8>>, Option<i64>, Option<String>,
+        Option<i64>, Option<i64>, Option<Vec<u8>>, Option<i64>, Option<String>, Option<String>,
     )> = conn.query_row(&sql, [], |row| Ok((
         row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
         row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
         row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?,
-        row.get(15)?, row.get(16)?, row.get(17)?, row.get(18)?, row.get(19)?,
+        row.get(15)?, row.get(16)?, row.get(17)?, row.get(18)?, row.get(19)?, row.get(20)?,
     ))).optional().map_err(sql_err)?;
-    let Some((primary_id, device_id, origin, endpoint, server_name, certificate_der, pin, identity_path, stream_id, data_epoch, expected_generation, enabled, last_error, manifest_hash, gzip_hash, last_connected_at_ms, last_ack_generation, last_ack_receipt_hash, capture_enabled, primary_display_name)) = row else {
+    let Some((primary_id, device_id, origin, endpoint, server_name, certificate_der, pin, identity_path, stream_id, data_epoch, expected_generation, enabled, last_error, manifest_hash, gzip_hash, last_connected_at_ms, last_ack_generation, last_ack_receipt_hash, capture_enabled, primary_display_name, primary_os)) = row else {
         return Ok(None);
     };
     let last_ack_generation = last_ack_generation.map(|value| u64::try_from(value).map_err(|_| SyncError::Security("stored secondary ACK generation is negative".into()))).transpose()?;
@@ -3635,7 +3714,7 @@ fn read_secondary_config_conn(conn: &Connection) -> SyncResult<Option<SecondaryS
     let data_epoch = data_epoch.map(|value| u64::try_from(value).map_err(|_| SyncError::Security("stored secondary data_epoch is negative".into()))).transpose()?;
     let expected_generation = expected_generation.map(|value| u64::try_from(value).map_err(|_| SyncError::Security("stored secondary expected_generation is negative".into()))).transpose()?;
     let config = SecondarySyncConfig {
-        primary_id, primary_display_name, device_id, origin, endpoint, server_name, certificate_der, certificate_pin,
+        primary_id, primary_display_name, primary_os, device_id, origin, endpoint, server_name, certificate_der, certificate_pin,
         identity_path: PathBuf::from(identity_path), stream_id, data_epoch, expected_generation,
         enabled: enabled != 0, capture_enabled, last_error, last_manifest_hash: hash(manifest_hash, "manifest hash")?,
         last_gzip_hash: hash(gzip_hash, "gzip hash")?, last_connected_at_ms, last_ack_generation,
@@ -4311,6 +4390,31 @@ mod tests {
         DeviceIdentity::create(origin, origin).unwrap()
     }
 
+    #[test]
+    fn auto_approve_pairing_approves_on_arrival_and_only_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SyncStore::open(&dir.path().join("index.db"), "primary-1").unwrap();
+        let device = identity("auto-ok");
+        let invite = store.create_pairing_invite("https://localhost:1", "0000000000000000000000000000000000000000000000000000000000000000", i64::MAX).unwrap();
+        let request = PairingRequest::new(&invite, &device, "linux").unwrap();
+        store.save_primary_config(&PrimarySyncConfig {
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(), advertise_host: Some("127.0.0.1".into()),
+            allow_lan: false, enabled: true, share_data_with_secondaries: false, auto_approve_pairing: true,
+        }, 1).unwrap();
+        let state = store.receive_pairing_request(&request, 2).unwrap();
+        assert_eq!(state.status, "paired", "the request answers approved without a manual tap");
+        let devices = store.devices().unwrap();
+        assert_eq!(devices[0].status, DeviceStatus::Paired);
+
+        // The same primary with the flag off keeps the manual queue.
+        let other = identity("auto-off");
+        let invite = store.create_pairing_invite("https://localhost:1", "0000000000000000000000000000000000000000000000000000000000000000", i64::MAX).unwrap();
+        let request = PairingRequest::new(&invite, &other, "linux").unwrap();
+        store.set_primary_auto_approve(false, 4).unwrap();
+        let state = store.receive_pairing_request(&request, 5).unwrap();
+        assert_eq!(state.status, "pending");
+    }
+
     struct CaptureFixture {
         path: PathBuf,
     }
@@ -4639,6 +4743,7 @@ mod tests {
     fn adopting_a_recovered_stream_drops_old_stream_artifacts_but_keeps_the_download_cursor() {
         let device = identity("recovery-reset");
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(),
             certificate_der: vec![1, 2, 3], certificate_pin: hash_bytes(&[1, 2, 3]), identity_path: PathBuf::from("identity.json"),
@@ -4946,6 +5051,7 @@ mod tests {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let certificate_der = vec![1u8, 2, 3];
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
             certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
@@ -4975,6 +5081,7 @@ mod tests {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let certificate_der = vec![1u8, 2, 3];
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
             certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
@@ -5023,6 +5130,7 @@ mod tests {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let certificate_der = vec![1u8, 2, 3];
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
             certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
@@ -5082,6 +5190,7 @@ mod tests {
         ).unwrap();
         let certificate_der = vec![1u8, 2, 3];
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
             certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
@@ -5144,6 +5253,7 @@ mod tests {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let certificate_der = vec![1u8, 2, 3];
         store.save_secondary_config(&SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
             certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
@@ -5180,6 +5290,7 @@ mod tests {
         let device = identity("reset-repeat");
         let certificate_der = vec![1u8, 2, 3];
         store.save_secondary_config(&SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id, origin: device.origin.clone(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
             certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
@@ -5198,6 +5309,7 @@ mod tests {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let certificate_der = vec![1u8, 2, 3];
         let make_config = |device_id: &str, origin: &str| SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device_id.into(), origin: origin.into(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
             certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
@@ -5398,6 +5510,7 @@ mod tests {
             [],
         ).unwrap();
         let config = PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(),
             bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()),
@@ -5424,6 +5537,7 @@ mod tests {
         let device = identity("download-secondary");
         let (mut primary, _) = paired_store_for(&device);
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -5528,6 +5642,7 @@ mod tests {
         let first_device = identity("download-ack-a");
         let (mut primary, _) = paired_store_for(&first_device);
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -5599,6 +5714,7 @@ mod tests {
         let device = identity("download-paused");
         let (mut primary, _) = paired_store_for(&device);
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -5707,6 +5823,7 @@ mod tests {
         let device = identity("download-ack-guard");
         let (mut primary, _) = paired_store_for(&device);
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -5740,6 +5857,7 @@ mod tests {
         let device = identity("download-backfill");
         let (mut primary, _) = paired_store_for(&device);
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -5779,6 +5897,7 @@ mod tests {
         let device = identity("download-window-backfill");
         let (mut primary, _) = paired_store_for(&device);
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -5832,6 +5951,7 @@ mod tests {
         let device = identity("download-origin");
         let (mut primary, _) = paired_store_for(&device);
         primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -5900,6 +6020,7 @@ mod tests {
         {
             let mut store = SyncStore::open(dir.path().join("index.db"), "primary-1").unwrap();
             store.save_primary_config(&crate::PrimarySyncConfig {
+                auto_approve_pairing: false,
                 primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
                 advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
                 share_data_with_secondaries: false,
@@ -5925,6 +6046,7 @@ mod tests {
         {
             let mut store = SyncStore::open(dir.path().join("index.db"), "primary-1").unwrap();
             store.save_primary_config(&PrimarySyncConfig {
+                auto_approve_pairing: false,
                 primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
                 advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
                 share_data_with_secondaries: true,
@@ -5946,6 +6068,7 @@ mod tests {
         {
             let mut store = SyncStore::open(dir.path().join("index.db"), "primary-1").unwrap();
             store.save_secondary_config(&crate::SecondarySyncConfig {
+                primary_os: None,
                 primary_id: "primary-1".into(), primary_display_name: Some("primary-1".into()),
                 device_id: "device-1".into(), origin: "SP-DESGIN".into(),
                 endpoint: "https://127.0.0.1:47821".into(), server_name: "localhost".into(),
@@ -5973,6 +6096,7 @@ mod tests {
         {
             let mut store = SyncStore::open(dir.path().join("index.db"), "primary-1").unwrap();
             store.save_primary_config(&PrimarySyncConfig {
+                auto_approve_pairing: false,
                 primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
                 advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
                 share_data_with_secondaries: false,
@@ -5985,6 +6109,7 @@ mod tests {
         // state-only seam: it must never open the usage index, or starting the
         // primary queues behind the ingest engine's write lock.
         SyncStore::write_primary_config_state(dir.path().join("index.db"), "primary-1", &PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47822".into(),
             advertise_host: Some("192.168.101.66".into()), allow_lan: true, enabled: true,
             share_data_with_secondaries: true,
@@ -6006,6 +6131,7 @@ mod tests {
         };
         let mut store = SyncStore::open(&path, "primary-1").unwrap();
         store.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
@@ -6069,6 +6195,7 @@ mod tests {
             [],
         ).unwrap();
         store.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
             primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: false,
             share_data_with_secondaries: false,
@@ -6099,6 +6226,7 @@ mod tests {
         let device = identity("capture-pause");
         let certificate_der = vec![1u8, 2, 3];
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: Some("Primary Mac".into()), device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: certificate_der.clone(),
             certificate_pin: hash_bytes(&certificate_der), identity_path: PathBuf::from("identity.json"),
@@ -6132,6 +6260,7 @@ mod tests {
     fn clearing_secondary_config_keeps_local_index_history() {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let config = SecondarySyncConfig {
+            primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: "device-1".into(), origin: "laptop".into(),
             endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1, 2, 3],
             certificate_pin: hash_bytes(&[1, 2, 3]), identity_path: PathBuf::from("identity.json"),

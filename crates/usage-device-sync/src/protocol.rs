@@ -847,6 +847,10 @@ pub struct PairingInviteDetails {
     pub primary_id: Option<String>,
     pub server_name: Option<String>,
     pub primary_display_name: Option<String>,
+    /// The primary's OS when the invite carried it. Older invites have no
+    /// such field and pair without it; the UI then falls back to a generic
+    /// platform icon.
+    pub primary_os: Option<String>,
     pub certificate_der: Option<Vec<u8>>,
 }
 
@@ -881,17 +885,25 @@ impl PairingInvite {
 
     /// Includes the primary's human-readable host name without changing the
     /// TLS server name (`name`), which is often `localhost` for pinned certs.
+    /// `primary_os` is the same courtesy for the platform icon and may be
+    /// omitted by older callers.
     pub fn url_with_primary_name(
         &self,
         primary_id: &str,
         server_name: &str,
         certificate_der: &[u8],
         primary_display_name: &str,
+        primary_os: Option<&str>,
     ) -> SyncResult<String> {
         valid_text("primary_display_name", primary_display_name, false)?;
+        if let Some(os) = primary_os { valid_text("primary_os", os, false)?; }
         let mut url = self.url_with_certificate(primary_id, server_name, certificate_der)?;
         url.push_str("&primary_name=");
         url.push_str(&hex(primary_display_name.as_bytes()));
+        if let Some(os) = primary_os {
+            url.push_str("&primary_os=");
+            url.push_str(&hex(os.as_bytes()));
+        }
         Ok(url)
     }
 
@@ -937,9 +949,21 @@ impl PairingInvite {
             valid_text("primary_display_name", &name, false)?;
             Ok(name)
         }).transpose()?;
+        // Optional and additive: invites minted before the field existed carry
+        // no `primary_os`, and unknown query keys are ignored anyway.
+        let primary_os = fields.get("primary_os").map(|value| {
+            if value.len() > MAX_STRING_BYTES.saturating_mul(2) {
+                return Err(SyncError::Limit("primary os exceeds the invite limit".into()));
+            }
+            let bytes = decode_hex(value, "primary os")?;
+            let os = String::from_utf8(bytes)
+                .map_err(|_| SyncError::Invalid("primary os is not UTF-8".into()))?;
+            valid_text("primary_os", &os, false)?;
+            Ok(os)
+        }).transpose()?;
         let certificate_der = fields.get("cert").map(|value| decode_hex(value, "invite certificate")).transpose()?
             .map(|der| { if der.len() > MAX_MANIFEST_BYTES { Err(SyncError::Limit("invite certificate is too large".into())) } else { Ok(der) } }).transpose()?;
-        Ok(PairingInviteDetails { invite, primary_id, server_name, primary_display_name, certificate_der })
+        Ok(PairingInviteDetails { invite, primary_id, server_name, primary_display_name, primary_os, certificate_der })
     }
 
     pub fn secret_hash(&self) -> [u8; 32] { hash_bytes(&self.secret) }
