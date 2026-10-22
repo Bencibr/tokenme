@@ -850,6 +850,7 @@ struct ServerContext {
     /// row, or an auto-approve landing) so the panel need not poll for them.
     /// Receives the requesting device's display name.
     pairing_notify: Mutex<Option<Arc<dyn Fn(&str, bool) + Send + Sync>>>,
+    disconnect_sink: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
     replay: Mutex<NonceReplayCache>,
 }
 
@@ -1126,6 +1127,7 @@ impl HttpsSyncServer {
             next_socket_id: AtomicU64::new(1),
             log_sink: Mutex::new(None),
             pairing_notify: Mutex::new(None),
+            disconnect_sink: Mutex::new(None),
             replay: Mutex::new(NonceReplayCache::default()),
         };
         Ok(Self { listener, context: Arc::new(context) })
@@ -1157,6 +1159,15 @@ impl HttpsSyncServer {
         hook: impl Fn(&str, bool) + Send + Sync + 'static,
     ) -> Result<(), TransportError> {
         *lock_recover(&self.context.pairing_notify) = Some(Arc::new(hook));
+        Ok(())
+    }
+
+    /// Registers a listener callback invoked when a secondary device explicitly disconnects.
+    pub fn set_disconnect_sink(
+        &self,
+        sink: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Result<(), TransportError> {
+        *lock_recover(&self.context.disconnect_sink) = Some(Arc::new(sink));
         Ok(())
     }
 
@@ -1316,6 +1327,13 @@ impl ServerContext {
             sink(is_error, message);
         } else if is_error {
             eprintln!("tokenme sync: {message}");
+        }
+    }
+
+    fn notify_disconnect(&self, device_id: &str) {
+        let sink = lock_recover(&self.disconnect_sink).clone();
+        if let Some(sink) = sink {
+            sink(device_id);
         }
     }
 
@@ -1493,7 +1511,7 @@ impl ServerContext {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
             let request = HttpRequest { path: head.path.clone(), content_type: head.content_type, body };
             let mut store = lock_recover(&self.store);
-            let dispatched = dispatch_request(&mut store, &request, &self.replay);
+            let dispatched = dispatch_request(&mut store, &request, &self.replay, self);
             drop(store);
             // A pairing request that persisted here (fresh pending row, or the
             // auto-approve that landed on it) is invisible to the panel until
@@ -1997,7 +2015,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn dispatch_request(store: &mut SyncStore, request: &HttpRequest, replay: &Mutex<NonceReplayCache>) -> (u16, Vec<u8>) {
+fn dispatch_request(store: &mut SyncStore, request: &HttpRequest, replay: &Mutex<NonceReplayCache>, context: &ServerContext) -> (u16, Vec<u8>) {
     let now = now_ms();
     let result: Result<Vec<u8>, SyncError> = match (request.path.as_str(), request.content_type.as_str()) {
         (PAIRING_PATH, "application/json") => serde_json::from_slice::<WirePairingRequest>(&request.body)
@@ -2025,7 +2043,10 @@ fn dispatch_request(store: &mut SyncStore, request: &HttpRequest, replay: &Mutex
         (DISCONNECT_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid disconnect request: {e}")))
             .and_then(|disconnect| with_claimed_nonce(replay, NONCE_SCOPE_DISCONNECT, disconnect.nonce, now, || {
-                store.disconnect_device(&disconnect, now).and_then(|_| serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string())))
+                store.disconnect_device(&disconnect, now).and_then(|_| {
+                    context.notify_disconnect(&disconnect.device_id);
+                    serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string()))
+                })
             })),
         _ => Err(SyncError::NotFound("HTTP path".into())),
     };
