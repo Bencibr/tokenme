@@ -388,6 +388,10 @@ pub struct SyncDevicesView {
     pub primary_data_sharing_enabled: bool,
     /// Primary only: pairing requests are approved on arrival while on.
     pub primary_auto_approve_enabled: bool,
+    /// Secondary only: one-time history materialization progress as
+    /// (last processed event id, max local event id). `None` on a primary or
+    /// when there is nothing to materialize.
+    pub history_init: Option<(i64, i64)>,
     pub service_health: Option<String>,
     pub endpoint: Option<String>,
     pub certificate_pin: Option<String>,
@@ -1585,6 +1589,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         primary_starting: state.primary_starting,
         primary_data_sharing_enabled,
         primary_auto_approve_enabled,
+        history_init: panel.occurrence_init,
         service_health,
         endpoint,
         certificate_pin,
