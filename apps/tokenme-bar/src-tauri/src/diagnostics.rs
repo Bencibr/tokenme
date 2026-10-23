@@ -2229,6 +2229,7 @@ mod tests {
     #[test]
     fn stopped_sync_service_cannot_report_listener_or_tls_ok() {
         let status = SyncDevicesView {
+            primary_link_live: false,
             primary_id: Some("primary-1".into()),
             role: "primary".into(),
             service_running: false,

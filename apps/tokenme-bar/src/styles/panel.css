@@ -4109,6 +4109,11 @@
   background: var(--ink-3);
 }
 
+.sync-dev-dot.is-offline {
+  background: var(--ink-4, var(--ink-3));
+  opacity: 0.45;
+}
+
 .sync-dev-dot.is-error {
   background: var(--bad);
 }

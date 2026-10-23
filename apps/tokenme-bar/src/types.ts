@@ -409,6 +409,8 @@ export interface SyncDeviceView {
   last_generation: number | null;
   last_merged_at_ms: number | null;
   snapshot_complete: boolean;
+  /** Live authenticated upload socket right now (primary's real-time view). */
+  live: boolean;
 }
 
 export interface SyncPairingRequestView {
@@ -471,6 +473,9 @@ export interface SyncDevicesSnapshot {
   discovered_primaries: DiscoveredPrimaryView[];
   devices: SyncDeviceView[];
   pairing_requests: SyncPairingRequestView[];
+  /** Secondary only: the heartbeat watchdog's real-time read of the
+   *  resident upload socket — instant, not poll-derived. */
+  primary_link_live: boolean;
 }
 
 export interface Report {
@@ -543,6 +548,7 @@ export interface Bridge {
   trayState: () => Promise<TrayState | null>;
   setTrayMode: (mode: TrayMode) => Promise<TrayState | null>;
   onReport: (handler: (report: Report) => void) => () => void;
+  onSyncDevicesChanged: (handler: () => void) => () => void;
   /** A tray menu entry ("本周"/"今日") asks the panel to focus a period. */
   onTrayPeriod: (handler: (period: PeriodKey) => void) => () => void;
   /** Panel-visible sync state changed out-of-band; the handler re-reads status. */

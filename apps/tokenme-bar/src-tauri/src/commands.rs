@@ -24,6 +24,22 @@ use crate::settings::{BubbleSkin, NotifyTier, QuotaDisplayMode, Settings, Theme,
 use crate::tray;
 
 const DEFAULT_PRIMARY_BIND: &str = "0.0.0.0:47821";
+
+/// Process-wide live upload sockets on the primary (device ids), written by
+/// the WS lifecycle hook the moment a socket comes up or dies. Read by every
+/// status snapshot, so the panel renders online/offline in real time instead
+/// of inferring it from merge timestamps.
+fn ws_live_registry() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// The secondary's view of the primary link, set by the heartbeat watchdog
+/// the moment the resident socket dies — not by a failed poll.
+fn primary_link_live() -> &'static std::sync::atomic::AtomicBool {
+    static FLAG: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+    FLAG.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+}
 const SYNC_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Terminates the tray application, rather than merely hiding its panel.
@@ -373,12 +389,17 @@ pub struct SyncDeviceView {
     pub last_generation: Option<u64>,
     pub last_merged_at_ms: Option<i64>,
     pub snapshot_complete: bool,
+    /// Live authenticated upload socket right now (primary's view only).
+    pub live: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncDevicesView {
     pub primary_id: Option<String>,
     pub primary_display_name: Option<String>,
+    /// Secondary only: the heartbeat watchdog's real-time read of the
+    /// resident upload socket, not a poll-derived guess.
+    pub primary_link_live: bool,
     /// Secondary only: the primary's OS as it advertised itself at pairing,
     /// for the platform icon on the device list. Absent on old pairings.
     pub primary_os: Option<String>,
@@ -420,7 +441,9 @@ pub struct SyncDevicesView {
 }
 
 fn sync_device_view(device: DeviceStatusView) -> SyncDeviceView {
+    let live = ws_live_registry().lock().map(|set| set.contains(&device.device_id)).unwrap_or(false);
     SyncDeviceView {
+        live,
         device_id: device.device_id,
         origin: device.origin,
         display_name: device.display_name,
@@ -544,6 +567,7 @@ fn reap_service(state: &mut SyncControlState) {
 fn stop_service(state: &mut SyncControlState) {
     state.runtime.take();
     state.service.take();
+    primary_link_live().store(false, std::sync::atomic::Ordering::Release);
 }
 
 fn retry_disconnect_notifications(index_path: &std::path::Path) -> Result<(), String> {
@@ -628,6 +652,7 @@ fn clear_secondary_state(state: &mut SyncControlState) {
 }
 
 fn clear_primary_state(state: &mut SyncControlState) {
+    ws_live_registry().lock().unwrap_or_else(|p| p.into_inner()).clear();
     state.role.clear();
     state.primary_id = None;
     state.endpoint = None;
@@ -831,6 +856,12 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
         return Err("secondary identity does not match the paired device configuration".into());
     }
     let transport = secondary_transport(&config)?;
+    // The heartbeat watchdog proves the primary link dead within one 3 s
+    // cycle; the flag feeds the status snapshots, so the panel flips to
+    // 重试连接 without waiting for a failed poll.
+    transport.set_ws_link_hook(|live| {
+        primary_link_live().store(live, std::sync::atomic::Ordering::Release);
+    });
     state.interrupt.install(&transport);
     let cancellation = transport.cancellation();
     let store = SyncStore::open(&index_path, config.primary_id.clone())
@@ -949,6 +980,23 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     server.set_log_sink(|is_error, message| {
         if is_error { crate::logging::error(message); } else { crate::logging::info(message); }
     }).map_err(|error| format!("cannot configure sync runtime logging: {error}"))?;
+    // Real-time device presence: the hook fires from the WS lifecycle — the
+    // moment an authenticated socket comes up or dies — and both updates the
+    // registry the status snapshots read and pushes the change at the panel
+    // so the online/offline flip never waits for the poll cadence.
+    {
+        let app_for_ws = diagnostics_app.clone();
+        server.set_ws_event_sink(move |device_id, live| {
+            {
+                let mut set = ws_live_registry().lock().unwrap_or_else(|p| p.into_inner());
+                if live { set.insert(device_id.to_string()); } else { set.remove(device_id); }
+            }
+            if let Some(app) = &app_for_ws {
+                use tauri::Emitter;
+                let _ = app.emit("sync-devices-changed", device_id.to_string());
+            }
+        }).map_err(|error| format!("cannot configure ws event sink: {error}"))?;
+    }
     // A pairing request lands in sync_state.db on the service thread, outside
     // any panel command; push the news instead of letting the UI poll for it,
     // and toast the owner — a closed panel must not swallow a device asking
@@ -1582,6 +1630,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let primary_auto_approve_enabled = primary_config.as_ref().is_some_and(|config| config.auto_approve_pairing);
     Ok(SyncDevicesView {
         primary_id,
+        primary_link_live: primary_link_live().load(std::sync::atomic::Ordering::Relaxed),
         primary_display_name: secondary_config.as_ref().and_then(|config| config.primary_display_name.clone()),
         primary_os: secondary_config.as_ref().and_then(|config| config.primary_os.clone()),
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
@@ -1627,6 +1676,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
                         last_generation: None,
                         last_merged_at_ms: config.last_connected_at_ms,
                         snapshot_complete: panel.download_complete.unwrap_or(false),
+                        live: primary_link_live().load(std::sync::atomic::Ordering::Relaxed),
                     };
                     if !devices.iter().any(|d| d.device_id == config.primary_id) {
                         devices.insert(0, primary_device);

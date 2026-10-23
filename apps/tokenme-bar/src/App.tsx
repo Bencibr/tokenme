@@ -90,7 +90,7 @@ const [page, setPage] = useState<PageKey>(() => {
   const [serversLoaded, setServersLoaded] = useState(false);
   const [serversOpen, setServersOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
-  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, primary_display_name: null, primary_os: null, role: "unconfigured", primary_auto_approve_enabled: false, history_init: null, service_running: false, primary_starting: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [] });
+  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, primary_display_name: null, primary_os: null, role: "unconfigured", primary_auto_approve_enabled: false, history_init: null, service_running: false, primary_starting: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, pending: 0, in_flight: 0, pending_bytes: 0, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [], primary_link_live: false });
   // The sheet's own close guard (a running install must not be dismissed) —
   // Escape asks through this ref instead of closing the sheet blind.
   const serverCloseRef = useRef<() => void>(() => {});
@@ -252,6 +252,14 @@ const [page, setPage] = useState<PageKey>(() => {
       setServers(v);
       setServersLoaded(true);
     });
+    // Real-time presence: the primary's WS lifecycle pushes the moment a
+    // device's socket comes up or dies; refetch immediately so the device
+    // rows flip online/offline without waiting for the poll cadence.
+    const unSyncWs = bridge.onSyncDevicesChanged(() => {
+      void bridge.syncDevices().then((v) => {
+        if (alive) setSyncDevices(v);
+      }).catch(() => {});
+    });
     const unSync = bridge.onSyncUpdated(readSyncDevices);
     const un = bridge.onReport((r) => {
       setReport(r);
@@ -277,6 +285,7 @@ const [page, setPage] = useState<PageKey>(() => {
       un();
       unPeriod();
       unServers();
+      unSyncWs();
       unSync();
     };
   }, [readSyncDevices]);

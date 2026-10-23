@@ -55,6 +55,11 @@ function syncStatus(snapshot: SyncDevicesSnapshot): { kind: "running" | "recover
       ? { kind: "degraded", label: t("sync.state.degraded") }
       : { kind: "recovering", label: t("sync.state.recovering") };
   }
+  // The heartbeat watchdog knows the primary link is dead before any poll
+  // can fail — surface it at once instead of waiting out the 5 s cadence.
+  if (snapshot.role === "secondary" && snapshot.service_running && !snapshot.primary_link_live) {
+    return { kind: "recovering", label: t("sync.state.recovering") };
+  }
   if (snapshot.last_error || snapshot.operation_state === "error") return { kind: "error", label: t("sync.state.error") };
   // A fast-accepted start reports operation_state "running" while no service
   // exists yet — without this the retry line claims a connection that was
@@ -533,12 +538,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       device.last_generation != null ? t("sync.device.gen", { n: device.last_generation }) : "",
       device.last_merged_at_ms != null ? t("sync.device.merged", { time: relTime(device.last_merged_at_ms) }) : "",
     ].filter(Boolean).join(" · ");
+    const live = device.role === "secondary" ? device.live : true;
     return (
       <div className="sync-dev" key={device.device_id}>
-        <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : ""}`} aria-hidden="true" />
+        <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : live ? "" : " is-offline"}`} aria-hidden="true" />
         <span className="sync-dev-platform" role="img" aria-label={device.os || "unknown system"} title={device.os || "unknown system"}><IconDevicePlatform os={device.os} size={14} /></span>
         <span className="sync-dev-name" title={hostName}>{hostName}</span>
-        {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : null}
+        {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : device.role === "secondary" && device.status === "paired" && !live ? <code>{t("sync.device.offline")}</code> : null}
         {device.role === "secondary" && device.status === "paired" && deviceMeta ? <span className="sync-dev-when">{deviceMeta}</span> : null}
         <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
           request: isSecondary ? { action: "stop" } : { action: "revoke", device_id: device.device_id },

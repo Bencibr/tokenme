@@ -104,15 +104,32 @@ mod base64_serde {
 
 /// Server-side WebSocket connection handler.
 /// Runs the persistent message loop for a connected secondary client until the socket closes.
+/// `on_live` fires the moment a device authenticates; `on_dead` fires exactly
+/// once when its authenticated socket dies — reset, timeout, protocol error
+/// or clean close — via a drop guard, so every exit path reports.
 pub fn handle_server_websocket<S>(
     mut ws: WebSocket<S>,
     store: Arc<std::sync::Mutex<SyncStore>>,
     now_ms: impl Fn() -> i64,
     stop: &AtomicBool,
+    on_live: &dyn Fn(&str),
+    on_dead: &dyn Fn(&str),
 ) -> Result<(), SyncError>
 where
     S: Read + Write,
 {
+    struct SessionGuard<'a> {
+        device: Option<String>,
+        on_dead: &'a dyn Fn(&str),
+    }
+    impl Drop for SessionGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(device) = &self.device {
+                (self.on_dead)(device);
+            }
+        }
+    }
+    let mut session = SessionGuard { device: None, on_dead };
     let mut authenticated_device: Option<String> = None;
 
     while !stop.load(Ordering::Acquire) {
@@ -141,7 +158,11 @@ where
                     let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
                     process_server_frame(&frame, &mut s, &mut authenticated_device, &now_ms)?
                 };
-                if let Some(resp) = response {
+                if let Some(device) = response.1 {
+                    session.device = Some(device.clone());
+                    on_live(&device);
+                }
+                if let Some(resp) = response.0 {
                     let resp_text = serde_json::to_string(&resp).map_err(|e| SyncError::Protocol(e.to_string()))?;
                     ws.send(Message::Text(resp_text)).map_err(|e| SyncError::Protocol(format!("ws send: {e}")))?;
                 }
@@ -159,7 +180,11 @@ where
                     let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
                     process_server_frame(&frame, &mut s, &mut authenticated_device, &now_ms)?
                 };
-                if let Some(resp) = response {
+                if let Some(device) = response.1 {
+                    session.device = Some(device.clone());
+                    on_live(&device);
+                }
+                if let Some(resp) = response.0 {
                     let resp_text = serde_json::to_string(&resp).map_err(|e| SyncError::Protocol(e.to_string()))?;
                     ws.send(Message::Text(resp_text)).map_err(|e| SyncError::Protocol(format!("ws send: {e}")))?;
                 }
@@ -179,12 +204,14 @@ where
     Ok(())
 }
 
+/// Returns the reply frame plus the device id when this frame authenticated
+/// a session — the caller owns the live-session callbacks.
 fn process_server_frame(
     frame: &WsSyncFrame,
     store: &mut SyncStore,
     authenticated_device: &mut Option<String>,
     now_ms: &impl Fn() -> i64,
-) -> Result<Option<WsSyncFrame>, SyncError> {
+) -> Result<(Option<WsSyncFrame>, Option<String>), SyncError> {
     match frame {
         WsSyncFrame::Auth { device_id, origin: _, display_name: _, version: _ } => {
             let status = match store.ws_device_status(device_id)? {
@@ -197,53 +224,53 @@ fn process_server_frame(
 
             if status == "paired" {
                 *authenticated_device = Some(device_id.clone());
-                Ok(Some(WsSyncFrame::AuthAck {
+                Ok((Some(WsSyncFrame::AuthAck {
                     status: "connected".into(),
                     primary_id,
                     primary_display_name: None,
                     epoch,
                     error: None,
-                }))
+                }), Some(device_id.clone())))
             } else {
-                Ok(Some(WsSyncFrame::AuthAck {
+                Ok((Some(WsSyncFrame::AuthAck {
                     status,
                     primary_id,
                     primary_display_name: None,
                     epoch,
                     error: Some("device is not in paired state".into()),
-                }))
+                }), None))
             }
         }
         WsSyncFrame::Ping { client_time_ms: _ } => {
-            Ok(Some(WsSyncFrame::Pong { server_time_ms: now_ms() }))
+            Ok((Some(WsSyncFrame::Pong { server_time_ms: now_ms() }), None))
         }
-        WsSyncFrame::Pong { .. } => Ok(None),
+        WsSyncFrame::Pong { .. } => Ok((None, None)),
         WsSyncFrame::SyncPush { batch_id, envelope, signature, gzip_bytes } => {
             let Some(device_id) = authenticated_device.as_deref() else {
-                return Ok(Some(WsSyncFrame::SyncAck {
+                return Ok((Some(WsSyncFrame::SyncAck {
                     batch_id: batch_id.clone(),
                     success: false,
                     receipt: None,
                     error: Some("unauthenticated connection; send Auth first".into()),
-                }));
+                }), None));
             };
 
             if envelope.device_id != device_id {
-                return Ok(Some(WsSyncFrame::SyncAck {
+                return Ok((Some(WsSyncFrame::SyncAck {
                     batch_id: batch_id.clone(),
                     success: false,
                     receipt: None,
                     error: Some("envelope device_id does not match authenticated socket".into()),
-                }));
+                }), None));
             }
 
             let Ok(sig): Result<&[u8; 64], _> = signature.as_slice().try_into() else {
-                return Ok(Some(WsSyncFrame::SyncAck {
+                return Ok((Some(WsSyncFrame::SyncAck {
                     batch_id: batch_id.clone(),
                     success: false,
                     receipt: None,
                     error: Some("invalid signature length, expected 64 bytes".into()),
-                }));
+                }), None));
             };
 
             let now = now_ms();
@@ -254,32 +281,32 @@ fn process_server_frame(
                 gzip_bytes.len(),
                 now,
             ) {
-                Ok(receipt) => Ok(Some(WsSyncFrame::SyncAck {
+                Ok(receipt) => Ok((Some(WsSyncFrame::SyncAck {
                     batch_id: batch_id.clone(),
                     success: true,
                     receipt: Some(receipt),
                     error: None,
-                })),
-                Err(err) => Ok(Some(WsSyncFrame::SyncAck {
+                }), None)),
+                Err(err) => Ok((Some(WsSyncFrame::SyncAck {
                     batch_id: batch_id.clone(),
                     success: false,
                     receipt: None,
                     error: Some(err.to_string()),
-                })),
+                }), None)),
             }
         }
         WsSyncFrame::StatusRequest { device_id } => {
             let status = store.ws_device_status(device_id)?.unwrap_or_else(|| "unpaired".into());
-            Ok(Some(WsSyncFrame::StatusResponse {
+            Ok((Some(WsSyncFrame::StatusResponse {
                 primary_id: store.primary_id().to_string(),
                 status,
                 active_stream_id: None,
                 expected_generation: None,
                 server_time_ms: now_ms(),
-            }))
+            }), None))
         }
         WsSyncFrame::SyncAck { .. } | WsSyncFrame::AuthAck { .. } | WsSyncFrame::StatusResponse { .. } | WsSyncFrame::Error { .. } => {
-            Ok(None)
+            Ok((None, None))
         }
     }
 }

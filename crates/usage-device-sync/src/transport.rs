@@ -320,12 +320,30 @@ impl ParsedEndpoint {
     }
 }
 
+impl Drop for Tls13HttpsTransport {
+    fn drop(&mut self) {
+        self.heartbeat_stop.store(true, AtomicOrdering::Release);
+        *lock_recover(&self.ws_client) = None;
+    }
+}
+
 pub struct Tls13HttpsTransport {
     config: HttpsTransportConfig,
     cancel: Arc<AtomicBool>,
     active_sockets: Arc<Mutex<BTreeMap<u64, TcpStream>>>,
     next_socket_id: Arc<AtomicU64>,
     ws_client: Arc<Mutex<Option<(tungstenite::protocol::WebSocket<StreamOwned<ClientConnection, TcpStream>>, ClientSocketGuard)>>>,
+    /// Bumped on every rebuilt socket; the heartbeat watchdog of a dead
+    /// generation exits instead of pinging a replaced socket.
+    ws_generation: Arc<AtomicU64>,
+    /// Stops the heartbeat watchdog on drop so the watchdog's Arc clone
+    /// cannot keep the resident socket — and the peer's view of it — alive
+    /// after the transport is gone.
+    heartbeat_stop: Arc<AtomicBool>,
+    /// Real-time link state for the embedding UI: `false` fires the moment
+    /// the watchdog proves the resident socket dead, `true` the moment a new
+    /// one is up. The panel reads this instead of guessing from poll results.
+    ws_link_hook: Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>>,
 }
 
 /// A TCP stream whose every read/write is bounded by one absolute request
@@ -426,7 +444,28 @@ impl Tls13HttpsTransport {
             active_sockets: Arc::new(Mutex::new(BTreeMap::new())),
             next_socket_id: Arc::new(AtomicU64::new(1)),
             ws_client: Arc::new(Mutex::new(None)),
+            ws_generation: Arc::new(AtomicU64::new(0)),
+            heartbeat_stop: Arc::new(AtomicBool::new(false)),
+            ws_link_hook: Mutex::new(None),
         })
+    }
+
+    /// Stops the heartbeat and closes the resident socket: the watchdog holds
+    /// an Arc clone of the socket slot, so without this an dropped transport
+    /// would leave the connection — and the peer's handler — alive forever.
+    pub fn shutdown_link(&self) {
+        self.heartbeat_stop.store(true, AtomicOrdering::Release);
+        *lock_recover(&self.ws_client) = None;
+    }
+
+    /// Real-time primary-link state for the embedding UI. `false` fires the
+    /// moment the heartbeat watchdog proves the resident socket dead;
+    /// `true` the moment a rebuilt one authenticates.
+    pub fn set_ws_link_hook(
+        &self,
+        hook: impl Fn(bool) + Send + Sync + 'static,
+    ) {
+        *lock_recover(&self.ws_link_hook) = Some(Arc::new(hook));
     }
 
     pub fn config(&self) -> &HttpsTransportConfig {
@@ -508,6 +547,8 @@ impl Tls13HttpsTransport {
                 _ => return Err(TransportError::Protocol("invalid auth ack frame".into())),
             }
             *ws_guard = Some((ws, socket));
+            self.ws_link_live(true);
+            self.spawn_ws_heartbeat();
         }
 
         let Some((ws, _socket)) = ws_guard.as_mut() else {
@@ -523,19 +564,34 @@ impl Tls13HttpsTransport {
         let push_msg = serde_json::to_string(&push_frame).map_err(|e| TransportError::Protocol(e.to_string()))?;
         if let Err(e) = ws.send(tungstenite::Message::Text(push_msg)) {
             *ws_guard = None;
+            self.ws_link_live(false);
             return Err(TransportError::Protocol(format!("ws send failed: {e}")));
         }
 
-        let reply = match ws.read() {
-            Ok(tungstenite::Message::Text(t)) => serde_json::from_str::<crate::ws::WsSyncFrame>(&t)
-                .map_err(|e| TransportError::Protocol(e.to_string()))?,
-            Err(e) => {
-                *ws_guard = None;
-                return Err(TransportError::Protocol(format!("ws read reply failed: {e}")));
-            }
-            _ => {
-                *ws_guard = None;
-                return Err(TransportError::Protocol("unexpected non-text frame for sync ack".into()));
+        // The heartbeat interleaves Ping/Pong frames with pushes; a Pong that
+        // lands between our push and its ack must not kill the leg.
+        let reply = loop {
+            match ws.read() {
+                Ok(tungstenite::Message::Text(t)) => match serde_json::from_str::<crate::ws::WsSyncFrame>(&t) {
+                    Ok(frame @ crate::ws::WsSyncFrame::SyncAck { .. }) => break frame,
+                    Ok(crate::ws::WsSyncFrame::Pong { .. }) | Ok(crate::ws::WsSyncFrame::Ping { .. }) => continue,
+                    Ok(other) => break other,
+                    Err(e) => {
+                        *ws_guard = None;
+                        self.ws_link_live(false);
+                        return Err(TransportError::Protocol(format!("invalid sync ack frame: {e}")));
+                    }
+                },
+                Err(e) => {
+                    *ws_guard = None;
+                    self.ws_link_live(false);
+                    return Err(TransportError::Protocol(format!("ws read reply failed: {e}")));
+                }
+                _ => {
+                    *ws_guard = None;
+                    self.ws_link_live(false);
+                    return Err(TransportError::Protocol("unexpected non-text frame for sync ack".into()));
+                }
             }
         };
 
@@ -574,6 +630,55 @@ impl Tls13HttpsTransport {
     /// next pass's status/download calls always find a free slot.
     pub fn ws_close(&mut self) {
         *lock_recover(&self.ws_client) = None;
+    }
+
+    fn ws_link_live(&self, live: bool) {
+        if let Some(hook) = lock_recover(&self.ws_link_hook).clone() {
+            hook(live);
+        }
+    }
+
+    /// A 3 s Ping/Pong watchdog over the resident socket. The primary dies →
+    /// the Pong read fails within one cycle and the link hook reports `false`
+    /// immediately — the panel never waits for a poll to learn it. Each
+    /// rebuilt socket bumps the generation, so a stale watchdog exits instead
+    /// of pinging a replaced leg; the mutex serializes it against pushes.
+    fn spawn_ws_heartbeat(&self) {
+        let generation = self.ws_generation.fetch_add(1, AtomicOrdering::AcqRel) + 1;
+        let ws_client = Arc::clone(&self.ws_client);
+        let ws_generation = Arc::clone(&self.ws_generation);
+        let cancel = Arc::clone(&self.cancel);
+        let heartbeat_stop = Arc::clone(&self.heartbeat_stop);
+        let hook = lock_recover(&self.ws_link_hook).clone();
+        let _ = std::thread::Builder::new().name("ws-heartbeat".into()).spawn(move || {
+            loop {
+                if cancel.load(AtomicOrdering::Acquire) || heartbeat_stop.load(AtomicOrdering::Acquire) { return; }
+                thread::sleep(Duration::from_secs(3));
+                if ws_generation.load(AtomicOrdering::Acquire) != generation { return; }
+                let outcome = (|ws_client: &Arc<Mutex<Option<(tungstenite::protocol::WebSocket<StreamOwned<ClientConnection, TcpStream>>, ClientSocketGuard)>>>| {
+                    let mut guard = lock_recover(ws_client);
+                    let Some((ws, _)) = guard.as_mut() else { return 0 };
+                    let ping = crate::ws::WsSyncFrame::Ping { client_time_ms: 0 };
+                    let Ok(msg) = serde_json::to_string(&ping).map(tungstenite::Message::Text) else { return 1 };
+                    if ws.send(msg).is_err() { return 1; }
+                    if matches!(ws.read(), Err(_)) { return 1; }
+                    2
+                })(&ws_client);
+                // 0: transport shut the leg down — the watchdog's Arc clone
+                // must not keep it alive, so exit without proving anything.
+                if outcome == 0 { return; }
+                if outcome == 1 {
+                    *lock_recover(&ws_client) = None;
+                    if let Some(hook) = &hook { hook(false); }
+                    return;
+                }
+                if outcome == 1 {
+                    *lock_recover(&ws_client) = None;
+                    if let Some(hook) = &hook { hook(false); }
+                    return;
+                }
+            }
+        });
     }
 
     /// Sends the pairing secret only after TLS1.3 is complete and the peer
@@ -830,6 +935,12 @@ struct ServerContext {
     /// Receives the requesting device's display name.
     pairing_notify: Mutex<Option<Arc<dyn Fn(&str, bool) + Send + Sync>>>,
     disconnect_sink: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
+    /// Live upload-WebSocket sessions by device id. A device is on the list
+    /// from its authenticated WS handshake until its socket dies — the
+    /// embedding UI reads this for real-time online/offline state instead of
+    /// inferring it from poll timestamps.
+    ws_live: Mutex<BTreeMap<String, i64>>,
+    ws_event_sink: Mutex<Option<Arc<dyn Fn(&str, bool) + Send + Sync>>>,
     replay: Mutex<NonceReplayCache>,
 }
 
@@ -1074,6 +1185,8 @@ impl HttpsSyncServer {
             log_sink: Mutex::new(None),
             pairing_notify: Mutex::new(None),
             disconnect_sink: Mutex::new(None),
+            ws_live: Mutex::new(BTreeMap::new()),
+            ws_event_sink: Mutex::new(None),
             replay: Mutex::new(NonceReplayCache::default()),
         };
         Ok(Self { listener, context: Arc::new(context) })
@@ -1092,6 +1205,23 @@ impl HttpsSyncServer {
     ) -> Result<(), TransportError> {
         *lock_recover(&self.context.log_sink) = Some(Arc::new(sink));
         Ok(())
+    }
+
+    /// Real-time upload-WebSocket lifecycle: the hook fires the moment a
+    /// device's authenticated socket comes up (`live = true`) and the moment
+    /// it dies for any reason — reset, timeout, close — (`live = false`). The
+    /// panel renders online/offline from this, never from poll timestamps.
+    pub fn set_ws_event_sink(
+        &self,
+        sink: impl Fn(&str, bool) + Send + Sync + 'static,
+    ) -> Result<(), TransportError> {
+        *lock_recover(&self.context.ws_event_sink) = Some(Arc::new(sink));
+        Ok(())
+    }
+
+    /// The devices with a live authenticated upload socket right now.
+    pub fn ws_live_devices(&self) -> Vec<String> {
+        lock_recover(&self.context.ws_live).keys().cloned().collect()
     }
 
     /// Registers the embedding UI's wake for pairing requests that persist
@@ -1320,6 +1450,28 @@ impl ServerContext {
         }
     }
 
+    /// Records a live authenticated upload socket and wakes the embedding UI.
+    fn ws_mark_live(&self, device_id: &str, now_ms: i64) {
+        lock_recover(&self.ws_live).insert(device_id.to_string(), now_ms);
+        if let Some(hook) = lock_recover(&self.ws_event_sink).clone() {
+            hook(device_id, true);
+        }
+    }
+
+    /// Retires a dead upload socket and wakes the embedding UI. No-op for a
+    /// device that never authenticated (its handshake was refused).
+    fn ws_mark_dead(&self, device_id: &str) {
+        if lock_recover(&self.ws_live).remove(device_id).is_some() {
+            if let Some(hook) = lock_recover(&self.ws_event_sink).clone() {
+                hook(device_id, false);
+            }
+        }
+    }
+
+    fn ws_live_devices(&self) -> Vec<String> {
+        lock_recover(&self.ws_live).keys().cloned().collect()
+    }
+
     fn health(&self) -> &'static str {
         match self.health.load(AtomicOrdering::Acquire) {
             HEALTH_READY => "ready",
@@ -1381,7 +1533,9 @@ impl ServerContext {
             let ws = tungstenite::accept(prefixed).map_err(|e| TransportError::Protocol(format!("ws accept: {e}")))?;
             self.log_event(false, "sync: action=ws_connect outcome=ok");
             let store = Arc::clone(&self.store);
-            crate::ws::handle_server_websocket(ws, store, now_ms, &self.cancel).map_err(TransportError::State)?;
+            let on_live = |device: &str| self.ws_mark_live(device, now_ms());
+            let on_dead = |device: &str| self.ws_mark_dead(device);
+            crate::ws::handle_server_websocket(ws, store, now_ms, &self.cancel, &on_live, &on_dead).map_err(TransportError::State)?;
             return Ok(());
         }
         if head.known_path.is_some() && head.wire_version.is_none_or(|(major, _)| major != WIRE_VERSION_MAJOR) {
@@ -3372,6 +3526,42 @@ mod tests {
         // errors out and the accept loop can return.
         drop(client);
         assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn ws_lifecycle_reports_live_and_dead_in_real_time() {
+        let cert = cert();
+        let device = DeviceIdentity::create("ws-lifecycle", "macOS").unwrap();
+        let (store, upload) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let events: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        server.set_ws_event_sink(move |device_id, live| {
+            sink.lock().unwrap().push((device_id.to_string(), live));
+        }).unwrap();
+        let handle = thread::spawn(move || server.run_connections_concurrent(1));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        let receipt = client.ws_upload(&upload).unwrap();
+        assert_eq!(receipt.inserted, 1);
+        // The authenticated handshake reported the device live…
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let live_events = events.lock().unwrap().clone();
+            if live_events.iter().any(|(id, live)| *id == device.device_id && *live) { break; }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(events.lock().unwrap().iter().any(|(id, live)| *id == device.device_id && *live), "auth must mark the device live");
+        // …and dropping the transport kills the socket, which reports it dead.
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let all = events.lock().unwrap().clone();
+            if all.iter().any(|(id, live)| *id == device.device_id && !*live) { break; }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(events.lock().unwrap().iter().any(|(id, live)| *id == device.device_id && !*live), "socket death must mark the device dead");
+        let _ = handle.join();
     }
 
     #[test]
