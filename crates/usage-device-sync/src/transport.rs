@@ -2556,6 +2556,10 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        // `run_connections` handles the connection inline, and a WebSocket
+        // lives until its peer hangs up: drop the client so the server's read
+        // errors out and the accept loop can return.
+        drop(client);
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -2737,6 +2741,10 @@ mod tests {
         sender.ack_outbox("sender-runtime", outbox_id, &receipt, 2).unwrap();
         assert_eq!(sender.outbox_summary().unwrap().pending, 0);
         assert_eq!(sender.outbox_summary().unwrap().in_flight, 0);
+        // `run_connections` handles the connection inline, and a WebSocket
+        // lives until its peer hangs up: drop the client so the server's read
+        // errors out and the accept loop can return.
+        drop(client);
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -2856,6 +2864,9 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        // The WebSocket lives until its peer hangs up: drop the client so the
+        // server's read errors out and the accept loop can return.
+        drop(client);
         assert!(handle.join().unwrap().is_ok(), "a request-scoped store failure must not stop the listener");
     }
 
@@ -2877,6 +2888,9 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        // The WebSocket lives until its peer hangs up: drop the client so the
+        // server's read errors out and the accept loop can return.
+        drop(client);
         assert!(handle.join().unwrap().is_ok(), "a panicking handler must not stop the listener");
     }
 
@@ -2898,6 +2912,9 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        // The WebSocket lives until its peer hangs up: drop the client so the
+        // server's read errors out and the accept loop can return.
+        drop(client);
         assert!(handle.join().unwrap().is_ok(), "a poisoned lock must not take the listener down");
     }
 
@@ -2918,6 +2935,10 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        // `run_connections` handles the connection inline, and a WebSocket
+        // lives until its peer hangs up: drop the client so the server's read
+        // errors out and the accept loop can return.
+        drop(client);
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -3309,6 +3330,10 @@ mod tests {
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
         let receipt = client.ws_upload(&upload).unwrap();
         assert_eq!(receipt.inserted, 1);
+        // `run_connections` handles the connection inline, and a WebSocket
+        // lives until its peer hangs up: drop the client so the server's read
+        // errors out and the accept loop can return.
+        drop(client);
         assert!(handle.join().unwrap().is_ok());
     }
 

@@ -236,6 +236,12 @@ impl SyncRuntime {
         }
         let mut total = RuntimeRunReport::default();
         let mut consecutive_errors = 0_u32;
+        // The first pass and every timed pass ingest local sources; the
+        // bounded catch-up continuations skip it. During an initial-snapshot
+        // backfill no new local bytes exist to read, and on a large index the
+        // scan dominated every continuation — one snapshot generation per
+        // ~20 s measured on a seeded Windows secondary.
+        let mut timed_pass = true;
         while !stop.load(Ordering::Acquire) {
             self.occurrence_init_progressed = false;
             self.primary_download_progressed = false;
@@ -246,9 +252,11 @@ impl SyncRuntime {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
                 return Err(SyncError::Security("sync scheduler lease was lost before preparing the next pass".into()));
             }
-            if let Err(error) = ingest(&mut self.store) {
-                let _ = self.store.release_scheduler_lease(&self.config.owner);
-                return Err(error);
+            if timed_pass {
+                if let Err(error) = ingest(&mut self.store) {
+                    let _ = self.store.release_scheduler_lease(&self.config.owner);
+                    return Err(error);
+                }
             }
             let mut catchup_complete = true;
             let pass = match self.prepare_secondary(&mut now_ms) {
@@ -297,14 +305,19 @@ impl SyncRuntime {
             }
             if stop.load(Ordering::Acquire) { break; }
             // Continue bounded local or remote snapshot catch-up immediately;
-            // idle passes stay on the normal poll cadence.
+            // idle passes stay on the normal poll cadence. A continuation
+            // skips the ingest scan (see `timed_pass` above): nothing new can
+            // have landed mid-backfill, and the scan was the dominant cost of
+            // every continuation pass.
             if !catchup_complete
                 && (pass.acknowledged > 0 || pass_had_occurrence_progress || pass_had_primary_download_progress)
                 && !pass_had_error
                 && !pass_had_no_claim_with_pending
             {
+                timed_pass = false;
                 continue;
             }
+            timed_pass = true;
             let started = std::time::Instant::now();
             let interval = idle_interval(self.config.poll_interval, self.primary_download_preparing, pass_had_error, consecutive_errors);
             // The timed pass is the one that discovers new primary data; the
