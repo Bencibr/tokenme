@@ -296,7 +296,7 @@ pub(crate) fn sql_err(e: rusqlite::Error) -> Error {
 /// under its origin, and everything else is this machine (`''`). A `linux:`
 /// without a second colon was never written by a merge, so it stays local
 /// rather than inventing an origin.
-pub(crate) const ORIGIN_SQL: &str = "\
+pub const ORIGIN_SQL: &str = "\
 CASE WHEN substr(source, 1, 6) = 'linux:' AND instr(substr(source, 7), ':') > 0 \
      THEN substr(source, 7, instr(substr(source, 7), ':') - 1) \
      ELSE '' END";

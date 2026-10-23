@@ -443,6 +443,9 @@ export interface SyncDevicesSnapshot {
   primary_data_sharing_enabled: boolean;
   /** Primary only: pairing requests are approved on arrival while on. */
   primary_auto_approve_enabled: boolean;
+  /** Secondary only: one-time history materialization progress as
+   *  [last processed event id, max local event id]; null on a primary. */
+  history_init: [number, number] | null;
   service_health: string | null;
   endpoint: string | null;
   certificate_pin: string | null;

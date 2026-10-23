@@ -35,11 +35,17 @@ const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 4;
 // four pages per pass pay at most 600 ms of it against per-page network
 // fetches and the five-second poll cadence.
 const DOWNLOAD_PAGE_ENGINE_YIELD: Duration = Duration::from_millis(200);
-// A fresh backup can owe tens of thousands of identity rows. One 256-row batch
-// per five-second poll left the first sync materializing for half an hour, so
-// each pass runs a few batches while it is already holding the index lock.
-const HISTORY_INIT_BATCHES_PER_PASS: usize = 4;
+// A fresh backup can owe hundreds of thousands of identity rows. One 256-row
+// batch per five-second poll left the first sync materializing for half an
+// hour on a 500k-event index (~200 rows/s), so each pass runs many larger
+// batches with an engine-yield between them — the same courtesy the download
+// burst pays: ~5k rows/s while the panel's publish cycle still wins the
+// writer inside every yield window.
+const HISTORY_INIT_BATCHES_PER_PASS: usize = 16;
+// ensure_sync_occurrences_page hard-caps a batch at 256 rows; the speedup
+// comes from running 16 of them per pass, not from bigger batches.
 const HISTORY_INIT_BATCH_ROWS: usize = 256;
+const HISTORY_INIT_ENGINE_YIELD: Duration = Duration::from_millis(100);
 // While the primary materializes historical identities it serves an empty
 // preparing page. Poll that state like a progress bar: fast enough to finish
 // initialization promptly, slow enough that the secondary is not a busy loop.
@@ -601,6 +607,10 @@ impl SyncRuntime {
                     break;
                 }
                 self.occurrence_init_progressed = true;
+                // Hand the writer to the engine between batches — the
+                // materialization is worth minutes, the panel's publish cycle
+                // must not starve for any of them (see DOWNLOAD_PAGE_ENGINE_YIELD).
+                std::thread::sleep(HISTORY_INIT_ENGINE_YIELD);
             }
             complete
         };
@@ -1296,7 +1306,18 @@ mod tests {
             "SELECT value FROM meta WHERE key = 'device_sync_occurrence_init_event_id'",
             [], |row| row.get::<_, String>(0),
         ).unwrap().parse().unwrap();
-        assert_eq!(initialized_to, (usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4) as i64);
+        // 16 batches per pass catch the small fixture up in one pass: the
+        // cursor must sit at the last local event. The live dirty row's
+        // import created the final identity before this read.
+        // One pass with 16 batches maps the whole fixture: no local-origin
+        // event may remain without an identity row (the live dirty row came
+        // pre-materialized, so it never enters the walk).
+        let missing: bool = runtime.store().index().conn()
+            .query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM event e LEFT JOIN sync_event_identity i ON i.event_id = e.id WHERE ({}) = '' AND i.event_id IS NULL)", usage_index::ORIGIN_SQL),
+                [], |row| row.get(0),
+            ).unwrap();
+        assert!(!missing, "one pass maps the whole fixture");
         let config = runtime.store().secondary_config().unwrap().unwrap();
         assert!(!runtime.store().snapshot_cursor(&config).unwrap().complete);
         assert!(server_thread.join().unwrap().is_ok());

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use usage_core::{origin_of, origin_ok};
-use usage_index::{Index, INDEX_SCHEMA_VERSION};
+use usage_index::{Index, INDEX_SCHEMA_VERSION, ORIGIN_SQL};
 
 use crate::protocol::{
     hash_bytes, identity_bytes, network_event_key, public_key_from_bytes, valid_text,
@@ -438,6 +438,10 @@ pub struct DeviceSyncRead {
     pub disconnect_requested: bool,
     pub upload_complete: Option<bool>,
     pub download_complete: Option<bool>,
+    /// Secondary only: the one-time history materialization progress as
+    /// (last processed event id, max local-origin event id). `None` on a
+    /// primary, without an index, or when there is nothing to materialize.
+    pub occurrence_init: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -833,7 +837,34 @@ impl SyncStore {
             read.upload_complete = upload_cursor_complete_conn(&index, config);
             read.download_complete = download_cursor_complete_conn(&index, &config.primary_id);
         }
+        read.occurrence_init = if read.secondary_config.is_some() {
+            Self::occurrence_init_progress_conn(&index)
+        } else {
+            None
+        };
         Ok(read)
+    }
+
+    /// One-time history-materialization progress for the panel's progress row.
+    /// The materializer walks local-origin events by id and records its cursor
+    /// in meta, so (cursor, max local id) is the honest pair; both reads are
+    /// bounded index scans on the read-only connection the poll already holds.
+    fn occurrence_init_progress_conn(index: &Connection) -> Option<(i64, i64)> {
+        let has_event: bool = index.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'event')",
+            [], |row| row.get(0),
+        ).ok()?;
+        if !has_event { return None; }
+        let total: i64 = index.query_row(
+            &format!("SELECT COALESCE(MAX(id), 0) FROM event WHERE ({ORIGIN_SQL}) = ''"),
+            [], |row| row.get(0),
+        ).ok()?;
+        if total == 0 { return None; }
+        let done: i64 = index.query_row(
+            "SELECT COALESCE((SELECT value FROM meta WHERE key = 'device_sync_occurrence_init_event_id'), '0')",
+            [], |row| row.get::<_, String>(0),
+        ).ok().and_then(|value| value.parse().ok()).unwrap_or(0);
+        Some((done.min(total), total))
     }
 
     /// Read the persisted secondary configuration without migrating or
