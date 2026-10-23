@@ -2235,6 +2235,7 @@ mod tests {
             primary_starting: false,
             primary_data_sharing_enabled: false,
             primary_auto_approve_enabled: false,
+            history_init: None,
             service_health: Some("stopped".into()),
             endpoint: Some("https://127.0.0.1:47821".into()),
             certificate_pin: Some("a".repeat(64)),
