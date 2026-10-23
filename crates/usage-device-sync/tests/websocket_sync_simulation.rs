@@ -1,10 +1,11 @@
 //! Comprehensive WebSocket multi-device sync simulation test suite.
 //!
 //! Validates end-to-end:
-//! 1. Primary-Secondary full WebSocket cycle (Auth, Ping/Pong, Delta SyncPush/Ack, StatusRequest).
+//! 1. Primary-Secondary full WebSocket cycle (Auth, Ping/Pong, RollupSync/RollupAck, StatusRequest).
 //! 2. Unpaired / unauthorized secondary rejection.
-//! 3. Multi-secondary concurrent WebSocket sync (multiple distinct secondary devices streaming in parallel).
-//! 4. Secondary reconnect and multi-generation incremental sync.
+//! 3. Multi-secondary concurrent WebSocket sync (multiple distinct secondary devices streaming rollups in parallel).
+//! 4. Secondary reconnect and successive full-snapshot rollup pushes.
+//! 5. Stale-frame rejection and full-replace rollup semantics.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,9 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
 use usage_device_sync::{
     deliver_disconnect_notice, hash_bytes, DeviceIdentity, DeviceStatus, HttpsServerConfig,
-    HttpsSyncServer, HttpsTransportConfig, NetworkCounts, NetworkPackage, NetworkRow,
-    PairingRequest, SecondarySyncConfig, SignedUpload, SyncStore, Tls13HttpsTransport,
-    UploadEnvelope, WsSyncFrame, PROTOCOL_ID, WS_PROTOCOL_VERSION,
+    HttpsSyncServer, HttpsTransportConfig, PairingRequest, RollupRow, RollupSnapshot,
+    SecondarySyncConfig, SyncStore, Tls13HttpsTransport, WsSyncFrame, WS_PROTOCOL_VERSION,
 };
 
 struct CertFixture {
@@ -71,55 +71,41 @@ fn pair_secondary(store: &mut SyncStore, device: &DeviceIdentity, _primary_id: &
     stream.stream_id
 }
 
-fn build_signed_upload(
-    device: &DeviceIdentity,
-    primary_id: &str,
-    stream_id: &str,
-    generation: u64,
-    tool: &str,
-    row_count: usize,
-) -> SignedUpload {
-    let rows: Vec<NetworkRow> = (0..row_count)
-        .map(|i| NetworkRow {
-            key: Some(format!("key-{tool}-{generation}-{i}")),
-            occurrence_id: None,
-            tool: tool.into(),
-            ts_ms: 1000 + i as i64,
-            session: format!("session-{tool}-{generation}"),
-            project: Some("project-tokenme".into()),
-            model: Some("gpt-4o".into()),
+/// The rows a secondary ships: its local-origin aggregate, so each row's own
+/// `origin` is empty by construction and the primary resolves the label from
+/// the device registry.
+fn rollup_rows(count: usize) -> Vec<RollupRow> {
+    rollup_rows_on("2026-10", count)
+}
+
+/// Rows sharing one day prefix but distinct day numbers, so no two rows of a
+/// snapshot collide on the remote_rollup primary key.
+fn rollup_rows_on(month: &str, count: usize) -> Vec<RollupRow> {
+    (0..count)
+        .map(|i| RollupRow {
+            day: format!("{month}-{:02}", 10 + i),
+            origin: String::new(),
+            tool: "codex".into(),
+            session: "session".into(),
+            project: "project-tokenme".into(),
+            model: "gpt-5".into(),
             meter: "tokens".into(),
-            source: "local".into(),
-            counts: NetworkCounts::all_zero(),
-            calls: vec![],
+            in_tok: 100.0,
+            cc_tok: 0.0,
+            cr_tok: 0.0,
+            out_tok: 50.0,
+            reason_tok: 0.0,
+            credits: 0.0,
+            n: 3,
+            nonzero: 2,
+            min_ts: 1000 + i as i64,
+            max_ts: 2000 + i as i64,
         })
-        .collect();
+        .collect()
+}
 
-    let min_ts = 1000;
-    let max_ts = 1000 + row_count as i64 + 100;
-    let pkg = NetworkPackage::from_rows(
-        device.origin.clone(),
-        usage_index::INDEX_SCHEMA_VERSION,
-        min_ts,
-        max_ts,
-        &rows,
-        10,
-    )
-    .unwrap();
-
-    let envelope = UploadEnvelope {
-        protocol_id: PROTOCOL_ID.into(),
-        primary_id: primary_id.into(),
-        device_id: device.device_id.clone(),
-        origin: device.origin.clone(),
-        stream_id: stream_id.into(),
-        data_epoch: 1,
-        generation,
-        manifest_bytes: pkg.manifest_bytes,
-        gzip_sha256: hash_bytes(&pkg.gzip_bytes),
-    };
-
-    SignedUpload::sign(envelope, &device.signing_key, pkg.gzip_bytes).unwrap()
+fn rollup_snapshot(origin: &str, count: usize) -> RollupSnapshot {
+    RollupSnapshot { origin: origin.into(), rows: rollup_rows(count) }
 }
 
 #[test]
@@ -130,7 +116,7 @@ fn test_primary_secondary_ws_full_cycle() {
     let mut store = SyncStore::open_in_memory(primary_id).unwrap();
 
     let secondary = DeviceIdentity::create("sec-node-1", "macOS-Client").unwrap();
-    let stream_id = pair_secondary(&mut store, &secondary, primary_id);
+    let _stream_id = pair_secondary(&mut store, &secondary, primary_id);
 
     let config = setup_server_config(&cert, staging, 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
@@ -194,14 +180,8 @@ fn test_primary_secondary_ws_full_cycle() {
         other => panic!("expected text frame, got {other:?}"),
     }
 
-    // 3. Delta SyncPush / SyncAck
-    let upload = build_signed_upload(&secondary, primary_id, &stream_id, 1, "claude-code", 10);
-    let push = WsSyncFrame::SyncPush {
-        batch_id: format!("{}-1", secondary.device_id),
-        envelope: upload.envelope,
-        signature: upload.signature.to_vec(),
-        gzip_bytes: upload.gzip_bytes,
-    };
+    // 3. Symmetric rollup uplink: RollupSync / RollupAck
+    let push = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&secondary.origin, 10) };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&push).unwrap())).unwrap();
 
     let sync_ack_msg = ws.read().unwrap();
@@ -209,14 +189,12 @@ fn test_primary_secondary_ws_full_cycle() {
         tungstenite::Message::Text(text) => {
             let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
             match frame {
-                WsSyncFrame::SyncAck { success, receipt, error, .. } => {
-                    assert!(success, "sync push should succeed: {error:?}");
-                    let rc = receipt.expect("expected receipt");
-                    assert_eq!(rc.rows, 10);
-                    assert_eq!(rc.inserted, 10);
-                    assert_eq!(rc.generation, 1);
+                WsSyncFrame::RollupAck { origin, accepted, n } => {
+                    assert!(accepted, "rollup push should succeed");
+                    assert_eq!(origin, secondary.origin, "the ack resolves the device's registry origin");
+                    assert_eq!(n, 10);
                 }
-                other => panic!("expected SyncAck, got {other:?}"),
+                other => panic!("expected RollupAck, got {other:?}"),
             }
         }
         other => panic!("expected text frame, got {other:?}"),
@@ -307,16 +285,13 @@ fn test_multi_secondary_concurrent_websocket_sync() {
 
     let num_secondaries = 4;
     let mut secondaries = Vec::new();
-    let mut stream_ids = Vec::new();
 
-    let tools = ["codex", "cline", "claude-code", "antigravity"];
     let row_counts = [5, 8, 12, 15];
 
     for i in 0..num_secondaries {
         let sec = DeviceIdentity::create(&format!("sec-node-{i}"), &format!("OS-{i}")).unwrap();
-        let sid = pair_secondary(&mut store, &sec, primary_id);
+        let _sid = pair_secondary(&mut store, &sec, primary_id);
         secondaries.push(sec);
-        stream_ids.push(sid);
     }
 
     let config = setup_server_config(&cert, staging, 16);
@@ -331,8 +306,6 @@ fn test_multi_secondary_concurrent_websocket_sync() {
 
     for i in 0..num_secondaries {
         let sec = secondaries[i].clone();
-        let stream_id = stream_ids[i].clone();
-        let tool = tools[i];
         let count = row_counts[i];
         let cert_der = cert.cert_der.clone();
         let port = addr.port();
@@ -376,14 +349,8 @@ fn test_multi_secondary_concurrent_websocket_sync() {
             let pong = ws.read().unwrap();
             assert!(matches!(pong, tungstenite::Message::Text(_)));
 
-            // 3. SyncPush
-            let upload = build_signed_upload(&sec, "primary-concurrent-hub", &stream_id, 1, tool, count);
-            let push = WsSyncFrame::SyncPush {
-                batch_id: format!("{}-{}-1", sec.device_id, tool),
-                envelope: upload.envelope,
-                signature: upload.signature.to_vec(),
-                gzip_bytes: upload.gzip_bytes,
-            };
+            // 3. RollupSync
+            let push = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, count) };
             ws.send(tungstenite::Message::Text(serde_json::to_string(&push).unwrap())).unwrap();
 
             let reply = ws.read().unwrap();
@@ -391,13 +358,12 @@ fn test_multi_secondary_concurrent_websocket_sync() {
                 tungstenite::Message::Text(text) => {
                     let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
                     match frame {
-                        WsSyncFrame::SyncAck { success, receipt, error, .. } => {
-                            assert!(success, "secondary {i} push failed: {error:?}");
-                            let r = receipt.expect("receipt missing");
-                            assert_eq!(r.rows, count as u64);
-                            assert_eq!(r.inserted, count as u64);
+                        WsSyncFrame::RollupAck { origin, accepted, n } => {
+                            assert!(accepted, "secondary {i} push failed");
+                            assert_eq!(origin, sec.origin, "secondary {i} rows must land under its registry origin");
+                            assert_eq!(n, count);
                         }
-                        other => panic!("client {i} expected SyncAck, got {other:?}"),
+                        other => panic!("client {i} expected RollupAck, got {other:?}"),
                     }
                 }
                 _other => panic!("expected text frame"),
@@ -426,7 +392,7 @@ fn test_secondary_reconnect_and_sequential_batches() {
     let mut store = SyncStore::open_in_memory(primary_id).unwrap();
 
     let sec = DeviceIdentity::create("sec-persistent", "Desktop-Workstation").unwrap();
-    let stream_id = pair_secondary(&mut store, &sec, primary_id);
+    let _stream_id = pair_secondary(&mut store, &sec, primary_id);
 
     let config = setup_server_config(&cert, staging, 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
@@ -435,7 +401,7 @@ fn test_secondary_reconnect_and_sequential_batches() {
     // Server serves 2 successive connections from the same secondary
     let server_handle = thread::spawn(move || server.run_connections(2));
 
-    // Session 1: Push batch 1 (generation 1)
+    // Session 1: Push snapshot 1
     {
         let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()),
@@ -455,13 +421,7 @@ fn test_secondary_reconnect_and_sequential_batches() {
         ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
         let _ = ws.read().unwrap(); // AuthAck
 
-        let upload1 = build_signed_upload(&sec, primary_id, &stream_id, 1, "codex", 7);
-        let push1 = WsSyncFrame::SyncPush {
-            batch_id: "batch-gen-1".into(),
-            envelope: upload1.envelope,
-            signature: upload1.signature.to_vec(),
-            gzip_bytes: upload1.gzip_bytes,
-        };
+        let push1 = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, 7) };
         ws.send(tungstenite::Message::Text(serde_json::to_string(&push1).unwrap())).unwrap();
 
         let ack1 = ws.read().unwrap();
@@ -469,13 +429,12 @@ fn test_secondary_reconnect_and_sequential_batches() {
             tungstenite::Message::Text(text) => {
                 let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
                 match frame {
-                    WsSyncFrame::SyncAck { success, receipt, .. } => {
-                        assert!(success);
-                        let r = receipt.unwrap();
-                        assert_eq!(r.generation, 1);
-                        assert_eq!(r.inserted, 7);
+                    WsSyncFrame::RollupAck { origin, accepted, n } => {
+                        assert!(accepted);
+                        assert_eq!(origin, sec.origin);
+                        assert_eq!(n, 7);
                     }
-                    other => panic!("expected SyncAck, got {other:?}"),
+                    other => panic!("expected RollupAck, got {other:?}"),
                 }
             }
             _ => panic!("expected text"),
@@ -485,7 +444,7 @@ fn test_secondary_reconnect_and_sequential_batches() {
         let _ = ws.close(None);
     }
 
-    // Session 2: Reconnect on fresh WebSocket, Push batch 2 (generation 2)
+    // Session 2: Reconnect on fresh WebSocket, push snapshot 2
     {
         let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()),
@@ -505,13 +464,7 @@ fn test_secondary_reconnect_and_sequential_batches() {
         ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
         let _ = ws.read().unwrap(); // AuthAck
 
-        let upload2 = build_signed_upload(&sec, primary_id, &stream_id, 2, "codex", 9);
-        let push2 = WsSyncFrame::SyncPush {
-            batch_id: "batch-gen-2".into(),
-            envelope: upload2.envelope,
-            signature: upload2.signature.to_vec(),
-            gzip_bytes: upload2.gzip_bytes,
-        };
+        let push2 = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, 9) };
         ws.send(tungstenite::Message::Text(serde_json::to_string(&push2).unwrap())).unwrap();
 
         let ack2 = ws.read().unwrap();
@@ -519,13 +472,12 @@ fn test_secondary_reconnect_and_sequential_batches() {
             tungstenite::Message::Text(text) => {
                 let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
                 match frame {
-                    WsSyncFrame::SyncAck { success, receipt, .. } => {
-                        assert!(success);
-                        let r = receipt.unwrap();
-                        assert_eq!(r.generation, 2);
-                        assert_eq!(r.inserted, 9);
+                    WsSyncFrame::RollupAck { origin, accepted, n } => {
+                        assert!(accepted);
+                        assert_eq!(origin, sec.origin);
+                        assert_eq!(n, 9);
                     }
-                    other => panic!("expected SyncAck, got {other:?}"),
+                    other => panic!("expected RollupAck, got {other:?}"),
                 }
             }
             _ => panic!("expected text"),
@@ -538,14 +490,14 @@ fn test_secondary_reconnect_and_sequential_batches() {
 }
 
 #[test]
-fn test_corrupted_sync_data_auto_rejection_and_clean_recovery() {
+fn test_stale_sync_push_rejected_and_clean_recovery() {
     let cert = generate_cert();
-    let primary_id = "primary-corrupt-test";
-    let staging = staging_path("corrupt-recovery");
+    let primary_id = "primary-stale-test";
+    let staging = staging_path("stale-recovery");
     let mut store = SyncStore::open_in_memory(primary_id).unwrap();
 
-    let sec = DeviceIdentity::create("sec-faulty", "Faulty-Device").unwrap();
-    let stream_id = pair_secondary(&mut store, &sec, primary_id);
+    let sec = DeviceIdentity::create("sec-stale", "Stale-Device").unwrap();
+    let _stream_id = pair_secondary(&mut store, &sec, primary_id);
 
     let config = setup_server_config(&cert, staging, 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
@@ -566,7 +518,7 @@ fn test_corrupted_sync_data_auto_rejection_and_clean_recovery() {
     let auth = WsSyncFrame::Auth {
         device_id: sec.device_id.clone(),
         origin: sec.origin.clone(),
-        display_name: "Faulty Device".into(),
+        display_name: "Stale Device".into(),
         version: WS_PROTOCOL_VERSION.into(),
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
@@ -576,58 +528,38 @@ fn test_corrupted_sync_data_auto_rejection_and_clean_recovery() {
         WsSyncFrame::AuthAck { status, .. } if status == "connected"
     ));
 
-    // 2. Transmit deliberately corrupted data (corrupted gzip payload)
-    let valid_upload = build_signed_upload(&sec, primary_id, &stream_id, 1, "cursor", 5);
-    let corrupted_push = WsSyncFrame::SyncPush {
-        batch_id: "batch-corrupted-1".into(),
-        envelope: valid_upload.envelope.clone(),
-        signature: valid_upload.signature.to_vec(),
-        gzip_bytes: vec![0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0x00, 0x01, 0x02], // Garbage payload
-    };
-    ws.send(tungstenite::Message::Text(serde_json::to_string(&corrupted_push).unwrap())).unwrap();
+    // 2. Transmit the retired row-level package frame: unknown wire now.
+    let stale_push = r#"{"type":"sync_push","batch_id":"batch-stale","envelope":null,"signature":[],"gzip_bytes":""}"#;
+    ws.send(tungstenite::Message::Text(stale_push.into())).unwrap();
 
-    // 3. Verify Primary immediately rejects corrupted batch without corrupting database
+    // 3. Verify the primary answers the standard error shape without killing
+    // the session or corrupting the database.
     let reject_ack = ws.read().unwrap();
     let reject_frame: WsSyncFrame = serde_json::from_str(reject_ack.to_text().unwrap()).unwrap();
     match reject_frame {
-        WsSyncFrame::SyncAck { success, error, receipt, .. } => {
-            assert!(!success, "corrupted batch MUST be rejected");
-            assert!(receipt.is_none(), "no receipt should be generated for corrupted data");
-            let err_msg = error.expect("descriptive error required");
+        WsSyncFrame::Error { message } => {
             assert!(
-                err_msg.to_ascii_lowercase().contains("gzip")
-                    || err_msg.to_ascii_lowercase().contains("decompression")
-                    || err_msg.to_ascii_lowercase().contains("crc")
-                    || err_msg.to_ascii_lowercase().contains("invalid")
-                    || err_msg.to_ascii_lowercase().contains("corrupt")
-                    || err_msg.to_ascii_lowercase().contains("read package")
-                    || err_msg.to_ascii_lowercase().contains("end of file"),
-                "error message should indicate payload corruption: {err_msg}"
+                message.to_ascii_lowercase().contains("invalid frame"),
+                "error message should indicate an unknown frame: {message}"
             );
         }
-        other => panic!("expected SyncAck rejection, got {other:?}"),
+        other => panic!("expected the wire error frame, got {other:?}"),
     }
 
-    // 4. Exception recovery: discard erroneous data, push clean uncorrupted batch
-    let clean_push = WsSyncFrame::SyncPush {
-        batch_id: "batch-clean-1".into(),
-        envelope: valid_upload.envelope,
-        signature: valid_upload.signature.to_vec(),
-        gzip_bytes: valid_upload.gzip_bytes,
-    };
+    // 4. Recovery: the same session accepts the symmetric rollup uplink.
+    let clean_push = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, 5) };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&clean_push).unwrap())).unwrap();
 
-    // 5. Verify Primary accepts the clean recovered batch
+    // 5. Verify the primary accepts the recovered snapshot.
     let recovery_ack = ws.read().unwrap();
     let recovery_frame: WsSyncFrame = serde_json::from_str(recovery_ack.to_text().unwrap()).unwrap();
     match recovery_frame {
-        WsSyncFrame::SyncAck { success, receipt, error, .. } => {
-            assert!(success, "clean recovered batch must succeed: {error:?}");
-            let r = receipt.unwrap();
-            assert_eq!(r.generation, 1);
-            assert_eq!(r.inserted, 5);
+        WsSyncFrame::RollupAck { origin, accepted, n } => {
+            assert!(accepted, "clean recovered snapshot must succeed");
+            assert_eq!(origin, sec.origin);
+            assert_eq!(n, 5);
         }
-        other => panic!("expected SyncAck success, got {other:?}"),
+        other => panic!("expected RollupAck success, got {other:?}"),
     }
 
     // 6. Verify health and status over the WebSocket session remains normal
@@ -648,16 +580,17 @@ fn test_corrupted_sync_data_auto_rejection_and_clean_recovery() {
 }
 
 #[test]
-fn test_conflicting_desynchronization_triggers_reconcile() {
+fn test_repeated_rollup_sync_lands_rows_under_registry_origin() {
     let cert = generate_cert();
-    let primary_id = "primary-conflict-test";
-    let staging = staging_path("conflict-reconcile");
-    let mut store = SyncStore::open_in_memory(primary_id).unwrap();
+    let primary_id = "primary-replace-test";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let index_path = temp_dir.path().join("index.db");
+    let mut store = SyncStore::open(&index_path, primary_id).unwrap();
 
-    let sec = DeviceIdentity::create("sec-conflict", "Conflict-Device").unwrap();
-    let stream_id = pair_secondary(&mut store, &sec, primary_id);
+    let sec = DeviceIdentity::create("sec-replace", "Replace-Device").unwrap();
+    let _stream_id = pair_secondary(&mut store, &sec, primary_id);
 
-    let config = setup_server_config(&cert, staging, 4);
+    let config = setup_server_config(&cert, temp_dir.path().join("staging"), 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
     let addr = server.local_addr().unwrap();
 
@@ -676,64 +609,52 @@ fn test_conflicting_desynchronization_triggers_reconcile() {
     let auth = WsSyncFrame::Auth {
         device_id: sec.device_id.clone(),
         origin: sec.origin.clone(),
-        display_name: "Conflict Device".into(),
+        display_name: "Replace Device".into(),
         version: WS_PROTOCOL_VERSION.into(),
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
     let _ = ws.read().unwrap(); // AuthAck
 
-    // 2. Upload valid generation 1
-    let gen1 = build_signed_upload(&sec, primary_id, &stream_id, 1, "codex", 3);
-    let push1 = WsSyncFrame::SyncPush {
-        batch_id: "batch-gen-1".into(),
-        envelope: gen1.envelope,
-        signature: gen1.signature.to_vec(),
-        gzip_bytes: gen1.gzip_bytes,
+    // 2. Push a first 3-row snapshot
+    let push1 = WsSyncFrame::RollupSync {
+        snapshot: RollupSnapshot { origin: sec.origin.clone(), rows: rollup_rows_on("2026-11", 3) },
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&push1).unwrap())).unwrap();
     let ack1 = ws.read().unwrap();
     assert!(matches!(
         serde_json::from_str::<WsSyncFrame>(ack1.to_text().unwrap()).unwrap(),
-        WsSyncFrame::SyncAck { success: true, .. }
+        WsSyncFrame::RollupAck { accepted: true, n: 3, .. }
     ));
 
-    // 3. Secondary attempts to push generation 1 AGAIN with conflicting data (desync / split brain)
-    let gen1_conflict = build_signed_upload(&sec, primary_id, &stream_id, 1, "cline", 8);
-    let push_conflict = WsSyncFrame::SyncPush {
-        batch_id: "batch-gen-1-conflict".into(),
-        envelope: gen1_conflict.envelope,
-        signature: gen1_conflict.signature.to_vec(),
-        gzip_bytes: gen1_conflict.gzip_bytes,
+    // 3. Push a second 2-row snapshot on disjoint days, same session
+    let push2 = WsSyncFrame::RollupSync {
+        snapshot: RollupSnapshot { origin: sec.origin.clone(), rows: rollup_rows_on("2026-12", 2) },
     };
-    ws.send(tungstenite::Message::Text(serde_json::to_string(&push_conflict).unwrap())).unwrap();
+    ws.send(tungstenite::Message::Text(serde_json::to_string(&push2).unwrap())).unwrap();
+    let ack2 = ws.read().unwrap();
+    assert!(matches!(
+        serde_json::from_str::<WsSyncFrame>(ack2.to_text().unwrap()).unwrap(),
+        WsSyncFrame::RollupAck { accepted: true, n: 2, .. }
+    ));
 
-    // 4. Primary rejects conflict
-    let ack_conflict = ws.read().unwrap();
-    let frame: WsSyncFrame = serde_json::from_str(ack_conflict.to_text().unwrap()).unwrap();
-    match frame {
-        WsSyncFrame::SyncAck { success, error, .. } => {
-            assert!(!success, "conflicting package must be rejected");
-            let err = error.expect("error required");
-            assert!(
-                err.contains("conflict") || err.contains("different package bytes") || err.contains("reconcile"),
-                "unexpected conflict error: {err}"
-            );
-        }
-        other => panic!("expected SyncAck, got {other:?}"),
-    }
-
-    // 5. Query status: Primary has automatically transitioned secondary to reconcile_required
-    ws.send(tungstenite::Message::Text(
-        serde_json::to_string(&WsSyncFrame::StatusRequest { device_id: sec.device_id.clone() }).unwrap(),
-    ))
-    .unwrap();
-    let status_ack = ws.read().unwrap();
-    match serde_json::from_str::<WsSyncFrame>(status_ack.to_text().unwrap()).unwrap() {
-        WsSyncFrame::StatusResponse { status, .. } => {
-            assert_eq!(status, "reconcile_required", "primary must mandate reconciliation on conflict");
-        }
-        other => panic!("expected StatusResponse, got {other:?}"),
-    }
+    // 4. Both snapshots' rows are stored under the device's REGISTRY origin
+    // (never a wire-declared label), applied as INSERT OR REPLACE per row.
+    let reopened = SyncStore::open(&index_path, primary_id).unwrap();
+    let stored: i64 = reopened.index().conn().query_row(
+        "SELECT count(*) FROM remote_rollup WHERE origin = ?1",
+        [&sec.origin], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(stored, 5, "both snapshots must land under the registry origin");
+    let november: i64 = reopened.index().conn().query_row(
+        "SELECT count(*) FROM remote_rollup WHERE origin = ?1 AND day LIKE '2026-11-%'",
+        [&sec.origin], |row| row.get(0),
+    ).unwrap();
+    let december: i64 = reopened.index().conn().query_row(
+        "SELECT count(*) FROM remote_rollup WHERE origin = ?1 AND day LIKE '2026-12-%'",
+        [&sec.origin], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(november, 3);
+    assert_eq!(december, 2);
 
     let _ = ws.close(None);
     assert!(server_handle.join().unwrap().is_ok());
@@ -793,19 +714,13 @@ fn test_secondary_disconnect_notifies_primary_and_halts_communication() {
         WsSyncFrame::AuthAck { status, .. } if status == "connected"
     ));
 
-    // 2. Upload initial batch before disconnect
-    let gen1 = build_signed_upload(&sec, primary_id, &stream_id, 1, "claude", 5);
-    let push1 = WsSyncFrame::SyncPush {
-        batch_id: "batch-1".into(),
-        envelope: gen1.envelope,
-        signature: gen1.signature.to_vec(),
-        gzip_bytes: gen1.gzip_bytes,
-    };
+    // 2. Upload initial rollup snapshot before disconnect
+    let push1 = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, 5) };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&push1).unwrap())).unwrap();
     let ack1 = ws.read().unwrap();
     assert!(matches!(
         serde_json::from_str::<WsSyncFrame>(ack1.to_text().unwrap()).unwrap(),
-        WsSyncFrame::SyncAck { success: true, .. }
+        WsSyncFrame::RollupAck { accepted: true, .. }
     ));
 
     // 3. Secondary clicks disconnect: deliver disconnect notice immediately to primary
@@ -845,20 +760,16 @@ fn test_secondary_disconnect_notifies_primary_and_halts_communication() {
     assert_eq!(dev.status, DeviceStatus::Revoked, "primary must mark device revoked");
 
     // 6. If secondary attempts to push again after disconnect over existing socket, it must fail
-    let gen2 = build_signed_upload(&sec, primary_id, &stream_id, 2, "claude", 2);
-    let push2 = WsSyncFrame::SyncPush {
-        batch_id: "batch-2".into(),
-        envelope: gen2.envelope,
-        signature: gen2.signature.to_vec(),
-        gzip_bytes: gen2.gzip_bytes,
-    };
+    let push2 = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, 2) };
     let _ = ws.send(tungstenite::Message::Text(serde_json::to_string(&push2).unwrap()));
     if let Ok(ack2) = ws.read() {
         if let Ok(frame) = serde_json::from_str::<WsSyncFrame>(ack2.to_text().unwrap()) {
             match frame {
-                WsSyncFrame::SyncAck { success, error, .. } => {
-                    assert!(!success, "push after revocation must not succeed");
-                    assert!(error.is_some(), "push after revocation must produce error");
+                WsSyncFrame::RollupAck { accepted, .. } => {
+                    assert!(!accepted, "push after revocation must not be accepted");
+                }
+                WsSyncFrame::Error { message } => {
+                    assert!(!message.is_empty(), "push after revocation must produce an error");
                 }
                 _ => {}
             }

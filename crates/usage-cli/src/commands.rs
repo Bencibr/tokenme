@@ -12,12 +12,12 @@ use std::time::Duration;
 use chrono::{Datelike, Local, TimeZone};
 use base64::Engine as _;
 use serde::Deserialize;
-use usage_core::{summarize, CallKind, DateFilter, Item, Meter, Summary, UsageEvent, Window};
+use usage_core::{summarize, DateFilter, Item, Summary, UsageEvent, Window};
 use usage_device_sync::{
-    hash_bytes, identity_bytes, ClientTransportCancellation, DeviceIdentity, DiagnosticsGrant,
+    hash_bytes, ClientTransportCancellation, DeviceIdentity, DiagnosticsGrant,
     DiagnosticsMcpRequest, DiagnosticsRequestAuth, DiagnosticsService, HttpsServerConfig,
-    HttpsTransportConfig, NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite,
-    PairingRequest, RuntimeRunReport, SignedUpload, SyncRuntime, SyncRuntimeConfig, SyncStore,
+    HttpsTransportConfig, PairingInvite,
+    PairingRequest, RuntimeRunReport, SyncRuntime, SyncRuntimeConfig, SyncStore,
     Tls13HttpsTransport,
 };
 use usage_index::{retention_cutoff, IngestReport};
@@ -1713,10 +1713,13 @@ pub fn import_sync(ctx: &mut Ctx, file: &std::path::Path, dry_run: bool) -> Resu
     Ok(())
 }
 
-/// Strict network sync command. This intentionally does not use the legacy
-/// JSONL/SSH importer and does not remove a local package after an ACK: the
-/// outbox/journal lifecycle is a later slice, so the command sends one bounded
-/// snapshot and leaves the source index untouched.
+/// Symmetric rollup uplink. The command ships this machine's whole
+/// local-origin rollup snapshot to the primary over the pinned WebSocket
+/// session; the primary applies the rows under this device's registry origin
+/// and answers the resolved label. Nothing is removed locally: the snapshot
+/// is a projection, not a move. The retired package-era flags (`--stream-id`,
+/// `--data-epoch`, `--generation`, `--days`) stay parsed for compatibility
+/// but no longer shape the transfer.
 pub fn sync_upload(
     ctx: &mut Ctx,
     endpoint: String,
@@ -1726,152 +1729,30 @@ pub fn sync_upload(
     identity_path: PathBuf,
     origin: String,
     primary_id: String,
-    stream_id: String,
-    data_epoch: u64,
-    generation: u64,
-    days: i64,
+    _stream_id: String,
+    _data_epoch: u64,
+    _generation: u64,
+    _days: i64,
 ) -> Result<(), String> {
-    if days <= 0 {
-        return Err("--days must be positive".into());
-    }
-    if data_epoch == 0 || generation == 0 {
-        return Err("--data-epoch and --generation start at 1".into());
-    }
     let identity = DeviceIdentity::load_or_create(&identity_path, origin, "tokenme-cli")
         .map_err(|e| format!("cannot load sync identity {}: {e}", identity_path.display()))?;
-    let hi_ms = ctx.now_ms.saturating_add(1);
-    let lo_ms = ctx.now_ms.saturating_sub(days.saturating_mul(MS_DAY));
-    let all_events = ctx.index.all_events().map_err(|e| e.to_string())?;
-    let keyless_ids = stable_keyless_occurrences(&all_events);
-    let mut keyless_seen: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
-    let mut rows = Vec::new();
-    for event in all_events.into_iter().filter(|event| event.ts_ms >= lo_ms) {
-        if event.ts_ms < lo_ms || event.ts_ms >= hi_ms || event.source.starts_with("linux:") {
-            continue;
-        }
-        let (key, occurrence_id) = match event.dedupe_key.clone() {
-            Some(key) => (Some(key), None),
-            None => {
-                let fingerprint = keyless_fingerprint(&event);
-                let ordinal = keyless_seen.entry(fingerprint.clone()).or_insert(0);
-                let occurrence = keyless_ids
-                    .get(&fingerprint)
-                    .and_then(|ids| ids.get(*ordinal))
-                    .cloned()
-                    .ok_or_else(|| "strict sync could not assign a stable keyless occurrence".to_string())?;
-                *ordinal += 1;
-                (None, Some(occurrence))
-            }
-        };
-        let calls = event.calls.iter().map(|call| NetworkCall {
-            kind: match call.kind { CallKind::Mcp => "mcp", CallKind::Skill => "skill" }.into(),
-            name: call.name.clone(),
-        }).collect::<Vec<_>>();
-        rows.push(NetworkRow {
-            key,
-            occurrence_id,
-            tool: event.tool,
-            ts_ms: event.ts_ms,
-            session: event.session,
-            project: event.project,
-            model: event.model,
-            meter: match event.meter { Meter::Tokens => "tokens", Meter::Credits => "credits" }.into(),
-            source: if event.source.is_empty() { "local".into() } else { event.source },
-            counts: NetworkCounts {
-                in_tok: Some(event.counts.input),
-                cc_tok: Some(event.counts.cache_creation),
-                cr_tok: Some(event.counts.cache_read),
-                out_tok: Some(event.counts.output),
-                reason_tok: Some(event.counts.reasoning),
-                credits: Some(event.counts.credits),
-            },
-            calls,
-        });
-    }
-    let package = NetworkPackage::from_rows(
-        identity.origin.clone(),
-        usage_index::INDEX_SCHEMA_VERSION,
-        lo_ms,
-        hi_ms,
-        &rows,
-        ctx.now_ms,
-    ).map_err(|e| format!("cannot build strict sync package: {e}"))?;
-    let envelope = usage_device_sync::UploadEnvelope {
-        protocol_id: usage_device_sync::PROTOCOL_ID.into(),
-        primary_id,
-        device_id: identity.device_id.clone(),
-        origin: identity.origin.clone(),
-        stream_id,
-        data_epoch,
-        generation,
-        manifest_bytes: package.manifest_bytes.clone(),
-        gzip_sha256: usage_device_sync::hash_bytes(&package.gzip_bytes),
-    };
-    let upload = SignedUpload::sign(envelope, &identity.signing_key, package.gzip_bytes)
-        .map_err(|e| format!("cannot sign strict sync package: {e}"))?;
     let cert_der = usage_device_sync::load_pem_certificate(&trust_cert)
         .map_err(|e| format!("cannot load pinned trust certificate {}: {e}", trust_cert.display()))?;
     let pin = parse_sha256(&pin_sha256)?;
     let mut transport_config = HttpsTransportConfig::pinned(endpoint, server_name, cert_der);
     transport_config.pinned_certificate_sha256 = pin;
     let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|e| e.to_string())?;
-    let receipt = transport.ws_upload(&upload).map_err(|e| format!("strict sync upload failed: {e}"))?;
+    transport.set_ws_session_identity(identity.device_id.clone(), identity.origin.clone());
+    let store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| format!("cannot open sync store {}: {e}", ctx.db_path.display()))?;
+    let rows = store.local_rollup_snapshot().map_err(|e| format!("cannot build local rollup snapshot: {e}"))?;
+    let count = rows.len();
+    let resolved = transport.ws_rollup_sync(&rows).map_err(|e| format!("rollup sync upload failed: {e}"))?;
     if ctx.g.json {
-        print_json(&receipt);
+        print_json(&serde_json::json!({ "origin": resolved, "accepted": true, "rows": count }));
     } else {
-        println!("uploaded {} row(s): inserted {}, updated {}, deduped {}", receipt.rows, receipt.inserted, receipt.updated, receipt.deduped);
-        println!("receipt {} / generation {}", hex_bytes(&receipt.receipt_hash), receipt.generation);
-        println!("local index and pending source data were retained; this command has no outbox cleanup");
+        println!("rollup snapshot {} rows — primary origin {}", count, resolved);
     }
     Ok(())
-}
-
-/// A keyless adapter row cannot use SQLite rowid: rebuild/prune may recreate it.
-/// Derive its identity from stable source content and keep a deterministic
-/// multiplicity for exact duplicates. The complete snapshot makes a window
-/// export a projection of one numbering, not a fresh numbering of a dirty subset.
-fn stable_keyless_occurrences(events: &[UsageEvent]) -> BTreeMap<Vec<u8>, Vec<String>> {
-    let mut fingerprints: Vec<Vec<u8>> = events
-        .iter()
-        .filter(|event| event.dedupe_key.is_none())
-        .map(keyless_fingerprint)
-        .collect();
-    fingerprints.sort();
-    let mut result = BTreeMap::new();
-    let mut counts: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
-    for fingerprint in fingerprints {
-        let ordinal = counts.entry(fingerprint.clone()).or_insert(0);
-        result.entry(fingerprint.clone()).or_insert_with(Vec::new).push(format!(
-            "codex-occ-v1:{}:{}",
-            hex_bytes(&hash_bytes(&identity_bytes(b"tokenme/device-sync/keyless-occurrence/v1", &[&fingerprint]))),
-            *ordinal,
-        ));
-        *ordinal += 1;
-    }
-    result
-}
-
-fn keyless_fingerprint(event: &UsageEvent) -> Vec<u8> {
-    let meter = match event.meter { Meter::Tokens => "tokens", Meter::Credits => "credits" };
-    let mut call_names = event.calls.iter().map(|call| {
-        let kind = match call.kind { CallKind::Mcp => "mcp", CallKind::Skill => "skill" };
-        format!("{kind}\u{1f}{name}", name = call.name)
-    }).collect::<Vec<_>>();
-    call_names.sort();
-    let calls = call_names.join("\u{1e}");
-    let count_bits = [
-        event.counts.input.to_bits(), event.counts.cache_creation.to_bits(),
-        event.counts.cache_read.to_bits(), event.counts.output.to_bits(),
-        event.counts.reasoning.to_bits(), event.counts.credits.to_bits(),
-    ];
-    let ts = event.ts_ms.to_be_bytes();
-    let count_bytes = count_bits.iter().flat_map(|bits| bits.to_be_bytes()).collect::<Vec<_>>();
-    let fields = [
-        event.tool.as_bytes(), &ts, event.session.as_bytes(), event.project.as_deref().unwrap_or("").as_bytes(),
-        event.model.as_deref().unwrap_or("").as_bytes(), meter.as_bytes(), event.source.as_bytes(),
-        count_bytes.as_slice(), calls.as_bytes(),
-    ];
-    identity_bytes(b"tokenme/device-sync/keyless-fingerprint/v1", &fields)
 }
 
 pub fn sync_status(ctx: &Ctx) -> Result<(), String> {

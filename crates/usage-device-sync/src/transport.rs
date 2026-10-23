@@ -34,11 +34,11 @@ use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use crate::protocol::{
     hash_bytes, verify_private_file, signature_serde, AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest,
     AuthenticatedStatus, AuthenticatedStatusRequest, DeviceIdentity, PairingInvite, PairingRequest, PrimaryDownloadPage,
-    SignedUpload, StreamOpenReceipt, MAX_AUTH_REQUEST_AGE_MS,
+    StreamOpenReceipt, MAX_AUTH_REQUEST_AGE_MS,
     MAX_AUTH_REQUEST_FUTURE_SKEW_MS, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES, MAX_STRING_BYTES, PROTOCOL_ID,
 };
 use crate::{
-    DeviceStatus, ImportReceipt, PairingRequestState, SyncError, SyncResult, SyncStore,
+    DeviceStatus, PairingRequestState, SyncError, SyncResult, SyncStore,
     protocol::identity_bytes,
 };
 
@@ -336,6 +336,11 @@ pub struct Tls13HttpsTransport {
     /// Bumped on every rebuilt socket; the heartbeat watchdog of a dead
     /// generation exits instead of pinging a replaced socket.
     ws_generation: Arc<AtomicU64>,
+    /// Identity the resident ws session authenticates with. `ws_rollup_sync`'s
+    /// signature carries only the rows, so the caller pins `(device_id,
+    /// origin)` once and every Auth frame on a rebuilt leg uses it — the same
+    /// fields the signed upload used to derive from its envelope.
+    ws_session_identity: Mutex<Option<(String, String)>>,
     /// Stops the heartbeat watchdog on drop so the watchdog's Arc clone
     /// cannot keep the resident socket — and the peer's view of it — alive
     /// after the transport is gone.
@@ -445,6 +450,7 @@ impl Tls13HttpsTransport {
             next_socket_id: Arc::new(AtomicU64::new(1)),
             ws_client: Arc::new(Mutex::new(None)),
             ws_generation: Arc::new(AtomicU64::new(0)),
+            ws_session_identity: Mutex::new(None),
             heartbeat_stop: Arc::new(AtomicBool::new(false)),
             ws_link_hook: Mutex::new(None),
         })
@@ -523,14 +529,25 @@ impl Tls13HttpsTransport {
         Ok((ws, socket))
     }
 
-    fn try_ws_upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
+    /// Pins the device identity the resident ws session authenticates with.
+    /// `ws_rollup_sync` needs it to build the Auth frame when it rebuilds a
+    /// leg; without it the uplink fails fast instead of sending an
+    /// unauthenticated snapshot.
+    pub fn set_ws_session_identity(&self, device_id: impl Into<String>, origin: impl Into<String>) {
+        *lock_recover(&self.ws_session_identity) = Some((device_id.into(), origin.into()));
+    }
+
+    fn try_ws_rollup_sync(&mut self, rows: &[RollupRow]) -> Result<String, TransportError> {
+        let Some((device_id, origin)) = lock_recover(&self.ws_session_identity).clone() else {
+            return Err(TransportError::Protocol("ws session identity is not set; call set_ws_session_identity before ws_rollup_sync".into()));
+        };
         let mut ws_guard = lock_recover(&self.ws_client);
         if ws_guard.is_none() {
             let (mut ws, socket) = self.connect_ws()?;
             let auth = crate::ws::WsSyncFrame::Auth {
-                device_id: upload.envelope.device_id.clone(),
-                origin: upload.envelope.origin.clone(),
-                display_name: upload.envelope.origin.clone(),
+                device_id,
+                origin: origin.clone(),
+                display_name: origin.clone(),
                 version: crate::ws::WS_PROTOCOL_VERSION.to_string(),
             };
             let auth_msg = serde_json::to_string(&auth).map_err(|e| TransportError::Protocol(e.to_string()))?;
@@ -555,11 +572,8 @@ impl Tls13HttpsTransport {
             return Err(TransportError::Protocol("ws unavailable".into()));
         };
 
-        let push_frame = crate::ws::WsSyncFrame::SyncPush {
-            batch_id: format!("{}-{}", upload.envelope.device_id, upload.envelope.generation),
-            envelope: upload.envelope.clone(),
-            signature: upload.signature.to_vec(),
-            gzip_bytes: upload.gzip_bytes.clone(),
+        let push_frame = crate::ws::WsSyncFrame::RollupSync {
+            snapshot: RollupSnapshot { origin: origin.clone(), rows: rows.to_vec() },
         };
         let push_msg = serde_json::to_string(&push_frame).map_err(|e| TransportError::Protocol(e.to_string()))?;
         if let Err(e) = ws.send(tungstenite::Message::Text(push_msg)) {
@@ -573,13 +587,13 @@ impl Tls13HttpsTransport {
         let reply = loop {
             match ws.read() {
                 Ok(tungstenite::Message::Text(t)) => match serde_json::from_str::<crate::ws::WsSyncFrame>(&t) {
-                    Ok(frame @ crate::ws::WsSyncFrame::SyncAck { .. }) => break frame,
+                    Ok(frame @ crate::ws::WsSyncFrame::RollupAck { .. }) => break frame,
                     Ok(crate::ws::WsSyncFrame::Pong { .. }) | Ok(crate::ws::WsSyncFrame::Ping { .. }) => continue,
                     Ok(other) => break other,
                     Err(e) => {
                         *ws_guard = None;
                         self.ws_link_live(false);
-                        return Err(TransportError::Protocol(format!("invalid sync ack frame: {e}")));
+                        return Err(TransportError::Protocol(format!("invalid rollup ack frame: {e}")));
                     }
                 },
                 Err(e) => {
@@ -590,16 +604,14 @@ impl Tls13HttpsTransport {
                 _ => {
                     *ws_guard = None;
                     self.ws_link_live(false);
-                    return Err(TransportError::Protocol("unexpected non-text frame for sync ack".into()));
+                    return Err(TransportError::Protocol("unexpected non-text frame for rollup ack".into()));
                 }
             }
         };
 
         match reply {
-            crate::ws::WsSyncFrame::SyncAck { success: true, receipt: Some(receipt), .. } => {
-                Ok(receipt)
-            }
-            crate::ws::WsSyncFrame::SyncAck { success: false, error, .. } => {
+            crate::ws::WsSyncFrame::RollupAck { origin, accepted: true, .. } => Ok(origin),
+            crate::ws::WsSyncFrame::RollupAck { accepted: false, .. } => {
                 // A rejection is a protocol-level answer, not a broken socket —
                 // but the next attempt should meet the primary with a fresh
                 // handshake anyway, and on a one-slot server the open leg IS
@@ -607,20 +619,32 @@ impl Tls13HttpsTransport {
                 // held). Drop it so the retry cannot starve behind the leg
                 // that just failed.
                 *ws_guard = None;
-                Err(TransportError::Protocol(error.unwrap_or_else(|| "sync failed on primary".into())))
+                Err(TransportError::Protocol("rollup snapshot was rejected by the primary".into()))
+            }
+            crate::ws::WsSyncFrame::Error { message } => {
+                *ws_guard = None;
+                Err(TransportError::Protocol(message))
             }
             _ => {
                 *ws_guard = None;
-                Err(TransportError::Protocol("expected sync ack frame with receipt".into()))
+                Err(TransportError::Protocol("expected rollup ack frame".into()))
             }
         }
     }
 
-    pub fn ws_upload(&mut self, upload: &SignedUpload) -> Result<ImportReceipt, TransportError> {
+    /// Pushes the secondary's full rollup snapshot to the primary over the
+    /// resident WebSocket session and returns the resolved origin the rows
+    /// were applied under. Symmetric rollup sync: the frame is the same
+    /// `RollupSnapshot` the downlink ships, the Auth frame carries the
+    /// identity, and the ack is `{"origin": …, "accepted": true, "n": …}` —
+    /// an apply failure comes back as the standard wire-error frame. Reuses
+    /// the resident socket across calls and rebuilds it (Auth included) when
+    /// a send or read ever fails.
+    pub fn ws_rollup_sync(&mut self, rows: &[RollupRow]) -> Result<String, TransportError> {
         // A cancelled transport must surface as `Cancelled` exactly like the
-        // retired one-shot HTTP upload did, even when the interrupt lands in
-        // the middle of a frame read instead of before a syscall.
-        self.try_ws_upload(upload).map_err(|error| self.map_cancelled(error))
+        // other legs, even when the interrupt lands in the middle of a frame
+        // read instead of before a syscall.
+        self.try_ws_rollup_sync(rows).map_err(|error| self.map_cancelled(error))
     }
 
     /// Drops the cached WebSocket, if any. The upload leg holds the socket only
@@ -2677,7 +2701,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{AuthenticatedDownloadRequest, DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, UploadEnvelope};
+    use crate::protocol::{AuthenticatedDownloadRequest, DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, SignedUpload, UploadEnvelope};
     use crate::{DiagnosticsHost, DiagnosticsRequestAuth, PairingRequest, PrimarySyncConfig, SyncStore};
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::thread;
@@ -2723,6 +2747,18 @@ mod tests {
         String::from_utf8_lossy(&response).into_owned()
     }
 
+    /// Up rows for the rollup uplink: the snapshot the secondary ships is its
+    /// local-origin aggregate, so each row's own `origin` is empty by
+    /// construction and the primary resolves the label from the registry.
+    fn rollup_rows(count: usize) -> Vec<RollupRow> {
+        (0..count).map(|i| RollupRow {
+            day: format!("2026-10-{:02}", 10 + i), origin: String::new(), tool: "codex".into(), session: "session".into(),
+            project: "project-tokenme".into(), model: "gpt-5".into(), meter: "tokens".into(),
+            in_tok: 100.0, cc_tok: 0.0, cr_tok: 0.0, out_tok: 50.0, reason_tok: 0.0, credits: 0.0,
+            n: 3, nonzero: 2, min_ts: 1_000 + i as i64, max_ts: 2_000 + i as i64,
+        }).collect()
+    }
+
     fn package(device: &DeviceIdentity) -> (SyncStore, SignedUpload) {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let invite = store.create_pairing_invite("https://localhost:47821", "2222222222222222222222222222222222222222222222222222222222222222", 100_000).unwrap();
@@ -2737,16 +2773,17 @@ mod tests {
     }
 
     #[test]
-    fn loopback_tls13_upload_round_trip() {
+    fn loopback_tls13_rollup_sync_round_trip() {
         let cert = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
-        let (store, upload) = package(&device);
+        let (store, _) = package(&device);
         let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(1));
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.ws_upload(&upload).unwrap();
-        assert_eq!(receipt.inserted, 1);
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let origin = client.ws_rollup_sync(&rollup_rows(2)).unwrap();
+        assert_eq!(origin, device.origin, "the ack must resolve the device's registry origin");
         // `run_connections` handles the connection inline, and a WebSocket
         // lives until its peer hangs up: drop the client so the server's read
         // errors out and the accept loop can return.
@@ -2903,43 +2940,6 @@ mod tests {
     }
 
     #[test]
-    fn independent_sender_outbox_uploads_over_tls_and_ack_clears_only_matching_entry() {
-        let cert = cert();
-        let device = DeviceIdentity::create("independent-sender", "Sender").unwrap();
-
-        // The primary and sender deliberately use separate SQLite stores. The
-        // sender has no device_registry row; ACK validation must use the
-        // authenticated receipt origin, not a primary-only registry lookup.
-        let mut primary = SyncStore::open_in_memory("primary-1").unwrap();
-        let invite = primary.create_pairing_invite("https://localhost:47821", &"6".repeat(64), i64::MAX).unwrap();
-        let request = PairingRequest::new(&invite, &device, "linux").unwrap();
-        let state = primary.receive_pairing_request(&request, 1).unwrap();
-        primary.approve_pairing(&state.request_id, 2).unwrap();
-        let stream = primary.open_stream(&device.device_id, &device.public_key(), 3).unwrap();
-
-        let row = NetworkRow { key: Some("independent-key".into()), occurrence_id: None, tool: "codex".into(), ts_ms: 10, session: "sender-session".into(), project: None, model: None, meter: "tokens".into(), source: "sender.jsonl".into(), counts: NetworkCounts::all_zero(), calls: vec![] };
-        let package = NetworkPackage::from_rows(device.origin.clone(), usage_index::INDEX_SCHEMA_VERSION, 0, 100, &[row], 4).unwrap();
-        let mut sender = SyncStore::open_in_memory("primary-1").unwrap();
-        let (outbox_id, _) = sender.enqueue_outbox_auto(&device.device_id, &device.origin, &stream.stream_id, stream.data_epoch, package.manifest_bytes, package.gzip_bytes, &device.signing_key, &[], 0).unwrap();
-        sender.acquire_scheduler_lease("sender-runtime", 0, 10_000).unwrap();
-        let entry = sender.claim_outbox("sender-runtime", 1, 1).unwrap().pop().unwrap();
-
-        let server = HttpsSyncServer::bind(server_config(&cert), primary).unwrap();
-        let addr = server.local_addr().unwrap();
-        let handle = thread::spawn(move || server.run_connections(1));
-        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.ws_upload(&entry.signed_upload()).unwrap();
-        sender.ack_outbox("sender-runtime", outbox_id, &receipt, 2).unwrap();
-        assert_eq!(sender.outbox_summary().unwrap().pending, 0);
-        assert_eq!(sender.outbox_summary().unwrap().in_flight, 0);
-        // `run_connections` handles the connection inline, and a WebSocket
-        // lives until its peer hangs up: drop the client so the server's read
-        // errors out and the accept loop can return.
-        drop(client);
-        assert!(handle.join().unwrap().is_ok());
-    }
-
-    #[test]
     fn known_path_without_wire_version_is_rejected_before_its_body_is_read() {
         let cert = cert();
         let store = SyncStore::open_in_memory("primary-1").unwrap();
@@ -3041,7 +3041,7 @@ mod tests {
     fn a_request_scoped_store_failure_closes_only_that_connection() {
         let cert = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
-        let (store, upload) = package(&device);
+        let (store, _) = package(&device);
         let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
         let addr = server.local_addr().unwrap();
         server.context.fault_next_connection.store(1, AtomicOrdering::Release);
@@ -3053,8 +3053,9 @@ mod tests {
         thread::sleep(Duration::from_millis(25));
 
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.ws_upload(&upload).unwrap();
-        assert_eq!(receipt.inserted, 1);
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let origin = client.ws_rollup_sync(&rollup_rows(1)).unwrap();
+        assert_eq!(origin, device.origin);
         // The WebSocket lives until its peer hangs up: drop the client so the
         // server's read errors out and the accept loop can return.
         drop(client);
@@ -3065,7 +3066,7 @@ mod tests {
     fn a_panicking_connection_does_not_stop_the_following_valid_upload() {
         let cert = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
-        let (store, upload) = package(&device);
+        let (store, _) = package(&device);
         let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
         let addr = server.local_addr().unwrap();
         server.context.fault_next_connection.store(2, AtomicOrdering::Release);
@@ -3077,8 +3078,9 @@ mod tests {
         thread::sleep(Duration::from_millis(25));
 
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.ws_upload(&upload).unwrap();
-        assert_eq!(receipt.inserted, 1);
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let origin = client.ws_rollup_sync(&rollup_rows(1)).unwrap();
+        assert_eq!(origin, device.origin);
         // The WebSocket lives until its peer hangs up: drop the client so the
         // server's read errors out and the accept loop can return.
         drop(client);
@@ -3089,7 +3091,7 @@ mod tests {
     fn a_poisoned_store_lock_recovers_instead_of_stopping_the_listener() {
         let cert = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
-        let (store, upload) = package(&device);
+        let (store, _) = package(&device);
         let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
         let addr = server.local_addr().unwrap();
         let store_lock = Arc::clone(&server.context.store);
@@ -3101,8 +3103,9 @@ mod tests {
         let handle = thread::spawn(move || server.run_connections(1));
 
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.ws_upload(&upload).unwrap();
-        assert_eq!(receipt.inserted, 1);
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let origin = client.ws_rollup_sync(&rollup_rows(1)).unwrap();
+        assert_eq!(origin, device.origin);
         // The WebSocket lives until its peer hangs up: drop the client so the
         // server's read errors out and the accept loop can return.
         drop(client);
@@ -3113,7 +3116,7 @@ mod tests {
     fn bad_connection_does_not_stop_the_following_valid_upload() {
         let cert = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
-        let (store, upload) = package(&device);
+        let (store, _) = package(&device);
         let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(2));
@@ -3124,8 +3127,9 @@ mod tests {
         thread::sleep(Duration::from_millis(25));
 
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.ws_upload(&upload).unwrap();
-        assert_eq!(receipt.inserted, 1);
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let origin = client.ws_rollup_sync(&rollup_rows(1)).unwrap();
+        assert_eq!(origin, device.origin);
         // `run_connections` handles the connection inline, and a WebSocket
         // lives until its peer hangs up: drop the client so the server's read
         // errors out and the accept loop can return.
@@ -3171,14 +3175,14 @@ mod tests {
             let _ = socket.read_to_end(&mut bytes);
         });
         let device = DeviceIdentity::create("cancel-upload", "Linux").unwrap();
-        let (_, upload) = package(&device);
         let cert = cert();
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
         )).unwrap();
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
         let cancellation = client.cancellation();
         let (tx, rx) = std::sync::mpsc::channel();
-        let join = thread::spawn(move || tx.send(client.ws_upload(&upload)).unwrap());
+        let join = thread::spawn(move || tx.send(client.ws_rollup_sync(&rollup_rows(1))).unwrap());
         thread::sleep(Duration::from_millis(50));
         cancellation.cancel();
         let result = rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -3334,14 +3338,15 @@ mod tests {
         let actual = cert();
         let expected = cert();
         let device = DeviceIdentity::create("linux", "Linux").unwrap();
-        let (store, upload) = package(&device);
+        let (store, _) = package(&device);
         let server = HttpsSyncServer::bind(server_config(&actual), store).unwrap();
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(1));
         let mut config = HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", expected.cert_der);
         config.trust_anchors_der.push(actual.cert_der);
         let mut client = Tls13HttpsTransport::new(config).unwrap();
-        assert!(matches!(client.ws_upload(&upload), Err(TransportError::PinMismatch)));
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        assert!(matches!(client.ws_rollup_sync(&rollup_rows(1)), Err(TransportError::PinMismatch)));
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -3511,7 +3516,7 @@ mod tests {
     fn lan_opt_in_server_round_trip_uses_the_same_tls_path() {
         let cert = cert();
         let device = DeviceIdentity::create("lan-linux", "Linux").unwrap();
-        let (store, upload) = package(&device);
+        let (store, _) = package(&device);
         let mut config = server_config(&cert);
         config.bind_addr = "0.0.0.0:0".parse().unwrap();
         config.allow_lan = true;
@@ -3519,8 +3524,9 @@ mod tests {
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(1));
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.ws_upload(&upload).unwrap();
-        assert_eq!(receipt.inserted, 1);
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let origin = client.ws_rollup_sync(&rollup_rows(1)).unwrap();
+        assert_eq!(origin, device.origin);
         // `run_connections` handles the connection inline, and a WebSocket
         // lives until its peer hangs up: drop the client so the server's read
         // errors out and the accept loop can return.
@@ -3532,7 +3538,7 @@ mod tests {
     fn ws_lifecycle_reports_live_and_dead_in_real_time() {
         let cert = cert();
         let device = DeviceIdentity::create("ws-lifecycle", "macOS").unwrap();
-        let (store, upload) = package(&device);
+        let (store, _) = package(&device);
         let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
         let addr = server.local_addr().unwrap();
         let events: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3542,8 +3548,9 @@ mod tests {
         }).unwrap();
         let handle = thread::spawn(move || server.run_connections_concurrent(1));
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let receipt = client.ws_upload(&upload).unwrap();
-        assert_eq!(receipt.inserted, 1);
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let origin = client.ws_rollup_sync(&rollup_rows(1)).unwrap();
+        assert_eq!(origin, device.origin);
         // The authenticated handshake reported the device live…
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
@@ -3590,6 +3597,48 @@ mod tests {
                 }
             }
             _ => panic!("expected text frame"),
+        }
+        let _ = ws.close(None);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn stale_sync_push_frame_is_rejected_and_the_session_survives() {
+        let cert = cert();
+        let device = DeviceIdentity::create("stale-push", "Linux").unwrap();
+        let (store, _) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        let (mut ws, _guard) = client.connect_ws().unwrap();
+        let auth = crate::ws::WsSyncFrame::Auth { device_id: device.device_id.clone(), origin: device.origin.clone(), display_name: device.origin.clone(), version: crate::ws::WS_PROTOCOL_VERSION.into() };
+        ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
+        let ack = ws.read().unwrap();
+        assert!(matches!(
+            serde_json::from_str::<crate::ws::WsSyncFrame>(ack.to_text().unwrap()).unwrap(),
+            crate::ws::WsSyncFrame::AuthAck { status, .. } if status == "connected"
+        ));
+        // The retired row-level package frame is unknown wire now: the server
+        // answers the standard error shape and keeps the session.
+        let stale = r#"{"type":"sync_push","batch_id":"b","envelope":null,"signature":[],"gzip_bytes":""}"#;
+        ws.send(tungstenite::Message::Text(stale.into())).unwrap();
+        let reply = ws.read().unwrap();
+        match serde_json::from_str::<crate::ws::WsSyncFrame>(reply.to_text().unwrap()).unwrap() {
+            crate::ws::WsSyncFrame::Error { message } => assert!(message.contains("invalid frame"), "{message}"),
+            other => panic!("expected the wire error frame, got {other:?}"),
+        }
+        // The same session still accepts the symmetric rollup uplink.
+        let snapshot = RollupSnapshot { origin: device.origin.clone(), rows: rollup_rows(2) };
+        ws.send(tungstenite::Message::Text(serde_json::to_string(&crate::ws::WsSyncFrame::RollupSync { snapshot }).unwrap())).unwrap();
+        let reply = ws.read().unwrap();
+        match serde_json::from_str::<crate::ws::WsSyncFrame>(reply.to_text().unwrap()).unwrap() {
+            crate::ws::WsSyncFrame::RollupAck { origin, accepted, n } => {
+                assert_eq!(origin, device.origin, "the ack must resolve the device's registry origin");
+                assert!(accepted);
+                assert_eq!(n, 2);
+            }
+            other => panic!("expected rollup ack, got {other:?}"),
         }
         let _ = ws.close(None);
         assert!(handle.join().unwrap().is_ok());

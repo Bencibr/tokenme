@@ -2680,16 +2680,31 @@ impl Index {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql_err)?;
-        // An offline secondary may have the only durable copy of a late
-        // update in sync_dirty.  Keep that event/call row until its journal is
+        // Two pins hold local rows against retention. The residual
+        // sync_dirty clause keeps its old per-row meaning: an offline
+        // secondary may have the only durable copy of a late update in
+        // sync_dirty, so the event/call row stays until its journal is
         // ACKed; after ACK the row becomes ordinary retention data again.
-        const PRUNEABLE: &str = "e.ts_ms < ?1 AND NOT EXISTS(
-            SELECT 1 FROM sync_dirty d
-             WHERE d.event_id = e.id OR (d.event_id IS NULL AND d.source_key = e.source AND d.event_ts_ms = e.ts_ms
-               AND (e.dedupe_key IS NULL OR d.identity = 'key:' || e.dedupe_key))
-        )";
+        // The rollup-era pin is pairing-wide: while the meta mirror
+        // `device_sync_uplink_paired` reads '1' (SyncStore maintains it
+        // beside the capture switch — a secondary config exists and is
+        // enabled), this machine's own history is the source the uplink
+        // snapshot re-ships every pass, so pruning a day here would drop it
+        // from every later snapshot and, after a re-pair, from the peer
+        // too. Mirror absent or '0' — never paired through a SyncStore, or
+        // unpaired/disabled — prunes normally.
+        let pruneable = format!(
+            "e.ts_ms < ?1 \
+             AND NOT (COALESCE((SELECT value FROM meta WHERE key = 'device_sync_uplink_paired'), '') = '1' \
+                      AND ({ORIGIN_SQL}) = '') \
+             AND NOT EXISTS(\
+            SELECT 1 FROM sync_dirty d \
+             WHERE d.event_id = e.id OR (d.event_id IS NULL AND d.source_key = e.source AND d.event_ts_ms = e.ts_ms \
+               AND (e.dedupe_key IS NULL OR d.identity = 'key:' || e.dedupe_key))\
+        )"
+        );
         // Compute the doomed id set once into a temp table: evaluating
-        // PRUNEABLE per side table re-ran the retention predicate five times
+        // the predicate per side table re-ran the retention logic five times
         // over `event` in the same transaction. The temp table lives and dies
         // with this connection, so nothing leaks between passes.
         tx.execute_batch(
@@ -2697,7 +2712,7 @@ impl Index {
              DELETE FROM doomed_event;",
         ).map_err(sql_err)?;
         tx.execute(
-            &format!("INSERT INTO doomed_event(id) SELECT e.id FROM event e WHERE {PRUNEABLE}"),
+            &format!("INSERT INTO doomed_event(id) SELECT e.id FROM event e WHERE {pruneable}"),
             params![cutoff_ms],
         ).map_err(sql_err)?;
         // The doomed rows' ts span decides which rollup days need recomputing;
@@ -2971,6 +2986,25 @@ mod tests {
         assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM event", [], |row| row.get(0)).unwrap(), 1);
         idx.conn.execute("DELETE FROM sync_dirty", []).unwrap();
         assert_eq!(idx.prune(2_000).unwrap(), 1, "once the journal is ACKed the event is ordinary retention data");
+    }
+
+    #[test]
+    fn paired_uplink_pins_local_history_against_prune_until_unpaired() {
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.conn.execute_batch(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', 10, 'session', 'tokens', 1, 'local.jsonl', 'mine'),
+                    ('codex', 11, 'session', 'tokens', 1, 'linux:peer:their-key', 'theirs');
+             INSERT INTO meta(key, value) VALUES('device_sync_uplink_paired', '1');",
+        ).unwrap();
+        assert_eq!(idx.prune(2_000).unwrap(), 1,
+            "while the uplink snapshot is the shared truth, this machine's own history must not age out");
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM event WHERE dedupe_key = 'mine'", [], |row| row.get(0)).unwrap(), 1);
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM event WHERE dedupe_key = 'theirs'", [], |row| row.get(0)).unwrap(), 0,
+            "a foreign-origin copy is not the snapshot's source and ages out");
+        idx.conn.execute("UPDATE meta SET value = '0' WHERE key = 'device_sync_uplink_paired'", []).unwrap();
+        assert_eq!(idx.prune(2_000).unwrap(), 1, "unpaired prunes normally");
+        assert_eq!(idx.conn.query_row::<i64, _, _>("SELECT count(*) FROM event", [], |row| row.get(0)).unwrap(), 0);
     }
 
     #[test]

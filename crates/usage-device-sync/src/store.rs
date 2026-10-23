@@ -34,6 +34,18 @@ const TOKENS_SCHEMA: &str = "tokens/v1";
 const MAX_TOKEN_CONFLICT_PAIRS_PER_KEY: i64 = 1_024;
 const DISCONNECT_NOTICE_PREFIX: &str = "device_sync_disconnect:";
 const MAX_DISCONNECT_NOTICES: i64 = 128;
+/// Per-device index-meta keys of the rollup uplink: the one-time migration
+/// gate (value: the origin whose row-merged era was retired) and the ack
+/// stamp the panel's upload status reads. Both are written by
+/// [`SyncStore::apply_uplink_rollup`] in the same transaction that stores
+/// the snapshot rows.
+const UPLINK_ROLLUP_MIGRATED_PREFIX: &str = "device_sync_uplink_rollup_migrated:";
+const UPLINK_ROLLUP_ACKED_PREFIX: &str = "device_sync_uplink_rollup_acked_at_ms:";
+/// Index-meta mirror of "a secondary config exists and enabled = 1",
+/// maintained by `write_capture_mirror` beside the capture switch: while it
+/// reads '1', `Index::prune` must not age this machine's local-origin
+/// history out — the uplink snapshot re-ships it as the shared truth.
+const UPLINK_PAIRED_MIRROR: &str = "device_sync_uplink_paired";
 /// Sibling file that carries device configuration/registry state so UI
 /// operations never have to open (or lock) the usage index.
 const SYNC_STATE_DB_NAME: &str = "sync_state.db";
@@ -660,16 +672,28 @@ impl SyncStore {
         self.index.with_network_transaction(|tx| release_acked_dirty_tx(tx, consumers, floor))
     }
 
-    /// Recomputes the ingest-time capture switch from the state database and
-    /// mirrors it into the index `meta` table so `Index` ingest never has to
-    /// open the state file. Runs after open and after every config/pairing
-    /// write that can change the answer.
+    /// Recomputes the ingest-time capture switch and the uplink prune pin
+    /// from the state database and mirrors both into the index `meta` table
+    /// so `Index` ingest/prune never have to open the state file. Runs after
+    /// open and after every config/pairing write that can change either
+    /// answer.
     fn write_capture_mirror(&self) -> SyncResult<()> {
         let enabled = sync_capture_enabled_state(&self.state)?;
         self.index.conn().execute(
             "INSERT INTO meta(key, value) VALUES('device_sync_capture_enabled', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![if enabled { "1".to_string() } else { "0".to_string() }],
+        ).map_err(sql_err)?;
+        // The prune pin's half: while a secondary config is enabled, this
+        // machine's own history is the shared truth the uplink snapshot
+        // re-ships every pass, so `Index::prune` must not age it out (see
+        // `Index::prune`). Unpaired machines write '0' — or nothing, if this
+        // index was never opened through a SyncStore — and prune normally.
+        let paired = sync_uplink_paired_state(&self.state)?;
+        self.index.conn().execute(
+            "INSERT INTO meta(key, value) VALUES(?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![UPLINK_PAIRED_MIRROR, if paired { "1".to_string() } else { "0".to_string() }],
         ).map_err(sql_err)?;
         Ok(())
     }
@@ -897,11 +921,13 @@ impl SyncStore {
 
     /// Read-only upload completion for the panel's status bridge, mirroring
     /// `read_status`: never migrate, never take the writer lock. `None` means
-    /// no stream exists yet (pairing not finished); `Some(false)` means the
-    /// initial snapshot is still being paged up.
+    /// the pairing has not produced an answer yet; `Some(false)` means a
+    /// legacy event-package snapshot is still being paged up; `Some(true)`
+    /// means the primary has stored this device's rollup snapshot (the ack
+    /// stamp of `apply_uplink_rollup`) — or completed a legacy snapshot.
     pub fn read_upload_cursor_complete(path: impl AsRef<std::path::Path>, config: &SecondarySyncConfig) -> Option<bool> {
-        // Snapshot cursors live in the index: they commit atomically with the
-        // event rows they cover. This stays a read-only open.
+        // The ack stamp and snapshot cursors live in the index: they commit
+        // atomically with the rows they cover. This stays a read-only open.
         let conn = open_read_only(path.as_ref()).ok()?;
         upload_cursor_complete_conn(&conn, config)
     }
@@ -1635,6 +1661,126 @@ impl SyncStore {
             ).map_err(sql_err)?;
             Ok::<_, SyncError>(())
         })
+    }
+
+    /// Applies a paired device's uplink rollup snapshot under the origin the
+    /// REGISTRY assigned it — never a label the wire declares, because the
+    /// receiver owns grouping. One index transaction: the one-time
+    /// per-device migration gate retires the row-merged uplink era (the
+    /// event copies the old package upload merged into this index under
+    /// `linux:<origin>`, their call children and their materialized
+    /// rollups), the snapshot lands in `remote_rollup`, and the ack stamp
+    /// flips the panel's upload status. Returns the resolved origin.
+    ///
+    /// The registry read runs on the state connection first — device state
+    /// never lives in the index — so the write half stays one network
+    /// transaction, the same split `release_acked_dirty` uses (state
+    /// decides, index writes).
+    ///
+    /// The snapshot is INSERT OR REPLACE per row and deliberately does NOT
+    /// delete days it does not mention: aggregate history is
+    /// append-mostly, and the only full clear is disconnect's
+    /// `DELETE FROM remote_rollup`.
+    pub fn apply_uplink_rollup(
+        &mut self,
+        device_id: &str,
+        rows: &[crate::transport::RollupRow],
+        at_ms: i64,
+    ) -> SyncResult<String> {
+        let origin: String = self.state.query_row(
+            "SELECT origin FROM device_registry WHERE device_id = ?1",
+            params![device_id], |row| row.get(0),
+        ).optional().map_err(sql_err)?
+            .ok_or_else(|| SyncError::NotPaired(device_id.to_string()))?;
+        validate_identifier("origin_label", &origin)?;
+        self.index.with_network_transaction(move |tx| {
+            let migrated: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    params![format!("{UPLINK_ROLLUP_MIGRATED_PREFIX}{device_id}")],
+                    |row| row.get(0),
+                )
+                .optional().map_err(sql_err)?;
+            if migrated.is_none() {
+                // One-time retirement of the row-merged uplink era for this
+                // device: the aggregate snapshot replaces those copies, so
+                // figures neither double count nor lose history.
+                tx.execute(
+                    &format!(
+                        "DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE ({ORIGIN_SQL}) = ?1)"
+                    ),
+                    params![origin],
+                ).map_err(sql_err)?;
+                tx.execute(
+                    &format!("DELETE FROM event WHERE ({ORIGIN_SQL}) = ?1"),
+                    params![origin],
+                ).map_err(sql_err)?;
+                tx.execute(
+                    "DELETE FROM event_rollup WHERE origin = ?1",
+                    params![origin],
+                ).map_err(sql_err)?;
+                tx.execute(
+                    "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![format!("{UPLINK_ROLLUP_MIGRATED_PREFIX}{device_id}"), origin],
+                ).map_err(sql_err)?;
+            }
+            for row in rows {
+                tx.execute(
+                    "INSERT OR REPLACE INTO remote_rollup(
+                        day, origin, tool, session, project, model, meter,
+                        in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    params![
+                        row.day, origin, row.tool, row.session, row.project, row.model, row.meter,
+                        row.in_tok, row.cc_tok, row.cr_tok, row.out_tok, row.reason_tok, row.credits,
+                        row.n, row.nonzero, row.min_ts, row.max_ts,
+                    ],
+                ).map_err(sql_err)?;
+            }
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![format!("{UPLINK_ROLLUP_ACKED_PREFIX}{device_id}"), at_ms.to_string()],
+            ).map_err(sql_err)?;
+            Ok::<_, SyncError>(origin)
+        })
+    }
+
+    /// The sender side of the uplink: this machine's own rollup rows,
+    /// exactly what the primary will store under our registry origin.
+    /// `event_rollup.origin` is the materialized `ORIGIN_SQL` of each
+    /// event's source (usage_index folds it in at ingest time), so the
+    /// local rows are precisely `origin = ''`; merged imports carry their
+    /// bundle origin and never travel this wire.
+    pub fn local_rollup_snapshot(&self) -> SyncResult<Vec<crate::transport::RollupRow>> {
+        let mut statement = self.index.conn().prepare(
+            "SELECT day, origin, tool, session, project, model, meter,
+                    in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts
+             FROM event_rollup WHERE origin = ''",
+        ).map_err(sql_err)?;
+        let rows = statement.query_map([], |row| Ok(crate::transport::RollupRow {
+            day: row.get(0)?,
+            origin: row.get(1)?,
+            tool: row.get(2)?,
+            session: row.get(3)?,
+            project: row.get(4)?,
+            model: row.get(5)?,
+            meter: row.get(6)?,
+            in_tok: row.get(7)?,
+            cc_tok: row.get(8)?,
+            cr_tok: row.get(9)?,
+            out_tok: row.get(10)?,
+            reason_tok: row.get(11)?,
+            credits: row.get(12)?,
+            n: row.get(13)?,
+            nonzero: row.get(14)?,
+            min_ts: row.get(15)?,
+            max_ts: row.get(16)?,
+        })).map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        Ok(rows)
     }
 
     pub fn queue_secondary_disconnect(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
@@ -3386,6 +3532,17 @@ fn rotate_index_sync_state_tx(tx: &Transaction<'_>, now_ms: i64) -> SyncResult<(
 /// offline, not unsubscribed: their cursor survives, so an update to an event
 /// below it can only arrive through the change feed. Revoking is the explicit
 /// way to give that share up.
+/// Whether the uplink snapshot has a live consumer: a secondary config that
+/// exists and is enabled. Paused keeps the pin (offline, not unsubscribed —
+/// the config row survives a pause); disabling the sync switch, disconnect
+/// or a missing config releases it, and prune owns retention again.
+fn sync_uplink_paired_state(state: &Connection) -> SyncResult<bool> {
+    state.query_row(
+        "SELECT EXISTS(SELECT 1 FROM device_sync_secondary_config WHERE config_key = 'secondary' AND enabled = 1)",
+        [], |row| row.get(0),
+    ).map_err(sql_err)
+}
+
 fn sync_capture_enabled_state(state: &Connection) -> SyncResult<bool> {
     let has_capture_column: bool = state.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_sync_secondary_config') WHERE name = 'capture_enabled')",
@@ -3781,6 +3938,21 @@ fn outbox_summary_if_table(conn: &Connection) -> SyncResult<OutboxSummary> {
 }
 
 fn upload_cursor_complete_conn(conn: &Connection, config: &SecondarySyncConfig) -> Option<bool> {
+    // The uplink is a rollup snapshot now: "complete" means the primary has
+    // stored this device's snapshot at least once — `apply_uplink_rollup`
+    // stamps the ack key in the same transaction that writes the rows. The
+    // old event-package cursor may still exist on upgraded secondaries and
+    // stays readable as a fallback, mirroring the download side's shape.
+    let acked: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![format!("{UPLINK_ROLLUP_ACKED_PREFIX}{}", config.device_id)],
+            |row| row.get(0),
+        )
+        .ok();
+    if acked.is_some() {
+        return Some(true);
+    }
     let stream_id = config.stream_id.as_ref()?;
     let data_epoch = config.data_epoch? as i64;
     conn.query_row(
@@ -5446,7 +5618,14 @@ mod tests {
         );
         store.ack_outbox("retention-owner", id, &receipt, 4).unwrap();
         assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM sync_dirty", [], |r| r.get(0)).unwrap(), 0);
-        assert_eq!(store.index_mut().prune(2_000).unwrap(), 1, "after the ACK the event is ordinary retention data");
+        // The ACK releases the journal's per-row hold, but the rollup-era
+        // pairing pin takes over: an enabled secondary's own history is the
+        // source its uplink snapshot re-ships every pass, so it stays pinned
+        // until the pairing ends (the `device_sync_uplink_paired` mirror in
+        // `write_capture_mirror`).
+        assert_eq!(store.index_mut().prune(2_000).unwrap(), 0, "a live pairing keeps local history after the ACK");
+        store.set_secondary_enabled(false, 5).unwrap();
+        assert_eq!(store.index_mut().prune(2_000).unwrap(), 1, "unpairing hands retention back to prune");
     }
 
     #[test]
@@ -6777,5 +6956,184 @@ mod tests {
         assert!(store.import_network_strict(&signed, 20).is_err());
         assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM event", [], |r| r.get(0)).unwrap(), 0);
         assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_receipt", [], |r| r.get(0)).unwrap(), 0);
+    }
+
+    fn rollup_row(day: &str, session: &str, in_tok: f64, n: i64) -> crate::transport::RollupRow {
+        crate::transport::RollupRow {
+            day: day.into(), origin: String::new(), tool: "codex".into(), session: session.into(),
+            project: String::new(), model: String::new(), meter: "tokens".into(),
+            in_tok, cc_tok: 0.0, cr_tok: 0.0, out_tok: 0.0, reason_tok: 0.0, credits: 0.0,
+            n, nonzero: n, min_ts: 1, max_ts: 2,
+        }
+    }
+
+    fn secondary_config_for(device_id: &str, origin: &str) -> SecondarySyncConfig {
+        SecondarySyncConfig {
+            primary_os: None,
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device_id.into(), origin: origin.into(),
+            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1, 2, 3],
+            certificate_pin: hash_bytes(&[1, 2, 3]), identity_path: PathBuf::from("identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }
+    }
+
+    #[test]
+    fn uplink_rollup_stores_under_registry_origin_and_keeps_absent_days() {
+        let device = identity("uplink-origin");
+        let (mut store, _stream) = paired_store_for(&device);
+        let count = |store: &SyncStore, sql: &str| -> i64 {
+            store.index().conn().query_row::<i64, _, _>(sql, [], |row| row.get(0)).unwrap()
+        };
+        let origin = store.apply_uplink_rollup(&device.device_id, &[
+            rollup_row("2026-10-01", "s1", 10.0, 1),
+            rollup_row("2026-10-02", "s1", 20.0, 2),
+        ], 100).unwrap();
+        assert_eq!(origin, "uplink-origin", "the label comes from the registry, never from the wire");
+        assert_eq!(count(&store, "SELECT count(*) FROM remote_rollup WHERE origin = 'uplink-origin'"), 2);
+
+        // A later snapshot grows day 1 and omits day 2: replace by day key,
+        // keep the absent day — the snapshot is not a full clear.
+        store.apply_uplink_rollup(&device.device_id, &[rollup_row("2026-10-01", "s1", 15.0, 3)], 200).unwrap();
+        assert_eq!(count(&store, "SELECT count(*) FROM remote_rollup"), 2);
+        assert_eq!(store.index().conn().query_row::<f64, _, _>(
+            "SELECT in_tok FROM remote_rollup WHERE origin = 'uplink-origin' AND day = '2026-10-01'", [], |row| row.get(0),
+        ).unwrap(), 15.0);
+        assert_eq!(store.index().conn().query_row::<f64, _, _>(
+            "SELECT in_tok FROM remote_rollup WHERE origin = 'uplink-origin' AND day = '2026-10-02'", [], |row| row.get(0),
+        ).unwrap(), 20.0);
+        let acked: String = store.index().conn().query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![format!("{UPLINK_ROLLUP_ACKED_PREFIX}{}", device.device_id)], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(acked, "200", "the ack stamp follows the latest apply");
+    }
+
+    #[test]
+    fn uplink_rollup_migration_gate_retires_row_merged_copies_once() {
+        let device = identity("gate-origin");
+        let (mut store, _stream) = paired_store_for(&device);
+        let seed_merged = |store: &SyncStore, tag: &str| {
+            store.index().conn().execute(
+                "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+                 VALUES('codex', 10, 'their-session', 'tokens', 7, 'linux:gate-origin:their-key', ?1)",
+                params![format!("gate-key-{tag}")],
+            ).unwrap();
+            let event_id = store.index().conn().last_insert_rowid();
+            store.index().conn().execute(
+                "INSERT INTO call(event_id, kind, name) VALUES(?1, 'tool_use', 'their-call')",
+                params![event_id],
+            ).unwrap();
+            store.index().conn().execute(
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)
+                 VALUES('2026-10-01', 'gate-origin', 'codex', 'their-session', '', '', 'tokens', 7, 0, 0, 0, 0, 0, 1, 1, 10, 10)",
+                [],
+            ).unwrap();
+        };
+        // The row-merged era this device previously uploaded, plus one
+        // untouched local rollup the gate must leave alone.
+        seed_merged(&store, "first");
+        store.index().conn().execute(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)
+             VALUES('2026-10-01', '', 'codex', 'local-session', '', '', 'tokens', 5, 0, 0, 0, 0, 0, 1, 1, 1, 2)",
+            [],
+        ).unwrap();
+
+        store.apply_uplink_rollup(&device.device_id, &[rollup_row("2026-10-01", "fresh", 9.0, 1)], 100).unwrap();
+        let count = |store: &SyncStore, sql: &str| -> i64 {
+            store.index().conn().query_row::<i64, _, _>(sql, [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(count(&store, "SELECT count(*) FROM event WHERE source LIKE 'linux:%'"), 0, "the merged event copies leave with the first aggregate apply");
+        assert_eq!(count(&store, "SELECT count(*) FROM call"), 0, "their call children leave too");
+        assert_eq!(count(&store, "SELECT count(*) FROM event_rollup WHERE origin = 'gate-origin'"), 0, "their materialized rollups leave too");
+        assert_eq!(count(&store, "SELECT count(*) FROM event_rollup WHERE origin = ''"), 1, "local rollups are not the gate's business");
+        assert_eq!(count(&store, "SELECT count(*) FROM remote_rollup WHERE origin = 'gate-origin'"), 1);
+
+        // The gate is one-time per device: rows that appear afterwards (a
+        // re-merged copy, say) belong to a later era and must survive the
+        // next apply.
+        seed_merged(&store, "second");
+        store.apply_uplink_rollup(&device.device_id, &[rollup_row("2026-10-01", "fresh", 12.0, 4)], 200).unwrap();
+        assert_eq!(count(&store, "SELECT count(*) FROM event WHERE source LIKE 'linux:%'"), 1, "the flag means the delete ran exactly once");
+        assert_eq!(count(&store, "SELECT count(*) FROM remote_rollup WHERE origin = 'gate-origin'"), 1);
+        assert_eq!(store.index().conn().query_row::<f64, _, _>(
+            "SELECT in_tok FROM remote_rollup WHERE origin = 'gate-origin'", [], |row| row.get(0),
+        ).unwrap(), 12.0);
+    }
+
+    #[test]
+    fn uplink_rollup_rejects_unknown_devices_and_empty_registry_origins() {
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        assert!(matches!(
+            store.apply_uplink_rollup("stranger", &[rollup_row("2026-10-01", "s", 1.0, 1)], 1),
+            Err(SyncError::NotPaired(id)) if id == "stranger"
+        ));
+        let device = identity("empty-origin");
+        let (mut store, _stream) = paired_store_for(&device);
+        store.state.execute(
+            "UPDATE device_registry SET origin = '' WHERE device_id = ?1",
+            params![device.device_id],
+        ).unwrap();
+        assert!(matches!(
+            store.apply_uplink_rollup(&device.device_id, &[rollup_row("2026-10-01", "s", 1.0, 1)], 1),
+            Err(SyncError::Invalid(_))
+        ));
+        assert_eq!(store.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM remote_rollup", [], |row| row.get(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn local_rollup_snapshot_ships_only_local_origin_rows() {
+        let store = SyncStore::open_in_memory("primary-1").unwrap();
+        store.index().conn().execute_batch(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)
+             VALUES('2026-10-01', '', 'codex', 'local-session', 'proj', 'model', 'tokens', 5, 1, 2, 3, 4, 0.5, 2, 1, 1, 2),
+                    ('2026-10-01', 'other-device', 'codex', 'their-session', '', '', 'tokens', 50, 0, 0, 0, 0, 0, 1, 1, 1, 2)",
+        ).unwrap();
+        let rows = store.local_rollup_snapshot().unwrap();
+        assert_eq!(rows.len(), 1, "merged imports never travel the uplink wire");
+        assert_eq!(rows[0].origin, "");
+        assert_eq!(rows[0].session, "local-session");
+        assert_eq!(rows[0].project, "proj");
+        assert_eq!(rows[0].model, "model");
+        assert_eq!(rows[0].in_tok, 5.0);
+        assert_eq!(rows[0].cc_tok, 1.0);
+        assert_eq!(rows[0].n, 2);
+        assert_eq!(rows[0].min_ts, 1);
+        assert_eq!(rows[0].max_ts, 2);
+    }
+
+    #[test]
+    fn uplink_ack_flips_upload_complete_for_the_panel() {
+        let device = identity("uplink-ack");
+        let (mut store, _stream) = paired_store_for(&device);
+        let config = secondary_config_for(&device.device_id, &device.origin);
+        assert_eq!(upload_cursor_complete_conn(store.index().conn(), &config), None, "no pairing answer yet");
+        store.apply_uplink_rollup(&device.device_id, &[rollup_row("2026-10-01", "s", 1.0, 1)], 100).unwrap();
+        assert_eq!(upload_cursor_complete_conn(store.index().conn(), &config), Some(true), "the ack stamp is the upload-complete answer");
+        // A device that never shipped a rollup still answers through the
+        // legacy snapshot-cursor fallback.
+        let other = secondary_config_for("other-device", "other-origin");
+        assert_eq!(upload_cursor_complete_conn(store.index().conn(), &other), None);
+    }
+
+    #[test]
+    fn the_uplink_prune_pin_follows_the_secondary_switch() {
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let mirror = |store: &SyncStore| -> String {
+            store.index().conn().query_row(
+                "SELECT value FROM meta WHERE key = 'device_sync_uplink_paired'", [], |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(mirror(&store), "0", "never paired: local history is ordinary retention data");
+        let config = secondary_config_for("device-1", "laptop");
+        store.save_secondary_config(&config, 1).unwrap();
+        assert_eq!(mirror(&store), "1", "an enabled pairing pins local history: the snapshot re-ships it");
+        store.set_secondary_enabled(false, 2).unwrap();
+        assert_eq!(mirror(&store), "0", "the sync switch off releases the pin");
+        store.set_secondary_enabled(true, 3).unwrap();
+        assert_eq!(mirror(&store), "1");
+        store.queue_secondary_disconnect(&config, 4).unwrap();
+        assert_eq!(mirror(&store), "0", "an explicit disconnect ends the shared-truth promise");
     }
 }

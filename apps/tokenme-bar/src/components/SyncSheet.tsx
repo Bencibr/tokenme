@@ -450,22 +450,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const errorDetail = awaitingSecondaryApproval && rawErrorDetail?.toLowerCase().includes("awaiting approval") ? null : rawErrorDetail;
   const visibleError = syncErrorMessage(errorDetail);
   // The two halves of a secondary's sync, each with its own finish line: the
-  // initial upload snapshot (pages still ACKing → queued items) and the
-  // primary-data downlink (absent until the primary shares its first page).
+  // upload is a rollup snapshot now — done once the primary has stored it,
+  // wait until then — and the primary-data downlink (absent until the
+  // primary shares its first page).
   const uploadQueued = snapshot.pending + snapshot.in_flight;
-  // The opaque first-sync wait had a name all along: the one-time history
-  // materialization walks every local event before the first snapshot page.
-  // Show its honest percentage instead of 等待开始.
-  const [historyDone, historyTotal] = snapshot.history_init ?? [0, 0];
-  const historyPreparing = snapshot.history_init != null && historyDone < historyTotal;
-  const historyPercent = historyTotal > 0 ? Math.min(100, Math.floor((historyDone / historyTotal) * 100)) : 0;
   const uploadState = snapshot.upload_complete === true
     ? t("sync.prog.done")
-    : snapshot.upload_complete === false
-      ? uploadQueued > 0 ? t("sync.prog.running_items", { n: uploadQueued }) : t("sync.prog.running")
-      : historyPreparing
-        ? t("sync.prog.preparing", { percent: historyPercent })
-        : t("sync.prog.wait");
+    : t("sync.prog.wait");
   const downloadState = snapshot.download_complete === true
     ? t("sync.prog.done")
     : snapshot.download_complete === false

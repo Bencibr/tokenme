@@ -1,7 +1,10 @@
-//! The single-owner outbox runtime used by CLI, Panel and a user service.
+//! The single-owner sync runtime used by CLI, Panel and a user service.
 //!
 //! It deliberately owns no timer thread by itself: callers choose `run_once`
 //! or `run_until`, while the SQLite lease is the process-wide singleton gate.
+//! The uplink is one symmetric rollup push per changed local state (a cheap
+//! change fingerprint keeps an idle device silent); the downlink is one
+//! authenticated rollup-snapshot fetch per interval. No outbox, no pages.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,45 +16,18 @@ use usage_core::{CallKind, Meter, UsageEvent};
 use usage_index::Index;
 
 use crate::{
-    AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest, AuthenticatedRollupRequest, AuthenticatedStatus,
-    AuthenticatedStatusRequest, DeviceIdentity, DirtyJournalInput,
+    AuthenticatedDisplayNameRequest, AuthenticatedRollupRequest, AuthenticatedStatus,
+    AuthenticatedStatusRequest, DeviceIdentity,
     NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, StreamOpenReceipt,
     ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
     TransportError,
 };
 
 // Keep the scheduler lease longer than the transport's 10-minute request
-// deadline. A live upload must not become reclaimable by a second process
-// while its owner is still waiting for the ACK.
+// deadline. A live sync pass must not become reclaimable by a second process
+// while its owner is still waiting on the primary.
 const DEFAULT_LEASE_TTL_MS: i64 = 15 * 60 * 1000;
 const DEFAULT_POLL_MS: u64 = 5_000;
-const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 8;
-// Snapshot ENQUEUING per pass. The outbox's own bounds (4,096 entries / 1 GB)
-// are the real backpressure; the old "stop at the first pending entry" gate
-// serialized the initial backfill to one 256-row generation per pass — 147
-// passes / 3.5 h measured on a seeded Windows secondary. 64 pages stream in
-// one WS burst; the outbox Limit still stops preparation when full.
-const SNAPSHOT_ENQUEUE_PAGES_PER_PASS: usize = 64;
-// A download burst used to hold the index writer almost continuously: every
-// page imports in one BEGIN IMMEDIATE (rows + rollups + cursor) and the
-// catch-up loop starts the next pass with no poll sleep, so the panel
-// engine's publish cycle timed out its 5 s busy wait with "database is
-// locked" for the whole burst. After each imported page this sleep hands
-// the writer to whoever is waiting — an engine-yield, not a rate limit:
-// four pages per pass pay at most 600 ms of it against per-page network
-// fetches and the five-second poll cadence.
-const DOWNLOAD_PAGE_ENGINE_YIELD: Duration = Duration::from_millis(50);
-// A fresh backup can owe hundreds of thousands of identity rows. One 256-row
-// batch per five-second poll left the first sync materializing for half an
-// hour on a 500k-event index (~200 rows/s), so each pass runs many larger
-// batches with an engine-yield between them — the same courtesy the download
-// burst pays: ~5k rows/s while the panel's publish cycle still wins the
-// writer inside every yield window.
-const HISTORY_INIT_BATCHES_PER_PASS: usize = 16;
-// Matches the raised materialization batch cap: fewer, denser transactions
-// beat many small ones while the 100ms yield still hands the writer over.
-const HISTORY_INIT_BATCH_ROWS: usize = 2048;
-const HISTORY_INIT_ENGINE_YIELD: Duration = Duration::from_millis(100);
 // The rollup downlink is a full snapshot of a few thousand aggregate rows —
 // a ~300 KB response. Thirty seconds keeps it fresh without hammering the
 // primary; there is no backfill to resume because there are no rows.
@@ -68,6 +44,10 @@ pub struct SyncRuntimeConfig {
     pub owner: String,
     pub lease_ttl_ms: i64,
     pub poll_interval: Duration,
+    /// Legacy knob of the row-level snapshot pipeline: rollup sync ships
+    /// aggregate rows whose coverage the index already bounds, so nothing
+    /// reads this any more. The field stays because the config is public
+    /// API and existing callers still set it.
     pub snapshot_days: i64,
 }
 
@@ -82,11 +62,22 @@ impl SyncRuntimeConfig {
     }
 }
 
+/// One sync pass's counters. The outbox-era fields survive as public API,
+/// but the rollup pipeline has no claim/ack bookkeeping for the sender: the
+/// push's `Ok` return IS the acknowledgment.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeRunReport {
+    /// Always 0: the outbox claim loop is gone.
     pub claimed: u64,
+    /// Rollup rows carried by this pass's uplink push — the whole local
+    /// snapshot, so the snapshot's size whenever local data changed; 0 when
+    /// the change fingerprint matched the last delivered push (or the pass
+    /// had nothing paired to do). `run_until` totals its passes' pushes.
     pub uploaded: u64,
+    /// Always 0: a delivered rollup push needs no separate ack bookkeeping.
     pub acknowledged: u64,
+    /// Always 0: push failures surface as pass errors with backoff instead
+    /// of outbox retries.
     pub retried: u64,
     pub pending: u64,
     pub in_flight: u64,
@@ -101,17 +92,22 @@ pub struct SyncRuntime {
     secondary_identity: Option<DeviceIdentity>,
     secondary_display_name: Option<String>,
     primary_data_sharing: bool,
-    primary_download_progressed: bool,
-    primary_download_more: bool,
     primary_download_preparing: bool,
+    primary_download_complete: bool,
     /// Embedding-UI wake for the moment the primary cuts this device off
     /// (revoked/blocked) and the runtime self-disables. Receives a short
     /// reason tag; the panel turns it into a toast.
     on_cut_off: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-    primary_download_complete: bool,
-    occurrences_initialized: bool,
     last_rollup_fetch: Option<i64>,
-    occurrence_init_progressed: bool,
+    /// (row count, summed in_tok, latest max_ts) of the local-origin rollup
+    /// rows at the moment of the last delivered push. None until the first
+    /// push; equal to the live tuple → the uplink push is skipped as
+    /// unchanged.
+    last_upload_fingerprint: Option<(i64, f64, i64)>,
+    /// Pass clock of the last delivered push. Does not move while pushes are
+    /// skipped as unchanged, so it doubles as the "something actually went
+    /// out" marker tests and the panel read.
+    last_upload_pushed_at: Option<i64>,
     /// Last instant the scheduler lease was actually rewritten. Renewing on
     /// every pass committed a write transaction twice per 5 s poll while the
     /// 15-minute lease was nowhere near expiry.
@@ -126,7 +122,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0, last_rollup_fetch: None, on_cut_off: None }
+        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_preparing: false, primary_download_complete: false, last_upload_fingerprint: None, last_upload_pushed_at: None, lease_renewed_at_ms: 0, last_rollup_fetch: None, on_cut_off: None }
     }
 
     pub fn new_secondary(
@@ -135,7 +131,10 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0, last_rollup_fetch: None, on_cut_off: None }
+        // Every uplink push authenticates the resident ws session with this
+        // identity; pinning it once here covers rebuilt legs too.
+        transport.set_ws_session_identity(identity.device_id.clone(), identity.origin.clone());
+        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_preparing: false, primary_download_complete: false, last_upload_fingerprint: None, last_upload_pushed_at: None, lease_renewed_at_ms: 0, last_rollup_fetch: None, on_cut_off: None }
     }
 
     pub fn new_secondary_with_display_name(
@@ -159,6 +158,10 @@ impl SyncRuntime {
     }
     pub fn owner(&self) -> &str { &self.config.owner }
 
+    /// The pass clock of the last delivered rollup push, if any. It does not
+    /// move while pushes are skipped as unchanged (see the field's doc).
+    pub fn last_upload_pushed_at(&self) -> Option<i64> { self.last_upload_pushed_at }
+
     pub fn transport_cancellation(&self) -> ClientTransportCancellation { self.transport.cancellation() }
 
     pub fn run_until_real(&mut self, stop: &AtomicBool) -> SyncResult<RuntimeRunReport> {
@@ -179,7 +182,7 @@ impl SyncRuntime {
     }
 
     /// Deterministic clock seam for lifecycle tests; production callers use
-    /// `run_once`, so ACK/retry/lease checks never reuse the pre-upload time.
+    /// `run_once`, so lease checks never reuse the pre-push time.
     pub fn run_once_with_clock(&mut self, mut now_ms: impl FnMut() -> i64) -> SyncResult<RuntimeRunReport> {
         let first_now = now_ms();
         if !self.store.acquire_scheduler_lease(&self.config.owner, first_now, self.config.lease_ttl_ms)? {
@@ -187,12 +190,10 @@ impl SyncRuntime {
         }
         self.lease_renewed_at_ms = first_now;
         let result = (|| {
-            self.store.recover_inflight_outbox(&self.config.owner, first_now)?;
-            let _ = self.prepare_secondary(&mut now_ms)?;
-            // A standalone pass must ask the primary again; only the resident
-            // scheduler may skip a downlink it already finished in this burst.
-            self.primary_download_complete = false;
-            self.run_owned_once(None, &mut now_ms)
+            let pushed = self.prepare_secondary(&mut now_ms)?;
+            let mut report = self.run_owned_once(None, &mut now_ms)?;
+            report.uploaded = pushed;
+            Ok(report)
         })();
         if let Err(error) = &result {
             self.remember_secondary_error(error, now_ms());
@@ -236,38 +237,23 @@ impl SyncRuntime {
             first_now = now_ms();
         }
         self.lease_renewed_at_ms = first_now;
-        if let Err(error) = self.store.recover_inflight_outbox(&self.config.owner, first_now) {
-            let _ = self.store.release_scheduler_lease(&self.config.owner);
-            return Err(error);
-        }
         let mut total = RuntimeRunReport::default();
         let mut consecutive_errors = 0_u32;
-        // The first pass and every timed pass ingest local sources; the
-        // bounded catch-up continuations skip it. During an initial-snapshot
-        // backfill no new local bytes exist to read, and on a large index the
-        // scan dominated every continuation — one snapshot generation per
-        // ~20 s measured on a seeded Windows secondary.
-        let mut timed_pass = true;
         while !stop.load(Ordering::Acquire) {
-            self.occurrence_init_progressed = false;
-            self.primary_download_progressed = false;
-            self.primary_download_more = false;
             self.primary_download_preparing = false;
             let lease_now = now_ms();
             if !self.renew_lease_if_due(lease_now)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
                 return Err(SyncError::Security("sync scheduler lease was lost before preparing the next pass".into()));
             }
-            if timed_pass {
-                if let Err(error) = ingest(&mut self.store) {
-                    let _ = self.store.release_scheduler_lease(&self.config.owner);
-                    return Err(error);
-                }
+            if let Err(error) = ingest(&mut self.store) {
+                let _ = self.store.release_scheduler_lease(&self.config.owner);
+                return Err(error);
             }
-            let mut catchup_complete = true;
+            let mut pushed_rows = 0_u64;
             let pass = match self.prepare_secondary(&mut now_ms) {
-                Ok(complete) => {
-                    catchup_complete = complete;
+                Ok(pushed) => {
+                    pushed_rows = pushed;
                     self.run_owned_once(Some(stop), &mut now_ms)
                 }
                 Err(error) if self.secondary_identity.is_some() && retryable_secondary_error(&error) => {
@@ -286,9 +272,8 @@ impl SyncRuntime {
                     return Err(error);
                 }
             };
-            catchup_complete &= !self.primary_download_more;
             total.claimed = total.claimed.saturating_add(pass.claimed);
-            total.uploaded = total.uploaded.saturating_add(pass.uploaded);
+            total.uploaded = total.uploaded.saturating_add(pushed_rows);
             total.acknowledged = total.acknowledged.saturating_add(pass.acknowledged);
             total.retried = total.retried.saturating_add(pass.retried);
             total.pending = pass.pending;
@@ -297,9 +282,6 @@ impl SyncRuntime {
             let pass_had_error = pass.last_error.is_some();
             let waiting_for_primary = pass.last_error.as_deref().is_some_and(|message| message.contains("awaiting approval") || message.contains("primary paused this device"));
             consecutive_errors = if pass_had_error && !waiting_for_primary { consecutive_errors.saturating_add(1) } else { 0 };
-            let pass_had_no_claim_with_pending = pass.claimed == 0 && pass.pending > 0;
-            let pass_had_occurrence_progress = self.occurrence_init_progressed;
-            let pass_had_primary_download_progress = self.primary_download_progressed;
             total.last_error = pass.last_error;
             if !pass_had_error && self.secondary_identity.is_some() {
                 let _ = self.store.set_secondary_last_error(None, now_ms());
@@ -310,25 +292,14 @@ impl SyncRuntime {
                 return Err(SyncError::Security("sync scheduler lease was lost".into()));
             }
             if stop.load(Ordering::Acquire) { break; }
-            // Continue bounded local or remote snapshot catch-up immediately;
-            // idle passes stay on the normal poll cadence. A continuation
-            // skips the ingest scan (see `timed_pass` above): nothing new can
-            // have landed mid-backfill, and the scan was the dominant cost of
-            // every continuation pass.
-            if !catchup_complete
-                && (pass.acknowledged > 0 || pass_had_occurrence_progress || pass_had_primary_download_progress)
-                && !pass_had_error
-                && !pass_had_no_claim_with_pending
-            {
-                timed_pass = false;
-                continue;
-            }
-            timed_pass = true;
+            // There is no bounded catch-up continuation any more: the uplink
+            // push and the rollup downlink are both one-shot calls, so a
+            // delivered-or-skipped push IS complete catch-up, and a failed
+            // one surfaces as a pass error with the backoff below instead of
+            // a fast continuation loop. Every pass here is a timed pass —
+            // it ingests, polls and sleeps the full (jittered) interval.
             let started = std::time::Instant::now();
             let interval = idle_interval(self.config.poll_interval, self.primary_download_preparing, pass_had_error, consecutive_errors);
-            // The timed pass is the one that discovers new primary data; the
-            // fast catch-up continuations above must not re-poll a downlink
-            // that already reported itself complete in this burst.
             self.primary_download_complete = false;
             while started.elapsed() < interval && !stop.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(50).min(interval));
@@ -352,6 +323,7 @@ impl SyncRuntime {
 
     fn run_owned_once(&mut self, stop: Option<&AtomicBool>, now_ms: &mut impl FnMut() -> i64) -> SyncResult<RuntimeRunReport> {
         let mut report = RuntimeRunReport::default();
+        if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) { return Ok(report); }
         if self.secondary_identity.is_some()
             && self.store.secondary_config()?.is_some_and(|config| !config.enabled)
         {
@@ -361,75 +333,12 @@ impl SyncRuntime {
             report.bytes = summary.bytes;
             return Ok(report);
         }
-        // The WS leg lives exactly for this drain: opened for the first push,
-        // reused across the burst, and closed on every exit — a primary that
-        // admits one connection at a time must see the slot again before the
-        // pass's own status/download calls.
-        let drain = 'drain: {
-            loop {
-                if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) { break; }
-                let claim_now = now_ms();
-                let entries = self.store.claim_outbox(&self.config.owner, claim_now, 1)?;
-                if entries.is_empty() { break; }
-                report.claimed += entries.len() as u64;
-                let entry = &entries[0];
-                if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-                    self.store.retry_outbox(&self.config.owner, entry.id, now_ms(), "sync stopped before upload")?;
-                    break;
-                }
-                // The resident WebSocket is the only upload path. The primary's
-                // import is idempotent per envelope — a package whose
-                // manifest+gzip hashes already have a receipt returns that
-                // receipt without re-importing — so a push the primary
-                // imported before its ack was lost is safely re-sent.
-                let upload = entry.signed_upload();
-                let result = self.transport.ws_upload(&upload);
-                match result {
-                    Ok(receipt) => {
-                        report.uploaded += 1;
-                        let commit_now = now_ms();
-                        if !self.renew_lease_if_due(commit_now)? {
-                            break 'drain Err(SyncError::Security("sync scheduler lease was lost before ACK".into()));
-                        }
-                        self.store.ack_outbox(&self.config.owner, entry.id, &receipt, commit_now)?;
-                        report.acknowledged += 1;
-                    }
-                    Err(error) => {
-                        let message = error.to_string();
-                        // A version-incompatible primary would just 426 the
-                        // re-snapshot too: resetting here used to loop
-                        // reset → full snapshot → 426 forever. Surface the
-                        // version copy instead and wait for an upgrade.
-                        if is_version_incompatible_error(&message) && self.secondary_identity.is_some() {
-                            let _ = self.store.reset_secondary_sync_state(now_ms());
-                            let _ = self.store.set_secondary_enabled(false, now_ms());
-                            let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
-                            report.last_error = Some(message.clone());
-                            break;
-                        }
-                        let fatal = is_unrecoverable_sync_error(&message) || entry.attempts >= 4;
-                        if fatal && self.secondary_identity.is_some() {
-                            let _ = self.store.reset_secondary_sync_state(now_ms());
-                            report.retried += 1;
-                            report.last_error = Some(format!("auto-recovering: {message}"));
-                            break;
-                        }
-                        self.store.retry_outbox(&self.config.owner, entry.id, now_ms(), &message)?;
-                        report.retried += 1;
-                        report.last_error = Some(message);
-                        break;
-                    }
-                }
-            }
-            Ok(())
-        };
-        // The WebSocket stays resident across passes: the primary admits four
-        // concurrent connections, so the held slot no longer starves the
-        // status/download calls, and a LAN keepalive link beats a fresh
-        // TCP+TLS+WS handshake per pass. `try_ws_upload` re-authenticates
-        // nothing — the socket is already authenticated — and rebuilds the
-        // leg itself if a send or read ever fails.
-        drain?;
+        // The uplink push already ran inside `prepare_secondary`; this half
+        // owns the downlink. The WebSocket stays resident across passes: the
+        // primary admits four concurrent connections, so the held slot no
+        // longer starves the status calls, and a LAN keepalive link beats a
+        // fresh TCP+TLS+WS handshake per pass.
+        //
         // Rollup-level downlink: one authenticated full-snapshot fetch per
         // ROLLUP_FETCH_INTERVAL replaces the row-level page walk entirely —
         // a 500k-event primary lands in one ~300 KB response, so there is
@@ -442,7 +351,6 @@ impl SyncRuntime {
                 match self.fetch_primary_rollup(now_ms()) {
                     Ok(()) => {
                         self.primary_download_complete = true;
-                        self.primary_download_progressed = true;
                         self.last_rollup_fetch = Some(now_ms());
                     }
                     Err(error) => {
@@ -481,62 +389,27 @@ impl SyncRuntime {
         Ok(())
     }
 
-    fn download_primary_pages(&mut self, stop: Option<&AtomicBool>, now_ms: &mut impl FnMut() -> i64) -> SyncResult<bool> {
-        let identity = self.secondary_identity.clone().ok_or_else(|| SyncError::Security("primary download requires a paired secondary identity".into()))?;
-        for _ in 0..MAX_SNAPSHOT_PAGES_PER_PASS {
-            if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) { return Ok(false); }
-            let cursor = self.store.primary_download_cursor()?;
-            let request = AuthenticatedDownloadRequest::new_at(
-                &identity, self.store.primary_id().to_string(), cursor.last_identity.clone(),
-                cursor.last_dirty_revision, now_ms(),
-            )?;
-            let page = self.transport.download_primary_page(&request).map_err(|error| match error {
-                TransportError::Unsupported(message) => SyncError::Unsupported(message),
-                error => SyncError::Protocol(format!("primary download request failed: {error}")),
-            })?;
-            if !page.enabled {
-                self.primary_data_sharing = false;
-                return Ok(true);
-            }
-            self.store.apply_primary_download_page(&page, now_ms())?;
-            // Hand the index writer to a waiting publish cycle between imports
-            // (see DOWNLOAD_PAGE_ENGINE_YIELD): a preparing page wrote nothing
-            // and a complete page ends the burst, so only a real import sleeps.
-            if !page.preparing && !page.complete { std::thread::sleep(DOWNLOAD_PAGE_ENGINE_YIELD); }
-            // A preparing page is an empty marker: the primary is still
-            // materializing identities and the cursor did not move, so this
-            // pass made no catch-up progress.
-            self.primary_download_preparing = page.preparing;
-            if !page.preparing { self.primary_download_progressed = true; }
-            if page.complete { self.primary_download_complete = true; return Ok(true); }
-        }
-        Ok(false)
-    }
-
-    fn prepare_secondary(&mut self, now_ms: &mut impl FnMut() -> i64) -> SyncResult<bool> {
-        let Some(identity) = self.secondary_identity.clone() else { return Ok(true); };
+    /// The status-and-pairing preamble every pass runs, closed by the uplink
+    /// push. Returns the rollup rows the push carried — 0 when the pass had
+    /// nothing paired to do or the fingerprint matched the last delivered
+    /// push. Errors are the caller's record-and-backoff input.
+    fn prepare_secondary(&mut self, now_ms: &mut impl FnMut() -> i64) -> SyncResult<u64> {
+        let Some(identity) = self.secondary_identity.clone() else { return Ok(0); };
         let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
         if !config.enabled {
             // Stop is the network scheduler switch.  A paired device keeps
-            // capturing dirty revisions while offline so resume cannot skip
-            // changes made before the last ACK.
-            return Ok(true);
+            // rolling local rows up while offline so resume cannot skip
+            // changes made before the last push.
+            return Ok(0);
         }
-        // Never build more pages while older immutable bytes are waiting for
-        // ACK.  This is the backpressure valve that lets the sender drain a
-        // bounded outbox instead of filling it during one preparation loop.
-        let summary = self.store.outbox_summary()?;
-        let has_pending = summary.pending > 0 || summary.in_flight > 0;
-        let had_stream = config.stream_id.is_some();
-        let local_has_history = if had_stream { true } else { self.store.secondary_has_history(&config)? };
-        let mut catchup_complete = true;
-        if had_stream && !has_pending {
-            let snapshot_now = now_ms();
-            if !self.renew_lease_if_due(snapshot_now)? {
-                return Err(SyncError::Security("sync scheduler lease was lost before snapshot".into()));
-            }
-            catchup_complete = self.enqueue_local_snapshot(&config, &identity, snapshot_now)?;
-        }
+        // A device that has a stream or ack history has synced before; a
+        // fresh pairing has neither, and must not be forced to reconcile
+        // just because it never minted a stream (new pairings never do).
+        let local_has_history = if config.stream_id.is_some() {
+            true
+        } else {
+            self.store.secondary_has_history(&config)?
+        };
         let request_now = now_ms();
         let request = AuthenticatedStatusRequest::new_at_with_checkpoint(
             &identity, config.primary_id.clone(), true, config.last_ack_generation, request_now,
@@ -622,15 +495,13 @@ impl SyncRuntime {
         } else {
             self.store.update_secondary_stream(&receipt, stream_now)?;
         }
-        if recover || (!had_stream && !has_pending) {
-            let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
-            let snapshot_now = now_ms();
-            if !self.renew_lease_if_due(snapshot_now)? {
-                return Err(SyncError::Security("sync scheduler lease was lost before snapshot".into()));
-            }
-            catchup_complete = self.enqueue_local_snapshot(&config, &identity, snapshot_now)?;
-        }
-        Ok(catchup_complete && !has_pending)
+        // The uplink: one authenticated rollup-snapshot push, riding the
+        // settled session — a pending/paused/revoked device never gets here,
+        // and a fresh pairing (no stream ever minted) pushes right after its
+        // first status pass. A delivered-or-skipped push is the whole
+        // catch-up: the pass that returns from here owes nothing to the
+        // next one.
+        self.push_local_rollup(now_ms())
     }
 
     fn remember_secondary_error(&mut self, error: &SyncError, now_ms: i64) {
@@ -655,101 +526,68 @@ impl SyncRuntime {
         }
     }
 
-    fn enqueue_local_snapshot(&mut self, config: &crate::SecondarySyncConfig, identity: &DeviceIdentity, now_ms: i64) -> SyncResult<bool> {
-        let historical_ready = if self.occurrences_initialized {
-            true
-        } else {
-            let mut complete = false;
-            for _ in 0..HISTORY_INIT_BATCHES_PER_PASS {
-                complete = self.store.index_mut().ensure_sync_occurrences_page(HISTORY_INIT_BATCH_ROWS).map_err(SyncError::from)?;
-                if complete {
-                    self.occurrences_initialized = true;
-                    break;
-                }
-                self.occurrence_init_progressed = true;
-                // Hand the writer to the engine between batches — the
-                // materialization is worth minutes, the panel's publish cycle
-                // must not starve for any of them (see DOWNLOAD_PAGE_ENGINE_YIELD).
-                std::thread::sleep(HISTORY_INIT_ENGINE_YIELD);
-            }
-            complete
-        };
-        let mut cursor = self.store.snapshot_cursor(config)?;
-        if !historical_ready { cursor.last_identity = None; }
-        for _ in 0..SNAPSHOT_ENQUEUE_PAGES_PER_PASS {
-            let page = if historical_ready {
-                self.store.index().sync_snapshot_page(
-                    cursor.last_identity.as_deref(), cursor.last_dirty_revision, now_ms,
-                    self.config.snapshot_days, usage_index::SYNC_SNAPSHOT_PAGE_ROWS,
-                    usage_index::SYNC_SNAPSHOT_PAGE_BYTES,
-                )
-            } else {
-                self.store.index().sync_dirty_page(
-                    cursor.last_dirty_revision, now_ms, self.config.snapshot_days,
-                    usage_index::SYNC_SNAPSHOT_PAGE_ROWS, usage_index::SYNC_SNAPSHOT_PAGE_BYTES,
-                )
-            }.map_err(SyncError::from)?;
-            let mut rows_by_identity = BTreeMap::<String, NetworkRow>::new();
-            for event in page.events {
-                let row = network_row(event.event, event.occurrence_id)?;
-                rows_by_identity.insert(event.identity, row);
-            }
-            let mut dirty_by_identity = BTreeMap::<String, usage_index::SyncDirtyEvent>::new();
-            for dirty in page.dirty_events {
-                dirty_by_identity.insert(dirty.identity.clone(), dirty);
-            }
-            for (dirty_identity, dirty) in &dirty_by_identity {
-                let row = network_row(dirty.event.clone(), dirty.occurrence_id.clone())?;
-                rows_by_identity.insert(dirty_identity.clone(), row);
-            }
-            // Journal every dirty row in this page straight from the map that
-            // produced its package row.  Re-deriving the identity from the
-            // serialized row could miss a repaired/duplicated identity, and a
-            // dirty row with no journal entry is never cleared by ACK — it
-            // would pin its event against prune forever.
-            let journal = dirty_by_identity.iter().map(|(identity_key, dirty)| {
-                let row = rows_by_identity.get(identity_key)
-                    .ok_or_else(|| SyncError::Protocol("dirty page row disappeared before journalling".into()))?;
-                Ok(DirtyJournalInput {
-                    identity: dirty.identity.clone(),
-                    revision: dirty.revision,
-                    kind: "event_snapshot".into(),
-                    row: row.clone(),
-                })
-            }).collect::<SyncResult<Vec<_>>>()?;
-            let mut rows = rows_by_identity.into_values().collect::<Vec<_>>();
-            rows.sort_by(|left, right| left.identity_material().unwrap_or("").cmp(right.identity_material().unwrap_or("")));
-            let complete = page.events_done && page.dirty_done;
-            if rows.is_empty() && !complete {
-                if !historical_ready { return Ok(false); }
-                return Err(SyncError::Limit("snapshot page made no cursor progress".into()));
-            }
-            if rows.is_empty() && complete && cursor.complete && cursor.completion_generation.is_some() {
-                // An already-ACKed cursor with no dirty revision is an idle
-                // pass, not a new empty generation.  In particular, do not
-                // let generated_at_ms manufacture receipts every poll.
-                return Ok(true);
-            }
-            let window_lo_ms = page.coverage_lo_ms;
-            let window_hi_ms = page.coverage_hi_ms;
-            let package = NetworkPackage::from_rows_with_snapshot_complete(
-                config.origin.clone(), usage_index::INDEX_SCHEMA_VERSION, window_lo_ms, window_hi_ms,
-                &rows, now_ms, complete,
-            )?;
-            match self.store.enqueue_snapshot_page_auto(
-                config, package, &journal, &identity.signing_key, page.next_identity.as_deref(),
-                page.next_dirty_revision, complete, now_ms,
-            ) {
-                Ok(_) => {}
-                Err(SyncError::Limit(_)) if self.store.outbox_summary()?.pending > 0 => return Ok(false),
-                Err(error) => return Err(error),
-            }
-            cursor.last_identity = page.next_identity;
-            cursor.last_dirty_revision = page.next_dirty_revision;
-            cursor.complete = complete;
-            if complete { return Ok(true); }
+    /// The uplink half of symmetric rollup sync: this device's own rollup
+    /// rows pushed to the primary over the resident WebSocket session. A
+    /// cheap change fingerprint — (row count, summed in_tok, latest max_ts)
+    /// over the local-origin rows — keeps an idle device from pushing
+    /// anything: the snapshot is re-sent only when the tuple moves, or on
+    /// the first pass so a fresh pairing establishes its uplink even with
+    /// zero rows. The primary's apply is idempotent (INSERT OR REPLACE per
+    /// row plus the ack stamp), so a push whose ack was lost is safely
+    /// re-sent — the fingerprint skip is an optimization, not a correctness
+    /// gate. Returns the number of rows the delivered push carried (0 when
+    /// skipped as unchanged).
+    fn push_local_rollup(&mut self, now_ms: i64) -> SyncResult<u64> {
+        let fingerprint = self.local_rollup_fingerprint()?;
+        if self.last_upload_fingerprint == Some(fingerprint) {
+            return Ok(0);
         }
-        Ok(false)
+        let rows = self.store.local_rollup_snapshot()?;
+        // Error handling is the old outbox drain's: a version-incompatible
+        // primary is disabled — resetting would loop reset → re-push → 426
+        // forever, so only an upgrade fixes it — a broken stream state is
+        // auto-recovered by resetting the local stream (the next pass's
+        // recovery handshake mints a fresh one), and anything else goes back
+        // as a pass error for the caller's record-and-backoff paths.
+        match self.transport.ws_rollup_sync(&rows) {
+            Ok(_origin) => {
+                self.last_upload_fingerprint = Some(fingerprint);
+                self.last_upload_pushed_at = Some(now_ms);
+                Ok(rows.len() as u64)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if is_version_incompatible_error(&message) {
+                    let _ = self.store.reset_secondary_sync_state(now_ms);
+                    let _ = self.store.set_secondary_enabled(false, now_ms);
+                    let _ = self.store.set_secondary_last_error(Some(&message), now_ms);
+                    return Err(SyncError::Protocol(message));
+                }
+                if is_unrecoverable_sync_error(&message) {
+                    let _ = self.store.reset_secondary_sync_state(now_ms);
+                    return Err(SyncError::Protocol(format!("auto-recovering: {message}")));
+                }
+                Err(SyncError::Protocol(format!("rollup push failed: {message}")))
+            }
+        }
+    }
+
+    /// The uplink's change fingerprint: (n, sum(in_tok), max(max_ts)) over
+    /// this device's local-origin rollup rows. `event_rollup.origin` IS the
+    /// materialized `ORIGIN_SQL` of each event's source — the index folds it
+    /// in at ingest and the table carries no `source` column to re-evaluate
+    /// the expression against — so the local rows are exactly `origin = ''`,
+    /// the same predicate `SyncStore::local_rollup_snapshot` serves. A row
+    /// edit that keeps all three equal is invisible to the push; aggregate
+    /// rows are append-mostly, so that trade is the cheap idleness gate's
+    /// accepted cost.
+    fn local_rollup_fingerprint(&self) -> SyncResult<(i64, f64, i64)> {
+        self.store.index().conn()
+            .query_row(
+                "SELECT count(*), IFNULL(sum(in_tok), 0), IFNULL(MAX(max_ts), 0) FROM event_rollup WHERE origin = ''",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| SyncError::Sqlite(error.to_string()))
     }
 }
 
@@ -934,9 +772,8 @@ fn current_time_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::{
-        hash_bytes, DeviceIdentity, HttpsServerConfig, HttpsTransportConfig, NetworkCounts, NetworkPackage,
-        PrimarySyncConfig,
-        NetworkRow, PairingRequest, SecondarySyncConfig, SyncStore, Tls13HttpsTransport, MAX_COMPRESSED_BYTES,
+        hash_bytes, DeviceIdentity, HttpsServerConfig, HttpsTransportConfig, PrimarySyncConfig,
+        PairingRequest, SecondarySyncConfig, SyncStore, Tls13HttpsTransport, MAX_COMPRESSED_BYTES,
     };
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::net::TcpListener;
@@ -967,22 +804,6 @@ mod tests {
         let mut primary = paired_primary_without_stream(device);
         let stream = primary.open_stream_for_registered(&device.device_id, 3).unwrap();
         (primary, stream)
-    }
-
-    fn package(origin: &str) -> NetworkPackage {
-        NetworkPackage::from_rows(
-            origin,
-            usage_index::INDEX_SCHEMA_VERSION,
-            0,
-            100,
-            &[NetworkRow {
-                key: Some("runtime-row".into()), occurrence_id: None, tool: "codex".into(),
-                ts_ms: 10, session: "runtime-session".into(), project: None, model: None,
-                meter: "tokens".into(), source: "runtime.jsonl".into(),
-                counts: NetworkCounts::all_zero(), calls: vec![],
-            }],
-            4,
-        ).unwrap()
     }
 
     fn server_config(cert_der: &[u8], key_der: &[u8], staging_dir: std::path::PathBuf) -> HttpsServerConfig {
@@ -1037,158 +858,6 @@ mod tests {
     }
 
     #[test]
-    fn download_page_yield_stays_a_small_engine_yield() {
-        // Wide band on purpose: the sleep must leave a waiting publish cycle
-        // room to win the writer, without turning a page backfill into a
-        // rate-limited crawl. SQLite's busy handler re-tries well inside
-        // 50 ms, and denser pages hand the writer over 8 times per pass.
-        assert!(DOWNLOAD_PAGE_ENGINE_YIELD >= Duration::from_millis(25), "{DOWNLOAD_PAGE_ENGINE_YIELD:?} is too short to let a waiting writer win the lock");
-        assert!(DOWNLOAD_PAGE_ENGINE_YIELD <= Duration::from_millis(1_000), "{DOWNLOAD_PAGE_ENGINE_YIELD:?} is a rate limit, not an engine-yield");
-    }
-
-    #[test]
-    fn secondary_runtime_uses_its_own_store_to_snapshot_and_ack() {
-        let device = DeviceIdentity::create("runtime-secondary", "Secondary").unwrap();
-        let (primary, _stream) = paired_primary(&device);
-        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
-        let (cert_der, key_der) = certificate();
-        let staging = tempfile::tempdir().unwrap();
-        let server = crate::HttpsSyncServer::bind(server_config(&cert_der, &key_der, staging.path().join("staging")), primary).unwrap();
-        let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections_concurrent(5));
-        let identity_dir = tempfile::tempdir().unwrap();
-        let identity_path = identity_dir.path().join("secondary-identity.json");
-        secondary.save_secondary_config(&SecondarySyncConfig {
-            primary_os: None,
-            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
-            endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
-            certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(), identity_path,
-            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
-            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
-            last_ack_generation: None, last_ack_receipt_hash: None,
-        }, usage_core::report::now_ms()).unwrap();
-        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
-            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
-        )).unwrap();
-        let mut runtime = SyncRuntime::new_secondary_with_display_name(
-            secondary, transport, SyncRuntimeConfig::new("secondary-test-owner").unwrap(), device.clone(), "Current host",
-        );
-        let first_now = usage_core::report::now_ms();
-        let report = runtime.run_once_with_clock(|| first_now).unwrap();
-        assert_eq!(report.acknowledged, 1, "an empty initial snapshot still needs a signed completion marker");
-        assert_eq!(runtime.store().outbox_summary().unwrap().pending, 0);
-        let second = runtime.run_once_with_clock(|| first_now + 5_000).unwrap();
-        assert_eq!(second.acknowledged, 0, "idle polling at a different time must remain outbox-free");
-        assert_eq!(runtime.store().outbox_summary().unwrap().pending, 0);
-        let config = runtime.store().secondary_config().unwrap().unwrap();
-        let primary_name = usage_index::hostname();
-        assert_eq!(config.primary_display_name.as_deref(), Some(primary_name.as_str()));
-        assert!(config.stream_id.is_some());
-        assert_eq!(config.data_epoch, Some(1));
-        assert!(config.last_connected_at_ms.is_some());
-        assert_eq!(config.last_ack_generation, Some(1));
-        assert!(config.last_ack_receipt_hash.is_some());
-        assert_eq!(runtime.store().snapshot_cursor(&config).unwrap().completion_generation, Some(1));
-        let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, first_now + 10_000).unwrap();
-        assert_eq!(runtime.transport.status(&status_request).unwrap().display_name.as_deref(), Some("Current host"));
-        assert!(server_thread.join().unwrap().is_ok());
-    }
-
-    #[test]
-    fn secondary_runtime_recovers_a_purged_receipt_with_a_fresh_stream() {
-        let device = DeviceIdentity::create("runtime-recovery", "Secondary").unwrap();
-        // The primary is file-backed so the test can purge a receipt between
-        // passes while the server holds its own connection to the same store.
-        let primary_dir = tempfile::tempdir().unwrap();
-        let primary_path = primary_dir.path().join("index.db");
-        let mut primary_admin = SyncStore::open(&primary_path, "primary-1").unwrap();
-        let invite = primary_admin.create_pairing_invite("https://localhost:47821", &"1".repeat(64), i64::MAX).unwrap();
-        let request = PairingRequest::new(&invite, &device, "linux").unwrap();
-        let state = primary_admin.receive_pairing_request(&request, 1).unwrap();
-        primary_admin.approve_pairing(&state.request_id, 2).unwrap();
-        let stream = primary_admin.open_stream_for_registered(&device.device_id, 3).unwrap();
-
-        let (cert_der, key_der) = certificate();
-        let staging = tempfile::tempdir().unwrap();
-        let server = crate::HttpsSyncServer::bind(
-            server_config(&cert_der, &key_der, staging.path().join("staging")),
-            SyncStore::open(&primary_path, "primary-1").unwrap(),
-        ).unwrap();
-        let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections_concurrent(32));
-
-        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
-        let identity_dir = tempfile::tempdir().unwrap();
-        let first_now = usage_core::report::now_ms();
-        secondary.save_secondary_config(&SecondarySyncConfig {
-            primary_os: None,
-            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
-            endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
-            certificate_pin: hash_bytes(&cert_der), certificate_der: cert_der.clone(),
-            identity_path: identity_dir.path().join("secondary-identity.json"),
-            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
-            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
-            last_ack_generation: None, last_ack_receipt_hash: None,
-        }, first_now).unwrap();
-        secondary.index_mut().conn().execute(
-            "INSERT INTO event(id, tool, ts_ms, session, meter, dedupe_key, source) VALUES(1, 'codex', ?1, 'recovery-session', 'tokens', 'recovery-row', 'live.jsonl')",
-            rusqlite::params![first_now],
-        ).unwrap();
-        secondary.index_mut().conn().execute(
-            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(1, 'key:recovery-row', NULL)",
-            [],
-        ).unwrap();
-        secondary.index_mut().conn().execute(
-            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
-             VALUES('key:recovery-row', 'live.jsonl', X'', 1, ?1, 1, ?1, ?1)",
-            rusqlite::params![first_now],
-        ).unwrap();
-
-        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
-            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
-        )).unwrap();
-        let mut runtime = SyncRuntime::new_secondary(
-            secondary, transport, SyncRuntimeConfig::new("secondary-recovery-owner").unwrap(), device.clone(),
-        );
-        let first = runtime.run_once_with_clock(|| first_now).unwrap();
-        assert_eq!(first.acknowledged, 1);
-        let before = runtime.store().secondary_config().unwrap().unwrap();
-        assert_eq!(before.stream_id.as_deref(), Some(stream.stream_id.as_str()));
-        assert_eq!(before.last_ack_generation, Some(1));
-
-        // Losing the ACKed receipt is the primary-side reconcile trigger; the
-        // next status call itself answers 409 and the client must repair it
-        // without a manual step.
-        primary_admin.purge_receipt(&device.device_id, &stream.stream_id, 1).unwrap();
-        let second = runtime.run_once_with_clock(|| first_now + 5_000).unwrap();
-        assert_eq!(second.acknowledged, 1, "recovery must re-send a fresh generation-1 snapshot");
-        let after = runtime.store().secondary_config().unwrap().unwrap();
-        assert_ne!(after.stream_id.as_deref(), Some(stream.stream_id.as_str()));
-        assert_eq!(after.data_epoch, Some(1));
-        assert_eq!(after.last_ack_generation, Some(1));
-        assert_eq!(after.last_error, None);
-        assert_eq!(runtime.store().outbox_summary().unwrap().pending, 0);
-        assert_eq!(runtime.store().snapshot_cursor(&after).unwrap().completion_generation, Some(1));
-
-        let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, first_now + 6_000).unwrap();
-        let status = runtime.transport.status(&status_request).unwrap();
-        assert_eq!(status.status, "paired");
-        assert_eq!(status.active_stream_id.as_deref(), after.stream_id.as_deref());
-        assert_eq!(status.expected_generation, Some(2), "the recovered stream must have accepted generation 1");
-        let old_active: i64 = primary_admin.index().conn().query_row(
-            "SELECT active FROM device_stream WHERE device_id = ?1 AND stream_id = ?2",
-            rusqlite::params![device.device_id, stream.stream_id], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(old_active, 0, "the recovered-from stream stays frozen");
-        let receipts: i64 = primary_admin.index().conn().query_row(
-            "SELECT count(*) FROM device_receipt WHERE device_id = ?1 AND stream_id = ?2",
-            rusqlite::params![device.device_id, after.stream_id.clone().unwrap()], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(receipts, 1);
-        drain_server(addr, server_thread);
-    }
-
-    #[test]
     fn secondary_runtime_syncs_primary_rollup_over_loopback_tls() {
         let device = DeviceIdentity::create("runtime-downlink", "Secondary").unwrap();
         let (mut primary, _) = paired_primary(&device);
@@ -1239,7 +908,9 @@ mod tests {
         );
 
         let report = runtime.run_once_with_clock(|| now + 10).unwrap();
-        assert_eq!(report.acknowledged, 1, "the initial empty upload still establishes the paired stream");
+        assert_eq!(report.uploaded, 0, "the secondary owns no local rows: the establishing push is empty");
+        assert_eq!(report.acknowledged, 0, "the push's Ok is the ack; there is no separate bookkeeping");
+        assert!(report.last_error.is_none());
         assert!(runtime.primary_download_complete, "one rollup snapshot completes the downlink");
         let (origin, in_tok): (String, f64) = runtime.store().index().conn().query_row(
             "SELECT origin, in_tok FROM remote_rollup", [],
@@ -1254,130 +925,83 @@ mod tests {
     }
 
     #[test]
-    fn secondary_runtime_uploads_dirty_rows_before_historical_identity_catchup() {
-        let device = DeviceIdentity::create("runtime-incremental", "Secondary").unwrap();
-        let primary = paired_primary_without_stream(&device);
+    fn secondary_runtime_pushes_its_rollup_snapshot_once_and_skips_unchanged() {
+        let device = DeviceIdentity::create("runtime-rollup-push", "Secondary").unwrap();
+        // The primary is file-backed so the test can read `remote_rollup`
+        // while the server holds its own connection to the same store.
+        let primary_dir = tempfile::tempdir().unwrap();
+        let primary_path = primary_dir.path().join("index.db");
+        let mut primary_admin = SyncStore::open(&primary_path, "primary-1").unwrap();
+        let invite = primary_admin.create_pairing_invite("https://localhost:47821", &"1".repeat(64), i64::MAX).unwrap();
+        let request = PairingRequest::new(&invite, &device, "linux").unwrap();
+        let state = primary_admin.receive_pairing_request(&request, 1).unwrap();
+        primary_admin.approve_pairing(&state.request_id, 2).unwrap();
+
         let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
         let (cert_der, key_der) = certificate();
         let staging = tempfile::tempdir().unwrap();
-        let server = crate::HttpsSyncServer::bind(server_config(&cert_der, &key_der, staging.path().join("staging")), primary).unwrap();
+        let server = crate::HttpsSyncServer::bind(
+            server_config(&cert_der, &key_der, staging.path().join("staging")),
+            SyncStore::open(&primary_path, "primary-1").unwrap(),
+        ).unwrap();
         let addr = server.local_addr().unwrap();
+        let server_thread = thread::spawn(move || server.run_connections_concurrent(16));
         let identity_dir = tempfile::tempdir().unwrap();
-        let identity_path = identity_dir.path().join("secondary-identity.json");
         let first_now = usage_core::report::now_ms();
         secondary.save_secondary_config(&SecondarySyncConfig {
             primary_os: None,
             primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
             endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
-            certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(), identity_path,
+            certificate_pin: hash_bytes(&cert_der), certificate_der: cert_der.clone(),
+            identity_path: identity_dir.path().join("secondary-identity.json"),
             stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
             last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
             last_ack_generation: None, last_ack_receipt_hash: None,
         }, first_now).unwrap();
-        // One more history row than the upload side materializes per pass
-        // (four identity batches).
-        let missing = usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4 + 1;
-        for id in 1..=missing as i64 {
+        // Five local-origin rollup rows — this device's whole uplink.
+        for index in 1..=5 {
             secondary.index_mut().conn().execute(
-                "INSERT INTO event(id, tool, ts_ms, session, meter, source) VALUES(?1, 'codex', ?2, ?3, 'tokens', 'history.jsonl')",
-                rusqlite::params![id, first_now, format!("history-{id}")],
+                "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter,                 in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)              VALUES('2026-10-22', '', 'codex', ?1, '', '', 'tokens', 3, 0, 0, 0, 0, 0, 1, 1, ?2, ?2)",
+                rusqlite::params![format!("session-{index}"), first_now - 1_000],
             ).unwrap();
         }
-        let dirty_id = missing as i64 + 1;
-        secondary.index_mut().conn().execute(
-            "INSERT INTO event(id, tool, ts_ms, session, meter, dedupe_key, source) VALUES(?1, 'codex', ?2, 'live', 'tokens', 'live-row', 'live.jsonl')",
-            rusqlite::params![dirty_id, first_now],
-        ).unwrap();
-        secondary.index_mut().conn().execute(
-            "INSERT INTO sync_event_identity(event_id, identity, occurrence_id) VALUES(?1, 'key:live-row', NULL)",
-            rusqlite::params![dirty_id],
-        ).unwrap();
-        secondary.index_mut().conn().execute(
-            "INSERT INTO sync_dirty(identity, source_key, event_json, event_id, event_ts_ms, revision, dirty_since_ms, updated_ms)
-             VALUES('key:live-row', 'live.jsonl', X'', ?1, ?2, 1, ?2, ?2)",
-            rusqlite::params![dirty_id, first_now],
-        ).unwrap();
+        let remote = |admin: &SyncStore| -> (i64, f64) {
+            admin.index().conn().query_row(
+                "SELECT count(*), IFNULL(sum(in_tok), 0) FROM remote_rollup WHERE origin = ?1",
+                rusqlite::params![device.origin], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap()
+        };
 
-        let server_thread = thread::spawn(move || server.run_connections_concurrent(3));
         let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
         )).unwrap();
-        let mut runtime = SyncRuntime::new_secondary(secondary, transport, SyncRuntimeConfig::new("secondary-incremental-owner").unwrap(), device);
+        let mut runtime = SyncRuntime::new_secondary(
+            secondary, transport, SyncRuntimeConfig::new("secondary-rollup-owner").unwrap(), device.clone(),
+        );
         let report = runtime.run_once_with_clock(|| first_now).unwrap();
-        // One burst packages the whole fixture — the live dirty row rides the
-        // same pass as the history pages instead of queueing behind them —
-        // so the count is the page count, not one.
-        assert!(report.acknowledged >= 1, "the live dirty row must upload in the first pass, never queued behind history mapping");
+        assert_eq!(report.uploaded, 5, "the first pass pushes the whole local snapshot");
+        assert_eq!(report.acknowledged, 0, "the push's Ok is the ack; there is no separate bookkeeping");
+        assert_eq!(remote(&primary_admin), (5, 15.0), "the primary stored the snapshot under the device origin");
+        assert!(runtime.last_upload_fingerprint.is_some(), "the delivered push left its fingerprint behind");
+        assert_eq!(runtime.last_upload_pushed_at, Some(first_now));
 
-        // 16 batches per pass catch the small fixture up in one pass: the
-        // cursor must sit at the last local event. The live dirty row's
-        // import created the final identity before this read.
-        // One pass with 16 batches maps the whole fixture: no local-origin
-        // event may remain without an identity row (the live dirty row came
-        // pre-materialized, so it never enters the walk).
-        let missing: bool = runtime.store().index().conn()
-            .query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM event e LEFT JOIN sync_event_identity i ON i.event_id = e.id WHERE ({}) = '' AND i.event_id IS NULL)", usage_index::ORIGIN_SQL),
-                [], |row| row.get(0),
-            ).unwrap();
-        assert!(!missing, "one pass maps the whole fixture");
-        let config = runtime.store().secondary_config().unwrap().unwrap();
-        // The burst finishes the whole snapshot in this pass — the dirty row
-        // was never queued behind history mapping, and the cursor says the
-        // backfill is done.
-        assert!(runtime.store().snapshot_cursor(&config).unwrap().complete);
-        assert!(server_thread.join().unwrap().is_ok());
-    }
+        let idle = runtime.run_once_with_clock(|| first_now + 5_000).unwrap();
+        assert_eq!(idle.uploaded, 0, "an unchanged local rollup pushes nothing");
+        assert_eq!(idle.last_error, None);
+        assert_eq!(remote(&primary_admin), (5, 15.0));
+        assert_eq!(runtime.last_upload_pushed_at, Some(first_now), "the push timestamp did not move: nothing was re-sent");
 
-    #[test]
-    fn runtime_claims_uploads_acks_and_clears_journaled_outbox() {
-        let device = DeviceIdentity::create("runtime-device", "Runtime").unwrap();
-        let (primary, stream) = paired_primary(&device);
-        let package = package(&device.origin);
-        let mut sender = SyncStore::open_in_memory("primary-1").unwrap();
-        sender.enqueue_outbox_auto(
-            &device.device_id, &device.origin, &stream.stream_id, stream.data_epoch,
-            package.manifest_bytes, package.gzip_bytes, &device.signing_key, &[], 10,
+        runtime.store_mut().index_mut().conn().execute(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter,                 in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)              VALUES('2026-10-23', '', 'codex', 'session-1', '', '', 'tokens', 7, 0, 0, 0, 0, 0, 1, 1, ?1, ?1)",
+            rusqlite::params![first_now - 500],
         ).unwrap();
-        let (cert_der, key_der) = certificate();
-        let staging = tempfile::tempdir().unwrap();
-        let server = crate::HttpsSyncServer::bind(server_config(&cert_der, &key_der, staging.path().join("staging")), primary).unwrap();
-        let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections_concurrent(1));
-        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
-            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
-        )).unwrap();
-        let config = SyncRuntimeConfig::new("runtime-owner").unwrap();
-        let mut runtime = SyncRuntime::new(sender, transport, config);
-        let report = runtime.run_once_with_clock(|| 10).unwrap();
-        assert_eq!(report.acknowledged, 1);
-        assert_eq!(runtime.store().outbox_summary().unwrap().pending, 0);
-        assert_eq!(runtime.store().outbox_summary().unwrap().in_flight, 0);
-        assert!(server_thread.join().unwrap().is_ok());
-    }
+        let changed = runtime.run_once_with_clock(|| first_now + 10_000).unwrap();
+        assert_eq!(changed.uploaded, 6, "new local data moves the fingerprint and pushes the full snapshot again");
+        assert_eq!(remote(&primary_admin), (6, 22.0));
+        assert_eq!(runtime.last_upload_pushed_at, Some(first_now + 10_000));
 
-    #[test]
-    fn runtime_keeps_outbox_pending_when_transport_fails() {
-        let device = DeviceIdentity::create("runtime-failure", "Runtime").unwrap();
-        let (_primary, stream) = paired_primary(&device);
-        let package = package(&device.origin);
-        let mut sender = SyncStore::open_in_memory("primary-1").unwrap();
-        sender.enqueue_outbox_auto(
-            &device.device_id, &device.origin, &stream.stream_id, stream.data_epoch,
-            package.manifest_bytes, package.gzip_bytes, &device.signing_key, &[], 10,
-        ).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let (cert_der, _key_der) = certificate();
-        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
-            format!("https://127.0.0.1:{port}"), "localhost", cert_der,
-        )).unwrap();
-        let mut runtime = SyncRuntime::new(sender, transport, SyncRuntimeConfig::new("runtime-owner").unwrap());
-        let report = runtime.run_once_with_clock(|| 10).unwrap();
-        assert_eq!(report.retried, 1);
-        assert_eq!(runtime.store().outbox_summary().unwrap().pending, 1);
-        assert_eq!(runtime.store().outbox_summary().unwrap().in_flight, 0);
+        drop(runtime);
+        drain_server(addr, server_thread);
     }
 
     #[test]
