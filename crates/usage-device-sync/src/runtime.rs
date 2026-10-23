@@ -26,6 +26,12 @@ use crate::{
 const DEFAULT_LEASE_TTL_MS: i64 = 15 * 60 * 1000;
 const DEFAULT_POLL_MS: u64 = 5_000;
 const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 8;
+// Snapshot ENQUEUING per pass. The outbox's own bounds (4,096 entries / 1 GB)
+// are the real backpressure; the old "stop at the first pending entry" gate
+// serialized the initial backfill to one 256-row generation per pass — 147
+// passes / 3.5 h measured on a seeded Windows secondary. 64 pages stream in
+// one WS burst; the outbox Limit still stops preparation when full.
+const SNAPSHOT_ENQUEUE_PAGES_PER_PASS: usize = 64;
 // A download burst used to hold the index writer almost continuously: every
 // page imports in one BEGIN IMMEDIATE (rows + rollups + cursor) and the
 // catch-up loop starts the next pass with no poll sleep, so the panel
@@ -417,7 +423,12 @@ impl SyncRuntime {
             }
             Ok(())
         };
-        self.transport.ws_close();
+        // The WebSocket stays resident across passes: the primary admits four
+        // concurrent connections, so the held slot no longer starves the
+        // status/download calls, and a LAN keepalive link beats a fresh
+        // TCP+TLS+WS handshake per pass. `try_ws_upload` re-authenticates
+        // nothing — the socket is already authenticated — and rebuilds the
+        // leg itself if a send or read ever fails.
         drain?;
         // Rollup-level downlink: one authenticated full-snapshot fetch per
         // ROLLUP_FETCH_INTERVAL replaces the row-level page walk entirely —
@@ -665,11 +676,7 @@ impl SyncRuntime {
         };
         let mut cursor = self.store.snapshot_cursor(config)?;
         if !historical_ready { cursor.last_identity = None; }
-        for _ in 0..MAX_SNAPSHOT_PAGES_PER_PASS {
-            let summary = self.store.outbox_summary()?;
-            if summary.pending > 0 || summary.in_flight > 0 {
-                return Ok(false);
-            }
+        for _ in 0..SNAPSHOT_ENQUEUE_PAGES_PER_PASS {
             let page = if historical_ready {
                 self.store.index().sync_snapshot_page(
                     cursor.last_identity.as_deref(), cursor.last_dirty_revision, now_ms,
@@ -983,7 +990,9 @@ mod tests {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             certificate_der: cert_der.to_vec(), private_key_der: key_der.to_vec(),
             allow_lan: false, allowed_peer_ips: vec![], max_body_bytes: MAX_COMPRESSED_BYTES,
-            max_concurrent: 1, staging_dir, idle_timeout: Duration::from_secs(30),
+            // Matches the panel's primary: the resident upload WebSocket holds
+            // one slot while the same pass's status/download calls take another.
+            max_concurrent: 4, staging_dir, idle_timeout: Duration::from_secs(30),
             total_timeout: Duration::from_secs(600), staging_quota_bytes: 512 * 1024 * 1024,
         }
     }
@@ -1046,7 +1055,7 @@ mod tests {
         let staging = tempfile::tempdir().unwrap();
         let server = crate::HttpsSyncServer::bind(server_config(&cert_der, &key_der, staging.path().join("staging")), primary).unwrap();
         let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections(5));
+        let server_thread = thread::spawn(move || server.run_connections_concurrent(5));
         let identity_dir = tempfile::tempdir().unwrap();
         let identity_path = identity_dir.path().join("secondary-identity.json");
         secondary.save_secondary_config(&SecondarySyncConfig {
@@ -1106,7 +1115,7 @@ mod tests {
             SyncStore::open(&primary_path, "primary-1").unwrap(),
         ).unwrap();
         let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections(32));
+        let server_thread = thread::spawn(move || server.run_connections_concurrent(32));
 
         let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
         let identity_dir = tempfile::tempdir().unwrap();
@@ -1208,7 +1217,7 @@ mod tests {
             server_config(&cert_der, &key_der, staging.path().join("staging")), primary,
         ).unwrap();
         let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections(6));
+        let server_thread = thread::spawn(move || server.run_connections_concurrent(6));
 
         let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
         let identity_dir = tempfile::tempdir().unwrap();
@@ -1289,7 +1298,7 @@ mod tests {
             rusqlite::params![dirty_id, first_now],
         ).unwrap();
 
-        let server_thread = thread::spawn(move || server.run_connections(3));
+        let server_thread = thread::spawn(move || server.run_connections_concurrent(3));
         let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
         )).unwrap();
@@ -1328,7 +1337,7 @@ mod tests {
         let staging = tempfile::tempdir().unwrap();
         let server = crate::HttpsSyncServer::bind(server_config(&cert_der, &key_der, staging.path().join("staging")), primary).unwrap();
         let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections(1));
+        let server_thread = thread::spawn(move || server.run_connections_concurrent(1));
         let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
         )).unwrap();

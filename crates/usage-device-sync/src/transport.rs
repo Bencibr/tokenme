@@ -1181,6 +1181,43 @@ impl HttpsSyncServer {
         result
     }
 
+    /// Test-only concurrent sibling of [`Self::run_connections`]: accepts up to
+    /// `connections` sockets but serves each on its own thread. A resident
+    /// upload WebSocket never returns from its handler, so the inline variant
+    /// would starve every connection accepted after it.
+    #[cfg(test)]
+    pub fn run_connections_concurrent(&self, connections: usize) -> Result<(), TransportError> {
+        self.context.cancel.store(false, AtomicOrdering::Release);
+        self.context.health.store(HEALTH_RUNNING, AtomicOrdering::Release);
+        let result = (|| {
+            let mut handlers: Vec<thread::JoinHandle<()>> = Vec::new();
+            for _ in 0..connections {
+                let (stream, peer) = match self.listener.accept() {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        self.context.cancel_active();
+                        for handler in handlers { let _ = handler.join(); }
+                        return Err(TransportError::from(error));
+                    }
+                };
+                let Some(permit) = self.context.gate.try_acquire_connection()? else {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                };
+                let context = self.context.clone();
+                handlers.push(thread::spawn(move || { let _ = handle_connection_isolated(&context, stream, peer, permit); }));
+            }
+            // Detached on purpose: a resident upload WebSocket never returns
+            // from its handler, and joining it here would deadlock every test
+            // that ends while the client transport is still alive. The
+            // handlers also outlive this call on purpose — tests keep issuing
+            // requests after the server thread has returned — so the success
+            // path neither cancels sockets nor flips the health state.
+            Ok(())
+        })();
+        result
+    }
+
     /// Blocking service loop. The caller owns process lifecycle and shutdown.
     pub fn run(self) -> Result<(), TransportError> {
         let stop = Arc::new(AtomicBool::new(false));
