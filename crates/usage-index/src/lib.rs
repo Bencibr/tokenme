@@ -73,7 +73,7 @@ pub struct SyncSnapshotPage {
 pub const SYNC_DIRTY_PAGE_SIZE: usize = 256;
 pub const SYNC_SNAPSHOT_MAX_EVENTS: usize = 500_000;
 pub const SYNC_SNAPSHOT_MAX_DIRTY: usize = 65_536;
-pub const SYNC_SNAPSHOT_PAGE_ROWS: usize = 256;
+pub const SYNC_SNAPSHOT_PAGE_ROWS: usize = 2048;
 pub const SYNC_SNAPSHOT_PAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const SYNC_SNAPSHOT_MAX_ROW_BYTES: usize = 1024 * 1024;
 pub const SYNC_DIRTY_MAX_BYTES: usize = 512 * 1024 * 1024;
@@ -2310,8 +2310,8 @@ impl Index {
     /// Seeds durable identities for local history that predates sync. It is
     /// called only after a sync role is opted in; ordinary indexes skip it.
     pub fn ensure_sync_occurrences_page(&mut self, limit: usize) -> Result<bool> {
-        if limit == 0 || limit > 256 {
-            return Err(Error::Sync("sync occurrence page must be in 1..=256".into()));
+        if limit == 0 || limit > 2048 {
+            return Err(Error::Sync("sync occurrence page must be in 1..=2048".into()));
         }
         // Steady state has nothing left to map. Answer from a read so an idle
         // caller (every download page, every upload pass) does not open an

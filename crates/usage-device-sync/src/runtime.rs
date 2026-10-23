@@ -25,7 +25,7 @@ use crate::{
 // while its owner is still waiting for the ACK.
 const DEFAULT_LEASE_TTL_MS: i64 = 15 * 60 * 1000;
 const DEFAULT_POLL_MS: u64 = 5_000;
-const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 4;
+const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 8;
 // A download burst used to hold the index writer almost continuously: every
 // page imports in one BEGIN IMMEDIATE (rows + rollups + cursor) and the
 // catch-up loop starts the next pass with no poll sleep, so the panel
@@ -34,7 +34,7 @@ const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 4;
 // the writer to whoever is waiting — an engine-yield, not a rate limit:
 // four pages per pass pay at most 600 ms of it against per-page network
 // fetches and the five-second poll cadence.
-const DOWNLOAD_PAGE_ENGINE_YIELD: Duration = Duration::from_millis(200);
+const DOWNLOAD_PAGE_ENGINE_YIELD: Duration = Duration::from_millis(50);
 // A fresh backup can owe hundreds of thousands of identity rows. One 256-row
 // batch per five-second poll left the first sync materializing for half an
 // hour on a 500k-event index (~200 rows/s), so each pass runs many larger
@@ -42,9 +42,9 @@ const DOWNLOAD_PAGE_ENGINE_YIELD: Duration = Duration::from_millis(200);
 // burst pays: ~5k rows/s while the panel's publish cycle still wins the
 // writer inside every yield window.
 const HISTORY_INIT_BATCHES_PER_PASS: usize = 16;
-// ensure_sync_occurrences_page hard-caps a batch at 256 rows; the speedup
-// comes from running 16 of them per pass, not from bigger batches.
-const HISTORY_INIT_BATCH_ROWS: usize = 256;
+// Matches the raised materialization batch cap: fewer, denser transactions
+// beat many small ones while the 100ms yield still hands the writer over.
+const HISTORY_INIT_BATCH_ROWS: usize = 2048;
 const HISTORY_INIT_ENGINE_YIELD: Duration = Duration::from_millis(100);
 // While the primary materializes historical identities it serves an empty
 // preparing page. Poll that state like a progress bar: fast enough to finish
@@ -982,8 +982,9 @@ mod tests {
     fn download_page_yield_stays_a_small_engine_yield() {
         // Wide band on purpose: the sleep must leave a waiting publish cycle
         // room to win the writer, without turning a page backfill into a
-        // rate-limited crawl.
-        assert!(DOWNLOAD_PAGE_ENGINE_YIELD >= Duration::from_millis(100), "{DOWNLOAD_PAGE_ENGINE_YIELD:?} is too short to let a waiting writer win the lock");
+        // rate-limited crawl. SQLite's busy handler re-tries well inside
+        // 50 ms, and denser pages hand the writer over 8 times per pass.
+        assert!(DOWNLOAD_PAGE_ENGINE_YIELD >= Duration::from_millis(25), "{DOWNLOAD_PAGE_ENGINE_YIELD:?} is too short to let a waiting writer win the lock");
         assert!(DOWNLOAD_PAGE_ENGINE_YIELD <= Duration::from_millis(1_000), "{DOWNLOAD_PAGE_ENGINE_YIELD:?} is a rate limit, not an engine-yield");
     }
 
