@@ -629,7 +629,7 @@ fn rediscover_secondary_endpoint(index_path: &std::path::Path) -> Option<(Second
     let config = SyncStore::read_secondary_config(index_path).ok()??;
     let error = config.last_error.as_deref()?;
     if !config.enabled || !(error.contains("transport I/O") || error.contains("transport timed out") || error.contains("TLS handshake") || error.contains("pin mismatch")) { return None; }
-    let candidate = discover_mdns_primaries().ok()?.into_iter().find(|candidate| {
+    let candidate = discover_primaries().ok()?.into_iter().find(|candidate| {
         candidate.primary_id == config.primary_id && !candidate.identity_conflict
             && candidate.certificate_pin == hex_bytes(&config.certificate_pin) && candidate.endpoint != config.endpoint
     })?;
@@ -1405,6 +1405,39 @@ fn advertised_address_rank(ip: std::net::IpAddr) -> u8 {
             let routable = (0x2000..=0x3fff).contains(&segment) || (0xfc00..=0xfdff).contains(&segment);
             if routable { 1 } else { 3 }
         }
+    }
+}
+
+/// Discovery = mDNS (fast, same-subnet) + the active subnet sweep (slower,
+/// reaches across routers where multicast cannot). Both run concurrently and
+/// the results merge by primary id — mDNS wins the richer fields, the sweep
+/// fills in every subnet mDNS cannot reach.
+fn discover_primaries() -> Result<Vec<DiscoveredPrimaryView>, String> {
+    const SYNC_PORT: u16 = 47_821;
+    let stop = Arc::new(AtomicBool::new(false));
+    let sweep = thread::spawn(move || {
+        usage_device_sync::discovery::sweep_local_primaries(
+            SYNC_PORT, Duration::from_millis(300), 96, Duration::from_secs(3), &stop,
+        )
+    });
+    let mdns = discover_mdns_primaries();
+    let swept = sweep.join().unwrap_or_default();
+    let mdns_failed = mdns.is_err();
+    let mut results = mdns.unwrap_or_default();
+    for found in swept {
+        merge_discovered_primary(&mut results, DiscoveredPrimaryView {
+            service_name: "TokenMe".into(),
+            primary_id: found.primary_id,
+            display_name: found.display_name,
+            endpoint: format!("https://{}:{SYNC_PORT}", found.address),
+            certificate_pin: found.certificate_pin,
+            identity_conflict: false,
+        });
+    }
+    if results.is_empty() && mdns_failed {
+        Err("mDNS and the subnet sweep found no primary".into())
+    } else {
+        Ok(results)
     }
 }
 
@@ -2407,7 +2440,7 @@ pub async fn sync_devices(app: AppHandle, request: Option<SyncManagementRequest>
             state.phase = SyncPhase::Running;
         }
         let discovery_started = Instant::now();
-        let discovery = match tauri::async_runtime::spawn_blocking(discover_mdns_primaries).await {
+        let discovery = match tauri::async_runtime::spawn_blocking(discover_primaries).await {
             Ok(result) => result,
             Err(error) => Err(format!("mDNS discovery worker stopped: {error}")),
         };

@@ -7,6 +7,7 @@
 
 mod protocol;
 mod diagnostics;
+pub mod discovery;
 mod lifecycle;
 mod runtime;
 mod store;
