@@ -69,6 +69,11 @@ pub const WS_SYNC_PATH: &str = "/v2/sync-ws";
 /// How often the server's WebSocket read loop wakes to drain the push queue
 /// and re-check the stop flag; also the upper bound on push delivery latency.
 const WS_PUSH_POLL: Duration = Duration::from_millis(250);
+/// Unauthenticated read-only discovery probe: answers the primary's id, the
+/// readable hostname and its certificate pin — exactly the fields mDNS
+/// already broadcasts in cleartext TXT records, so the exposure class is
+/// unchanged. The active subnet sweep identifies a primary through it.
+pub const WHOAMI_PATH: &str = "/v1/whoami";
 const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
 // A transient accept failure (EMFILE, a peer that vanishes between SYN and
 // accept) is not a reason to stop serving. Only a listener that has failed
@@ -1951,6 +1956,12 @@ pub(crate) fn primary_local_rollup_snapshot(store: &SyncStore) -> SyncResult<Rol
 fn dispatch_request(store: &mut SyncStore, request: &HttpRequest) -> (u16, Vec<u8>) {
     let now = now_ms();
     let result: Result<Vec<u8>, SyncError> = match (request.path.as_str(), request.content_type.as_str()) {
+        // Content-type free: the active sweep sends a bare GET.
+        (WHOAMI_PATH, _) => Ok(serde_json::to_vec(&serde_json::json!({
+            "primary_id": store.primary_id(),
+            "name": usage_index::hostname(),
+            "pin": hex_bytes(&hash_bytes(&context.config.certificate_der)),
+        })).unwrap_or_default()),
         (PAIRING_PATH, "application/json") => serde_json::from_slice::<WirePairingRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid pairing JSON: {e}")))
             .and_then(|wire| wire.into_request().map_err(|e| SyncError::Protocol(e.to_string())))
@@ -2160,7 +2171,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST or WebSocket GET is supported".into()));
     }
     let known_path = match path {
-        WS_SYNC_PATH | "/v1/sync/ws" | PAIRING_PATH | PAIRING_INVITE_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        WS_SYNC_PATH | "/v1/sync/ws" | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | ROLLUP_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH | WHOAMI_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
