@@ -343,6 +343,9 @@ impl Ctx {
             // including rows merged from other machines' bundles (the panel
             // narrows the scope interactively; the CLI has no such switch).
             scope: usage_core::MachineScope::All,
+            // The CLI never detaches a sync origin: its figures stay whatever
+            // the index holds (the panel owns the disconnect semantics).
+            exclude_origins: Vec::new(),
         }
     }
 

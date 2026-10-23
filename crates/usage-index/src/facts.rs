@@ -462,6 +462,20 @@ impl Index {
     /// *within the scope*, or a heavy local machine would starve a remote's
     /// list empty.
     pub fn report_facts(&mut self, plan: &AggregatePlan, scope: &MachineScope) -> Result<ReportFacts> {
+        self.report_facts_excluding(plan, scope, &[])
+    }
+
+    /// [`Self::report_facts`] with device-sync's detached origins kept out of
+    /// the session top-N at the source. The fold re-applies the same list to
+    /// every other figure (the correctness backstop), but the sessions' LIMIT
+    /// runs in SQL — a departed device filtered only afterwards would leave
+    /// the list short by the slots its rows occupied.
+    pub fn report_facts_excluding(
+        &mut self,
+        plan: &AggregatePlan,
+        scope: &MachineScope,
+        exclude_origins: &[String],
+    ) -> Result<ReportFacts> {
         let mut facts = ReportFacts::default();
         // Lazy build: only when there is something to build from and nothing to
         // build into. Any other state is already consistent.
@@ -480,7 +494,7 @@ impl Index {
         facts.live = self.fetch_live(plan)?;
         facts.calls = self.fetch_calls(plan)?;
         facts.quotas = self.fetch_quotas(plan.now_ms)?;
-        facts.sessions = self.fetch_sessions(plan.recent_session_limit, scope)?;
+        facts.sessions = self.fetch_sessions(plan.recent_session_limit, scope, exclude_origins)?;
         facts.syncs = self.fetch_syncs()?;
         Ok(facts)
     }
@@ -769,26 +783,39 @@ impl Index {
     /// let other machines' sessions fill all 20 slots and starve the scoped
     /// view. `origin` is part of the session key even under `All`; two devices
     /// may legitimately reuse a session id. A named scope restricts the same
-    /// queries by `origin` (rollup) or the source prefix (event).
-    fn fetch_sessions(&self, limit: usize, scope: &MachineScope) -> Result<Vec<SessionFact>> {
+    /// queries by `origin` (rollup) or the source prefix (event). Detached
+    /// origins get the same treatment — the `NOT IN` keeps them below the
+    /// LIMIT, where a post-hoc filter could only shorten the list.
+    fn fetch_sessions(&self, limit: usize, scope: &MachineScope, exclude_origins: &[String]) -> Result<Vec<SessionFact>> {
         let (origin, all): (&str, bool) = match scope {
             MachineScope::All => ("", true),
             MachineScope::Local => ("", false),
             MachineScope::Origin { name } => (name.as_str(), false),
         };
-        let mut top = self
-            .conn
-            .prepare(
-                "SELECT origin, tool, session, MIN(min_ts), MAX(max_ts) \
-                 FROM event_rollup \
-                 WHERE (?2 = 1 OR origin = ?3) \
-                 GROUP BY origin, tool, session \
-                 ORDER BY MAX(max_ts) DESC, origin ASC, tool ASC, session ASC \
-                 LIMIT ?1",
-            )
-            .map_err(sql_err)?;
+        let mut top_sql = String::from(
+            "SELECT origin, tool, session, MIN(min_ts), MAX(max_ts) \
+             FROM event_rollup \
+             WHERE (?2 = 1 OR origin = ?3)",
+        );
+        if !exclude_origins.is_empty() {
+            let placeholders = (0..exclude_origins.len())
+                .map(|i| format!("?{}", i + 4))
+                .collect::<Vec<_>>()
+                .join(", ");
+            top_sql.push_str(&format!(" AND origin NOT IN ({placeholders})"));
+        }
+        top_sql.push_str(
+            " \
+             GROUP BY origin, tool, session \
+             ORDER BY MAX(max_ts) DESC, origin ASC, tool ASC, session ASC \
+             LIMIT ?1",
+        );
+        let mut top = self.conn.prepare(&top_sql).map_err(sql_err)?;
+        let mut bind: Vec<rusqlite::types::Value> =
+            vec![(limit.max(1) as i64).into(), (all as i64).into(), origin.to_string().into()];
+        bind.extend(exclude_origins.iter().map(|excluded| excluded.clone().into()));
         let heads: Vec<(String, String, String, i64, i64)> = top
-            .query_map(params![limit.max(1) as i64, all, origin], |r| {
+            .query_map(params_from_iter(bind), |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })
             .map_err(sql_err)?

@@ -281,7 +281,7 @@ struct PendingPairing {
 
 /// A stop's disconnect write parked for the recovery loop: the captured
 /// binding plus the timestamp the notice would have carried.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PendingDisconnectWrite {
     config: SecondarySyncConfig,
     queued_at_ms: i64,
@@ -547,6 +547,12 @@ fn retry_disconnect_notifications(index_path: &std::path::Path) -> Result<(), St
     // At most four seconds of network work per recovery tick, outside the
     // control mutex. A status read and a new role never wait for this ACK.
     for notice in notices.into_iter().take(2) {
+        // Same guard as the worker drain: a notice for a primary this device
+        // has re-paired (any identity) is obsolete and must never revoke the
+        // fresh binding.
+        if let Ok(Some(current)) = SyncStore::read_secondary_config(index_path) {
+            if current.primary_id == notice.config.primary_id { continue; }
+        }
         let result = usage_device_sync::deliver_disconnect_notice(&notice.config, current_ms());
         if let Ok(mut store) = SyncStore::open(index_path, notice.config.primary_id.clone()) {
             let error = result.as_ref().err().map(ToString::to_string);
@@ -564,7 +570,7 @@ fn retry_disconnect_notifications(index_path: &std::path::Path) -> Result<(), St
 /// Same guard as the task: a config row for the same primary AND device means
 /// the user re-paired with the retained identity and the notice is obsolete.
 /// Failures go back on the queue for the next tick.
-fn drain_pending_disconnect_writes(index_path: &std::path::Path, pending: &Mutex<Vec<PendingDisconnectWrite>>) {
+fn drain_pending_disconnect_writes(index_path: &std::path::Path, pending: &Mutex<Vec<PendingDisconnectWrite>>, delivery: &Mutex<()>) {
     let writes = {
         let Ok(mut slot) = pending.lock() else { return; };
         if slot.is_empty() { return; }
@@ -577,6 +583,7 @@ fn drain_pending_disconnect_writes(index_path: &std::path::Path, pending: &Mutex
                 if current.primary_id == write.config.primary_id && current.device_id == write.config.device_id { return Ok(()); }
             }
             let mut store = SyncStore::open(index_path, write.config.primary_id.clone()).map_err(|error| error.to_string())?;
+            let _delivery = delivery.lock();
             store.queue_secondary_disconnect(&write.config, write.queued_at_ms).map_err(|error| error.to_string())?;
             Ok(())
         })();
@@ -790,6 +797,18 @@ fn secondary_transport(config: &SecondarySyncConfig) -> Result<Tls13HttpsTranspo
     Tls13HttpsTransport::new(transport_config).map_err(|error| format!("cannot configure pinned sync transport: {error}"))
 }
 
+/// One wake for every sync-state change that happens outside a panel
+/// command: refresh the sync sheet's snapshot (sync-updated) and refold the
+/// figures (Msg::Refresh) so both surfaces move together.
+fn wake_sync_ui() {
+    if let Some(app) = crate::notify::app_handle() {
+        let _ = app.emit("sync-updated", ());
+        if let Some(channel) = app.try_state::<EngineChannel>() {
+            let _ = channel.0.send(Msg::Refresh);
+        }
+    }
+}
+
 fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     reap_runtime(state);
     if state.runtime.is_some() { return Ok(()); }
@@ -817,7 +836,10 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     let mut runtime = SyncRuntime::new_secondary_with_display_name(
         store, transport, runtime_config, identity, usage_index::hostname(),
     );
-    runtime.set_cut_off_notify(|reason| crate::notify::post_cut_off(reason));
+    runtime.set_cut_off_notify(|reason| {
+        crate::notify::post_cut_off(reason);
+        wake_sync_ui();
+    });
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let join = thread::spawn(move || runtime.run_until_real(&thread_stop));
@@ -943,6 +965,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         let refresh_app = app;
         let sink_index = index_path.clone();
         server.set_disconnect_sink(move |device_id: &str| {
+            let _ = refresh_app.emit("sync-updated", ());
             if let Some(channel) = refresh_app.try_state::<EngineChannel>() {
                 let _ = channel.0.send(Msg::Refresh);
             }
@@ -1427,11 +1450,13 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let primary_config = panel.primary_config.clone();
     if let Some(config) = secondary_config.clone() {
         if panel.disconnect_requested {
+            // Migrate a stop requested by an older build. Nothing in production
+            // writes this flag any more, and the poll mutex must never wait on
+            // a full index open — tear down state-only and let the recovery
+            // loop's notice sweep handle any residue.
             stop_service(state);
-            // Migrate a stop requested by an older build without blocking on
-            // its failed network notification again.
-            SyncStore::open(&index_path, config.primary_id.clone()).map_err(|error| error.to_string())?
-                .request_secondary_disconnect(current_ms()).map_err(|error| error.to_string())?;
+            SyncStore::clear_secondary_config_state(&index_path, &config.primary_id, &config.device_id)
+                .map_err(|error| error.to_string())?;
             clear_secondary_state(state);
             secondary_config = None;
         }
@@ -1664,7 +1689,22 @@ fn ensure_sync_recovery_loop(app: &AppHandle) {
             }
             let Some(state_ref) = state_ref.upgrade() else { return; };
             if let Ok(index_path) = sync_index_path() {
-                drain_pending_disconnect_writes(&index_path, &pending_disconnect_writes);
+                // A crash between "config deleted" and "notice queued" leaves this file;
+// re-arm its work into the slot the drain below empties.
+            let ghost_path = sync_dir().ok().map(|dir| dir.join("pending-disconnect.json"));
+            if let Some(ghost_path) = ghost_path {
+                if let Ok(bytes) = std::fs::read(&ghost_path) {
+                    if let Ok(write) = serde_json::from_slice::<PendingDisconnectWrite>(&bytes) {
+                        if let Ok(mut slot) = pending_disconnect_writes.lock() {
+                            if !slot.iter().any(|w| w.config.device_id == write.config.device_id) {
+                                slot.push(write);
+                                let _ = std::fs::remove_file(&ghost_path);
+                            }
+                        }
+                    }
+                }
+            }
+            drain_pending_disconnect_writes(&index_path, &pending_disconnect_writes, &disconnect_delivery);
                 let delivery = disconnect_delivery.lock();
                 if delivery.is_ok() && retry_disconnect_notifications(&index_path).is_err() {
                     crate::logging::info("sync: action=disconnect_notify outcome=error error_code=retry_state");
@@ -1702,10 +1742,15 @@ fn ensure_sync_recovery_loop(app: &AppHandle) {
 
 /// Tear the current secondary binding (or a pending pairing) down in place:
 /// stop any service, queue the disconnect notice for the old primary, and
-/// clear the local role state — the exact sequence the Unpair action runs.
-/// Idempotent: a device with neither a config row nor a pending pairing is
-/// left untouched. Re-pairing uses the same helper so an old binding can
-/// never dead-end a new invite.
+/// clear the local role state. Called only from the pairing pre-check paths:
+/// there the synchronous queue-before-drain ordering against the immediate
+/// re-pair's notice drain is load-bearing — a re-pair moments later must
+/// start clean — so this composition keeps its full `SyncStore::open` on the
+/// caller's thread. The user-initiated Stop/Unpair arms use
+/// `begin_async_secondary_teardown` instead, which moves the index work off
+/// the control-state mutex. Idempotent: a device with neither a config row
+/// nor a pending pairing is left untouched. Re-pairing uses the same helper
+/// so an old binding can never dead-end a new invite.
 fn unpair_secondary_binding(state: &mut SyncControlState, index_path: &std::path::Path) -> Result<(), String> {
     let config = SyncStore::read_secondary_config(index_path).map_err(|e| e.to_string())?;
     if let Some(config) = config {
@@ -1728,6 +1773,108 @@ fn unpair_secondary_binding(state: &mut SyncControlState, index_path: &std::path
             .request_secondary_disconnect(current_ms()).map_err(|error| error.to_string())?;
         clear_pending_pairing()?;
     } else if read_pending_pairing()?.is_some() {
+        cancel_pending_pairing(index_path)?;
+        state.pending_pairing_attempted = true;
+    }
+    if SyncStore::read_secondary_config(index_path).map_err(|error| error.to_string())?.is_none() {
+        clear_secondary_state(state);
+    }
+    Ok(())
+}
+
+/// User-initiated teardown (the Stop and Unpair arms): unlike
+/// `unpair_secondary_binding` — whose synchronous queue-before-drain
+/// ordering is load-bearing for the pairing pre-check — this must answer at
+/// click speed, so everything under the control-state mutex stays cheap:
+/// the runtime stop (the interrupt aborts its network leg within one 50 ms
+/// poll slice; the join only waits out the pass's final index writes), the
+/// state-only config delete, the pending-pairing file and the in-memory
+/// role. The index-side half — the network delivery and the full
+/// `SyncStore::open` that queues the notice — moves to one background
+/// thread, where the ingest engine's write lock can hold it without
+/// freezing the sheet's 5 s status poll. The recovery loop tolerates the
+/// in-flight work: a missing config row is the same state the Stop arm
+/// leaves on every exit, and the cleared pending file gives the snapshot's
+/// resume nothing to re-arm.
+fn begin_async_secondary_teardown(state: &mut SyncControlState, index_path: &std::path::Path) -> Result<(), String> {
+    stop_service(state);
+    let config = SyncStore::read_secondary_config(index_path).map_err(|error| error.to_string())?;
+    if let Some(config) = config {
+        // State-only delete: never opens the usage index, so the teardown
+        // cannot queue behind the ingest engine's write lock. The index-side
+        // bookkeeping (disconnect notice, outbox retirement, journal
+        // release, capture mirror) is the thread's concern, on the captured
+        // config — the row it would read is already gone.
+        SyncStore::clear_secondary_config_state(index_path, &config.primary_id, &config.device_id)
+            .map_err(|error| error.to_string())?;
+        clear_pending_pairing()?;
+        let stopped_at_ms = current_ms();
+        let delivery_config = config.clone();
+        // Ghost insurance: the notice lives only in this process's memory
+        // until the background thread queues it, so a crash in between would
+        // leave a paired zombie on the primary. Persist the intent; the
+        // recovery loop drains the file the same way it drains the slot.
+        let ghost_path = sync_dir()?.join("pending-disconnect.json");
+        let ghost_bytes = serde_json::to_vec(&PendingDisconnectWrite { config: config.clone(), queued_at_ms: stopped_at_ms })
+            .map_err(|error| format!("cannot encode pending disconnect: {error}"))?;
+        std::fs::write(&ghost_path, ghost_bytes).map_err(|error| format!("cannot persist pending disconnect: {error}"))?;
+        let delivery_index = index_path.to_path_buf();
+        let pending_writes = Arc::clone(&state.pending_disconnect_writes);
+        let pending_delivery = Arc::clone(&state.disconnect_delivery);
+        let ghost_path_captured = ghost_path.clone();
+        thread::spawn(move || {
+            let started = Instant::now();
+            // The primary learns at once: deliver straight from the captured
+            // config, bounded by the transport's own 1 s + 2 s timeouts.
+            let delivery_error = usage_device_sync::deliver_disconnect_notice(&delivery_config, current_ms())
+                .err().map(|error| error.to_string());
+            log_sync_action("disconnect_immediate", started, delivery_error.as_deref());
+            let outcome = (|| -> Result<(), String> {
+                // A same-identity re-pair makes this write obsolete: queueing
+                // the notice after the user re-paired the same primary would
+                // revoke the fresh binding. The row this delete removed only
+                // exists again if a new pairing wrote it.
+                if let Ok(Some(current)) = SyncStore::read_secondary_config(&delivery_index) {
+                    // Primary-only: a fresh-identity re-pair to the same primary must also void this notice.
+                    if current.primary_id == delivery_config.primary_id { return Ok(()); }
+                }
+                let mut opened = None;
+                for attempt in 0..6 {
+                    if attempt > 0 { thread::sleep(Duration::from_secs(1)); }
+                    if let Ok(store) = SyncStore::open(&delivery_index, delivery_config.primary_id.clone()) { opened = Some(store); break; }
+                }
+                let mut store = opened.ok_or_else(|| "cannot open sync store: index stayed busy".to_string())?;
+                // Serialize the queue against a same-window pairing drain: the
+                // drain must never read an empty notice list while this write
+                // is between its deliver and queue halves.
+                let delivery = Arc::clone(&pending_delivery);
+                let _held = delivery.lock();
+                store.queue_secondary_disconnect(&delivery_config, stopped_at_ms)
+                    .map_err(|error| format!("cannot queue the disconnect notice: {error}"))?;
+                // Record the delivery outcome now that the notice exists: an
+                // ack retires the notice and its payload; a failure
+                // backoff-waits on the queue for the recovery loop's next tick.
+                let _ = store.finish_disconnect_notice(&delivery_config.device_id, current_ms(), delivery_error.as_deref());
+                Ok(())
+            })();
+            if let Err(error) = outcome.as_ref() {
+                // A lost write is a ghost paired device: park the work for
+                // the recovery loop instead of only logging it. The ghost file
+                // stays on disk for a crash in exactly this window.
+                if let Ok(mut slot) = pending_writes.lock() {
+                    slot.push(PendingDisconnectWrite { config: delivery_config, queued_at_ms: stopped_at_ms });
+                }
+                log_sync_action("stop_converge", started, Some(error.as_str()));
+                return;
+            }
+            let _ = std::fs::remove_file(&ghost_path_captured);
+            log_sync_action("stop_converge", started, None);
+        });
+    } else if read_pending_pairing()?.is_some() {
+        // No binding, but a pairing request is on its way out: cancel it so
+        // the recovery loop cannot resume the request this teardown just
+        // abandoned. The file work is cheap; the notice it queues needs the
+        // index, but this branch never had a runtime to stop.
         cancel_pending_pairing(index_path)?;
         state.pending_pairing_attempted = true;
     }
@@ -1999,61 +2146,10 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             let was_secondary = state.role == "secondary" || (state.role.is_empty() && secondary_config.is_some());
             stop_service(state);
             if was_secondary {
-                if let Some(config) = secondary_config {
-                    let delivery_config = config.clone();
-                    let delivery_index = index_path.clone();
-                    thread::spawn(move || {
-                        let started = Instant::now();
-                        let result = usage_device_sync::deliver_disconnect_notice(&delivery_config, current_ms());
-                        let error = result.as_ref().err().map(ToString::to_string);
-                        if let Ok(mut store) = SyncStore::open(&delivery_index, delivery_config.primary_id.clone()) {
-                            let _ = store.finish_disconnect_notice(&delivery_config.device_id, current_ms(), error.as_deref());
-                        }
-                        log_sync_action("disconnect_immediate", started, error.as_deref());
-                    });
-                    SyncStore::clear_secondary_config_state(&index_path, &config.primary_id, &config.device_id)
-                        .map_err(|error| error.to_string())?;
-                    let stopped_at_ms = current_ms();
-                    let converge_path = index_path.clone();
-                    let pending_writes = Arc::clone(&state.pending_disconnect_writes);
-                    thread::spawn(move || {
-                        let started = Instant::now();
-                        let outcome = (|| -> Result<(), String> {
-                            // A same-identity re-pair makes this write
-                            // obsolete: queueing the notice after the user
-                            // re-paired the same primary would revoke the
-                            // fresh binding. The row this delete removed only
-                            // exists again if a new pairing wrote it.
-                            if let Ok(Some(current)) = SyncStore::read_secondary_config(&converge_path) {
-                                if current.primary_id == config.primary_id && current.device_id == config.device_id { return Ok(()); }
-                            }
-                            let mut opened = None;
-                            for attempt in 0..6 {
-                                if attempt > 0 { thread::sleep(Duration::from_secs(1)); }
-                                match SyncStore::open(&converge_path, config.primary_id.clone()) {
-                                    Ok(store) => { opened = Some(store); break; }
-                                    Err(_) => continue,
-                                }
-                            }
-                            let mut store = opened.ok_or_else(|| "cannot open sync store: index stayed busy".to_string())?;
-                            store.queue_secondary_disconnect(&config, stopped_at_ms)
-                                .map_err(|error| format!("cannot queue the disconnect notice: {error}"))?;
-                            Ok(())
-                        })();
-                        if let Err(error) = outcome.as_ref() {
-                            // A lost write is a ghost paired device: park the
-                            // work for the recovery loop instead of only
-                            // logging it.
-                            if let Ok(mut slot) = pending_writes.lock() {
-                                slot.push(PendingDisconnectWrite { config, queued_at_ms: stopped_at_ms });
-                            }
-                            log_sync_action("stop_converge", started, Some(error.as_str()));
-                            return;
-                        }
-                        log_sync_action("stop_converge", started, None);
-                    });
-                }
-                clear_secondary_state(state);
+                // Same composition as the Unpair arm: everything under this
+                // mutex is state-only — the notice delivery and the index-side
+                // converge run on the teardown thread, off the sheet's poll.
+                begin_async_secondary_teardown(state, &index_path)?;
             } else {
                 // Stop & disconnect is a complete primary teardown. Do not
                 // leave a disabled primary config behind for recovery: the
@@ -2113,7 +2209,10 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
             if state.role == "primary" || state.service.is_some() {
                 return Err("stop the primary sync service before unpairing this device".into());
             }
-            unpair_secondary_binding(state, &index_path)
+            // Async teardown, not `unpair_secondary_binding`: the user is
+            // waiting on this thread, and the pending-pairing branch inside
+            // the helper covers the no-config case synchronously.
+            begin_async_secondary_teardown(state, &index_path)
         },
         SyncManagementRequest::ResetSecondary => {
             let config = SyncStore::read_secondary_config(&index_path)

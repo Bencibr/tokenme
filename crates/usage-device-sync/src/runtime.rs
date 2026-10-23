@@ -26,6 +26,15 @@ use crate::{
 const DEFAULT_LEASE_TTL_MS: i64 = 15 * 60 * 1000;
 const DEFAULT_POLL_MS: u64 = 5_000;
 const MAX_SNAPSHOT_PAGES_PER_PASS: usize = 4;
+// A download burst used to hold the index writer almost continuously: every
+// page imports in one BEGIN IMMEDIATE (rows + rollups + cursor) and the
+// catch-up loop starts the next pass with no poll sleep, so the panel
+// engine's publish cycle timed out its 5 s busy wait with "database is
+// locked" for the whole burst. After each imported page this sleep hands
+// the writer to whoever is waiting — an engine-yield, not a rate limit:
+// four pages per pass pay at most 600 ms of it against per-page network
+// fetches and the five-second poll cadence.
+const DOWNLOAD_PAGE_ENGINE_YIELD: Duration = Duration::from_millis(200);
 // A fresh backup can owe tens of thousands of identity rows. One 256-row batch
 // per five-second poll left the first sync materializing for half an hour, so
 // each pass runs a few batches while it is already holding the index lock.
@@ -424,6 +433,10 @@ impl SyncRuntime {
                 return Ok(true);
             }
             self.store.apply_primary_download_page(&page, now_ms())?;
+            // Hand the index writer to a waiting publish cycle between imports
+            // (see DOWNLOAD_PAGE_ENGINE_YIELD): a preparing page wrote nothing
+            // and a complete page ends the burst, so only a real import sleeps.
+            if !page.preparing && !page.complete { std::thread::sleep(DOWNLOAD_PAGE_ENGINE_YIELD); }
             // A preparing page is an empty marker: the primary is still
             // materializing identities and the cursor did not move, so this
             // pass made no catch-up progress.
@@ -953,6 +966,15 @@ mod tests {
         // The default 5s cadence must still reach the documented 5-minute cap.
         let default_capped = idle_interval(Duration::from_secs(5), false, true, 10);
         assert!(default_capped >= Duration::from_secs(240) && default_capped <= Duration::from_secs(360), "{default_capped:?}");
+    }
+
+    #[test]
+    fn download_page_yield_stays_a_small_engine_yield() {
+        // Wide band on purpose: the sleep must leave a waiting publish cycle
+        // room to win the writer, without turning a page backfill into a
+        // rate-limited crawl.
+        assert!(DOWNLOAD_PAGE_ENGINE_YIELD >= Duration::from_millis(100), "{DOWNLOAD_PAGE_ENGINE_YIELD:?} is too short to let a waiting writer win the lock");
+        assert!(DOWNLOAD_PAGE_ENGINE_YIELD <= Duration::from_millis(1_000), "{DOWNLOAD_PAGE_ENGINE_YIELD:?} is a rate limit, not an engine-yield");
     }
 
     #[test]

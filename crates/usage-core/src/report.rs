@@ -358,6 +358,13 @@ pub struct ReportOptions<'a> {
     /// ever sees this machine's events, so `All` and `Local` fold them and a
     /// remote scope folds none.
     pub scope: MachineScope,
+    /// Origins whose rows stop counting even under [`MachineScope::All`]. The
+    /// device-sync detach writes this: once a device is disconnected or
+    /// revoked its remote data leaves the figures, while the index keeps the
+    /// rows (no deletes) — re-pairing restores them losslessly. Empty by
+    /// default, which is the CLI's contract: `usage-cli` folds whatever the
+    /// index holds.
+    pub exclude_origins: Vec<String>,
 }
 
 impl<'a> ReportOptions<'a> {
@@ -370,6 +377,7 @@ impl<'a> ReportOptions<'a> {
             polled_quota: Vec::new(),
             budgets: BTreeMap::new(),
             scope: MachineScope::All,
+            exclude_origins: Vec::new(),
         }
     }
 
@@ -1577,8 +1585,13 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
 
     // The scope filter over every row's origin. Quotas and budget cost inputs
     // stay out of it on purpose: vendor windows and spend caps describe *this*
-    // machine whichever machine's numbers are on screen.
-    let keep = |origin: &str| opts.scope.keeps(origin);
+    // machine whichever machine's numbers are on screen. Detached sync origins
+    // drop out of the same predicate — a disconnected/revoked device's remote
+    // rows stop counting everywhere the scope filter applies. The rows stay in
+    // the index, so re-pairing restores the figures losslessly; a PAUSED
+    // device is not detached and keeps counting ("offline, not unsubscribed").
+    let detached = |origin: &str| opts.exclude_origins.iter().any(|excluded| excluded == origin);
+    let keep = |origin: &str| opts.scope.keeps(origin) && !detached(origin);
 
     // Cur = whole rollup days from the window's local midnight through yesterday,
     // plus today's live slice; prev = the complete preceding calendar period.
@@ -1739,10 +1752,13 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
     );
 
     // Recent sessions arrive resolved and ordered from the index; the fold only
-    // prices their groups and sums.
+    // prices their groups and sums. Detached origins are dropped before the
+    // `.take()`: a departed device must not occupy top-N slots (the fetch's
+    // own scope LIMIT is a superset of this list).
     let recent_sessions: Vec<SessionRow> = facts
         .sessions
         .iter()
+        .filter(|s| !detached(&s.origin))
         .map(|s| {
             let mut total_tokens = 0.0;
             let mut cost = 0.0;
@@ -1777,13 +1793,17 @@ pub fn summarize_facts(facts: &ReportFacts, opts: &ReportOptions) -> Report {
     // Unscoped by definition: the menu lists every machine while one of them
     // is selected. Origins are enumerated from the rollup (a remote whose
     // today slice is empty still gets a row); the numbers are today's live
-    // sums, `""` being this machine.
+    // sums, `""` being this machine. A detached origin is no machine at all —
+    // dropping it here lets the engine's scope-reset loop hand back a scope
+    // pinned to a device that has left.
     let mut machine_acc: BTreeMap<&str, f64> = BTreeMap::new();
     for r in &facts.rollup {
-        machine_acc.entry(r.origin.as_str()).or_insert(0.0);
+        if !detached(&r.origin) {
+            machine_acc.entry(r.origin.as_str()).or_insert(0.0);
+        }
     }
     for f in &facts.live {
-        if f.bucket == LIVE_TODAY {
+        if f.bucket == LIVE_TODAY && !detached(&f.origin) {
             *machine_acc.entry(f.origin.as_str()).or_default() += f.counts.total();
         }
     }

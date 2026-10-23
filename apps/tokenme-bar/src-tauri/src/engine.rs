@@ -883,6 +883,11 @@ fn publish_with_quota<R: Runtime>(
     // row remains). `report.machines` is unscoped by construction — the rollup
     // spans the whole index whatever the report's own scope — so a missing
     // origin means the index truly holds no rows for it, not a filtered view.
+    // Which origins have left the sync promise (a revoked device on the
+    // primary, a severed downlink on the secondary). One read-only probe per
+    // publish: any detach or re-pair lands within one cadence, no deletes —
+    // the fold just stops counting the rows until the pairing is live again.
+    let exclude_origins = usage_device_sync::SyncStore::read_detached_origins(&index_path());
     let mut report = loop {
         let opts = ReportOptions {
             pricing,
@@ -896,14 +901,16 @@ fn publish_with_quota<R: Runtime>(
             polled_quota: polled_quota.clone(),
             budgets: shared.settings().budgets,
             scope: scope.clone(),
+            exclude_origins: exclude_origins.clone(),
         };
         // Every period's numbers fold from the day rollup (~2k rows) plus the
         // plan's live slices over today — never from re-reading all events. The
         // scope travels into the fetch as well: the sessions' top-N is applied in
-        // SQL, so it must already be the top-N of the chosen scope.
+        // SQL, so it must already be the top-N of the chosen scope — and of the
+        // detached set, or a departed origin would fill the slots.
         let plan = AggregatePlan::build(opts.now_ms, opts.recent_session_limit);
         let facts_started = Instant::now();
-        let facts = match index.report_facts(&plan, &scope) {
+        let facts = match index.report_facts_excluding(&plan, &scope, &exclude_origins) {
             Ok(facts) => facts,
             Err(e) => {
                 crate::logging::error(&format!(

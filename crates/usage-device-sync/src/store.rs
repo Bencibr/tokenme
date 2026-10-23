@@ -884,6 +884,86 @@ impl SyncStore {
         download_cursor_complete_conn(&conn, primary_id)
     }
 
+    /// The origins whose remote rows must not count in the figures — the
+    /// disconnect side of the fold-time exclusion (see
+    /// `ReportOptions::exclude_origins`), keyed on exact origins so the
+    /// collector's separate `sync:linux:<origin>` import records keep
+    /// counting whatever happens to a pairing.
+    ///
+    /// Primary side: the origins of revoked devices in the registry. A PAUSED
+    /// device deliberately keeps counting — a pause is reversible ("offline,
+    /// not unsubscribed"); only revocation ends the sharing promise, so the
+    /// exclusion keys on `revoked` and nothing else.
+    ///
+    /// Secondary side: the origin its merged downlink rows carry (recorded by
+    /// [`Self::apply_primary_download_page`], or by
+    /// [`Self::queue_secondary_disconnect`] when no page got there first),
+    /// detached unless a live, enabled pairing says otherwise. The runtime's
+    /// self-disable on a revoked pairing (`remember_secondary_error` →
+    /// `set_secondary_enabled(false)`) lands here through that same bit — no
+    /// further runtime write is needed to detach a revoked secondary.
+    ///
+    /// Restore needs no bookkeeping either: `transition_to_secondary` and
+    /// `save_secondary_config` deliberately leave the meta key alone; an
+    /// enabled config is what un-detaches the origin.
+    ///
+    /// Shaped like [`Self::read_panel_state`]: read-only opens, no writes,
+    /// tolerant of missing tables and files — any unreadable piece means
+    /// "nothing detached", which errs toward the pre-detach status quo.
+    pub fn read_detached_origins(path: impl AsRef<std::path::Path>) -> Vec<String> {
+        let mut detached: Vec<String> = Vec::new();
+        let state_path = match sync_state_path(path.as_ref()) {
+            Ok(state_path) => state_path,
+            Err(_) => return detached,
+        };
+        if !state_path.exists() { return detached; }
+        let Ok(state) = open_read_only(&state_path) else { return detached; };
+        let has_registry: bool = state
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_registry')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if has_registry {
+            if let Ok(mut stmt) = state.prepare("SELECT origin FROM device_registry WHERE status = 'revoked'") {
+                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                    for origin in rows.flatten() {
+                        if !origin.is_empty() && !detached.contains(&origin) { detached.push(origin); }
+                    }
+                }
+            }
+        }
+        // A live, enabled pairing is what keeps the downlink origin counting:
+        // no config row, or one with enabled = 0, detaches it. An unreadable
+        // config errs the same way the rest of this function does.
+        let live = match read_secondary_config_conn(&state) {
+            Ok(Some(config)) => config.enabled,
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        if live { return detached; }
+        if let Ok(index) = open_read_only(path.as_ref()) {
+            let has_meta: bool = index
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if has_meta {
+                if let Ok(origin) = index.query_row(
+                    "SELECT value FROM meta WHERE key = 'device_sync_downlink_origin'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    if !origin.is_empty() && !detached.contains(&origin) { detached.push(origin); }
+                }
+            }
+        }
+        detached
+    }
+
     pub fn devices(&self) -> SyncResult<Vec<DeviceRecord>> {
         let mut stmt = self.state.prepare(
             "SELECT device_id FROM device_registry ORDER BY origin, device_id",
@@ -1348,6 +1428,16 @@ impl SyncStore {
                 let merged = merge_row(tx, &primary_id, &export_origin, row, now_ms)?;
                 affected_ts.extend(merged.affected_ts);
             }
+            // Record which origin the merged downlink rows carry, in the same
+            // transaction as the rows themselves. A later disconnect detaches
+            // exactly this origin from the figures without deleting a row
+            // (`read_detached_origins`); re-pairing flips the enabled bit back
+            // and the same rows count again, losslessly.
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_downlink_origin', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![export_origin],
+            ).map_err(sql_err)?;
             usage_index::recompute_network_days(tx, &affected_ts).map_err(SyncError::from)?;
             ensure_network_rollups_finite(tx)?;
             tx.execute(
@@ -1477,6 +1567,32 @@ impl SyncStore {
                  WHERE device_id = ?1",
                 params![config.device_id],
             ).map_err(sql_err)?;
+            // The origin the merged downlink rows carry leaves the figures at
+            // disconnect time (`read_detached_origins`). Pages record it as
+            // they merge; a pairing that has not pulled a page under this
+            // build recovers it from the merged rows' `linux:<origin>:<key>`
+            // sources, and one with no downlink rows at all records nothing —
+            // there is nothing to detach. `DO NOTHING`: whatever a page wrote
+            // for this pairing stands.
+            let recorded: Option<String> = tx
+                .query_row("SELECT value FROM meta WHERE key = 'device_sync_downlink_origin'", [], |row| row.get(0))
+                .optional().map_err(sql_err)?;
+            let downlink_origin = recorded.or_else(|| {
+                let mut stmt = tx.prepare("SELECT source FROM event WHERE source LIKE 'linux:%' LIMIT 64").ok()?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0)).ok()?;
+                for source in rows.flatten() {
+                    let origin = origin_of(&source);
+                    if !origin.is_empty() { return Some(origin.to_string()); }
+                }
+                None
+            });
+            if let Some(downlink_origin) = downlink_origin {
+                tx.execute(
+                    "INSERT INTO meta(key, value) VALUES('device_sync_downlink_origin', ?1)
+                     ON CONFLICT(key) DO NOTHING",
+                    params![downlink_origin],
+                ).map_err(sql_err)?;
+            }
             // An explicit disconnect ends the sync promise.  No upload
             // consumer will ACK these revisions, and a later pairing starts
             // from a fresh snapshot; keeping them would let an unreachable
@@ -6136,6 +6252,108 @@ mod tests {
             "SELECT source FROM event", [], |row| row.get(0),
         ).unwrap(), "linux:Renamed-Mac:a", "the row is relabeled, not rejected");
         assert_eq!(secondary.index().event_count().unwrap(), 1, "a relabel must not duplicate the row");
+    }
+
+    fn secondary_config_fixture(dir: &std::path::Path, origin: &str) -> SecondarySyncConfig {
+        let device = identity(origin);
+        let certificate_der = vec![7_u8; 32];
+        SecondarySyncConfig {
+            primary_os: None,
+            primary_id: "primary-1".into(), primary_display_name: None,
+            device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: "https://127.0.0.1:1".into(), server_name: "localhost".into(),
+            certificate_pin: hash_bytes(&certificate_der), certificate_der,
+            identity_path: dir.join("identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None,
+            enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }
+    }
+
+    #[test]
+    fn read_detached_origins_tracks_the_downlink_origin_through_disconnect_and_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        // No sync state at all: the read is empty, not an error.
+        assert!(SyncStore::read_detached_origins(&path).is_empty());
+
+        let device = identity("download-detach");
+        let (mut primary, _) = paired_store_for(&device);
+        primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 1).unwrap();
+        primary.pin_primary_export_origin("MacBook-Pro").unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        primary.index().conn().execute(
+            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
+             VALUES('codex', ?1, 'session', 'tokens', 3, 'local.jsonl', 'd')",
+            params![now - 1_000],
+        ).unwrap();
+
+        let mut secondary = SyncStore::open(&path, "primary-1").unwrap();
+        let config = secondary_config_fixture(dir.path(), "downloader");
+        secondary.save_secondary_config(&config, 2).unwrap();
+        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now).unwrap();
+        let page = primary.primary_download_page(&request, now, 30).unwrap();
+        secondary.apply_primary_download_page(&page, now).unwrap();
+        assert_eq!(secondary.index().conn().query_row::<String, _, _>(
+            "SELECT value FROM meta WHERE key = 'device_sync_downlink_origin'", [], |row| row.get(0),
+        ).unwrap(), "MacBook-Pro", "a page records the origin its rows carry, in the page's own transaction");
+        // A live, enabled pairing: the downlink origin counts.
+        assert!(SyncStore::read_detached_origins(&path).is_empty());
+
+        // The runtime's self-disable on an error flips the enabled bit — that
+        // alone detaches the origin, no further bookkeeping needed.
+        secondary.set_secondary_enabled(false, now + 1).unwrap();
+        assert_eq!(SyncStore::read_detached_origins(&path), vec!["MacBook-Pro".to_string()]);
+
+        // An explicit disconnect deletes the config row and the origin stays
+        // detached; the key survives untouched, because re-pairing un-detaches
+        // through the enabled bit alone.
+        secondary.queue_secondary_disconnect(&config, now + 2).unwrap();
+        assert_eq!(SyncStore::read_detached_origins(&path), vec!["MacBook-Pro".to_string()]);
+        assert_eq!(secondary.index().conn().query_row::<String, _, _>(
+            "SELECT value FROM meta WHERE key = 'device_sync_downlink_origin'", [], |row| row.get(0),
+        ).unwrap(), "MacBook-Pro");
+
+        // A pairing that never recorded the key (rows merged before this
+        // bookkeeping existed) still detaches: the disconnect recovers the
+        // origin from the merged rows' `linux:<origin>:<key>` sources.
+        secondary.save_secondary_config(&config, now + 3).unwrap();
+        secondary.index().conn().execute("DELETE FROM meta WHERE key = 'device_sync_downlink_origin'", []).unwrap();
+        secondary.queue_secondary_disconnect(&config, now + 4).unwrap();
+        assert_eq!(SyncStore::read_detached_origins(&path), vec!["MacBook-Pro".to_string()]);
+
+        // Re-pairing live again restores the figures losslessly.
+        secondary.save_secondary_config(&config, now + 5).unwrap();
+        assert!(SyncStore::read_detached_origins(&path).is_empty());
+    }
+
+    #[test]
+    fn read_detached_origins_lists_revoked_devices_and_keeps_paused_counting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let mut primary = SyncStore::open(&path, "primary-1").unwrap();
+        let revoked = identity("departed-host");
+        let paused = identity("paused-host");
+        for device in [&revoked, &paused] {
+            let invite = primary.create_pairing_invite("https://localhost:1", "0000000000000000000000000000000000000000000000000000000000000000", i64::MAX).unwrap();
+            let request = PairingRequest::new(&invite, device, "linux").unwrap();
+            let state = primary.receive_pairing_request(&request, 1).unwrap();
+            primary.approve_pairing(&state.request_id, 2).unwrap();
+        }
+        primary.pause_device(&paused.device_id).unwrap();
+        assert!(SyncStore::read_detached_origins(&path).is_empty(), "a paused device keeps counting — offline, not unsubscribed");
+        primary.revoke_device(&revoked.device_id, 3).unwrap();
+        assert_eq!(SyncStore::read_detached_origins(&path), vec![revoked.origin.clone()]);
+        // A state file that does not exist reads empty, not an error. The
+        // state path is directory-keyed (sync_state_path), so "another db"
+        // must live in another directory to actually be absent.
+        assert!(SyncStore::read_detached_origins(dir.path().join("absent").join("other.db")).is_empty());
     }
 
     #[test]

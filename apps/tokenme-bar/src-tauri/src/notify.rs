@@ -427,6 +427,12 @@ pub fn init(app: &tauri::AppHandle) {
     let _ = APP.set(app.clone());
 }
 
+/// The process-wide handle for sync-side wakes (cut-off events fire from
+/// threads that never see an AppHandle).
+pub fn app_handle() -> Option<tauri::AppHandle> {
+    APP.get().cloned()
+}
+
 /// Offer a fresh report's quota views to the notification worker. Budget views
 /// (caps the user set in tokenme, not vendor quota) are not this feature's
 /// business; vendor package expiry rows are handled alongside quota tiers.
