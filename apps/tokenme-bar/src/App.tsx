@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { MachineScope, PageKey, PanelSettings, PeriodKey, QuotaDisplayMode, Report, ServerView, SyncDevicesSnapshot, TrayMode, TrayState, TtftSnapshot } from "./types";
+import type { MachineScope, PageKey, PanelSettings, PeriodKey, QuotaDisplayMode, Report, ServerView, SyncDevicesSnapshot, SyncRecord, TrayMode, TrayState, TtftSnapshot } from "./types";
 import { bridge, inTauri, isWindows, applyTheme, applyMoney } from "./lib/bridge";
 import { checkForUpdate, type UpdateInfo } from "./lib/update";
 import { RELEASE_PAGE_URL } from "./lib/about";
@@ -465,7 +465,39 @@ const [page, setPage] = useState<PageKey>(() => {
     // long since removed, and "no data today" about one of those is noise:
     // same rule as the scope menu, so the badge never names a machine the
     // menu does not list.
-    const all = (report?.syncs ?? [])
+    // Device-sync merges never write Report.syncs records (that list is the
+    // legacy Linux-collector import log), so the paired machines themselves
+    // are the freshness source for their origins: on the primary each paired
+    // secondary carries its last merge, and on the secondary the primary's
+    // last contact stands in for its downlink. Legacy records win only when
+    // they are newer for the same origin.
+    const deviceRecords: SyncRecord[] = [];
+    if (syncDevices.role === "primary") {
+      for (const device of syncDevices.devices) {
+        if (device.status !== "paired" || device.last_merged_at_ms == null) continue;
+        deviceRecords.push({
+          origin: device.origin, file: "device-sync", rows: 0,
+          imported_at_ms: device.last_merged_at_ms,
+          window_lo_ms: device.last_merged_at_ms, window_hi_ms: device.last_merged_at_ms + 1,
+        });
+      }
+    } else if (syncDevices.role === "secondary") {
+      const origin = syncDevices.primary_display_name?.trim();
+      if (origin && syncDevices.last_connected_at_ms != null) {
+        deviceRecords.push({
+          origin, file: "device-sync", rows: 0,
+          imported_at_ms: syncDevices.last_connected_at_ms,
+          window_lo_ms: syncDevices.last_connected_at_ms, window_hi_ms: syncDevices.last_connected_at_ms + 1,
+        });
+      }
+    }
+    const byOrigin = new Map<string, SyncRecord>();
+    for (const r of deviceRecords) byOrigin.set(r.origin, r);
+    for (const r of report?.syncs ?? []) {
+      const existing = byOrigin.get(r.origin);
+      if (!existing || r.imported_at_ms > existing.imported_at_ms) byOrigin.set(r.origin, r);
+    }
+    const all = [...byOrigin.values()]
       .filter((r) => isManagedOrigin(r.origin, syncDevices.devices, serverOrigins, syncDevices.role === "secondary"))
       .sort((a, b) => b.imported_at_ms - a.imported_at_ms);
     // The badge says whose numbers these are: under a machine scope it reports
