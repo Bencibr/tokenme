@@ -585,7 +585,11 @@ impl Index {
             .prepare(
                 "SELECT day, origin, tool, session, project, model, meter, \
                         in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts \
-                 FROM event_rollup",
+                 FROM event_rollup \
+                 UNION ALL \
+                 SELECT day, origin, tool, session, project, model, meter, \
+                        in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts \
+                 FROM remote_rollup",
             )
             .map_err(sql_err)?;
         let rows = stmt
@@ -681,13 +685,55 @@ impl Index {
                 })
             })
             .map_err(sql_err)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
+        let mut collected: Vec<FactGroup> = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        // Remote today exists only in remote_rollup (the primary recomputes
+        // its own rollup continuously and serves all days): project its
+        // today rows into the LIVE_TODAY bucket, one pre-aggregated group
+        // per (origin, tool, session, project, model, meter).
+        let today_key = plan.today.format("%Y-%m-%d").to_string();
+        let mut remote_stmt = self.conn.prepare(
+            "SELECT origin, tool, session, COALESCE(project, ''), model, meter, \
+                    in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero \
+             FROM remote_rollup WHERE day = ?1",
+        ).map_err(sql_err)?;
+        let remote_rows = remote_stmt
+            .query_map([&today_key], |r| {
+                Ok(FactGroup {
+                    bucket: LIVE_TODAY,
+                    origin: r.get(0)?,
+                    tool: r.get(1)?,
+                    session: r.get(2)?,
+                    project: opt_of(r.get(3)?),
+                    model: opt_of(r.get(4)?),
+                    meter: meter_of(&r.get::<_, String>(5)?),
+                    counts: TokenCounts {
+                        input: r.get(6)?,
+                        cache_creation: r.get(7)?,
+                        cache_read: r.get(8)?,
+                        output: r.get(9)?,
+                        reasoning: r.get(10)?,
+                        credits: r.get(11)?,
+                    },
+                    requests: r.get::<_, i64>(12)?.max(0) as u64,
+                    nonzero: r.get::<_, i64>(13)?.max(0) as u64,
+                })
+            })
+            .map_err(sql_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        collected.extend(remote_rows);
+        Ok(collected)
     }
 
     /// The mcp/skill breakdowns of the four cur windows. `firsts` keeps, per
     /// (event, kind), the first call by rowid — the event path's
     /// `calls.iter().find(kind)` — and the outer join re-projects each event
     /// into every cur window it falls in, exactly like the per-window scan.
+    /// Remote data has no per-call rows locally, so the breakdown is
+    /// local-only by design; the summary counts still include remote via the
+    /// rollup union in fetch_rollup and the remote-today rows above.
     fn fetch_calls(&self, plan: &AggregatePlan) -> Result<Vec<CallFact>> {
         let sql = format!(
             "WITH w(bid, lo, hi) AS (VALUES (0, ?, ?), (1, ?, ?), (2, ?, ?), (3, ?, ?)), \
@@ -830,7 +876,11 @@ impl Index {
                         IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), IFNULL(sum(cr_tok), 0), \
                         IFNULL(sum(out_tok), 0), IFNULL(sum(reason_tok), 0), IFNULL(sum(credits), 0), \
                         sum(n) \
-                 FROM event_rollup WHERE origin = ?1 AND tool = ?2 AND session = ?3 \
+                 FROM (SELECT model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n \
+                       FROM event_rollup WHERE origin = ?1 AND tool = ?2 AND session = ?3 \
+                       UNION ALL \
+                       SELECT model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n \
+                       FROM remote_rollup WHERE origin = ?1 AND tool = ?2 AND session = ?3) \
                  GROUP BY model, meter ORDER BY model, meter",
             )
             .map_err(sql_err)?;

@@ -13,7 +13,7 @@ use usage_core::{CallKind, Meter, UsageEvent};
 use usage_index::Index;
 
 use crate::{
-    AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest, AuthenticatedStatus,
+    AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest, AuthenticatedRollupRequest, AuthenticatedStatus,
     AuthenticatedStatusRequest, DeviceIdentity, DirtyJournalInput,
     NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, StreamOpenReceipt,
     ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
@@ -46,6 +46,10 @@ const HISTORY_INIT_BATCHES_PER_PASS: usize = 16;
 // beat many small ones while the 100ms yield still hands the writer over.
 const HISTORY_INIT_BATCH_ROWS: usize = 2048;
 const HISTORY_INIT_ENGINE_YIELD: Duration = Duration::from_millis(100);
+// The rollup downlink is a full snapshot of a few thousand aggregate rows —
+// a ~300 KB response. Thirty seconds keeps it fresh without hammering the
+// primary; there is no backfill to resume because there are no rows.
+const ROLLUP_FETCH_INTERVAL_MS: i64 = 30_000;
 // While the primary materializes historical identities it serves an empty
 // preparing page. Poll that state like a progress bar: fast enough to finish
 // initialization promptly, slow enough that the secondary is not a busy loop.
@@ -100,6 +104,7 @@ pub struct SyncRuntime {
     on_cut_off: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     primary_download_complete: bool,
     occurrences_initialized: bool,
+    last_rollup_fetch: Option<i64>,
     occurrence_init_progressed: bool,
     /// Last instant the scheduler lease was actually rewritten. Renewing on
     /// every pass committed a write transaction twice per 5 s poll while the
@@ -115,7 +120,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0, on_cut_off: None }
+        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0, last_rollup_fetch: None, on_cut_off: None }
     }
 
     pub fn new_secondary(
@@ -124,7 +129,7 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0, on_cut_off: None }
+        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_progressed: false, primary_download_more: false, primary_download_preparing: false, primary_download_complete: false, occurrences_initialized: false, occurrence_init_progressed: false, lease_renewed_at_ms: 0, last_rollup_fetch: None, on_cut_off: None }
     }
 
     pub fn new_secondary_with_display_name(
@@ -401,14 +406,30 @@ impl SyncRuntime {
         };
         self.transport.ws_close();
         drain?;
-        if self.secondary_identity.is_some() && self.primary_data_sharing && !self.primary_download_complete {
-            match self.download_primary_pages(stop, now_ms) {
-                Ok(complete) => self.primary_download_more = !complete,
-                Err(error) => {
-                    let message = format!("primary data download failed: {error}");
-                    let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
-                    report.last_error = Some(message);
+        // Rollup-level downlink: one authenticated full-snapshot fetch per
+        // ROLLUP_FETCH_INTERVAL replaces the row-level page walk entirely —
+        // a 500k-event primary lands in one ~300 KB response, so there is
+        // no backfill and nothing to resume.
+        if self.secondary_identity.is_some() && self.primary_data_sharing {
+            let due = self.last_rollup_fetch.map_or(true, |at| {
+                now_ms().saturating_sub(at) >= ROLLUP_FETCH_INTERVAL_MS
+            });
+            if due {
+                match self.fetch_primary_rollup(now_ms()) {
+                    Ok(()) => {
+                        self.primary_download_complete = true;
+                        self.primary_download_progressed = true;
+                        self.last_rollup_fetch = Some(now_ms());
+                    }
+                    Err(error) => {
+
+                        let message = format!("primary rollup sync failed: {error}");
+                        let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
+                        report.last_error = Some(message);
+                    }
                 }
+            } else {
+                self.primary_download_complete = true;
             }
         }
         let summary = self.store.outbox_summary()?;
@@ -419,6 +440,21 @@ impl SyncRuntime {
             let _ = self.store.set_secondary_last_error(None, now_ms());
         }
         Ok(report)
+    }
+
+    /// One authenticated full-snapshot fetch of the primary's own rollup
+    /// rows, applied as a full replace for the primary's origin label. This
+    /// is the whole downlink: no pages, no cursor, no backfill.
+    fn fetch_primary_rollup(&mut self, now_ms: i64) -> SyncResult<()> {
+        let identity = self.secondary_identity.clone().ok_or_else(|| SyncError::Security("primary rollup sync requires a paired secondary identity".into()))?;
+        let request = AuthenticatedRollupRequest::new_at(&identity, self.store.primary_id().to_string(), now_ms)?;
+        self.transport.ws_close();
+        let snapshot = self.transport.rollup_snapshot(&request).map_err(|error| match error {
+            TransportError::Unsupported(message) => SyncError::Unsupported(message),
+            error => SyncError::Protocol(format!("primary rollup request failed: {error}")),
+        })?;
+        self.store.apply_remote_rollup(&snapshot.origin, &snapshot.rows, now_ms)?;
+        Ok(())
     }
 
     fn download_primary_pages(&mut self, stop: Option<&AtomicBool>, now_ms: &mut impl FnMut() -> i64) -> SyncResult<bool> {
@@ -1131,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn secondary_runtime_downloads_primary_data_over_loopback_tls() {
+    fn secondary_runtime_syncs_primary_rollup_over_loopback_tls() {
         let device = DeviceIdentity::create("runtime-downlink", "Secondary").unwrap();
         let (mut primary, _) = paired_primary(&device);
         let now = usage_core::report::now_ms();
@@ -1141,10 +1177,16 @@ mod tests {
             advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
             share_data_with_secondaries: true,
         }, now).unwrap();
+        // The primary's own rollup rows, plus a foreign-origin row that must
+        // never travel: the export serves local-origin rows only.
+        let day = usage_core::local_day_of(now).unwrap().format("%Y-%m-%d").to_string();
         primary.index().conn().execute(
-            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
-             VALUES('codex', ?1, 'primary-session', 'tokens', 9, 'local.jsonl', 'primary-live-row')",
-            rusqlite::params![now - 1_000],
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter,                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)              VALUES(?1, '', 'codex', 'primary-session', '', '', 'tokens', 9, 0, 0, 0, 0, 0, 1, 1, ?2, ?2)",
+            rusqlite::params![day, now - 1_000],
+        ).unwrap();
+        primary.index().conn().execute(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter,                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)              VALUES(?1, 'other-device', 'codex', 's', '', '', 'tokens', 99, 0, 0, 0, 0, 0, 1, 1, ?2, ?2)",
+            rusqlite::params![day, now - 1_000],
         ).unwrap();
 
         let (cert_der, key_der) = certificate();
@@ -1153,7 +1195,7 @@ mod tests {
             server_config(&cert_der, &key_der, staging.path().join("staging")), primary,
         ).unwrap();
         let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections(3));
+        let server_thread = thread::spawn(move || server.run_connections(6));
 
         let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
         let identity_dir = tempfile::tempdir().unwrap();
@@ -1176,78 +1218,16 @@ mod tests {
 
         let report = runtime.run_once_with_clock(|| now + 10).unwrap();
         assert_eq!(report.acknowledged, 1, "the initial empty upload still establishes the paired stream");
-        assert_eq!(runtime.store().index().event_count().unwrap(), 1);
-        assert_eq!(runtime.store().index().conn().query_row::<f64, _, _>(
-            "SELECT in_tok FROM event LIMIT 1", [], |row| row.get(0),
-        ).unwrap(), 9.0);
-        let config = runtime.store().secondary_config().unwrap().unwrap();
-        assert!(runtime.store().primary_download_cursor().unwrap().complete);
-        assert_eq!(config.last_error, None);
-        assert!(server_thread.join().unwrap().is_ok());
-    }
-
-    #[test]
-    fn preparing_primary_download_is_not_progress_and_keeps_the_cursor() {
-        let device = DeviceIdentity::create("runtime-preparing", "Secondary").unwrap();
-        let (mut primary, _) = paired_primary(&device);
-        let now = usage_core::report::now_ms();
-        primary.save_primary_config(&PrimarySyncConfig {
-            auto_approve_pairing: false,
-            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
-            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
-            share_data_with_secondaries: true,
-        }, now).unwrap();
-        // More events than one pass can materialize: four download requests,
-        // each running four identity batches.
-        let rows = usage_index::SYNC_SNAPSHOT_PAGE_ROWS * 4 * MAX_SNAPSHOT_PAGES_PER_PASS + 200;
-        for index in 0..rows {
-            primary.index().conn().execute(
-                "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
-                 VALUES('codex', ?1, 'primary-session', 'tokens', 1, 'local.jsonl', ?2)",
-                rusqlite::params![now - 1_000 - index as i64, format!("preparing-{index:05}")],
-            ).unwrap();
-        }
-
-        let (cert_der, key_der) = certificate();
-        let staging = tempfile::tempdir().unwrap();
-        let server = crate::HttpsSyncServer::bind(
-            server_config(&cert_der, &key_der, staging.path().join("staging")), primary,
+        assert!(runtime.primary_download_complete, "one rollup snapshot completes the downlink");
+        let (origin, in_tok): (String, f64) = runtime.store().index().conn().query_row(
+            "SELECT origin, in_tok FROM remote_rollup", [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
         ).unwrap();
-        let addr = server.local_addr().unwrap();
-        let server_thread = thread::spawn(move || server.run_connections(12));
-
-        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
-        let identity_dir = tempfile::tempdir().unwrap();
-        secondary.save_secondary_config(&SecondarySyncConfig {
-            primary_os: None,
-            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
-            endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
-            certificate_pin: crate::hash_bytes(&cert_der), certificate_der: cert_der.clone(),
-            identity_path: identity_dir.path().join("secondary-identity.json"),
-            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
-            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
-            last_ack_generation: None, last_ack_receipt_hash: None,
-        }, now).unwrap();
-        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
-            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
-        )).unwrap();
-        let mut runtime = SyncRuntime::new_secondary(
-            secondary, transport, SyncRuntimeConfig::new("secondary-preparing-test").unwrap(), device,
-        );
-
-        let report = runtime.run_once_with_clock(|| now + 10).unwrap();
-        assert_eq!(report.acknowledged, 1, "the paired stream still receives the empty upload");
-        assert_eq!(report.last_error, None);
-        assert!(runtime.primary_download_preparing);
-        assert!(!runtime.primary_download_progressed, "an empty preparing marker is not catch-up progress");
-        assert!(runtime.primary_download_more, "the pass must be continued after a preparing page");
-        assert!(!runtime.primary_download_complete);
-        let cursor = runtime.store().primary_download_cursor().unwrap();
-        assert!(!cursor.complete);
-        assert_eq!(cursor.last_identity, None);
-        assert_eq!(cursor.last_dirty_revision, 0);
-        assert_eq!(runtime.store().index().event_count().unwrap(), 0);
-        assert_eq!(runtime.store().secondary_config().unwrap().unwrap().last_error, None);
+        assert_eq!(origin, usage_index::hostname());
+        assert_eq!(in_tok, 9.0);
+        assert_eq!(runtime.store().index().event_count().unwrap(), 0, "raw event rows are no longer downloaded");
+        let config = runtime.store().secondary_config().unwrap().unwrap();
+        assert_eq!(config.last_error, None);
         drain_server(addr, server_thread);
     }
 
@@ -1303,10 +1283,7 @@ mod tests {
         let mut runtime = SyncRuntime::new_secondary(secondary, transport, SyncRuntimeConfig::new("secondary-incremental-owner").unwrap(), device);
         let report = runtime.run_once_with_clock(|| first_now).unwrap();
         assert_eq!(report.acknowledged, 1, "a new dirty row must upload before history mapping finishes");
-        let initialized_to: i64 = runtime.store().index().conn().query_row(
-            "SELECT value FROM meta WHERE key = 'device_sync_occurrence_init_event_id'",
-            [], |row| row.get::<_, String>(0),
-        ).unwrap().parse().unwrap();
+
         // 16 batches per pass catch the small fixture up in one pass: the
         // cursor must sit at the last local event. The live dirty row's
         // import created the final identity before this read.

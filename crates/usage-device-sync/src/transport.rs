@@ -29,13 +29,18 @@ use crate::diagnostics::{
     DiagnosticsScope, DiagnosticsService, DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_REQUEST_TIMEOUT,
     MAX_DIAGNOSTICS_BODY_BYTES, MAX_DIAGNOSTICS_RESPONSE_BYTES,
 };
+use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+
 use crate::protocol::{
-    hash_bytes, verify_private_file, AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest,
-    AuthenticatedStatus, AuthenticatedStatusRequest, PairingInvite, PairingRequest, PrimaryDownloadPage,
+    hash_bytes, verify_private_file, signature_serde, AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest,
+    AuthenticatedStatus, AuthenticatedStatusRequest, DeviceIdentity, PairingInvite, PairingRequest, PrimaryDownloadPage,
     SignedUpload, StreamOpenReceipt, MAX_AUTH_REQUEST_AGE_MS,
-    MAX_AUTH_REQUEST_FUTURE_SKEW_MS, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES, MAX_STRING_BYTES,
+    MAX_AUTH_REQUEST_FUTURE_SKEW_MS, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES, MAX_STRING_BYTES, PROTOCOL_ID,
 };
-use crate::{ImportReceipt, PairingRequestState, SyncError, SyncStore};
+use crate::{
+    DeviceStatus, ImportReceipt, PairingRequestState, SyncError, SyncResult, SyncStore,
+    protocol::identity_bytes,
+};
 
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_RESPONSE_BYTES: usize = MAX_DIAGNOSTICS_RESPONSE_BYTES;
@@ -78,6 +83,7 @@ const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
 const STATUS_PATH: &str = "/v1/status";
 const DOWNLOAD_PATH: &str = "/v1/download";
+const ROLLUP_PATH: &str = "/v1/rollup";
 const DISPLAY_NAME_PATH: &str = "/v1/device/display-name";
 const RECOVERY_PATH: &str = "/v1/recovery";
 const DISCONNECT_PATH: &str = "/v1/disconnect";
@@ -617,6 +623,27 @@ impl Tls13HttpsTransport {
         decode_primary_download_page(&response.body, request)
     }
 
+    /// Fetches the primary's own local-origin rollup rows as one snapshot.
+    /// The answer's `origin` is the label the secondary groups the rows under
+    /// (the primary's hostname, the same label its merged rows have always
+    /// carried); each row's own `origin` field is empty by construction.
+    pub fn rollup_snapshot(&mut self, request: &AuthenticatedRollupRequest) -> Result<RollupSnapshot, TransportError> {
+        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode rollup request: {e}")))?;
+        let response = self.request(ROLLUP_PATH, body)?;
+        if response.status != 200 {
+            let message = serde_json::from_slice::<WireError>(&response.body)
+                .ok()
+                .map(|error| error.message)
+                .unwrap_or_else(|| "rollup request rejected".into());
+            return Err(TransportError::HttpStatus { status: response.status, message });
+        }
+        let snapshot: RollupSnapshot = response.json()?;
+        if snapshot.origin.is_empty() {
+            return Err(TransportError::Protocol("rollup snapshot does not declare an origin".into()));
+        }
+        Ok(snapshot)
+    }
+
     pub fn update_display_name(&mut self, request: &AuthenticatedDisplayNameRequest) -> Result<(), TransportError> {
         let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode display-name update: {e}")))?;
         let response = self.request(DISPLAY_NAME_PATH, body)?;
@@ -883,6 +910,7 @@ impl NonceReplayCache {
 
 const NONCE_SCOPE_STATUS: &str = "status";
 const NONCE_SCOPE_DOWNLOAD: &str = "download";
+const NONCE_SCOPE_ROLLUP: &str = "rollup";
 const NONCE_SCOPE_DISPLAY_NAME: &str = "display-name";
 const NONCE_SCOPE_DISCONNECT: &str = "disconnect";
 
@@ -1792,6 +1820,159 @@ fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// The rollup endpoint signs under its own domain so a captured download or
+/// status request cannot be replayed against it (and the other way around).
+const ROLLUP_DOMAIN: &[u8] = b"tokenme-device-sync/rollup/v1";
+
+/// Authenticated request for the primary's own rollup rows. Same identity
+/// fields as the download request minus the paging cursors: the snapshot is
+/// the whole local-origin rollup table, not a page, so there is no cursor to
+/// sign.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatedRollupRequest {
+    pub protocol_id: String,
+    pub primary_id: String,
+    pub device_id: String,
+    pub origin: String,
+    pub nonce: [u8; 16],
+    pub issued_at_ms: i64,
+    #[serde(with = "signature_serde")]
+    pub signature: [u8; 64],
+}
+
+impl AuthenticatedRollupRequest {
+    pub fn new_at(identity: &DeviceIdentity, primary_id: impl Into<String>, issued_at_ms: i64) -> SyncResult<Self> {
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|e| SyncError::Crypto(format!("OS randomness unavailable: {e}")))?;
+        let mut request = Self {
+            protocol_id: PROTOCOL_ID.into(),
+            primary_id: primary_id.into(),
+            device_id: identity.device_id.clone(),
+            origin: identity.origin.clone(),
+            nonce,
+            issued_at_ms,
+            signature: [0; 64],
+        };
+        request.validate_fields()?;
+        request.signature = identity.signing_key.sign(&request.signing_bytes()).to_bytes();
+        Ok(request)
+    }
+
+    pub fn verify(&self, public_key: &VerifyingKey) -> SyncResult<()> {
+        self.validate_fields()?;
+        public_key.verify(&self.signing_bytes(), &Signature::from_bytes(&self.signature))
+            .map_err(|_| SyncError::Auth("authenticated rollup signature verification failed".into()))
+    }
+
+    fn validate_fields(&self) -> SyncResult<()> {
+        if self.protocol_id != PROTOCOL_ID {
+            return Err(SyncError::Auth("invalid authenticated rollup request".into()));
+        }
+        crate::protocol::valid_text("primary_id", &self.primary_id, false)?;
+        crate::protocol::valid_text("device_id", &self.device_id, false)?;
+        crate::protocol::valid_text("origin", &self.origin, false)?;
+        if !usage_core::origin_ok(&self.origin) { return Err(SyncError::Auth("invalid authenticated rollup origin".into())); }
+        Ok(())
+    }
+
+    pub(crate) fn is_fresh(&self, now_ms: i64) -> bool {
+        self.issued_at_ms > now_ms.saturating_sub(MAX_AUTH_REQUEST_AGE_MS)
+            && self.issued_at_ms <= now_ms.saturating_add(MAX_AUTH_REQUEST_FUTURE_SKEW_MS)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        identity_bytes(ROLLUP_DOMAIN, &[
+            self.protocol_id.as_bytes(), self.primary_id.as_bytes(), self.device_id.as_bytes(),
+            self.origin.as_bytes(), &self.nonce, &self.issued_at_ms.to_be_bytes(),
+        ])
+    }
+}
+
+/// The primary's own local-origin rollup rows. `origin` declares the label the
+/// secondary must group the rows under (the primary's hostname — consistent
+/// with what its merged rows historically carried); each row's own `origin`
+/// field is empty by construction and the secondary overrides it with the
+/// declared label on import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollupSnapshot {
+    pub origin: String,
+    pub rows: Vec<RollupRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollupRow {
+    pub day: String,
+    pub origin: String,
+    pub tool: String,
+    pub session: String,
+    pub project: String,
+    pub model: String,
+    pub meter: String,
+    pub in_tok: f64,
+    pub cc_tok: f64,
+    pub cr_tok: f64,
+    pub out_tok: f64,
+    pub reason_tok: f64,
+    pub credits: f64,
+    pub n: i64,
+    pub nonzero: i64,
+    pub min_ts: i64,
+    pub max_ts: i64,
+}
+
+/// Serves the primary's own rollup rows after the same identity checks
+/// `SyncStore::primary_download_page` runs before serving: right primary,
+/// registered device, matching origin, valid signature, fresh request, paired
+/// status. The read touches only the index, so no cursor state is written.
+fn primary_rollup_snapshot(store: &mut SyncStore, request: &AuthenticatedRollupRequest, now: i64) -> SyncResult<RollupSnapshot> {
+    if request.primary_id != store.primary_id() {
+        return Err(SyncError::Auth("rollup targets another primary".into()));
+    }
+    let Some(record) = store.device(&request.device_id)? else {
+        return Err(SyncError::NotPaired(request.device_id.clone()));
+    };
+    if record.origin != request.origin {
+        return Err(SyncError::Auth("rollup origin does not match paired device".into()));
+    }
+    request.verify(&crate::protocol::public_key_from_bytes(&record.public_key)?)?;
+    if !request.is_fresh(now) {
+        return Err(SyncError::Auth("rollup request is expired or from the future".into()));
+    }
+    if record.status != DeviceStatus::Paired {
+        return Err(SyncError::NotPaired(request.device_id.clone()));
+    }
+    // `event_rollup.origin` is the materialized ORIGIN_SQL of each event's
+    // source (usage_index folds it in at ingest time), so the primary's own
+    // rows are exactly `origin = ''`; merged bundle imports carry their
+    // bundle origin and never travel this wire.
+    let mut statement = store.index().conn().prepare(
+        "SELECT day, origin, tool, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts FROM event_rollup WHERE origin = ''",
+    ).map_err(|e| SyncError::Sqlite(e.to_string()))?;
+    let rows = statement.query_map([], |row| Ok(RollupRow {
+        day: row.get(0)?,
+        origin: row.get(1)?,
+        tool: row.get(2)?,
+        session: row.get(3)?,
+        project: row.get(4)?,
+        model: row.get(5)?,
+        meter: row.get(6)?,
+        in_tok: row.get(7)?,
+        cc_tok: row.get(8)?,
+        cr_tok: row.get(9)?,
+        out_tok: row.get(10)?,
+        reason_tok: row.get(11)?,
+        credits: row.get(12)?,
+        n: row.get(13)?,
+        nonzero: row.get(14)?,
+        min_ts: row.get(15)?,
+        max_ts: row.get(16)?,
+    })).map_err(|e| SyncError::Sqlite(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| SyncError::Sqlite(e.to_string()))?;
+    Ok(RollupSnapshot { origin: usage_index::hostname(), rows })
+}
+
 fn dispatch_request(store: &mut SyncStore, request: &HttpRequest, replay: &Mutex<NonceReplayCache>, context: &ServerContext) -> (u16, Vec<u8>) {
     let now = now_ms();
     let result: Result<Vec<u8>, SyncError> = match (request.path.as_str(), request.content_type.as_str()) {
@@ -1808,6 +1989,11 @@ fn dispatch_request(store: &mut SyncStore, request: &HttpRequest, replay: &Mutex
             .map_err(|e| SyncError::Protocol(format!("invalid download request: {e}")))
             .and_then(|download| with_claimed_nonce(replay, NONCE_SCOPE_DOWNLOAD, download.nonce, now, || {
                 store.primary_download_page(&download, now, 30).and_then(encode_primary_download_page)
+            })),
+        (ROLLUP_PATH, "application/json") => serde_json::from_slice::<AuthenticatedRollupRequest>(&request.body)
+            .map_err(|e| SyncError::Protocol(format!("invalid rollup request: {e}")))
+            .and_then(|rollup| with_claimed_nonce(replay, NONCE_SCOPE_ROLLUP, rollup.nonce, now, || {
+                primary_rollup_snapshot(store, &rollup, now).and_then(|snapshot| serde_json::to_vec(&snapshot).map_err(|e| SyncError::Protocol(e.to_string())))
             })),
         (DISPLAY_NAME_PATH, "application/json") => serde_json::from_slice::<AuthenticatedDisplayNameRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid display-name update: {e}")))
@@ -2030,7 +2216,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST or WebSocket GET is supported".into()));
     }
     let known_path = match path {
-        WS_SYNC_PATH | "/v1/sync/ws" | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        WS_SYNC_PATH | "/v1/sync/ws" | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | ROLLUP_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;

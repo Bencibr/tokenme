@@ -201,6 +201,30 @@ CREATE TABLE IF NOT EXISTS event_rollup(
     max_ts     INTEGER NOT NULL,
     PRIMARY KEY(day, origin, tool, session, project, model, meter)
 );
+-- Synced copies of a peer's own rollup rows (rollup-level device sync):
+-- one row set per source origin, written by the sync's full-snapshot
+-- apply, read by the report fold alongside event_rollup. Never touched
+-- by recompute_network_days — the source device owns their truth.
+CREATE TABLE IF NOT EXISTS remote_rollup(
+    day        TEXT    NOT NULL,
+    origin     TEXT    NOT NULL DEFAULT '',
+    tool       TEXT    NOT NULL,
+    session    TEXT    NOT NULL,
+    project    TEXT    NOT NULL DEFAULT '',
+    model      TEXT    NOT NULL DEFAULT '',
+    meter      TEXT    NOT NULL,
+    in_tok     REAL    NOT NULL,
+    cc_tok     REAL    NOT NULL,
+    cr_tok     REAL    NOT NULL,
+    out_tok    REAL    NOT NULL,
+    reason_tok REAL    NOT NULL,
+    credits    REAL    NOT NULL,
+    n          INTEGER NOT NULL,
+    nonzero    INTEGER NOT NULL,
+    min_ts     INTEGER NOT NULL,
+    max_ts     INTEGER NOT NULL,
+    PRIMARY KEY(day, origin, tool, session, project, model, meter)
+);
 -- Serves the per-session correlated lookups (first project / last model) and
 -- the newest-event probe without a full scan.
 CREATE INDEX IF NOT EXISTS event_tool_session ON event(tool, session);

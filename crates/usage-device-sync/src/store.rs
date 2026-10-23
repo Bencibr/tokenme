@@ -1571,6 +1571,72 @@ impl SyncStore {
         self.queue_secondary_disconnect(&config, now_ms)
     }
 
+    /// Applies a fetched rollup snapshot from the current primary as a full
+    /// replace for `origin_label`: delete that origin's previous rows, insert
+    /// the received ones, stamp the fetch time. On the first apply this also
+    /// retires the row-level download era: the remote-origin event rows the
+    /// old event download merged into this index (and their rollup rows) are
+    /// deleted — the aggregate snapshot replaces them, so figures neither
+    /// double count nor lose history. Gated by a meta flag, once per origin.
+    pub fn apply_remote_rollup(
+        &mut self,
+        origin_label: &str,
+        rows: &[crate::transport::RollupRow],
+        fetched_at_ms: i64,
+    ) -> SyncResult<()> {
+        validate_identifier("origin_label", origin_label)?;
+        self.index.with_network_transaction(|tx| {
+            let migrated: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'device_sync_rollup_migrated'",
+                    [], |row| row.get(0),
+                )
+                .optional().map_err(sql_err)?;
+            if migrated.is_none() {
+                // One-time retirement of the row-level download era.
+                tx.execute(
+                    &format!(
+                        "DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE ({ORIGIN_SQL}) = ?1)"
+                    ),
+                    params![origin_label],
+                ).map_err(sql_err)?;
+                tx.execute(
+                    &format!("DELETE FROM event WHERE ({ORIGIN_SQL}) = ?1"),
+                    params![origin_label],
+                ).map_err(sql_err)?;
+                tx.execute(
+                    "DELETE FROM event_rollup WHERE origin = ?1",
+                    params![origin_label],
+                ).map_err(sql_err)?;
+                tx.execute(
+                    "INSERT INTO meta(key, value) VALUES('device_sync_rollup_migrated', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![origin_label],
+                ).map_err(sql_err)?;
+            }
+            tx.execute("DELETE FROM remote_rollup WHERE origin = ?1", params![origin_label]).map_err(sql_err)?;
+            for row in rows {
+                tx.execute(
+                    "INSERT OR REPLACE INTO remote_rollup(
+                        day, origin, tool, session, project, model, meter,
+                        in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    params![
+                        row.day, origin_label, row.tool, row.session, row.project, row.model, row.meter,
+                        row.in_tok, row.cc_tok, row.cr_tok, row.out_tok, row.reason_tok, row.credits,
+                        row.n, row.nonzero, row.min_ts, row.max_ts,
+                    ],
+                ).map_err(sql_err)?;
+            }
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_rollup_fetched_at_ms', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![fetched_at_ms.to_string()],
+            ).map_err(sql_err)?;
+            Ok::<_, SyncError>(())
+        })
+    }
+
     pub fn queue_secondary_disconnect(&mut self, config: &SecondarySyncConfig, now_ms: i64) -> SyncResult<()> {
         config.validate(&config.primary_id)?;
         let mut config = config.clone();
@@ -1629,6 +1695,10 @@ impl SyncStore {
             // from a fresh snapshot; keeping them would let an unreachable
             // primary pin local history against prune forever.
             tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?;
+            // 分家: the peer's aggregate rows leave the figures with the
+            // pairing — the fold unions remote_rollup, so removing the rows
+            // IS the detach. A re-pair re-syncs the snapshot in seconds.
+            tx.execute("DELETE FROM remote_rollup", []).map_err(sql_err)?;
             tx.execute("DELETE FROM meta WHERE key = 'device_sync_dirty_json_bytes'", []).map_err(sql_err)?;
             tx.execute("DELETE FROM meta WHERE key = 'device_sync_disconnect_requested'", []).map_err(sql_err)?;
             tx.execute(
@@ -1687,6 +1757,9 @@ impl SyncStore {
                     // upload consumer left they would pin local events against
                     // retention forever.
                     tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?;
+                    // 分家: with the binding gone, the peer's aggregate rows
+                    // leave the figures (the fold unions remote_rollup).
+                    tx.execute("DELETE FROM remote_rollup", []).map_err(sql_err)?;
                     tx.execute("DELETE FROM meta WHERE key = 'device_sync_dirty_json_bytes'", []).map_err(sql_err)?;
                 }
                 let audit = serde_json::json!({ "completed_at_ms": now_ms, "retired_packages": retired }).to_string();
@@ -1811,6 +1884,9 @@ impl SyncStore {
             // No upload consumer remains; a fresh pairing takes a full
             // snapshot from the event table instead of replaying this journal.
             tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?;
+            // 分家: the departed primary's aggregate rows leave the figures;
+            // a re-pair re-syncs the snapshot in seconds.
+            tx.execute("DELETE FROM remote_rollup", []).map_err(sql_err)?;
             tx.execute("DELETE FROM meta WHERE key = 'device_sync_dirty_json_bytes'", []).map_err(sql_err)?;
             tx.execute(
                 "DELETE FROM meta WHERE key = 'device_sync_disconnect_requested' AND value = ?1",
@@ -3715,11 +3791,26 @@ fn upload_cursor_complete_conn(conn: &Connection, config: &SecondarySyncConfig) 
 }
 
 fn download_cursor_complete_conn(conn: &Connection, primary_id: &str) -> Option<bool> {
+    // The downlink is a rollup snapshot now: "complete" means the first
+    // snapshot has been fetched and applied. The old event-page cursor may
+    // still exist on upgraded secondaries and must not override it.
+    let fetched: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'device_sync_rollup_fetched_at_ms'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if fetched.is_some() {
+        return Some(true);
+    }
     conn.query_row(
         &format!("SELECT complete FROM device_sync_snapshot_cursor WHERE device_id = ?1 AND stream_id = '{PRIMARY_DOWNLOAD_STREAM_ID}' AND data_epoch = 1"),
         params![primary_id],
         |row| row.get::<_, i64>(0),
-    ).ok().map(|complete| complete != 0)
+    )
+    .ok()
+    .map(|complete| complete != 0)
 }
 
 fn disconnect_requested_conn(conn: &Connection, primary_id: &str) -> SyncResult<bool> {
