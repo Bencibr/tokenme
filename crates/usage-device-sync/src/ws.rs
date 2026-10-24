@@ -6,7 +6,7 @@
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,8 @@ use tungstenite::protocol::WebSocket;
 use tungstenite::{Message, Error as WsError};
 
 use crate::protocol::DeviceIdentity;
-use crate::store::{SyncError, SyncStore};
-use crate::transport::RollupSnapshot;
+use crate::store::{DeviceStatus, SyncError, SyncResult, SyncStore};
+use crate::transport::{primary_local_rollup_snapshot, RollupSnapshot};
 
 pub const WS_PROTOCOL_VERSION: &str = "tokenme-ws-v2";
 pub const DEFAULT_WS_PING_INTERVAL: Duration = Duration::from_secs(15);
@@ -76,6 +76,39 @@ pub enum WsSyncFrame {
         expected_generation: Option<u64>,
         server_time_ms: i64,
     },
+    /// Secondary asking for the primary's own local-origin rollup snapshot —
+    /// the session leg of what POST /v1/rollup served. The authenticated
+    /// session replaces the signed request; the reply is `RollupSnapshot`.
+    RollupFetch {},
+    /// Server reply to `RollupFetch`: the primary's own rollup rows under the
+    /// label the secondary groups them by (the primary's hostname).
+    RollupSnapshot {
+        snapshot: RollupSnapshot,
+    },
+    /// Secondary refreshing its display name. The session's Auth frame proves
+    /// the sender is the paired device, so the frame carries just the name.
+    DisplayNameUpdate {
+        name: String,
+    },
+    /// Server acknowledging an applied display-name update. Failures travel
+    /// as the standard `Error` frame instead.
+    DisplayNameAck {},
+    /// Secondary announcing a clean disconnect ("I am leaving"). The
+    /// session's Auth frame proves the sender owns the pairing, so the frame
+    /// carries nothing — the primary marks the intended leave instantly, no
+    /// notice queue needed for the clean case.
+    DisconnectNotify {},
+    /// Server acknowledging a disconnect notice. Failures travel as the
+    /// standard `Error` frame instead.
+    DisconnectAck {},
+    /// Server-initiated, one-way advisory: this device's registry state moved
+    /// out-of-band on the primary (revoke, pause, resume) or the primary's
+    /// data-sharing flag flipped. Best-effort — no live socket, no delivery,
+    /// and the device's next session re-syncs regardless.
+    DeviceState {
+        status: String,
+        data_sharing: bool,
+    },
     /// Explicit error message.
     Error {
         message: String,
@@ -87,6 +120,10 @@ pub enum WsSyncFrame {
 /// `on_live` fires the moment a device authenticates; `on_dead` fires exactly
 /// once when its authenticated socket dies — reset, timeout, protocol error
 /// or clean close — via a drop guard, so every exit path reports.
+/// `on_disconnect` fires when an authenticated device lands a clean
+/// `DisconnectNotify`. `push_rx` carries the server-initiated frames
+/// (`DeviceState`) the live-socket registry queued for this connection; the
+/// loop drains it between reads, so a push waits at most one poll slice.
 pub fn handle_server_websocket<S>(
     mut ws: WebSocket<S>,
     store: Arc<std::sync::Mutex<SyncStore>>,
@@ -94,10 +131,27 @@ pub fn handle_server_websocket<S>(
     stop: &AtomicBool,
     on_live: &dyn Fn(&str),
     on_dead: &dyn Fn(&str),
+    on_disconnect: &dyn Fn(&str),
+    push_rx: &mpsc::Receiver<WsSyncFrame>,
 ) -> Result<(), SyncError>
 where
     S: Read + Write,
 {
+    fn drain_pushes<S: Read + Write>(ws: &mut WebSocket<S>, push_rx: &mpsc::Receiver<WsSyncFrame>) {
+        loop {
+            match push_rx.try_recv() {
+                Ok(frame) => {
+                    if let Ok(text) = serde_json::to_string(&frame) {
+                        // Best-effort by contract: a WouldBlock here leaves the
+                        // frame queued in tungstenite's write cache, and a dead
+                        // socket is the next read's problem.
+                        let _ = ws.send(Message::Text(text));
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
     struct SessionGuard<'a> {
         device: Option<String>,
         on_dead: &'a dyn Fn(&str),
@@ -116,7 +170,12 @@ where
         let msg = match ws.read() {
             Ok(msg) => msg,
             Err(WsError::ConnectionClosed) | Err(WsError::AlreadyClosed) => break,
-            Err(WsError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(WsError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock
+                || err.kind() == std::io::ErrorKind::TimedOut => {
+                // WouldBlock is the unix shape of an idle poll; Windows names
+                // the same SO_RCVTIMEO expiry TimedOut. Both mean "nothing to
+                // read": drain the push queue and keep the session alive.
+                drain_pushes(&mut ws, push_rx);
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
@@ -136,7 +195,7 @@ where
 
                 let response = {
                     let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
-                    process_server_frame(&frame, &mut s, &mut authenticated_device, &now_ms)?
+                    process_server_frame(&frame, &mut s, &mut authenticated_device, &now_ms, on_disconnect)?
                 };
                 if let Some(device) = response.1 {
                     session.device = Some(device.clone());
@@ -146,6 +205,7 @@ where
                     let resp_text = serde_json::to_string(&resp).map_err(|e| SyncError::Protocol(e.to_string()))?;
                     ws.send(Message::Text(resp_text)).map_err(|e| SyncError::Protocol(format!("ws send: {e}")))?;
                 }
+                drain_pushes(&mut ws, push_rx);
             }
             Message::Binary(bytes) => {
                 let frame: WsSyncFrame = match serde_json::from_slice(&bytes) {
@@ -158,7 +218,7 @@ where
                 };
                 let response = {
                     let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
-                    process_server_frame(&frame, &mut s, &mut authenticated_device, &now_ms)?
+                    process_server_frame(&frame, &mut s, &mut authenticated_device, &now_ms, on_disconnect)?
                 };
                 if let Some(device) = response.1 {
                     session.device = Some(device.clone());
@@ -168,6 +228,7 @@ where
                     let resp_text = serde_json::to_string(&resp).map_err(|e| SyncError::Protocol(e.to_string()))?;
                     ws.send(Message::Text(resp_text)).map_err(|e| SyncError::Protocol(format!("ws send: {e}")))?;
                 }
+                drain_pushes(&mut ws, push_rx);
             }
             Message::Ping(payload) => {
                 let _ = ws.send(Message::Pong(payload));
@@ -185,12 +246,14 @@ where
 }
 
 /// Returns the reply frame plus the device id when this frame authenticated
-/// a session — the caller owns the live-session callbacks.
+/// a session — the caller owns the live-session callbacks. `on_disconnect`
+/// fires only after a disconnect notice the store accepted.
 fn process_server_frame(
     frame: &WsSyncFrame,
     store: &mut SyncStore,
     authenticated_device: &mut Option<String>,
     now_ms: &impl Fn() -> i64,
+    on_disconnect: &dyn Fn(&str),
 ) -> Result<(Option<WsSyncFrame>, Option<String>), SyncError> {
     match frame {
         WsSyncFrame::Auth { device_id, origin: _, display_name: _, version: _ } => {
@@ -212,12 +275,17 @@ fn process_server_frame(
                     error: None,
                 }), Some(device_id.clone())))
             } else {
+                // The registry status word rides in the error text — the
+                // secondary's only carrier for it — so a refused session maps
+                // back onto the status poll's taxonomy (paused is
+                // recoverable, revoked is not) instead of reading as a
+                // generic refusal.
                 Ok((Some(WsSyncFrame::AuthAck {
-                    status,
+                    status: status.clone(),
                     primary_id,
                     primary_display_name: None,
                     epoch,
-                    error: Some("device is not in paired state".into()),
+                    error: Some(format!("device is not in paired state: registry status is {status}")),
                 }), None))
             }
         }
@@ -254,6 +322,88 @@ fn process_server_frame(
                 Err(err) => Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
             }
         }
+        WsSyncFrame::RollupFetch {} => {
+            let Some(device_id) = authenticated_device.as_deref() else {
+                return Ok((Some(WsSyncFrame::Error {
+                    message: "unauthenticated connection; send Auth first".into(),
+                }), None));
+            };
+            // The downlink serves the primary's own rows only to a device that
+            // is still paired — the same gate the retired POST /v1/rollup
+            // applied after its signature checks. The registry status word
+            // rides in the message: the secondary maps refused frames back
+            // onto the status poll's taxonomy (paused is recoverable, revoked
+            // is not).
+            match store.ws_device_status(device_id) {
+                Ok(Some(status)) if status == "paired" => {}
+                Ok(Some(status)) => return Ok((Some(WsSyncFrame::Error {
+                    message: format!("device is not authorized to fetch the primary rollup: registry status is {status}"),
+                }), None)),
+                Ok(None) => return Ok((Some(WsSyncFrame::Error {
+                    message: "device is not in paired state".into(),
+                }), None)),
+                Err(err) => return Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
+            }
+            // Data sharing is the primary's answer, not the secondary's guess:
+            // a configured-off primary refuses with the keyword the secondary
+            // learns from, and the device stops asking until a DeviceState
+            // push (or a restart) re-opens the question.
+            let sharing = match store.primary_config() {
+                Ok(config) => config.is_some_and(|config| config.share_data_with_secondaries),
+                Err(err) => return Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
+            };
+            if !sharing {
+                return Ok((Some(WsSyncFrame::Error {
+                    message: "the primary is not sharing data with secondaries".into(),
+                }), None));
+            }
+            match primary_local_rollup_snapshot(store) {
+                Ok(snapshot) => Ok((Some(WsSyncFrame::RollupSnapshot { snapshot }), None)),
+                Err(err) => Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
+            }
+        }
+        WsSyncFrame::DisplayNameUpdate { name } => {
+            let Some(device_id) = authenticated_device.as_deref() else {
+                return Ok((Some(WsSyncFrame::Error {
+                    message: "unauthenticated connection; send Auth first".into(),
+                }), None));
+            };
+            // The store's `update_display_name` verifies a client-signed
+            // request; the session's Auth frame replaces that proof, so this
+            // is the same write with the session's authenticated device: the
+            // same validity rule, the same paired gate, the same UPDATE.
+            match session_update_display_name(store, device_id, name) {
+                Ok(()) => Ok((Some(WsSyncFrame::DisplayNameAck {}), None)),
+                Err(err) => Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
+            }
+        }
+        WsSyncFrame::DisconnectNotify {} => {
+            let Some(device_id) = authenticated_device.as_deref() else {
+                return Ok((Some(WsSyncFrame::Error {
+                    message: "unauthenticated connection; send Auth first".into(),
+                }), None));
+            };
+            // What the POST /v1/disconnect arm marked: a registered device
+            // that is not already revoked is revoked (epoch bump, stream
+            // teardown, journal release) via the same primitive the primary's
+            // own revoke uses; an already-revoked device gets the idempotent
+            // ack the store's disconnect produced; an unknown device is an
+            // error, like the store's NotPaired.
+            match store.ws_device_status(device_id) {
+                Ok(Some(status)) if status != "revoked" => match store.revoke_device(device_id, now_ms()) {
+                    Ok(_) => {
+                        on_disconnect(device_id);
+                        Ok((Some(WsSyncFrame::DisconnectAck {}), None))
+                    }
+                    Err(err) => Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
+                },
+                Ok(Some(_)) => Ok((Some(WsSyncFrame::DisconnectAck {}), None)),
+                Ok(None) => Ok((Some(WsSyncFrame::Error {
+                    message: "device is not in paired state".into(),
+                }), None)),
+                Err(err) => Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
+            }
+        }
         WsSyncFrame::StatusRequest { device_id } => {
             let status = store.ws_device_status(device_id)?.unwrap_or_else(|| "unpaired".into());
             Ok((Some(WsSyncFrame::StatusResponse {
@@ -264,10 +414,27 @@ fn process_server_frame(
                 server_time_ms: now_ms(),
             }), None))
         }
-        WsSyncFrame::RollupAck { .. } | WsSyncFrame::AuthAck { .. } | WsSyncFrame::StatusResponse { .. } | WsSyncFrame::Error { .. } => {
+        WsSyncFrame::RollupSnapshot { .. } | WsSyncFrame::DisplayNameAck {} | WsSyncFrame::DisconnectAck {} | WsSyncFrame::DeviceState { .. }
+        | WsSyncFrame::RollupAck { .. } | WsSyncFrame::AuthAck { .. } | WsSyncFrame::StatusResponse { .. } | WsSyncFrame::Error { .. } => {
             Ok((None, None))
         }
     }
+}
+
+/// The session-authenticated display-name write — the same validity rule,
+/// paired gate and UPDATE predicate `SyncStore::update_display_name` applies
+/// to a client-signed request, with the authenticated session standing in
+/// for the signature the frame no longer carries.
+fn session_update_display_name(store: &mut SyncStore, device_id: &str, name: &str) -> SyncResult<()> {
+    crate::protocol::valid_text("display_name", name, false)?;
+    let record = store.device(device_id)?.ok_or_else(|| SyncError::NotPaired(device_id.to_string()))?;
+    if record.status != DeviceStatus::Paired { return Err(SyncError::NotPaired(device_id.to_string())); }
+    let changed = store.state.execute(
+        "UPDATE device_registry SET display_name = ?1 WHERE device_id = ?2 AND origin = ?3 AND status = 'paired'",
+        rusqlite::params![name, device_id, record.origin],
+    ).map_err(|e| SyncError::Sqlite(e.to_string()))?;
+    if changed != 1 { return Err(SyncError::NotPaired(device_id.to_string())); }
+    Ok(())
 }
 
 /// Client-side WebSocket connection controller.
@@ -384,7 +551,8 @@ mod tests {
             snapshot: RollupSnapshot { origin: device.origin.clone(), rows: vec![rollup_row("2026-10-22", "codex", 1)] },
         };
         let mut authenticated = None;
-        let (reply, session) = process_server_frame(&frame, &mut store, &mut authenticated, &|| 1_000).unwrap();
+        let no_sink = |_device: &str| {};
+        let (reply, session) = process_server_frame(&frame, &mut store, &mut authenticated, &|| 1_000, &no_sink).unwrap();
         assert!(session.is_none());
         match reply {
             Some(WsSyncFrame::Error { message }) => assert!(message.contains("unauthenticated"), "{message}"),
@@ -400,7 +568,8 @@ mod tests {
             snapshot: RollupSnapshot { origin: device.origin.clone(), rows },
         };
         let mut authenticated = Some(device.device_id.clone());
-        let (reply, session) = process_server_frame(&frame, &mut store, &mut authenticated, &|| 1_000).unwrap();
+        let no_sink = |_device: &str| {};
+        let (reply, session) = process_server_frame(&frame, &mut store, &mut authenticated, &|| 1_000, &no_sink).unwrap();
         assert!(session.is_none(), "a rollup push does not re-authenticate the session");
         match reply {
             Some(WsSyncFrame::RollupAck { origin, accepted, n }) => {
@@ -415,5 +584,161 @@ mod tests {
             [&device.origin], |row| row.get(0),
         ).unwrap();
         assert_eq!(stored, 2, "both rows must land under the registry origin");
+    }
+
+    fn no_disconnect_sink() -> impl Fn(&str) {
+        |_device: &str| {}
+    }
+
+    #[test]
+    fn rollup_fetch_serves_the_primary_snapshot_to_a_paired_session() {
+        let (mut store, device) = paired_store();
+        // The fetch is served only by a sharing primary — turn the flag on
+        // like a configured primary would carry it.
+        store.save_primary_config(&crate::PrimarySyncConfig {
+            auto_approve_pairing: false,
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 5).unwrap();
+        let day = "2026-10-22";
+        store.index().conn().execute(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)
+             VALUES(?1, '', 'codex', 'primary-session', '', '', 'tokens', 9, 0, 0, 0, 0, 0, 1, 1, 1000, 2000)",
+            [&day],
+        ).unwrap();
+        // A foreign-origin row must never travel: the snapshot is local-origin only.
+        store.index().conn().execute(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)
+             VALUES(?1, 'other-origin', 'codex', 's', '', '', 'tokens', 99, 0, 0, 0, 0, 0, 1, 1, 1000, 2000)",
+            [&day],
+        ).unwrap();
+        let mut authenticated = Some(device.device_id.clone());
+        let (reply, session) = process_server_frame(&WsSyncFrame::RollupFetch {}, &mut store, &mut authenticated, &|| 1_000, &no_disconnect_sink()).unwrap();
+        assert!(session.is_none());
+        match reply {
+            Some(WsSyncFrame::RollupSnapshot { snapshot }) => {
+                assert_eq!(snapshot.origin, usage_index::hostname(), "the label the secondary groups the rows under");
+                assert_eq!(snapshot.rows.len(), 1, "only the primary's own local-origin rows travel");
+                assert_eq!(snapshot.rows[0].in_tok, 9.0);
+            }
+            other => panic!("expected the snapshot frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rollup_fetch_without_a_paired_session_is_refused() {
+        let (mut store, device) = paired_store();
+        let mut authenticated = None;
+        let (reply, _) = process_server_frame(&WsSyncFrame::RollupFetch {}, &mut store, &mut authenticated, &|| 1_000, &no_disconnect_sink()).unwrap();
+        match reply {
+            Some(WsSyncFrame::Error { message }) => assert!(message.contains("unauthenticated"), "{message}"),
+            other => panic!("expected the wire error frame, got {other:?}"),
+        }
+        // A session whose device is no longer paired must not fetch either.
+        let mut authenticated = Some(device.device_id.clone());
+        store.revoke_device(&device.device_id, 2_000).unwrap();
+        let (reply, _) = process_server_frame(&WsSyncFrame::RollupFetch {}, &mut store, &mut authenticated, &|| 3_000, &no_disconnect_sink()).unwrap();
+        match reply {
+            Some(WsSyncFrame::Error { message }) => assert!(message.contains("not authorized"), "{message}"),
+            other => panic!("expected the wire error frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn display_name_update_applies_for_the_session_device() {
+        let (mut store, device) = paired_store();
+        let mut authenticated = Some(device.device_id.clone());
+        let (reply, _) = process_server_frame(
+            &WsSyncFrame::DisplayNameUpdate { name: "Renamed MacBook".into() },
+            &mut store, &mut authenticated, &|| 2_000, &no_disconnect_sink(),
+        ).unwrap();
+        assert!(matches!(reply, Some(WsSyncFrame::DisplayNameAck {})), "{reply:?}");
+        let record = store.device(&device.device_id).unwrap().unwrap();
+        assert_eq!(record.display_name, "Renamed MacBook");
+        // An invalid name is refused and leaves the stored name alone.
+        let (reply, _) = process_server_frame(
+            &WsSyncFrame::DisplayNameUpdate { name: String::new() },
+            &mut store, &mut authenticated, &|| 3_000, &no_disconnect_sink(),
+        ).unwrap();
+        assert!(matches!(reply, Some(WsSyncFrame::Error { .. })), "{reply:?}");
+        assert_eq!(store.device(&device.device_id).unwrap().unwrap().display_name, "Renamed MacBook");
+    }
+
+    #[test]
+    fn disconnect_notify_revokes_the_device_and_fires_the_sink() {
+        let (mut store, device) = paired_store();
+        let mut authenticated = Some(device.device_id.clone());
+        let sink = std::sync::Mutex::new(None);
+        let sink_ref = &sink;
+        let on_disconnect = |device: &str| *sink_ref.lock().unwrap() = Some(device.to_string());
+        let (reply, _) = process_server_frame(&WsSyncFrame::DisconnectNotify {}, &mut store, &mut authenticated, &|| 2_000, &on_disconnect).unwrap();
+        assert!(matches!(reply, Some(WsSyncFrame::DisconnectAck {})), "{reply:?}");
+        assert_eq!(sink.lock().unwrap().as_deref(), Some(device.device_id.as_str()), "the clean notice must wake the primary's UI");
+        let status = store.ws_device_status(&device.device_id).unwrap();
+        assert_eq!(status.as_deref(), Some("revoked"), "the notice must mark what the POST /v1/disconnect arm marked");
+        // The notice is idempotent: a second one is an ack, not an error, and
+        // the sink does not fire twice.
+        let fired = std::sync::Mutex::new(0);
+        let fired_ref = &fired;
+        let count_sink = |_device: &str| *fired_ref.lock().unwrap() += 1;
+        let (reply, _) = process_server_frame(&WsSyncFrame::DisconnectNotify {}, &mut store, &mut authenticated, &|| 3_000, &count_sink).unwrap();
+        assert!(matches!(reply, Some(WsSyncFrame::DisconnectAck {})), "{reply:?}");
+        assert_eq!(*fired.lock().unwrap(), 0, "an already-revoked device has nothing left to mark");
+    }
+
+    #[test]
+    fn device_state_is_a_one_way_server_advisory_the_server_never_answers() {
+        let (mut store, _device) = paired_store();
+        let mut authenticated = Some("whatever".into());
+        let (reply, session) = process_server_frame(
+            &WsSyncFrame::DeviceState { status: "paused".into(), data_sharing: false },
+            &mut store, &mut authenticated, &|| 1_000, &no_disconnect_sink(),
+        ).unwrap();
+        assert!(reply.is_none(), "a push frame is one-way: {reply:?}");
+        assert!(session.is_none());
+    }
+
+    #[test]
+    fn a_refused_session_error_carries_the_registry_status_word() {
+        let (mut store, device) = paired_store();
+        // Paused is recoverable: the word must ride so the secondary maps the
+        // refusal onto the status poll's taxonomy instead of a generic error.
+        store.pause_device(&device.device_id).unwrap();
+        let mut authenticated = None;
+        let (reply, session) = process_server_frame(
+            &WsSyncFrame::Auth {
+                device_id: device.device_id.clone(), origin: device.origin.clone(),
+                display_name: device.origin.clone(), version: WS_PROTOCOL_VERSION.into(),
+            },
+            &mut store, &mut authenticated, &|| 1_000, &no_disconnect_sink(),
+        ).unwrap();
+        assert!(session.is_none(), "a paused device does not open a session");
+        match reply {
+            Some(WsSyncFrame::AuthAck { status, error, .. }) => {
+                assert_eq!(status, "paused");
+                let error = error.expect("the refusal explains itself");
+                assert!(error.contains("paused"), "{error}");
+            }
+            other => panic!("expected the refused ack, got {other:?}"),
+        }
+        // Revoked is terminal and carries its own word the same way.
+        store.resume_device(&device.device_id).unwrap();
+        store.revoke_device(&device.device_id, 2_000).unwrap();
+        let (reply, _) = process_server_frame(
+            &WsSyncFrame::Auth {
+                device_id: device.device_id.clone(), origin: device.origin.clone(),
+                display_name: device.origin.clone(), version: WS_PROTOCOL_VERSION.into(),
+            },
+            &mut store, &mut authenticated, &|| 3_000, &no_disconnect_sink(),
+        ).unwrap();
+        match reply {
+            Some(WsSyncFrame::AuthAck { status, error, .. }) => {
+                assert_eq!(status, "revoked");
+                let error = error.expect("the refusal explains itself");
+                assert!(error.contains("revoked"), "{error}");
+            }
+            other => panic!("expected the refused ack, got {other:?}"),
+        }
     }
 }

@@ -2,9 +2,14 @@
 //!
 //! It deliberately owns no timer thread by itself: callers choose `run_once`
 //! or `run_until`, while the SQLite lease is the process-wide singleton gate.
-//! The uplink is one symmetric rollup push per changed local state (a cheap
-//! change fingerprint keeps an idle device silent); the downlink is one
-//! authenticated rollup-snapshot fetch per interval. No outbox, no pages.
+//! Both directions ride one resident WebSocket session: the uplink is one
+//! symmetric rollup push per changed local state (a cheap change fingerprint
+//! keeps an idle device silent), the downlink is one authenticated rollup
+//! fetch per interval. Pairing state arrives as the server's `DeviceState`
+//! push; between pushes the runtime trusts its local config, its last known
+//! state, and the errors the session calls surface — a revoked, paused or
+//! unpaired device's frames are refused, and that refusal is the cut-off
+//! trigger. No outbox, no pages, no per-pass status poll.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,9 +21,7 @@ use usage_core::{CallKind, Meter, UsageEvent};
 use usage_index::Index;
 
 use crate::{
-    AuthenticatedDisplayNameRequest, AuthenticatedRollupRequest, AuthenticatedStatus,
-    AuthenticatedStatusRequest, DeviceIdentity,
-    NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, StreamOpenReceipt,
+    DeviceIdentity, NetworkCall, NetworkCounts, NetworkPackage, NetworkRow,
     ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
     TransportError,
 };
@@ -32,10 +35,12 @@ const DEFAULT_POLL_MS: u64 = 5_000;
 // a ~300 KB response. Thirty seconds keeps it fresh without hammering the
 // primary; there is no backfill to resume because there are no rows.
 const ROLLUP_FETCH_INTERVAL_MS: i64 = 30_000;
-// While the primary materializes historical identities it serves an empty
-// preparing page. Poll that state like a progress bar: fast enough to finish
-// initialization promptly, slow enough that the secondary is not a busy loop.
-const PREPARING_POLL: Duration = Duration::from_millis(500);
+// A paired device with nothing to exchange (sharing refused, or the uplink
+// fingerprint idle with the fetch interval not yet due) does not keep its
+// session leg open forever: after this much idle time the next pass drops it,
+// and the next due call rebuilds it. Errors close the leg inside the
+// transport already.
+const SESSION_IDLE_CLOSE_MS: i64 = 10 * 60 * 1000;
 const RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 const POLL_JITTER_PERCENT: u64 = 20;
 
@@ -81,6 +86,9 @@ pub struct RuntimeRunReport {
     pub retried: u64,
     pub pending: u64,
     pub in_flight: u64,
+    /// Rollup payload bytes this pass moved over the session: the uplink
+    /// push's rows plus the downlink snapshot's rows. `run_until` totals its
+    /// passes; the legacy outbox-backlog meaning is gone with the outbox.
     pub bytes: u64,
     pub last_error: Option<String>,
 }
@@ -91,8 +99,16 @@ pub struct SyncRuntime {
     config: SyncRuntimeConfig,
     secondary_identity: Option<DeviceIdentity>,
     secondary_display_name: Option<String>,
+    /// Whether the downlink should run. The status poll used to set this
+    /// from the primary's answer; the session model starts it optimistically
+    /// at `true` for a paired device and learns from the primary's refusal:
+    /// a sharing-off primary answers the fetch with "the primary is not
+    /// sharing data with secondaries", which the pass records here and then
+    /// stops asking (no error, no backoff). The session's `DeviceState` push
+    /// would correct it live once the transport records those frames —
+    /// today they are read-loop advisories, so no slot is exposed to
+    /// consume here.
     primary_data_sharing: bool,
-    primary_download_preparing: bool,
     primary_download_complete: bool,
     /// Embedding-UI wake for the moment the primary cuts this device off
     /// (revoked/blocked) and the runtime self-disables. Receives a short
@@ -108,6 +124,15 @@ pub struct SyncRuntime {
     /// skipped as unchanged, so it doubles as the "something actually went
     /// out" marker tests and the panel read.
     last_upload_pushed_at: Option<i64>,
+    /// Pass clock of the last session call that actually round-tripped (a
+    /// delivered push or an applied fetch). Drives the idle-leg close; 0
+    /// until the first exchange.
+    last_session_activity_ms: i64,
+    /// The display name the primary last acknowledged via the session's
+    /// `DisplayNameUpdate` frame. The session's Auth frame announces the name
+    /// on every fresh leg; this frame covers renames — sent once per change,
+    /// never per pass like the HTTP call it replaced.
+    last_display_name_sent: Option<String>,
     /// Last instant the scheduler lease was actually rewritten. Renewing on
     /// every pass committed a write transaction twice per 5 s poll while the
     /// 15-minute lease was nowhere near expiry.
@@ -122,7 +147,7 @@ pub struct LocalSnapshot {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_preparing: false, primary_download_complete: false, last_upload_fingerprint: None, last_upload_pushed_at: None, lease_renewed_at_ms: 0, last_rollup_fetch: None, on_cut_off: None }
+        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_complete: false, last_rollup_fetch: None, last_upload_fingerprint: None, last_upload_pushed_at: None, last_session_activity_ms: 0, last_display_name_sent: None, lease_renewed_at_ms: 0, on_cut_off: None }
     }
 
     pub fn new_secondary(
@@ -131,10 +156,10 @@ impl SyncRuntime {
         config: SyncRuntimeConfig,
         identity: DeviceIdentity,
     ) -> Self {
-        // Every uplink push authenticates the resident ws session with this
-        // identity; pinning it once here covers rebuilt legs too.
+        // Every session frame authenticates with this identity; pinning it
+        // once here covers rebuilt legs too.
         transport.set_ws_session_identity(identity.device_id.clone(), identity.origin.clone());
-        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: false, primary_download_preparing: false, primary_download_complete: false, last_upload_fingerprint: None, last_upload_pushed_at: None, lease_renewed_at_ms: 0, last_rollup_fetch: None, on_cut_off: None }
+        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: true, primary_download_complete: false, last_rollup_fetch: None, last_upload_fingerprint: None, last_upload_pushed_at: None, last_session_activity_ms: 0, last_display_name_sent: None, lease_renewed_at_ms: 0, on_cut_off: None }
     }
 
     pub fn new_secondary_with_display_name(
@@ -190,9 +215,10 @@ impl SyncRuntime {
         }
         self.lease_renewed_at_ms = first_now;
         let result = (|| {
-            let pushed = self.prepare_secondary(&mut now_ms)?;
+            let (pushed, push_bytes) = self.prepare_secondary(&mut now_ms)?;
             let mut report = self.run_owned_once(None, &mut now_ms)?;
             report.uploaded = pushed;
+            report.bytes = report.bytes.saturating_add(push_bytes);
             Ok(report)
         })();
         if let Err(error) = &result {
@@ -202,10 +228,11 @@ impl SyncRuntime {
         result
     }
 
-    /// Resident scheduler lifecycle. It recovers only its own lease's stale
-    /// in-flight rows, sends FIFO bytes, and stops between requests when the
-    /// caller sets the flag. A failed network request remains in outbox with
-    /// backoff; it never advances to a later generation.
+    /// Resident scheduler lifecycle. It holds the SQLite lease across passes,
+    /// pushes the uplink rollup when the local fingerprint moves, fetches the
+    /// primary's downlink snapshot on its interval, and stops between passes
+    /// when the caller sets the flag. A failed session call surfaces as a
+    /// pass error with backoff.
     pub fn run_until(&mut self, stop: &AtomicBool, mut now_ms: impl FnMut() -> i64) -> SyncResult<RuntimeRunReport> {
         self.run_until_inner(stop, &mut now_ms, |_| Ok(()))
     }
@@ -240,7 +267,6 @@ impl SyncRuntime {
         let mut total = RuntimeRunReport::default();
         let mut consecutive_errors = 0_u32;
         while !stop.load(Ordering::Acquire) {
-            self.primary_download_preparing = false;
             let lease_now = now_ms();
             if !self.renew_lease_if_due(lease_now)? {
                 let _ = self.store.release_scheduler_lease(&self.config.owner);
@@ -251,9 +277,11 @@ impl SyncRuntime {
                 return Err(error);
             }
             let mut pushed_rows = 0_u64;
+            let mut push_bytes = 0_u64;
             let pass = match self.prepare_secondary(&mut now_ms) {
-                Ok(pushed) => {
+                Ok((pushed, bytes)) => {
                     pushed_rows = pushed;
+                    push_bytes = bytes;
                     self.run_owned_once(Some(stop), &mut now_ms)
                 }
                 Err(error) if self.secondary_identity.is_some() && retryable_secondary_error(&error) => {
@@ -278,7 +306,7 @@ impl SyncRuntime {
             total.retried = total.retried.saturating_add(pass.retried);
             total.pending = pass.pending;
             total.in_flight = pass.in_flight;
-            total.bytes = pass.bytes;
+            total.bytes = total.bytes.saturating_add(pass.bytes).saturating_add(push_bytes);
             let pass_had_error = pass.last_error.is_some();
             let waiting_for_primary = pass.last_error.as_deref().is_some_and(|message| message.contains("awaiting approval") || message.contains("primary paused this device"));
             consecutive_errors = if pass_had_error && !waiting_for_primary { consecutive_errors.saturating_add(1) } else { 0 };
@@ -293,18 +321,25 @@ impl SyncRuntime {
             }
             if stop.load(Ordering::Acquire) { break; }
             // There is no bounded catch-up continuation any more: the uplink
-            // push and the rollup downlink are both one-shot calls, so a
-            // delivered-or-skipped push IS complete catch-up, and a failed
-            // one surfaces as a pass error with the backoff below instead of
-            // a fast continuation loop. Every pass here is a timed pass —
-            // it ingests, polls and sleeps the full (jittered) interval.
+            // push and the rollup downlink are both one-shot session calls,
+            // so a delivered-or-skipped push IS complete catch-up, and a
+            // failed one surfaces as a pass error with the backoff below
+            // instead of a fast continuation loop. Every pass here is a timed
+            // pass — it ingests, exchanges and sleeps the full (jittered)
+            // interval.
             let started = std::time::Instant::now();
-            let interval = idle_interval(self.config.poll_interval, self.primary_download_preparing, pass_had_error, consecutive_errors);
+            let interval = idle_interval(self.config.poll_interval, consecutive_errors);
             self.primary_download_complete = false;
             while started.elapsed() < interval && !stop.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(50).min(interval));
             }
         }
+        // A stop is not a departure the primary should act on: the resident
+        // socket closing reports the device offline through the server's own
+        // session guard, and the session's DisconnectNotify frame means
+        // "leave the pairing" (the store's disconnect_device revokes the
+        // registry entry) — an unpair decision that belongs to the embedder's
+        // unpair flow, never to a stop or a drop.
         let _ = self.store.release_scheduler_lease(&self.config.owner);
         Ok(total)
     }
@@ -327,47 +362,68 @@ impl SyncRuntime {
         if self.secondary_identity.is_some()
             && self.store.secondary_config()?.is_some_and(|config| !config.enabled)
         {
+            self.close_idle_session(now_ms());
             let summary = self.store.outbox_summary()?;
             report.pending = summary.pending;
             report.in_flight = summary.in_flight;
-            report.bytes = summary.bytes;
             return Ok(report);
         }
         // The uplink push already ran inside `prepare_secondary`; this half
-        // owns the downlink. The WebSocket stays resident across passes: the
-        // primary admits four concurrent connections, so the held slot no
-        // longer starves the status calls, and a LAN keepalive link beats a
-        // fresh TCP+TLS+WS handshake per pass.
+        // owns the downlink. The session leg is built by the first session
+        // call of a pass and stays resident across passes — a LAN keepalive
+        // link beats a fresh TCP+TLS+WS handshake every 30 seconds, and with
+        // the status poll gone there is no per-pass HTTP call left to starve
+        // behind a held slot. A pass with nothing to exchange drops the leg
+        // once it has idled past SESSION_IDLE_CLOSE_MS.
         //
         // Rollup-level downlink: one authenticated full-snapshot fetch per
-        // ROLLUP_FETCH_INTERVAL replaces the row-level page walk entirely —
-        // a 500k-event primary lands in one ~300 KB response, so there is
-        // no backfill and nothing to resume.
+        // ROLLUP_FETCH_INTERVAL over the session replaces the row-level page
+        // walk entirely — a 500k-event primary lands in one ~300 KB response,
+        // so there is no backfill and nothing to resume.
         if self.secondary_identity.is_some() && self.primary_data_sharing {
             let due = self.last_rollup_fetch.map_or(true, |at| {
                 now_ms().saturating_sub(at) >= ROLLUP_FETCH_INTERVAL_MS
             });
             if due {
                 match self.fetch_primary_rollup(now_ms()) {
-                    Ok(()) => {
+                    Ok(payload_bytes) => {
                         self.primary_download_complete = true;
                         self.last_rollup_fetch = Some(now_ms());
+                        report.bytes = payload_bytes;
                     }
                     Err(error) => {
-
-                        let message = format!("primary rollup sync failed: {error}");
-                        let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
-                        report.last_error = Some(message);
+                        let message = error.to_string();
+                        if message.to_ascii_lowercase().contains("sharing") {
+                            // The primary refuses the downlink over data
+                            // sharing ("the primary is not sharing data with
+                            // secondaries"): a configuration answer, not a
+                            // device-state problem — learn it and stop
+                            // asking, no last_error, no backoff. The session's
+                            // DeviceState push (or a restart) re-opens the
+                            // question.
+                            self.primary_data_sharing = false;
+                            self.primary_download_complete = true;
+                        } else if is_cut_off_error(&error) {
+                            // A refused fetch is also a revocation sensor for
+                            // a device whose push was skipped as unchanged.
+                            self.remember_secondary_error(&error, now_ms());
+                            report.last_error = Some(message);
+                        } else {
+                            let message = format!("primary rollup sync failed: {error}");
+                            let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
+                            report.last_error = Some(message);
+                        }
                     }
                 }
             } else {
                 self.primary_download_complete = true;
             }
+        } else if self.secondary_identity.is_some() {
+            self.close_idle_session(now_ms());
         }
         let summary = self.store.outbox_summary()?;
         report.pending = summary.pending;
         report.in_flight = summary.in_flight;
-        report.bytes = summary.bytes;
         if self.secondary_identity.is_some() && report.last_error.is_none() {
             let _ = self.store.set_secondary_last_error(None, now_ms());
         }
@@ -375,132 +431,34 @@ impl SyncRuntime {
     }
 
     /// One authenticated full-snapshot fetch of the primary's own rollup
-    /// rows, applied as a full replace for the primary's origin label. This
-    /// is the whole downlink: no pages, no cursor, no backfill.
-    fn fetch_primary_rollup(&mut self, now_ms: i64) -> SyncResult<()> {
-        let identity = self.secondary_identity.clone().ok_or_else(|| SyncError::Security("primary rollup sync requires a paired secondary identity".into()))?;
-        let request = AuthenticatedRollupRequest::new_at(&identity, self.store.primary_id().to_string(), now_ms)?;
-        self.transport.ws_close();
-        let snapshot = self.transport.rollup_snapshot(&request).map_err(|error| match error {
-            TransportError::Unsupported(message) => SyncError::Unsupported(message),
-            error => SyncError::Protocol(format!("primary rollup request failed: {error}")),
-        })?;
+    /// rows over the resident session, applied as a full replace for the
+    /// primary's origin label. This is the whole downlink: no pages, no
+    /// cursor, no backfill. Returns the snapshot's payload size for the pass
+    /// report.
+    fn fetch_primary_rollup(&mut self, now_ms: i64) -> SyncResult<u64> {
+        let snapshot = self.transport.ws_rollup_fetch().map_err(|error| map_session_error(self.secondary_identity.as_ref(), error))?;
+        let payload_bytes = serde_json::to_vec(&snapshot.rows).map(|bytes| bytes.len() as u64).unwrap_or(0);
         self.store.apply_remote_rollup(&snapshot.origin, &snapshot.rows, now_ms)?;
-        Ok(())
+        self.last_session_activity_ms = now_ms;
+        self.store.mark_secondary_connected(now_ms)?;
+        Ok(payload_bytes)
     }
 
-    /// The status-and-pairing preamble every pass runs, closed by the uplink
-    /// push. Returns the rollup rows the push carried — 0 when the pass had
-    /// nothing paired to do or the fingerprint matched the last delivered
-    /// push. Errors are the caller's record-and-backoff input.
-    fn prepare_secondary(&mut self, now_ms: &mut impl FnMut() -> i64) -> SyncResult<u64> {
-        let Some(identity) = self.secondary_identity.clone() else { return Ok(0); };
+    /// The paired preamble every pass runs, closed by the uplink push.
+    /// Returns (rollup rows the push carried, push payload bytes) — (0, 0)
+    /// when the pass had nothing paired to do or the fingerprint matched the
+    /// last delivered push. Errors are the caller's record-and-backoff input,
+    /// and a revoked/unpaired refusal reaches the cut-off path through them.
+    fn prepare_secondary(&mut self, now_ms: &mut impl FnMut() -> i64) -> SyncResult<(u64, u64)> {
+        let Some(identity) = self.secondary_identity.clone() else { return Ok((0, 0)); };
         let config = self.store.secondary_config()?.ok_or_else(|| SyncError::NotPaired(identity.device_id.clone()))?;
         if !config.enabled {
             // Stop is the network scheduler switch.  A paired device keeps
             // rolling local rows up while offline so resume cannot skip
             // changes made before the last push.
-            return Ok(0);
+            return Ok((0, 0));
         }
-        // A device that has a stream or ack history has synced before; a
-        // fresh pairing has neither, and must not be forced to reconcile
-        // just because it never minted a stream (new pairings never do).
-        let local_has_history = if config.stream_id.is_some() {
-            true
-        } else {
-            self.store.secondary_has_history(&config)?
-        };
-        let request_now = now_ms();
-        let request = AuthenticatedStatusRequest::new_at_with_checkpoint(
-            &identity, config.primary_id.clone(), true, config.last_ack_generation, request_now,
-        )?;
-        let status_result = self.transport.status(&request).map_err(map_secondary_status_error);
-        // A checkpoint the primary no longer has a receipt for makes the
-        // status call itself fail with 409.  The primary is reachable, and
-        // that answer is precisely the recovery handshake's input.
-        if matches!(&status_result, Ok(_) | Err(SyncError::ReconcileRequired)) {
-            self.store.mark_secondary_connected(now_ms())?;
-        }
-        let status = match status_result {
-            Ok(status) => Some(status),
-            Err(SyncError::ReconcileRequired) => None,
-            Err(error) => return Err(error),
-        };
-        // A local reset deliberately forgot the stream while the primary still
-        // holds its highwater: adopting that stream again would replay
-        // generation 1 against a stream expecting N+1 forever. The recovery
-        // handshake freezes it and mints a fresh one instead.
-        let mut recover = status.is_none() || self.store.secondary_needs_recovery()?;
-        if let Some(status) = status.as_ref() {
-            self.primary_data_sharing = status.primary_data_sharing;
-            if let Some(name) = status.primary_display_name.as_deref() {
-                if config.primary_display_name.as_deref() != Some(name) {
-                    if let Err(error) = self.store.set_secondary_primary_display_name(name, now_ms()) {
-                        eprintln!("tokenme sync: primary display-name cache failed: {error}");
-                    }
-                }
-            }
-            match status.status.as_str() {
-                "paired" => {}
-                "pending" => return Err(SyncError::NotPaired("pairing request is awaiting approval".into())),
-                "rejected" => return Err(SyncError::NotPaired("pairing request was rejected".into())),
-                "expired" => return Err(SyncError::NotPaired("pairing invite expired".into())),
-                "paused" => return Err(SyncError::Conflict("primary paused this device".into())),
-                "revoked" => return Err(SyncError::Revoked(identity.device_id.clone())),
-                "reconcile_required" => recover = true,
-                other => return Err(SyncError::Protocol(format!("primary returned unknown device status {other:?}"))),
-            }
-            // A cursor, stream or epoch the primary no longer recognizes is
-            // the recovery handshake's job, not a terminal error: the primary
-            // freezes the old stream and issues a fresh one.  Any other
-            // validation failure is reported as-is.
-            recover = recover || match validate_secondary_status(&config, status, local_has_history) {
-                Ok(()) => false,
-                Err(SyncError::ReconcileRequired) | Err(SyncError::EpochStale) => true,
-                Err(error) => return Err(error),
-            };
-            if let Some(display_name) = self.secondary_display_name.clone() {
-                if status.display_name.as_deref().is_some_and(|current| current != display_name) {
-                    match AuthenticatedDisplayNameRequest::new_at(&identity, config.primary_id.clone(), display_name, now_ms()) {
-                        Ok(update) => if let Err(error) = self.transport.update_display_name(&update) {
-                            eprintln!("tokenme sync: display-name refresh failed: {error}");
-                        },
-                        Err(error) => eprintln!("tokenme sync: display-name refresh request was rejected locally: {error}"),
-                    }
-                }
-            }
-        }
-        let receipt = if recover {
-            self.transport.recover(&request).map_err(|error| SyncError::Protocol(format!("secondary stream recovery failed: {error}")))?
-        } else {
-            let status = status.as_ref().expect("a non-recovering status pass has a status");
-            match (status.active_stream_id.clone(), status.expected_generation) {
-                (Some(stream_id), Some(expected_generation)) => StreamOpenReceipt {
-                    primary_id: status.primary_id.clone(),
-                    device_id: status.device_id.clone(),
-                    stream_id,
-                    data_epoch: status.data_epoch,
-                    expected_generation,
-                },
-                (None, None) => self.transport.recover(&request).map_err(|error| SyncError::Protocol(format!("secondary stream recovery failed: {error}")))?,
-                _ => return Err(SyncError::Security("primary returned an incomplete stream status".into())),
-            }
-        };
-        let stream_now = now_ms();
-        if !self.renew_lease_if_due(stream_now)? {
-            return Err(SyncError::Security("sync scheduler lease was lost before stream update".into()));
-        }
-        if recover {
-            self.store.adopt_recovered_stream(&receipt, stream_now)?;
-        } else {
-            self.store.update_secondary_stream(&receipt, stream_now)?;
-        }
-        // The uplink: one authenticated rollup-snapshot push, riding the
-        // settled session — a pending/paused/revoked device never gets here,
-        // and a fresh pairing (no stream ever minted) pushes right after its
-        // first status pass. A delivered-or-skipped push is the whole
-        // catch-up: the pass that returns from here owes nothing to the
-        // next one.
+        self.send_display_name_update_once();
         self.push_local_rollup(now_ms())
     }
 
@@ -508,13 +466,13 @@ impl SyncRuntime {
         if self.secondary_identity.is_none() { return; }
         let message = error.to_string();
         let _ = self.store.set_secondary_last_error(Some(&message), now_ms);
-        if matches!(error, SyncError::Revoked(_) | SyncError::Security(_))
-            || matches!(error, SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired")
-        {
+        if is_cut_off_error(error) {
             let _ = self.store.set_secondary_enabled(false, now_ms);
-            // The primary cut this device off (revoked or blocked): the panel
-            // polls on its own cadence, so wake the owner directly — the same
-            // door-knock courtesy the primary's pairing hook provides.
+            // The primary cut this device off (revoked or blocked): drop the
+            // session leg and wake the owner directly — the panel polls on
+            // its own cadence, so this is the same door-knock courtesy the
+            // primary's pairing hook provides.
+            self.transport.ws_close();
             if let Some(hook) = self.on_cut_off.as_ref() {
                 let reason = match error {
                     SyncError::Revoked(_) => "revoked",
@@ -535,39 +493,42 @@ impl SyncRuntime {
     /// zero rows. The primary's apply is idempotent (INSERT OR REPLACE per
     /// row plus the ack stamp), so a push whose ack was lost is safely
     /// re-sent — the fingerprint skip is an optimization, not a correctness
-    /// gate. Returns the number of rows the delivered push carried (0 when
-    /// skipped as unchanged).
-    fn push_local_rollup(&mut self, now_ms: i64) -> SyncResult<u64> {
+    /// gate. Returns (rows carried, payload bytes) — (0, 0) when skipped as
+    /// unchanged.
+    fn push_local_rollup(&mut self, now_ms: i64) -> SyncResult<(u64, u64)> {
         let fingerprint = self.local_rollup_fingerprint()?;
         if self.last_upload_fingerprint == Some(fingerprint) {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let rows = self.store.local_rollup_snapshot()?;
+        let payload_bytes = serde_json::to_vec(&rows).map(|bytes| bytes.len() as u64).unwrap_or(0);
         // Error handling is the old outbox drain's: a version-incompatible
         // primary is disabled — resetting would loop reset → re-push → 426
-        // forever, so only an upgrade fixes it — a broken stream state is
-        // auto-recovered by resetting the local stream (the next pass's
-        // recovery handshake mints a fresh one), and anything else goes back
-        // as a pass error for the caller's record-and-backoff paths.
+        // forever, so only an upgrade fixes it — a broken sync state is
+        // auto-recovered by resetting it locally, and anything else is mapped
+        // onto the status poll's taxonomy so a revoked or unpaired device
+        // still reaches the cut-off path through `remember_secondary_error`.
         match self.transport.ws_rollup_sync(&rows) {
             Ok(_origin) => {
                 self.last_upload_fingerprint = Some(fingerprint);
                 self.last_upload_pushed_at = Some(now_ms);
-                Ok(rows.len() as u64)
+                self.last_session_activity_ms = now_ms;
+                self.store.mark_secondary_connected(now_ms)?;
+                Ok((rows.len() as u64, payload_bytes))
             }
             Err(error) => {
-                let message = error.to_string();
-                if is_version_incompatible_error(&message) {
+                let raw = error.to_string();
+                if is_version_incompatible_error(&raw) {
                     let _ = self.store.reset_secondary_sync_state(now_ms);
                     let _ = self.store.set_secondary_enabled(false, now_ms);
-                    let _ = self.store.set_secondary_last_error(Some(&message), now_ms);
-                    return Err(SyncError::Protocol(message));
+                    let _ = self.store.set_secondary_last_error(Some(&raw), now_ms);
+                    return Err(SyncError::Protocol(raw));
                 }
-                if is_unrecoverable_sync_error(&message) {
+                if is_unrecoverable_sync_error(&raw) {
                     let _ = self.store.reset_secondary_sync_state(now_ms);
-                    return Err(SyncError::Protocol(format!("auto-recovering: {message}")));
+                    return Err(SyncError::Protocol(format!("auto-recovering: {raw}")));
                 }
-                Err(SyncError::Protocol(format!("rollup push failed: {message}")))
+                Err(map_session_error(self.secondary_identity.as_ref(), error))
             }
         }
     }
@@ -589,35 +550,65 @@ impl SyncRuntime {
             )
             .map_err(|error| SyncError::Sqlite(error.to_string()))
     }
+
+    /// Sends the session's `DisplayNameUpdate` frame only when the known name
+    /// is not the one the primary already acknowledged — once per name
+    /// change, not once per pass like the HTTP call it replaced. The frame
+    /// carries just the name: the session's Auth frame proves the sender is
+    /// the paired device, and the primary applies the same validity rule the
+    /// signed HTTP arm enforced. Best-effort: a failed update is logged and
+    /// retried on the next pass.
+    fn send_display_name_update_once(&mut self) {
+        let Some(name) = self.secondary_display_name.clone() else { return; };
+        if self.last_display_name_sent.as_deref() == Some(name.as_str()) { return; }
+        match self.transport.ws_update_display_name(&name) {
+            Ok(()) => self.last_display_name_sent = Some(name),
+            Err(error) => eprintln!("tokenme sync: display-name update failed: {error}"),
+        }
+    }
+
+    /// Drops the resident session leg after SESSION_IDLE_CLOSE_MS without a
+    /// round-trip. The next due call rebuilds it, so a device with nothing
+    /// to exchange stops holding a primary slot.
+    fn close_idle_session(&mut self, now_ms: i64) {
+        if self.last_session_activity_ms != 0 && now_ms.saturating_sub(self.last_session_activity_ms) >= SESSION_IDLE_CLOSE_MS {
+            self.transport.ws_close();
+        }
+    }
 }
 
-fn validate_secondary_status(config: &crate::SecondarySyncConfig, status: &AuthenticatedStatus, local_has_history: bool) -> SyncResult<()> {
-    if config.data_epoch.is_some_and(|epoch| epoch != status.data_epoch) {
-        return Err(SyncError::EpochStale);
+/// The session-model replacement for the status poll's terminal verdicts: a
+/// revoked (or security-rejected, or finally rejected/expired pairing) device
+/// must self-disable and wake the embedding UI instead of retrying forever.
+fn is_cut_off_error(error: &SyncError) -> bool {
+    matches!(error, SyncError::Revoked(_) | SyncError::Security(_))
+        || matches!(error, SyncError::NotPaired(message) if message == "pairing request was rejected" || message == "pairing invite expired")
+}
+
+/// Maps a refused session call onto the same taxonomy the status poll used,
+/// so `remember_secondary_error`'s cut-off logic keeps working unchanged.
+/// The wire `Error` frame's message is the only carrier of device state on a
+/// refused call, so the mapping is keyword-based: the canonical status words
+/// (the registry's own vocabulary) map precisely, and the generic refusal —
+/// an in-session frame after the registry changed under an authenticated
+/// leg — is treated as revoked: the device lost its paired privileges and
+/// must self-disable rather than spin on a retryable error forever. The
+/// session's `DeviceState` push disambiguates paused from revoked once its
+/// recorded slot is exposed by the transport.
+fn map_session_error(identity: Option<&DeviceIdentity>, error: TransportError) -> SyncError {
+    if let TransportError::Unsupported(message) = &error { return SyncError::Unsupported(message.clone()); }
+    let message = error.to_string();
+    let lower = message.to_ascii_lowercase();
+    let device_id = identity.map(|identity| identity.device_id.clone()).unwrap_or_default();
+    if lower.contains("revoked") { return SyncError::Revoked(device_id); }
+    if lower.contains("paused") { return SyncError::Conflict("primary paused this device".into()); }
+    if lower.contains("awaiting approval") || lower.contains("pending") { return SyncError::NotPaired("pairing request is awaiting approval".into()); }
+    if lower.contains("rejected") { return SyncError::NotPaired("pairing request was rejected".into()); }
+    if lower.contains("expired") { return SyncError::NotPaired("pairing invite expired".into()); }
+    if lower.contains("not authorized") || lower.contains("not in paired state") || lower.contains("unpaired") || lower.contains("not paired") {
+        return SyncError::Revoked(device_id);
     }
-    match (config.stream_id.as_deref(), status.active_stream_id.as_deref()) {
-        (Some(local), Some(remote)) if local != remote => return Err(SyncError::ReconcileRequired),
-        (Some(_), None) => return Err(SyncError::ReconcileRequired),
-        (None, Some(_)) if local_has_history => return Err(SyncError::ReconcileRequired),
-        _ => {}
-    }
-    if let Some(last_ack_generation) = config.last_ack_generation {
-        if status.checkpoint_generation != Some(last_ack_generation)
-            || status.checkpoint_receipt_hash != config.last_ack_receipt_hash
-        {
-            return Err(SyncError::ReconcileRequired);
-        }
-        let remote_generation = status.highwater_generation.unwrap_or(0);
-        if remote_generation < last_ack_generation {
-            return Err(SyncError::ReconcileRequired);
-        }
-        if remote_generation == last_ack_generation && status.highwater_receipt_hash != config.last_ack_receipt_hash {
-            return Err(SyncError::ReconcileRequired);
-        }
-    } else if status.checkpoint_generation.is_some() || status.checkpoint_receipt_hash.is_some() {
-        return Err(SyncError::ReconcileRequired);
-    }
-    Ok(())
+    SyncError::Protocol(message)
 }
 
 fn retryable_secondary_error(error: &SyncError) -> bool {
@@ -631,7 +622,7 @@ fn retryable_secondary_error(error: &SyncError) -> bool {
     }
 }
 
-/// A primary (or secondary) on an incompatible schema version answers 426
+/// A primary (or secondary) on an incompatible schema version answers
 /// "update tokenme…" — no amount of resetting or re-snapshotting fixes that;
 /// only an upgrade does.
 fn is_version_incompatible_error(message: &str) -> bool {
@@ -654,14 +645,6 @@ fn is_unrecoverable_sync_error(message: &str) -> bool {
         || lower.contains("package marker")
         || lower.contains("read package")
         || lower.contains("unexpected end of file")
-}
-
-fn map_secondary_status_error(error: TransportError) -> SyncError {
-    match error {
-        TransportError::HttpStatus { status: 409, message } if message.contains("reconciliation is required") => SyncError::ReconcileRequired,
-        TransportError::Unsupported(message) => SyncError::Unsupported(message),
-        error => SyncError::Protocol(format!("secondary status request failed: {error}")),
-    }
 }
 
 /// Export the complete local-origin projection used by the secondary runtime.
@@ -741,12 +724,8 @@ pub(crate) fn network_row(event: UsageEvent, occurrence_id: Option<String>) -> S
     })
 }
 
-fn idle_interval(poll_interval: Duration, preparing: bool, pass_had_error: bool, consecutive_errors: u32) -> Duration {
-    let base = if preparing && !pass_had_error {
-        PREPARING_POLL.min(poll_interval)
-    } else {
-        poll_interval.saturating_mul(1_u32 << consecutive_errors.min(6))
-    };
+fn idle_interval(poll_interval: Duration, consecutive_errors: u32) -> Duration {
+    let base = poll_interval.saturating_mul(1_u32 << consecutive_errors.min(6));
     jittered(base.min(RETRY_MAX))
 }
 
@@ -800,19 +779,13 @@ mod tests {
         primary
     }
 
-    fn paired_primary(device: &DeviceIdentity) -> (SyncStore, crate::StreamOpenReceipt) {
-        let mut primary = paired_primary_without_stream(device);
-        let stream = primary.open_stream_for_registered(&device.device_id, 3).unwrap();
-        (primary, stream)
-    }
-
     fn server_config(cert_der: &[u8], key_der: &[u8], staging_dir: std::path::PathBuf) -> HttpsServerConfig {
         HttpsServerConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             certificate_der: cert_der.to_vec(), private_key_der: key_der.to_vec(),
             allow_lan: false, allowed_peer_ips: vec![], max_body_bytes: MAX_COMPRESSED_BYTES,
-            // Matches the panel's primary: the resident upload WebSocket holds
-            // one slot while the same pass's status/download calls take another.
+            // The session model needs one slot: the resident WebSocket serves
+            // the push, the fetch and the display-name frame on one leg.
             max_concurrent: 4, staging_dir, idle_timeout: Duration::from_secs(30),
             total_timeout: Duration::from_secs(600), staging_quota_bytes: 512 * 1024 * 1024,
         }
@@ -842,25 +815,20 @@ mod tests {
     }
 
     #[test]
-    fn preparing_downloads_poll_quickly_while_failures_back_off_to_the_cap() {
-        let preparing = idle_interval(Duration::from_secs(5), true, false, 0);
-        assert!(preparing >= Duration::from_millis(400) && preparing <= Duration::from_millis(600), "{preparing:?}");
-        let capped_by_user_poll = idle_interval(Duration::from_millis(200), true, false, 0);
-        assert!(capped_by_user_poll <= Duration::from_millis(240), "{capped_by_user_poll:?}");
-        // A failing primary is not a preparing primary: pass_had_error wins.
-        let failing_while_preparing = idle_interval(Duration::from_secs(5), true, true, 0);
-        assert!(failing_while_preparing >= Duration::from_secs(4), "{failing_while_preparing:?}");
-        let capped = idle_interval(Duration::from_secs(60), false, true, 10);
+    fn error_backoff_doubles_to_the_cap() {
+        let steady = idle_interval(Duration::from_secs(5), 0);
+        assert!(steady >= Duration::from_millis(4_000) && steady <= Duration::from_millis(6_000), "{steady:?}");
+        let capped = idle_interval(Duration::from_secs(60), 10);
         assert!(capped >= Duration::from_secs(240) && capped <= Duration::from_secs(360), "{capped:?}");
         // The default 5s cadence must still reach the documented 5-minute cap.
-        let default_capped = idle_interval(Duration::from_secs(5), false, true, 10);
+        let default_capped = idle_interval(Duration::from_secs(5), 10);
         assert!(default_capped >= Duration::from_secs(240) && default_capped <= Duration::from_secs(360), "{default_capped:?}");
     }
 
     #[test]
     fn secondary_runtime_syncs_primary_rollup_over_loopback_tls() {
         let device = DeviceIdentity::create("runtime-downlink", "Secondary").unwrap();
-        let (mut primary, _) = paired_primary(&device);
+        let mut primary = paired_primary_without_stream(&device);
         let now = usage_core::report::now_ms();
         primary.save_primary_config(&PrimarySyncConfig {
             auto_approve_pairing: false,
@@ -869,7 +837,7 @@ mod tests {
             share_data_with_secondaries: true,
         }, now).unwrap();
         // The primary's own rollup rows, plus a foreign-origin row that must
-        // never travel: the export serves local-origin rows only.
+        // never travel: the fetch serves local-origin rows only.
         let day = usage_core::local_day_of(now).unwrap().format("%Y-%m-%d").to_string();
         primary.index().conn().execute(
             "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter,                     in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)              VALUES(?1, '', 'codex', 'primary-session', '', '', 'tokens', 9, 0, 0, 0, 0, 0, 1, 1, ?2, ?2)",
@@ -910,8 +878,9 @@ mod tests {
         let report = runtime.run_once_with_clock(|| now + 10).unwrap();
         assert_eq!(report.uploaded, 0, "the secondary owns no local rows: the establishing push is empty");
         assert_eq!(report.acknowledged, 0, "the push's Ok is the ack; there is no separate bookkeeping");
+        assert!(report.bytes > 0, "the fetched snapshot's payload counts into the pass report");
         assert!(report.last_error.is_none());
-        assert!(runtime.primary_download_complete, "one rollup snapshot completes the downlink");
+        assert!(runtime.primary_download_complete, "one session rollup fetch completes the downlink");
         let (origin, in_tok): (String, f64) = runtime.store().index().conn().query_row(
             "SELECT origin, in_tok FROM remote_rollup", [],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
@@ -921,6 +890,7 @@ mod tests {
         assert_eq!(runtime.store().index().event_count().unwrap(), 0, "raw event rows are no longer downloaded");
         let config = runtime.store().secondary_config().unwrap().unwrap();
         assert_eq!(config.last_error, None);
+        drop(runtime);
         drain_server(addr, server_thread);
     }
 
@@ -936,6 +906,14 @@ mod tests {
         let request = PairingRequest::new(&invite, &device, "linux").unwrap();
         let state = primary_admin.receive_pairing_request(&request, 1).unwrap();
         primary_admin.approve_pairing(&state.request_id, 2).unwrap();
+        // The downlink rides the same session; without an explicit sharing
+        // answer the runtime would optimistically fetch and learn the refusal.
+        primary_admin.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, usage_core::report::now_ms()).unwrap();
 
         let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
         let (cert_der, key_der) = certificate();
@@ -981,6 +959,7 @@ mod tests {
         let report = runtime.run_once_with_clock(|| first_now).unwrap();
         assert_eq!(report.uploaded, 5, "the first pass pushes the whole local snapshot");
         assert_eq!(report.acknowledged, 0, "the push's Ok is the ack; there is no separate bookkeeping");
+        assert!(report.bytes > 0, "the pushed snapshot's payload counts into the pass report");
         assert_eq!(remote(&primary_admin), (5, 15.0), "the primary stored the snapshot under the device origin");
         assert!(runtime.last_upload_fingerprint.is_some(), "the delivered push left its fingerprint behind");
         assert_eq!(runtime.last_upload_pushed_at, Some(first_now));
@@ -1002,6 +981,79 @@ mod tests {
 
         drop(runtime);
         drain_server(addr, server_thread);
+    }
+
+    #[test]
+    fn revoked_device_is_cut_off_through_the_session_error() {
+        let device = DeviceIdentity::create("runtime-revoke", "Secondary").unwrap();
+        let mut primary = paired_primary_without_stream(&device);
+        let now = usage_core::report::now_ms();
+        primary.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, now).unwrap();
+        // The registry revocation happens before the first session attempt:
+        // the Auth handshake must refuse, and that refusal is the cut-off
+        // trigger the status poll used to be.
+        primary.revoke_device(&device.device_id, now).unwrap();
+
+        let (cert_der, key_der) = certificate();
+        let staging = tempfile::tempdir().unwrap();
+        let server = crate::HttpsSyncServer::bind(
+            server_config(&cert_der, &key_der, staging.path().join("staging")), primary,
+        ).unwrap();
+        let addr = server.local_addr().unwrap();
+        let server_thread = thread::spawn(move || server.run_connections_concurrent(6));
+
+        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
+        let identity_dir = tempfile::tempdir().unwrap();
+        secondary.save_secondary_config(&SecondarySyncConfig {
+            primary_os: None,
+            primary_id: "primary-1".into(), primary_display_name: None, device_id: device.device_id.clone(), origin: device.origin.clone(),
+            endpoint: format!("https://127.0.0.1:{}", addr.port()), server_name: "localhost".into(),
+            certificate_pin: hash_bytes(&cert_der), certificate_der: cert_der.clone(),
+            identity_path: identity_dir.path().join("secondary-identity.json"),
+            stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
+            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
+            last_ack_generation: None, last_ack_receipt_hash: None,
+        }, now).unwrap();
+        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert_der,
+        )).unwrap();
+        let mut runtime = SyncRuntime::new_secondary(
+            secondary, transport, SyncRuntimeConfig::new("secondary-revoke-test").unwrap(), device,
+        );
+        let cut_offs = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&cut_offs);
+        runtime.set_cut_off_notify(move |reason| sink.lock().unwrap().push(reason.into()));
+
+        let error = runtime.run_once_with_clock(|| now + 10).unwrap_err();
+        assert!(matches!(error, SyncError::Revoked(_)), "{error}");
+        assert_eq!(*cut_offs.lock().unwrap(), vec!["revoked".to_string()], "the embedding UI wake fired");
+        assert_eq!(runtime.store().secondary_config().unwrap().unwrap().enabled, false, "the device self-disabled");
+        drop(runtime);
+        drain_server(addr, server_thread);
+    }
+
+    #[test]
+    fn session_refusals_map_onto_the_status_taxonomy() {
+        let device = DeviceIdentity::create("runtime-mapper", "Secondary").unwrap();
+        let identity = Some(&device);
+        // The generic in-session refusal (registry changed under an
+        // authenticated leg) is the revocation sensor.
+        assert!(matches!(map_session_error(identity, TransportError::Protocol("device is not authorized to upload".into())), SyncError::Revoked(_)));
+        assert!(matches!(map_session_error(identity, TransportError::Protocol("auth failed: device status revoked by primary".into())), SyncError::Revoked(_)));
+        assert!(matches!(map_session_error(identity, TransportError::Protocol("primary paused this device".into())), SyncError::Conflict(message) if message == "primary paused this device"));
+        assert!(matches!(map_session_error(identity, TransportError::Protocol("pairing request is awaiting approval".into())), SyncError::NotPaired(message) if message == "pairing request is awaiting approval"));
+        // The canonical terminal pair must survive verbatim: the cut-off
+        // matcher compares these exact strings.
+        assert!(matches!(map_session_error(identity, TransportError::Protocol("pairing request was rejected".into())), SyncError::NotPaired(message) if message == "pairing request was rejected"));
+        assert!(matches!(map_session_error(identity, TransportError::Protocol("pairing invite expired".into())), SyncError::NotPaired(message) if message == "pairing invite expired"));
+        assert!(matches!(map_session_error(identity, TransportError::Unsupported("schema is not supported".into())), SyncError::Unsupported(_)));
+        assert!(matches!(map_session_error(identity, TransportError::Timeout), SyncError::Protocol(_)));
+        assert!(is_cut_off_error(&map_session_error(identity, TransportError::Protocol("device is not in paired state".into()))));
     }
 
     #[test]
@@ -1027,70 +1079,5 @@ mod tests {
         assert_ne!(first.owner, second.owner);
         assert!(first.owner.starts_with("secondary-"));
         assert!(second.owner.starts_with("secondary-"));
-    }
-
-    #[test]
-    fn remote_highwater_rollback_or_same_generation_hash_change_requires_reconcile() {
-        let mut config = SecondarySyncConfig {
-            primary_os: None,
-            primary_id: "primary-1".into(), primary_display_name: None, device_id: "device-1".into(), origin: "origin-1".into(),
-            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1], certificate_pin: hash_bytes(&[1]),
-            identity_path: std::path::PathBuf::from("identity.json"), stream_id: Some("stream-1".into()), data_epoch: Some(1), expected_generation: Some(3), enabled: true, capture_enabled: true,
-            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
-            last_ack_generation: Some(2), last_ack_receipt_hash: Some([7; 32]),
-        };
-        let status = |generation, receipt_hash| AuthenticatedStatus {
-            primary_id: "primary-1".into(), device_id: "device-1".into(), origin: "origin-1".into(), request_nonce: [0; 16], status: "paired".into(),
-            data_epoch: 1, active_stream_id: Some("stream-1".into()), expected_generation: Some(3), last_generation: generation,
-            highwater_generation: generation, highwater_receipt_hash: receipt_hash,
-            checkpoint_generation: Some(2), checkpoint_receipt_hash: Some([7; 32]),
-            display_name: None, primary_display_name: None, primary_data_sharing: false,
-            coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: 0,
-        };
-        assert!(matches!(validate_secondary_status(&config, &status(Some(1), Some([7; 32])), true), Err(SyncError::ReconcileRequired)));
-        assert!(matches!(validate_secondary_status(&config, &status(Some(2), Some([8; 32])), true), Err(SyncError::ReconcileRequired)));
-        assert!(validate_secondary_status(&config, &status(Some(2), Some([7; 32])), true).is_ok());
-        assert!(validate_secondary_status(&config, &status(Some(3), Some([9; 32])), true).is_ok());
-        config.stream_id = Some("other-stream".into());
-        assert!(matches!(validate_secondary_status(&config, &status(Some(2), Some([7; 32])), true), Err(SyncError::ReconcileRequired)));
-    }
-
-    #[test]
-    fn first_pairing_adopts_primary_stream_without_local_history() {
-        let config = SecondarySyncConfig {
-            primary_os: None,
-            primary_id: "primary-1".into(), primary_display_name: None, device_id: "device-1".into(), origin: "origin-1".into(),
-            endpoint: "https://localhost:1".into(), server_name: "localhost".into(), certificate_der: vec![1], certificate_pin: hash_bytes(&[1]),
-            identity_path: std::path::PathBuf::from("identity.json"), stream_id: None, data_epoch: None, expected_generation: None, enabled: true, capture_enabled: true,
-            last_error: None, last_manifest_hash: None, last_gzip_hash: None, last_connected_at_ms: None,
-            last_ack_generation: None, last_ack_receipt_hash: None,
-        };
-        let status = AuthenticatedStatus {
-            primary_id: "primary-1".into(), device_id: "device-1".into(), origin: "origin-1".into(), request_nonce: [0; 16], status: "paired".into(),
-            data_epoch: 1, active_stream_id: Some("primary-stream".into()), expected_generation: Some(1), last_generation: None,
-            highwater_generation: None, highwater_receipt_hash: None, checkpoint_generation: None, checkpoint_receipt_hash: None,
-            display_name: None, primary_display_name: None, primary_data_sharing: false,
-            coverage_lo_ms: None, coverage_hi_ms: None, observed_at_ms: 0,
-        };
-        assert!(validate_secondary_status(&config, &status, false).is_ok());
-        assert!(matches!(validate_secondary_status(&config, &status, true), Err(SyncError::ReconcileRequired)));
-    }
-
-    #[test]
-    fn secondary_status_reconciliation_response_disables_the_secondary() {
-        let error = map_secondary_status_error(TransportError::HttpStatus {
-            status: 409,
-            message: "reconciliation is required before retrying this package".into(),
-        });
-        assert!(matches!(error, SyncError::ReconcileRequired));
-    }
-
-    #[test]
-    fn unrelated_secondary_status_conflicts_remain_retryable_protocol_errors() {
-        let error = map_secondary_status_error(TransportError::HttpStatus {
-            status: 409,
-            message: "primary paused this device".into(),
-        });
-        assert!(matches!(error, SyncError::Protocol(message) if message.contains("HTTP status 409")));
     }
 }

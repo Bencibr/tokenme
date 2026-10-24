@@ -17,9 +17,11 @@ use usage_device_sync::{
     hash_bytes, ClientTransportCancellation, DeviceIdentity, DiagnosticsGrant,
     DiagnosticsMcpRequest, DiagnosticsRequestAuth, DiagnosticsService, HttpsServerConfig,
     HttpsTransportConfig, PairingInvite,
-    PairingRequest, RuntimeRunReport, SyncRuntime, SyncRuntimeConfig, SyncStore,
+    PairingRequest, SyncRuntime, SyncRuntimeConfig, SyncStore,
     Tls13HttpsTransport,
 };
+#[cfg(unix)]
+use usage_device_sync::RuntimeRunReport;
 use usage_index::{retention_cutoff, IngestReport};
 
 use crate::args::{Group, Win};
@@ -1943,6 +1945,7 @@ fn restart_delay(consecutive_failures: u32) -> Duration {
 }
 
 /// Sleeps in short slices so `sync stop` is honored during a restart backoff.
+#[cfg(any(unix, test))]
 fn sleep_until_retry(stop: &AtomicBool, delay: Duration) -> bool {
     let deadline = std::time::Instant::now() + delay;
     while !stop.load(Ordering::Acquire) {
@@ -1956,6 +1959,7 @@ fn sleep_until_retry(stop: &AtomicBool, delay: Duration) -> bool {
 /// The binding is re-read before every restart: a revoked/unpaired device
 /// disables its config, which is the terminal signal. Everything else — a
 /// transient SQLite failure, a lost lease, a panic — gets a new runtime.
+#[cfg(unix)]
 fn secondary_binding_enabled(db_path: &std::path::Path) -> bool {
     SyncStore::read_secondary_config(db_path).ok().flatten().is_some_and(|config| config.enabled)
 }

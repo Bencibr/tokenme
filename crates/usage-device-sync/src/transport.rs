@@ -1,9 +1,11 @@
 //! Bounded HTTPS over TCP/TLS 1.3 transport for the strict sync protocol.
 //!
-//! The transport is deliberately small: it implements only the two protocol
-//! endpoints needed by pairing and upload, with a bounded HTTP/1.1 envelope.
-//! It does not provide relay, NAT traversal, UDP, QUIC, SSH, or loopback-TCP
-//! IPC. The server binds only to the caller-selected socket address.
+//! The transport is deliberately small: the post-pairing protocol lives on
+//! one resident WebSocket session (rollup uplink and downlink, display-name
+//! refresh, clean-disconnect notice, pushed device state), and the plain
+//! HTTPS legs are only the pre-trust pairing one-shots and the diagnostics
+//! route. No relay, NAT traversal, UDP, QUIC, SSH, or loopback-TCP IPC. The
+//! server binds only to the caller-selected socket address.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -29,17 +31,12 @@ use crate::diagnostics::{
     DiagnosticsScope, DiagnosticsService, DIAGNOSTICS_MCP_PATH, DIAGNOSTICS_REQUEST_TIMEOUT,
     MAX_DIAGNOSTICS_BODY_BYTES, MAX_DIAGNOSTICS_RESPONSE_BYTES,
 };
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
-
 use crate::protocol::{
-    hash_bytes, verify_private_file, signature_serde, AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest,
-    AuthenticatedStatus, AuthenticatedStatusRequest, DeviceIdentity, PairingInvite, PairingRequest, PrimaryDownloadPage,
-    StreamOpenReceipt, MAX_AUTH_REQUEST_AGE_MS,
-    MAX_AUTH_REQUEST_FUTURE_SKEW_MS, MAX_COMPRESSED_BYTES, MAX_MANIFEST_BYTES, MAX_STRING_BYTES, PROTOCOL_ID,
+    hash_bytes, verify_private_file, AuthenticatedStatusRequest, PairingInvite,
+    PairingRequest,
 };
 use crate::{
-    DeviceStatus, PairingRequestState, SyncError, SyncResult, SyncStore,
-    protocol::identity_bytes,
+    PairingRequestState, SyncError, SyncResult, SyncStore,
 };
 
 const MAX_HEADER_BYTES: usize = 32 * 1024;
@@ -62,32 +59,16 @@ const MAX_TRACKED_PAIRING_IPS: usize = 1024;
 /// stale secondary fail with an actionable 426 instead of importing half a
 /// package under different semantics.
 const WIRE_VERSION_MAJOR: u16 = 2;
-const WIRE_VERSION_MINOR: u16 = 0;
+const WIRE_VERSION_MINOR: u16 = 1;
 const WIRE_VERSION_HEADER: &str = "x-tokenme-wire-version";
 const WIRE_REJECT_DRAIN_BYTES: usize = 128 * 1024;
 const BUSY_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
-const DOWNLOAD_MAGIC: &[u8; 8] = b"TMPAGE01";
-const DOWNLOAD_PAGE_VERSION: u8 = 1;
-const DOWNLOAD_FLAG_ENABLED: u8 = 1;
-const DOWNLOAD_FLAG_PREPARING: u8 = 2;
-const DOWNLOAD_FLAG_COMPLETE: u8 = 4;
-// Sized for the fastest legitimate cadence, not for a single device: a busy
-// secondary mints ~60 nonces per minute (status plus snapshot pages) inside an
-// ~11-minute retention window, so 16k entries leave room for dozens of secondaries.
-const MAX_REPLAY_ENTRIES: usize = 16_384;
-// A nonce is accepted for one endpoint once. Keep it at least as long as the
-// signed request it belongs to can still pass the freshness check.
-const REPLAY_RETENTION_MS: i64 =
-    MAX_AUTH_REQUEST_AGE_MS + MAX_AUTH_REQUEST_FUTURE_SKEW_MS + 60_000;
 const PAIRING_PATH: &str = "/v1/pairing/request";
 const PAIRING_INVITE_PATH: &str = "/v1/pairing/invite";
-const STATUS_PATH: &str = "/v1/status";
-const DOWNLOAD_PATH: &str = "/v1/download";
-const ROLLUP_PATH: &str = "/v1/rollup";
-const DISPLAY_NAME_PATH: &str = "/v1/device/display-name";
-const RECOVERY_PATH: &str = "/v1/recovery";
-const DISCONNECT_PATH: &str = "/v1/disconnect";
 pub const WS_SYNC_PATH: &str = "/v2/sync-ws";
+/// How often the server's WebSocket read loop wakes to drain the push queue
+/// and re-check the stop flag; also the upper bound on push delivery latency.
+const WS_PUSH_POLL: Duration = Duration::from_millis(250);
 const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
 // A transient accept failure (EMFILE, a peer that vanishes between SYN and
 // accept) is not a reason to stop serving. Only a listener that has failed
@@ -537,17 +518,26 @@ impl Tls13HttpsTransport {
         *lock_recover(&self.ws_session_identity) = Some((device_id.into(), origin.into()));
     }
 
-    fn try_ws_rollup_sync(&mut self, rows: &[RollupRow]) -> Result<String, TransportError> {
-        let Some((device_id, origin)) = lock_recover(&self.ws_session_identity).clone() else {
-            return Err(TransportError::Protocol("ws session identity is not set; call set_ws_session_identity before ws_rollup_sync".into()));
-        };
+    /// Opens the resident session if absent (Auth included), sends `frame`,
+    /// and reads the reply skipping heartbeat Pings/Pongs and unsolicited
+    /// `DeviceState` pushes. On any send or read failure the leg is dropped so
+    /// the next attempt meets the primary with a fresh handshake; semantic
+    /// failures (Error frames, unexpected replies) leave the drop to the
+    /// caller, which knows whether the answer was session-fatal.
+    fn ws_round_trip(
+        &mut self,
+        frame: crate::ws::WsSyncFrame,
+        device_id: &str,
+        origin: &str,
+        display_name: Option<&str>,
+    ) -> Result<crate::ws::WsSyncFrame, TransportError> {
         let mut ws_guard = lock_recover(&self.ws_client);
         if ws_guard.is_none() {
             let (mut ws, socket) = self.connect_ws()?;
             let auth = crate::ws::WsSyncFrame::Auth {
-                device_id,
-                origin: origin.clone(),
-                display_name: origin.clone(),
+                device_id: device_id.to_string(),
+                origin: origin.to_string(),
+                display_name: display_name.unwrap_or(origin).to_string(),
                 version: crate::ws::WS_PROTOCOL_VERSION.to_string(),
             };
             let auth_msg = serde_json::to_string(&auth).map_err(|e| TransportError::Protocol(e.to_string()))?;
@@ -572,10 +562,7 @@ impl Tls13HttpsTransport {
             return Err(TransportError::Protocol("ws unavailable".into()));
         };
 
-        let push_frame = crate::ws::WsSyncFrame::RollupSync {
-            snapshot: RollupSnapshot { origin: origin.clone(), rows: rows.to_vec() },
-        };
-        let push_msg = serde_json::to_string(&push_frame).map_err(|e| TransportError::Protocol(e.to_string()))?;
+        let push_msg = serde_json::to_string(&frame).map_err(|e| TransportError::Protocol(e.to_string()))?;
         if let Err(e) = ws.send(tungstenite::Message::Text(push_msg)) {
             *ws_guard = None;
             self.ws_link_live(false);
@@ -583,17 +570,18 @@ impl Tls13HttpsTransport {
         }
 
         // The heartbeat interleaves Ping/Pong frames with pushes; a Pong that
-        // lands between our push and its ack must not kill the leg.
-        let reply = loop {
+        // lands between our request and its reply must not kill the leg, and
+        // a server-initiated `DeviceState` push is an advisory to skip, not
+        // the answer.
+        loop {
             match ws.read() {
                 Ok(tungstenite::Message::Text(t)) => match serde_json::from_str::<crate::ws::WsSyncFrame>(&t) {
-                    Ok(frame @ crate::ws::WsSyncFrame::RollupAck { .. }) => break frame,
-                    Ok(crate::ws::WsSyncFrame::Pong { .. }) | Ok(crate::ws::WsSyncFrame::Ping { .. }) => continue,
-                    Ok(other) => break other,
+                    Ok(crate::ws::WsSyncFrame::Pong { .. }) | Ok(crate::ws::WsSyncFrame::Ping { .. }) | Ok(crate::ws::WsSyncFrame::DeviceState { .. }) => continue,
+                    Ok(other) => break Ok(other),
                     Err(e) => {
                         *ws_guard = None;
                         self.ws_link_live(false);
-                        return Err(TransportError::Protocol(format!("invalid rollup ack frame: {e}")));
+                        return Err(TransportError::Protocol(format!("invalid reply frame: {e}")));
                     }
                 },
                 Err(e) => {
@@ -604,32 +592,20 @@ impl Tls13HttpsTransport {
                 _ => {
                     *ws_guard = None;
                     self.ws_link_live(false);
-                    return Err(TransportError::Protocol("unexpected non-text frame for rollup ack".into()));
+                    return Err(TransportError::Protocol("unexpected non-text frame for reply".into()));
                 }
             }
-        };
-
-        match reply {
-            crate::ws::WsSyncFrame::RollupAck { origin, accepted: true, .. } => Ok(origin),
-            crate::ws::WsSyncFrame::RollupAck { accepted: false, .. } => {
-                // A rejection is a protocol-level answer, not a broken socket —
-                // but the next attempt should meet the primary with a fresh
-                // handshake anyway, and on a one-slot server the open leg IS
-                // the blocker (new connections are shut down while slots are
-                // held). Drop it so the retry cannot starve behind the leg
-                // that just failed.
-                *ws_guard = None;
-                Err(TransportError::Protocol("rollup snapshot was rejected by the primary".into()))
-            }
-            crate::ws::WsSyncFrame::Error { message } => {
-                *ws_guard = None;
-                Err(TransportError::Protocol(message))
-            }
-            _ => {
-                *ws_guard = None;
-                Err(TransportError::Protocol("expected rollup ack frame".into()))
-            }
         }
+    }
+
+    /// Drops the cached WebSocket after a semantic (non-transport) failure.
+    /// A rejection is a protocol-level answer, not a broken socket — but the
+    /// next attempt should meet the primary with a fresh handshake anyway,
+    /// and on a one-slot server the open leg IS the blocker (new connections
+    /// are shut down while slots are held), so the retry cannot starve behind
+    /// the leg that just failed.
+    fn ws_drop_leg(&mut self) {
+        *lock_recover(&self.ws_client) = None;
     }
 
     /// Pushes the secondary's full rollup snapshot to the primary over the
@@ -641,17 +617,116 @@ impl Tls13HttpsTransport {
     /// the resident socket across calls and rebuilds it (Auth included) when
     /// a send or read ever fails.
     pub fn ws_rollup_sync(&mut self, rows: &[RollupRow]) -> Result<String, TransportError> {
+        let Some((device_id, origin)) = lock_recover(&self.ws_session_identity).clone() else {
+            return Err(TransportError::Protocol("ws session identity is not set; call set_ws_session_identity before ws_rollup_sync".into()));
+        };
         // A cancelled transport must surface as `Cancelled` exactly like the
         // other legs, even when the interrupt lands in the middle of a frame
         // read instead of before a syscall.
-        self.try_ws_rollup_sync(rows).map_err(|error| self.map_cancelled(error))
+        let reply = self.ws_round_trip(
+            crate::ws::WsSyncFrame::RollupSync { snapshot: RollupSnapshot { origin: origin.clone(), rows: rows.to_vec() } },
+            &device_id, &origin, Some(&origin),
+        ).map_err(|error| self.map_cancelled(error))?;
+        match reply {
+            crate::ws::WsSyncFrame::RollupAck { origin, accepted: true, .. } => Ok(origin),
+            crate::ws::WsSyncFrame::RollupAck { accepted: false, .. } => {
+                self.ws_drop_leg();
+                Err(TransportError::Protocol("rollup snapshot was rejected by the primary".into()))
+            }
+            crate::ws::WsSyncFrame::Error { message } => {
+                self.ws_drop_leg();
+                Err(TransportError::Protocol(message))
+            }
+            _ => {
+                self.ws_drop_leg();
+                Err(TransportError::Protocol("expected rollup ack frame".into()))
+            }
+        }
     }
 
-    /// Drops the cached WebSocket, if any. The upload leg holds the socket only
-    /// for the outbox drain it serves: a primary admitting one connection at a
-    /// time (`max_concurrent: 1`) rejects every later HTTP request while a
-    /// socket sits open, so the runtime closes the leg between passes and the
-    /// next pass's status/download calls always find a free slot.
+    /// Fetches the primary's own local-origin rollup rows over the resident
+    /// WebSocket session — the session leg of what POST /v1/rollup served.
+    /// The answer's `origin` is the label the secondary groups the rows under
+    /// (the primary's hostname, the same label its merged rows have always
+    /// carried); each row's own `origin` field is empty by construction. The
+    /// session's Auth frame authenticates the fetch; the primary serves only
+    /// a still-paired device.
+    pub fn ws_rollup_fetch(&mut self) -> Result<RollupSnapshot, TransportError> {
+        let Some((device_id, origin)) = lock_recover(&self.ws_session_identity).clone() else {
+            return Err(TransportError::Protocol("ws session identity is not set; call set_ws_session_identity before ws_rollup_fetch".into()));
+        };
+        let reply = self.ws_round_trip(crate::ws::WsSyncFrame::RollupFetch {}, &device_id, &origin, None)
+            .map_err(|error| self.map_cancelled(error))?;
+        match reply {
+            crate::ws::WsSyncFrame::RollupSnapshot { snapshot } => {
+                if snapshot.origin.is_empty() {
+                    return Err(TransportError::Protocol("rollup snapshot does not declare an origin".into()));
+                }
+                Ok(snapshot)
+            }
+            crate::ws::WsSyncFrame::Error { message } => {
+                self.ws_drop_leg();
+                Err(TransportError::Protocol(message))
+            }
+            _ => {
+                self.ws_drop_leg();
+                Err(TransportError::Protocol("expected rollup snapshot frame".into()))
+            }
+        }
+    }
+
+    /// Refreshes this device's display name on the primary over the resident
+    /// WebSocket session. The session's Auth frame proves the sender is the
+    /// paired device, so the frame carries just the name. An ack is
+    /// `{"type":"display_name_ack"}`; a rejection comes back as the standard
+    /// wire-error frame.
+    pub fn ws_update_display_name(&mut self, name: &str) -> Result<(), TransportError> {
+        let Some((device_id, origin)) = lock_recover(&self.ws_session_identity).clone() else {
+            return Err(TransportError::Protocol("ws session identity is not set; call set_ws_session_identity before ws_update_display_name".into()));
+        };
+        let reply = self.ws_round_trip(
+            crate::ws::WsSyncFrame::DisplayNameUpdate { name: name.to_string() },
+            &device_id, &origin, None,
+        ).map_err(|error| self.map_cancelled(error))?;
+        match reply {
+            crate::ws::WsSyncFrame::DisplayNameAck {} => Ok(()),
+            crate::ws::WsSyncFrame::Error { message } => {
+                self.ws_drop_leg();
+                Err(TransportError::Protocol(message))
+            }
+            _ => {
+                self.ws_drop_leg();
+                Err(TransportError::Protocol("expected display-name ack frame".into()))
+            }
+        }
+    }
+
+    /// Delivers the clean-disconnect notice over the resident WebSocket
+    /// session — "I am leaving cleanly", the session leg of what POST
+    /// /v1/disconnect served. The session's Auth frame proves the sender owns
+    /// the pairing, so the frame carries nothing. The primary learns
+    /// instantly and marks the intended leave; no notice queue is needed for
+    /// the clean case. The ack ends the session by definition — the leg is
+    /// dropped either way, so a later notice always meets the primary with a
+    /// fresh handshake (a revoked device is refused there, which is how
+    /// "already disconnected" is told from a retryable failure).
+    pub fn ws_disconnect_notify(&mut self) -> Result<(), TransportError> {
+        let Some((device_id, origin)) = lock_recover(&self.ws_session_identity).clone() else {
+            return Err(TransportError::Protocol("ws session identity is not set; call set_ws_session_identity before ws_disconnect_notify".into()));
+        };
+        let reply = self.ws_round_trip(crate::ws::WsSyncFrame::DisconnectNotify {}, &device_id, &origin, None)
+            .map_err(|error| self.map_cancelled(error));
+        self.ws_drop_leg();
+        match reply? {
+            crate::ws::WsSyncFrame::DisconnectAck {} => Ok(()),
+            crate::ws::WsSyncFrame::Error { message } => Err(TransportError::Protocol(message)),
+            _ => Err(TransportError::Protocol("expected disconnect ack frame".into())),
+        }
+    }
+
+    /// Drops the cached WebSocket, if any. A caller that wants a guaranteed
+    /// fresh session (for example before verifying a rebuilt link) closes the
+    /// leg; the next session-carrying call reconnects and re-authenticates.
     pub fn ws_close(&mut self) {
         *lock_recover(&self.ws_client) = None;
     }
@@ -732,76 +807,28 @@ impl Tls13HttpsTransport {
         response.json::<WirePairingInvite>()?.into_invite()
     }
 
-    pub fn status(&mut self, request: &AuthenticatedStatusRequest) -> Result<AuthenticatedStatus, TransportError> {
-        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode status request: {e}")))?;
-        let response = self.request(STATUS_PATH, body)?;
-        let status: AuthenticatedStatus = response.json()?;
-        if status.request_nonce != request.nonce || status.device_id != request.device_id || status.primary_id != request.primary_id {
-            return Err(TransportError::Protocol("authenticated status response does not match request nonce or identity".into()));
-        }
-        Ok(status)
-    }
-
-    pub fn download_primary_page(&mut self, request: &AuthenticatedDownloadRequest) -> Result<PrimaryDownloadPage, TransportError> {
-        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode download request: {e}")))?;
-        let response = self.request(DOWNLOAD_PATH, body)?;
-        if response.status != 200 {
-            response.json::<serde_json::Value>()?;
-            return Err(TransportError::Protocol("primary download was accepted without a page body".into()));
-        }
-        decode_primary_download_page(&response.body, request)
-    }
-
-    /// Fetches the primary's own local-origin rollup rows as one snapshot.
-    /// The answer's `origin` is the label the secondary groups the rows under
-    /// (the primary's hostname, the same label its merged rows have always
-    /// carried); each row's own `origin` field is empty by construction.
-    pub fn rollup_snapshot(&mut self, request: &AuthenticatedRollupRequest) -> Result<RollupSnapshot, TransportError> {
-        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode rollup request: {e}")))?;
-        let response = self.request(ROLLUP_PATH, body)?;
-        if response.status != 200 {
-            let message = serde_json::from_slice::<WireError>(&response.body)
-                .ok()
-                .map(|error| error.message)
-                .unwrap_or_else(|| "rollup request rejected".into());
-            return Err(TransportError::HttpStatus { status: response.status, message });
-        }
-        let snapshot: RollupSnapshot = response.json()?;
-        if snapshot.origin.is_empty() {
-            return Err(TransportError::Protocol("rollup snapshot does not declare an origin".into()));
-        }
-        Ok(snapshot)
-    }
-
-    pub fn update_display_name(&mut self, request: &AuthenticatedDisplayNameRequest) -> Result<(), TransportError> {
-        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode display-name update: {e}")))?;
-        let response = self.request(DISPLAY_NAME_PATH, body)?;
-        response.json::<serde_json::Value>()?;
-        Ok(())
-    }
-
-    pub fn recover(&mut self, request: &AuthenticatedStatusRequest) -> Result<StreamOpenReceipt, TransportError> {
-        if !request.want_recovery { return Err(TransportError::Protocol("recovery request must set want_recovery".into())); }
-        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode recovery request: {e}")))?;
-        let response = self.request(RECOVERY_PATH, body)?;
-        let receipt: StreamOpenReceipt = response.json()?;
-        if receipt.primary_id != request.primary_id || receipt.device_id != request.device_id || receipt.data_epoch == 0 || receipt.expected_generation == 0 {
-            return Err(TransportError::Protocol("recovery response does not match request identity".into()));
-        }
-        Ok(receipt)
-    }
-
+    /// Delivers the clean-disconnect notice. Formerly the POST /v1/disconnect
+    /// leg; the notice rides the resident WebSocket session now via
+    /// [`Self::ws_disconnect_notify`]. The request argument pins the session
+    /// identity for callers that built a fresh transport (the notice path
+    /// loads the retired binding's identity) — the session's Auth frame
+    /// replaces the signed request as the wire-level proof. A primary that
+    /// no longer knows the device refuses the session handshake — surfaced as
+    /// the same HTTP 401 the retired endpoint produced, so "already
+    /// disconnected" stays distinguishable from a retryable failure.
     pub fn disconnect(&mut self, request: &AuthenticatedStatusRequest) -> Result<(), TransportError> {
-        let body = serde_json::to_vec(request).map_err(|e| TransportError::Protocol(format!("encode disconnect request: {e}")))?;
-        let response = self.request(DISCONNECT_PATH, body)?;
-        if response.status != 200 {
-            let message = serde_json::from_slice::<WireError>(&response.body)
-                .ok()
-                .map(|error| error.message)
-                .unwrap_or_else(|| "disconnect request rejected".into());
-            return Err(TransportError::HttpStatus { status: response.status, message });
+        if lock_recover(&self.ws_session_identity).is_none() {
+            self.set_ws_session_identity(request.device_id.clone(), request.origin.clone());
         }
-        Ok(())
+        match self.ws_disconnect_notify() {
+            // The refusal text carries the registry status word (the
+            // contract the refused-session mapping on the runtime side codes
+            // against), so the retired-binding detection matches the prefix.
+            Err(TransportError::Protocol(message)) if message.contains("device is not in paired state") => {
+                Err(TransportError::HttpStatus { status: 401, message: "device is not authorized".into() })
+            }
+            other => other,
+        }
     }
 
     /// Sends one authenticated MCP JSON-RPC request over the same TLS 1.3 and
@@ -938,6 +965,19 @@ impl HttpsSyncServerHandle {
     pub fn diagnostics_host(&self) -> DiagnosticsHost {
         self.context.diagnostics.host()
     }
+
+    /// Best-effort server push: tells a live authenticated device its
+    /// registry state moved out-of-band (revoke, pause, resume) or the
+    /// primary's data-sharing flag flipped, by enqueueing a `DeviceState`
+    /// frame on its socket. No live socket, no delivery — the device's next
+    /// session re-syncs regardless. Runs on the caller's thread and never
+    /// blocks on the socket.
+    pub fn push_device_state(&self, device_id: &str, status: &str, data_sharing: bool) {
+        self.context.notify_device(device_id, &crate::ws::WsSyncFrame::DeviceState {
+            status: status.to_string(),
+            data_sharing,
+        });
+    }
 }
 
 struct ServerContext {
@@ -965,7 +1005,14 @@ struct ServerContext {
     /// inferring it from poll timestamps.
     ws_live: Mutex<BTreeMap<String, i64>>,
     ws_event_sink: Mutex<Option<Arc<dyn Fn(&str, bool) + Send + Sync>>>,
-    replay: Mutex<NonceReplayCache>,
+    /// Server push queues by device id: the sender half of one channel per
+    /// live authenticated socket. `notify_device` enqueues, the connection
+    /// loop drains — a push reaches the wire within one poll slice, and a
+    /// socket that died but whose handler has not returned yet simply fills a
+    /// channel nobody reads. The token makes a late re-auth on a dying socket
+    /// unable to unregister its successor's entry.
+    ws_push: Mutex<BTreeMap<String, (u64, mpsc::Sender<crate::ws::WsSyncFrame>)>>,
+    next_push_token: AtomicU64,
 }
 
 struct ActiveSocketGuard<'a> {
@@ -1005,85 +1052,6 @@ impl PairingRateLimiter {
         }
         bucket.push(now);
         true
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NonceClaim {
-    Fresh,
-    Replay,
-    Full,
-}
-
-/// One signed request may be answered once. Requests are scoped by endpoint
-/// because the status/recovery handshake deliberately reuses one nonce across
-/// two paths; recovery keeps its own durable replay record in the store.
-#[derive(Default)]
-struct NonceReplayCache {
-    claims: BTreeMap<([u8; 16], &'static str), i64>,
-}
-
-impl NonceReplayCache {
-    fn claim(&mut self, scope: &'static str, nonce: [u8; 16], now_ms: i64) -> NonceClaim {
-        let cutoff = now_ms.saturating_sub(REPLAY_RETENTION_MS);
-        self.claims.retain(|_, claimed_at| *claimed_at > cutoff);
-        let key = (nonce, scope);
-        if self.claims.contains_key(&key) {
-            return NonceClaim::Replay;
-        }
-        if self.claims.len() >= MAX_REPLAY_ENTRIES {
-            return NonceClaim::Full;
-        }
-        self.claims.insert(key, now_ms);
-        NonceClaim::Fresh
-    }
-
-    fn release(&mut self, scope: &'static str, nonce: [u8; 16]) {
-        self.claims.remove(&(nonce, scope));
-    }
-}
-
-const NONCE_SCOPE_STATUS: &str = "status";
-const NONCE_SCOPE_DOWNLOAD: &str = "download";
-const NONCE_SCOPE_ROLLUP: &str = "rollup";
-const NONCE_SCOPE_DISPLAY_NAME: &str = "display-name";
-const NONCE_SCOPE_DISCONNECT: &str = "disconnect";
-
-fn claim_request_nonce(
-    replay: &Mutex<NonceReplayCache>,
-    scope: &'static str,
-    nonce: [u8; 16],
-    now_ms: i64,
-) -> Result<(), SyncError> {
-    let mut cache = lock_recover(replay);
-    match cache.claim(scope, nonce, now_ms) {
-        NonceClaim::Fresh => Ok(()),
-        NonceClaim::Replay => Err(SyncError::Auth("signed request was already answered".into())),
-        NonceClaim::Full => Err(SyncError::Limit("sync request replay cache is full".into())),
-    }
-}
-
-fn release_request_nonce(replay: &Mutex<NonceReplayCache>, scope: &'static str, nonce: [u8; 16]) {
-    lock_recover(replay).release(scope, nonce);
-}
-
-/// Claims the nonce before the side effect and releases it only when the
-/// action failed; a rejected or unauthenticated request cannot exhaust the
-/// cache, while a retry after a transient failure stays possible.
-fn with_claimed_nonce<T>(
-    replay: &Mutex<NonceReplayCache>,
-    scope: &'static str,
-    nonce: [u8; 16],
-    now_ms: i64,
-    action: impl FnOnce() -> Result<T, SyncError>,
-) -> Result<T, SyncError> {
-    claim_request_nonce(replay, scope, nonce, now_ms)?;
-    match action() {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            release_request_nonce(replay, scope, nonce);
-            Err(error)
-        }
     }
 }
 
@@ -1211,7 +1179,8 @@ impl HttpsSyncServer {
             disconnect_sink: Mutex::new(None),
             ws_live: Mutex::new(BTreeMap::new()),
             ws_event_sink: Mutex::new(None),
-            replay: Mutex::new(NonceReplayCache::default()),
+            ws_push: Mutex::new(BTreeMap::new()),
+            next_push_token: AtomicU64::new(1),
         };
         Ok(Self { listener, context: Arc::new(context) })
     }
@@ -1246,6 +1215,12 @@ impl HttpsSyncServer {
     /// The devices with a live authenticated upload socket right now.
     pub fn ws_live_devices(&self) -> Vec<String> {
         lock_recover(&self.context.ws_live).keys().cloned().collect()
+    }
+
+    /// Best-effort server push of a device's registry state change onto its
+    /// live authenticated WebSocket; see [`HttpsSyncServerHandle::push_device_state`].
+    pub fn push_device_state(&self, device_id: &str, status: &str, data_sharing: bool) {
+        self.diagnostics_handle().push_device_state(device_id, status, data_sharing)
     }
 
     /// Registers the embedding UI's wake for pairing requests that persist
@@ -1492,8 +1467,27 @@ impl ServerContext {
         }
     }
 
-    fn ws_live_devices(&self) -> Vec<String> {
-        lock_recover(&self.ws_live).keys().cloned().collect()
+    /// Registers this connection as the push target for an authenticated
+    /// device. A re-auth replaces the entry; a dying socket's late
+    /// unregister removes only its own token's entry.
+    fn ws_register_push(&self, token: u64, device_id: &str, sender: mpsc::Sender<crate::ws::WsSyncFrame>) {
+        lock_recover(&self.ws_push).insert(device_id.to_string(), (token, sender));
+    }
+
+    fn ws_unregister_push(&self, token: u64, device_id: &str) {
+        let mut push = lock_recover(&self.ws_push);
+        if push.get(device_id).is_some_and(|(registered, _)| *registered == token) {
+            push.remove(device_id);
+        }
+    }
+
+    /// Best-effort server push to a device's live authenticated socket: no
+    /// live socket, no delivery — the device's next session re-syncs.
+    fn notify_device(&self, device_id: &str, frame: &crate::ws::WsSyncFrame) {
+        let sender = lock_recover(&self.ws_push).get(device_id).map(|(_, tx)| tx.clone());
+        if let Some(tx) = sender {
+            let _ = tx.send(frame.clone());
+        }
     }
 
     fn health(&self) -> &'static str {
@@ -1553,13 +1547,26 @@ impl ServerContext {
         let mut tls = StreamOwned::new(connection, stream);
         let head = read_request_head(&mut tls, self.config.max_body_bytes, deadline, &self.cancel)?;
         if head.is_websocket {
+            // The session loop drains the push queue between reads; a short
+            // read timeout keeps server-initiated frames — and the stop flag —
+            // responsive instead of parking on the idle timeout.
+            let _ = tls.get_mut().set_read_timeout(Some(WS_PUSH_POLL));
             let prefixed = PrefixedStream { prefix: std::io::Cursor::new(head.raw_header), inner: tls };
             let ws = tungstenite::accept(prefixed).map_err(|e| TransportError::Protocol(format!("ws accept: {e}")))?;
             self.log_event(false, "sync: action=ws_connect outcome=ok");
             let store = Arc::clone(&self.store);
-            let on_live = |device: &str| self.ws_mark_live(device, now_ms());
-            let on_dead = |device: &str| self.ws_mark_dead(device);
-            crate::ws::handle_server_websocket(ws, store, now_ms, &self.cancel, &on_live, &on_dead).map_err(TransportError::State)?;
+            let (push_tx, push_rx) = mpsc::channel::<crate::ws::WsSyncFrame>();
+            let push_token = self.next_push_token.fetch_add(1, AtomicOrdering::AcqRel);
+            let on_live = |device: &str| {
+                self.ws_register_push(push_token, device, push_tx.clone());
+                self.ws_mark_live(device, now_ms());
+            };
+            let on_dead = |device: &str| {
+                self.ws_unregister_push(push_token, device);
+                self.ws_mark_dead(device);
+            };
+            let on_disconnect = |device: &str| self.notify_disconnect(device);
+            crate::ws::handle_server_websocket(ws, store, now_ms, &self.cancel, &on_live, &on_dead, &on_disconnect, &push_rx).map_err(TransportError::State)?;
             return Ok(());
         }
         if head.known_path.is_some() && head.wire_version.is_none_or(|(major, _)| major != WIRE_VERSION_MAJOR) {
@@ -1598,7 +1605,7 @@ impl ServerContext {
             let body = read_body(&mut tls, head.content_length, deadline, &self.cancel)?;
             let request = HttpRequest { path: head.path.clone(), content_type: head.content_type, body };
             let mut store = lock_recover(&self.store);
-            let dispatched = dispatch_request(&mut store, &request, &self.replay, self);
+            let dispatched = dispatch_request(&mut store, &request);
             drop(store);
             // A pairing request that persisted here (fresh pending row, or the
             // auto-approve that landed on it) is invisible to the panel until
@@ -1614,8 +1621,7 @@ impl ServerContext {
             }
             dispatched
         };
-        let content_type = if status == 200 && head.path == DOWNLOAD_PATH { "application/octet-stream" } else { "application/json" };
-        write_response(&mut tls, status, content_type, &response, self.config.max_body_bytes)?;
+        write_response(&mut tls, status, "application/json", &response, self.config.max_body_bytes)?;
         tls.conn.send_close_notify();
         let _ = tls.flush();
         let _ = tls.get_mut().shutdown(Shutdown::Both);
@@ -1666,171 +1672,6 @@ struct HttpRequest {
     path: String,
     content_type: String,
     body: Vec<u8>,
-}
-
-/// Binary downlink framing. The page carries a complete immutable package, so
-/// base64-in-JSON would inflate every page by a third before decompression and
-/// blur the difference between the control answer and the payload. Fields are
-/// length-prefixed with an explicit absent marker; the decoder rejects any
-/// trailing byte so a framing change cannot be silently truncated.
-fn encode_primary_download_page(page: PrimaryDownloadPage) -> Result<Vec<u8>, SyncError> {
-    if page.preparing && page.complete {
-        return Err(SyncError::Protocol("primary download page cannot be both preparing and complete".into()));
-    }
-    let package = match (page.enabled, page.package.as_ref()) {
-        (true, Some(package)) => Some(package),
-        (false, None) => None,
-        _ => return Err(SyncError::Protocol("primary download page sharing state is inconsistent".into())),
-    };
-    let mut body = Vec::with_capacity(96 + package.map_or(0, |package| package.manifest_bytes.len() + package.gzip_bytes.len()));
-    body.extend_from_slice(DOWNLOAD_MAGIC);
-    body.push(DOWNLOAD_PAGE_VERSION);
-    let flags = (if page.enabled { DOWNLOAD_FLAG_ENABLED } else { 0 })
-        | (if page.preparing { DOWNLOAD_FLAG_PREPARING } else { 0 })
-        | (if page.complete { DOWNLOAD_FLAG_COMPLETE } else { 0 });
-    body.push(flags);
-    body.extend_from_slice(&page.request_nonce);
-    body.extend_from_slice(&page.next_dirty_revision.to_be_bytes());
-    body.extend_from_slice(&package.map_or([0u8; 32], |package| hash_bytes(&package.gzip_bytes)));
-    match page.next_identity.as_deref() {
-        Some(identity) => {
-            if identity.is_empty() || identity.len() > MAX_STRING_BYTES {
-                return Err(SyncError::Protocol("primary download identity cursor is invalid".into()));
-            }
-            let len = u32::try_from(identity.len()).map_err(|_| SyncError::Limit("download identity is too large".into()))?;
-            body.extend_from_slice(&len.to_be_bytes());
-            body.extend_from_slice(identity.as_bytes());
-        }
-        None => body.extend_from_slice(&u32::MAX.to_be_bytes()),
-    }
-    match package {
-        Some(package) => {
-            let manifest_len = u32::try_from(package.manifest_bytes.len())
-                .map_err(|_| SyncError::Limit("download manifest is too large".into()))?;
-            body.extend_from_slice(&manifest_len.to_be_bytes());
-            body.extend_from_slice(&package.manifest_bytes);
-            body.extend_from_slice(&(package.gzip_bytes.len() as u64).to_be_bytes());
-            body.extend_from_slice(&package.gzip_bytes);
-        }
-        None => {
-            body.extend_from_slice(&u32::MAX.to_be_bytes());
-            body.extend_from_slice(&u64::MAX.to_be_bytes());
-        }
-    }
-    Ok(body)
-}
-
-fn decode_primary_download_page(body: &[u8], request: &AuthenticatedDownloadRequest) -> Result<PrimaryDownloadPage, TransportError> {
-    let mut offset = 0usize;
-    let mut take = |len: usize| -> Result<&[u8], TransportError> {
-        let end = offset.checked_add(len).ok_or(TransportError::Limit)?;
-        let slice = body.get(offset..end).ok_or_else(|| TransportError::Protocol("primary download page is truncated".into()))?;
-        offset = end;
-        Ok(slice)
-    };
-    if take(8)? != DOWNLOAD_MAGIC {
-        return Err(TransportError::Protocol("primary download page has an unknown magic".into()));
-    }
-    let version = take(1)?[0];
-    if version != DOWNLOAD_PAGE_VERSION {
-        return Err(TransportError::Unsupported(format!(
-            "peer sent download page version {version}; this build requires {DOWNLOAD_PAGE_VERSION} — update TokenMe on the other machine"
-        )));
-    }
-    let flags = take(1)?[0];
-    if flags & !(DOWNLOAD_FLAG_ENABLED | DOWNLOAD_FLAG_PREPARING | DOWNLOAD_FLAG_COMPLETE) != 0 {
-        return Err(TransportError::Protocol("primary download page has unknown flags".into()));
-    }
-    let enabled = flags & DOWNLOAD_FLAG_ENABLED != 0;
-    let preparing = flags & DOWNLOAD_FLAG_PREPARING != 0;
-    let complete = flags & DOWNLOAD_FLAG_COMPLETE != 0;
-    let request_nonce: [u8; 16] = take(16)?.try_into().map_err(|_| TransportError::Protocol("primary download nonce is invalid".into()))?;
-    if request_nonce != request.nonce {
-        return Err(TransportError::Protocol("primary download response does not match request nonce".into()));
-    }
-    let next_dirty_revision = u64::from_be_bytes(take(8)?.try_into().map_err(|_| TransportError::Protocol("primary download cursor is invalid".into()))?);
-    if next_dirty_revision > i64::MAX as u64 {
-        return Err(TransportError::Protocol("primary download cursor is too large".into()));
-    }
-    let gzip_sha256: [u8; 32] = take(32)?.try_into().map_err(|_| TransportError::Protocol("primary download package hash is invalid".into()))?;
-    let identity_len = u32::from_be_bytes(take(4)?.try_into().map_err(|_| TransportError::Protocol("primary download identity length is invalid".into()))?);
-    let next_identity = if identity_len == u32::MAX {
-        None
-    } else {
-        let len = usize::try_from(identity_len).map_err(|_| TransportError::Limit)?;
-        if len > MAX_STRING_BYTES { return Err(TransportError::Limit); }
-        let identity = std::str::from_utf8(take(len)?).map_err(|_| TransportError::Protocol("primary download identity is not UTF-8".into()))?;
-        crate::protocol::valid_text("download identity cursor", identity, false)
-            .map_err(|error| TransportError::Protocol(error.to_string()))?;
-        Some(identity.to_string())
-    };
-    let manifest_len = u32::from_be_bytes(take(4)?.try_into().map_err(|_| TransportError::Protocol("primary download manifest length is invalid".into()))?);
-    let manifest_bytes = if manifest_len == u32::MAX {
-        None
-    } else {
-        let len = usize::try_from(manifest_len).map_err(|_| TransportError::Limit)?;
-        if len == 0 || len > MAX_MANIFEST_BYTES { return Err(TransportError::Limit); }
-        Some(take(len)?.to_vec())
-    };
-    let gzip_len = u64::from_be_bytes(take(8)?.try_into().map_err(|_| TransportError::Protocol("primary download package length is invalid".into()))?);
-    let gzip_bytes = if gzip_len == u64::MAX {
-        None
-    } else {
-        let len = usize::try_from(gzip_len).map_err(|_| TransportError::Limit)?;
-        if len > MAX_COMPRESSED_BYTES { return Err(TransportError::Limit); }
-        Some(take(len)?.to_vec())
-    };
-    if offset != body.len() {
-        return Err(TransportError::Protocol("primary download page has trailing bytes".into()));
-    }
-    let identity_regressed = match (&request.after_identity, &next_identity) {
-        (Some(_), None) => true,
-        (Some(old), Some(new)) => new < old,
-        _ => false,
-    };
-    if identity_regressed || next_dirty_revision < request.after_dirty_revision {
-        return Err(TransportError::Protocol("primary download cursor moved backwards".into()));
-    }
-    let package = match (enabled, manifest_bytes, gzip_bytes) {
-        (true, Some(manifest_bytes), Some(gzip_bytes)) => {
-            if hash_bytes(&gzip_bytes) != gzip_sha256 {
-                return Err(TransportError::Protocol("primary download package hash mismatch".into()));
-            }
-            let package = crate::NetworkPackage { manifest_bytes, gzip_bytes };
-            let (manifest, _) = package.validate().map_err(|error| TransportError::Protocol(error.to_string()))?;
-            if manifest.origin.is_empty() || !usage_core::origin_ok(&manifest.origin) || manifest.schema_version != usage_index::INDEX_SCHEMA_VERSION
-                || manifest.snapshot_complete != complete
-            {
-                return Err(TransportError::Protocol("primary download package identity or completion marker is invalid".into()));
-            }
-            Some(package)
-        }
-        (false, None, None) => {
-            if gzip_sha256 != [0u8; 32] || next_identity != request.after_identity || next_dirty_revision != request.after_dirty_revision {
-                return Err(TransportError::Protocol("disabled primary download response contains data or changes its cursor".into()));
-            }
-            if !complete { return Err(TransportError::Protocol("disabled primary download response is incomplete".into())); }
-            if preparing { return Err(TransportError::Protocol("disabled primary download response is still preparing".into())); }
-            None
-        }
-        _ => return Err(TransportError::Protocol("primary download page mixes package and cursor state".into())),
-    };
-    if preparing && complete {
-        return Err(TransportError::Protocol("primary download response cannot be both preparing and complete".into()));
-    }
-    let progressed = next_identity != request.after_identity || next_dirty_revision > request.after_dirty_revision;
-    if enabled && !progressed && !complete && !preparing {
-        return Err(TransportError::Protocol("primary download page did not advance its cursor".into()));
-    }
-    Ok(PrimaryDownloadPage {
-        request_nonce,
-        enabled,
-        preparing,
-        package,
-        next_identity,
-        next_dirty_revision,
-        complete,
-    })
 }
 
 #[derive(Debug)]
@@ -2035,75 +1876,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// The rollup endpoint signs under its own domain so a captured download or
-/// status request cannot be replayed against it (and the other way around).
-const ROLLUP_DOMAIN: &[u8] = b"tokenme-device-sync/rollup/v1";
-
-/// Authenticated request for the primary's own rollup rows. Same identity
-/// fields as the download request minus the paging cursors: the snapshot is
-/// the whole local-origin rollup table, not a page, so there is no cursor to
-/// sign.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthenticatedRollupRequest {
-    pub protocol_id: String,
-    pub primary_id: String,
-    pub device_id: String,
-    pub origin: String,
-    pub nonce: [u8; 16],
-    pub issued_at_ms: i64,
-    #[serde(with = "signature_serde")]
-    pub signature: [u8; 64],
-}
-
-impl AuthenticatedRollupRequest {
-    pub fn new_at(identity: &DeviceIdentity, primary_id: impl Into<String>, issued_at_ms: i64) -> SyncResult<Self> {
-        let mut nonce = [0u8; 16];
-        getrandom::fill(&mut nonce).map_err(|e| SyncError::Crypto(format!("OS randomness unavailable: {e}")))?;
-        let mut request = Self {
-            protocol_id: PROTOCOL_ID.into(),
-            primary_id: primary_id.into(),
-            device_id: identity.device_id.clone(),
-            origin: identity.origin.clone(),
-            nonce,
-            issued_at_ms,
-            signature: [0; 64],
-        };
-        request.validate_fields()?;
-        request.signature = identity.signing_key.sign(&request.signing_bytes()).to_bytes();
-        Ok(request)
-    }
-
-    pub fn verify(&self, public_key: &VerifyingKey) -> SyncResult<()> {
-        self.validate_fields()?;
-        public_key.verify(&self.signing_bytes(), &Signature::from_bytes(&self.signature))
-            .map_err(|_| SyncError::Auth("authenticated rollup signature verification failed".into()))
-    }
-
-    fn validate_fields(&self) -> SyncResult<()> {
-        if self.protocol_id != PROTOCOL_ID {
-            return Err(SyncError::Auth("invalid authenticated rollup request".into()));
-        }
-        crate::protocol::valid_text("primary_id", &self.primary_id, false)?;
-        crate::protocol::valid_text("device_id", &self.device_id, false)?;
-        crate::protocol::valid_text("origin", &self.origin, false)?;
-        if !usage_core::origin_ok(&self.origin) { return Err(SyncError::Auth("invalid authenticated rollup origin".into())); }
-        Ok(())
-    }
-
-    pub(crate) fn is_fresh(&self, now_ms: i64) -> bool {
-        self.issued_at_ms > now_ms.saturating_sub(MAX_AUTH_REQUEST_AGE_MS)
-            && self.issued_at_ms <= now_ms.saturating_add(MAX_AUTH_REQUEST_FUTURE_SKEW_MS)
-    }
-
-    fn signing_bytes(&self) -> Vec<u8> {
-        identity_bytes(ROLLUP_DOMAIN, &[
-            self.protocol_id.as_bytes(), self.primary_id.as_bytes(), self.device_id.as_bytes(),
-            self.origin.as_bytes(), &self.nonce, &self.issued_at_ms.to_be_bytes(),
-        ])
-    }
-}
-
 /// The primary's own local-origin rollup rows. `origin` declares the label the
 /// secondary must group the rows under (the primary's hostname — consistent
 /// with what its merged rows historically carried); each row's own `origin`
@@ -2136,27 +1908,11 @@ pub struct RollupRow {
     pub max_ts: i64,
 }
 
-/// Serves the primary's own rollup rows after the same identity checks
-/// `SyncStore::primary_download_page` runs before serving: right primary,
-/// registered device, matching origin, valid signature, fresh request, paired
-/// status. The read touches only the index, so no cursor state is written.
-fn primary_rollup_snapshot(store: &mut SyncStore, request: &AuthenticatedRollupRequest, now: i64) -> SyncResult<RollupSnapshot> {
-    if request.primary_id != store.primary_id() {
-        return Err(SyncError::Auth("rollup targets another primary".into()));
-    }
-    let Some(record) = store.device(&request.device_id)? else {
-        return Err(SyncError::NotPaired(request.device_id.clone()));
-    };
-    if record.origin != request.origin {
-        return Err(SyncError::Auth("rollup origin does not match paired device".into()));
-    }
-    request.verify(&crate::protocol::public_key_from_bytes(&record.public_key)?)?;
-    if !request.is_fresh(now) {
-        return Err(SyncError::Auth("rollup request is expired or from the future".into()));
-    }
-    if record.status != DeviceStatus::Paired {
-        return Err(SyncError::NotPaired(request.device_id.clone()));
-    }
+/// The primary's own local-origin rollup rows — the payload the retired
+/// POST /v1/rollup served, now the reply to the WebSocket `RollupFetch`
+/// frame. The caller gates pairing status on the authenticated session
+/// before calling; the read itself touches only the index.
+pub(crate) fn primary_local_rollup_snapshot(store: &SyncStore) -> SyncResult<RollupSnapshot> {
     // `event_rollup.origin` is the materialized ORIGIN_SQL of each event's
     // source (usage_index folds it in at ingest time), so the primary's own
     // rows are exactly `origin = ''`; merged bundle imports carry their
@@ -2188,44 +1944,17 @@ fn primary_rollup_snapshot(store: &mut SyncStore, request: &AuthenticatedRollupR
     Ok(RollupSnapshot { origin: usage_index::hostname(), rows })
 }
 
-fn dispatch_request(store: &mut SyncStore, request: &HttpRequest, replay: &Mutex<NonceReplayCache>, context: &ServerContext) -> (u16, Vec<u8>) {
+/// The only POST dispatch left: the pre-trust pairing one-shot. Everything
+/// post-pairing rides the resident WebSocket session, and anything else
+/// answers 404 so a stale secondary sees its leg is gone, not silently
+/// misrouted.
+fn dispatch_request(store: &mut SyncStore, request: &HttpRequest) -> (u16, Vec<u8>) {
     let now = now_ms();
     let result: Result<Vec<u8>, SyncError> = match (request.path.as_str(), request.content_type.as_str()) {
         (PAIRING_PATH, "application/json") => serde_json::from_slice::<WirePairingRequest>(&request.body)
             .map_err(|e| SyncError::Protocol(format!("invalid pairing JSON: {e}")))
             .and_then(|wire| wire.into_request().map_err(|e| SyncError::Protocol(e.to_string())))
             .and_then(|pairing| store.receive_pairing_request(&pairing, now).map(|state| serde_json::to_vec(&state).map_err(|e| SyncError::Protocol(e.to_string())).unwrap_or_default())),
-        (STATUS_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
-            .map_err(|e| SyncError::Protocol(format!("invalid status request: {e}")))
-            .and_then(|status| with_claimed_nonce(replay, NONCE_SCOPE_STATUS, status.nonce, now, || {
-                store.authenticated_status(&status, now).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))
-            })),
-        (DOWNLOAD_PATH, "application/json") => serde_json::from_slice::<AuthenticatedDownloadRequest>(&request.body)
-            .map_err(|e| SyncError::Protocol(format!("invalid download request: {e}")))
-            .and_then(|download| with_claimed_nonce(replay, NONCE_SCOPE_DOWNLOAD, download.nonce, now, || {
-                store.primary_download_page(&download, now, 30).and_then(encode_primary_download_page)
-            })),
-        (ROLLUP_PATH, "application/json") => serde_json::from_slice::<AuthenticatedRollupRequest>(&request.body)
-            .map_err(|e| SyncError::Protocol(format!("invalid rollup request: {e}")))
-            .and_then(|rollup| with_claimed_nonce(replay, NONCE_SCOPE_ROLLUP, rollup.nonce, now, || {
-                primary_rollup_snapshot(store, &rollup, now).and_then(|snapshot| serde_json::to_vec(&snapshot).map_err(|e| SyncError::Protocol(e.to_string())))
-            })),
-        (DISPLAY_NAME_PATH, "application/json") => serde_json::from_slice::<AuthenticatedDisplayNameRequest>(&request.body)
-            .map_err(|e| SyncError::Protocol(format!("invalid display-name update: {e}")))
-            .and_then(|update| with_claimed_nonce(replay, NONCE_SCOPE_DISPLAY_NAME, update.nonce, now, || {
-                store.update_display_name(&update, now).and_then(|_| serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string())))
-            })),
-        (RECOVERY_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
-            .map_err(|e| SyncError::Protocol(format!("invalid recovery request: {e}")))
-            .and_then(|recovery| store.recover_stream(&recovery, now).and_then(|value| serde_json::to_vec(&value).map_err(|e| SyncError::Protocol(e.to_string())))),
-        (DISCONNECT_PATH, "application/json") => serde_json::from_slice::<AuthenticatedStatusRequest>(&request.body)
-            .map_err(|e| SyncError::Protocol(format!("invalid disconnect request: {e}")))
-            .and_then(|disconnect| with_claimed_nonce(replay, NONCE_SCOPE_DISCONNECT, disconnect.nonce, now, || {
-                store.disconnect_device(&disconnect, now).and_then(|_| {
-                    context.notify_disconnect(&disconnect.device_id);
-                    serde_json::to_vec(&serde_json::json!({})).map_err(|e| SyncError::Protocol(e.to_string()))
-                })
-            })),
         _ => Err(SyncError::NotFound("HTTP path".into())),
     };
     match result {
@@ -2431,7 +2160,7 @@ fn read_request_head<S: Read>(stream: &mut S, max_body: usize, deadline: Instant
         return Err(TransportError::Protocol("only HTTP/1.1 POST or WebSocket GET is supported".into()));
     }
     let known_path = match path {
-        WS_SYNC_PATH | "/v1/sync/ws" | PAIRING_PATH | PAIRING_INVITE_PATH | STATUS_PATH | DOWNLOAD_PATH | ROLLUP_PATH | DISPLAY_NAME_PATH | RECOVERY_PATH | DISCONNECT_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
+        WS_SYNC_PATH | "/v1/sync/ws" | PAIRING_PATH | PAIRING_INVITE_PATH | DIAGNOSTICS_MCP_PATH => Some(()),
         _ => None,
     };
     let mut content_length = None;
@@ -2701,7 +2430,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{AuthenticatedDownloadRequest, DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, SignedUpload, UploadEnvelope};
+    use crate::protocol::{DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, SignedUpload, UploadEnvelope};
     use crate::{DiagnosticsHost, DiagnosticsRequestAuth, PairingRequest, PrimarySyncConfig, SyncStore};
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::thread;
@@ -2788,43 +2517,6 @@ mod tests {
         // lives until its peer hangs up: drop the client so the server's read
         // errors out and the accept loop can return.
         drop(client);
-        assert!(handle.join().unwrap().is_ok());
-    }
-
-    #[test]
-    fn loopback_tls13_primary_download_round_trip() {
-        let cert = cert();
-        let device = DeviceIdentity::create("download-secondary", "Secondary").unwrap();
-        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
-        let invite = store.create_pairing_invite("https://localhost:47821", &"11".repeat(32), i64::MAX).unwrap();
-        let pairing = PairingRequest::new(&invite, &device, "linux").unwrap();
-        let pending = store.receive_pairing_request(&pairing, 1).unwrap();
-        store.approve_pairing(&pending.request_id, 2).unwrap();
-        store.save_primary_config(&PrimarySyncConfig {
-            auto_approve_pairing: false,
-            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
-            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
-            share_data_with_secondaries: true,
-        }, 3).unwrap();
-        let now = now_ms();
-        store.index().conn().execute(
-            "INSERT INTO event(tool, ts_ms, session, meter, in_tok, source, dedupe_key)
-             VALUES('codex', ?1, 'session', 'tokens', 9, 'local.jsonl', 'primary-row')",
-            [now - 1_000],
-        ).unwrap();
-
-        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
-        let addr = server.local_addr().unwrap();
-        let handle = thread::spawn(move || server.run_connections(1));
-        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
-            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
-        )).unwrap();
-        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now).unwrap();
-        let page = client.download_primary_page(&request).unwrap();
-        let (manifest, rows) = page.package.unwrap().validate().unwrap();
-        assert!(page.enabled && !page.preparing && page.complete);
-        assert_eq!(manifest.rows, 1);
-        assert_eq!(rows[0].key.as_deref(), Some("primary-row"));
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -2947,9 +2639,25 @@ mod tests {
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(1));
         // Announce a body but never send it: the 426 must not wait for it.
-        let response = raw_tls_request(&cert, addr, b"POST /v1/status HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n");
+        let response = raw_tls_request(&cert, addr, b"POST /v1/pairing/request HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n");
         assert!(response.starts_with("HTTP/1.1 426"), "{response}");
-        assert!(response.to_ascii_lowercase().contains("requires sync protocol 2.0"), "{response}");
+        assert!(response.to_ascii_lowercase().contains("requires sync protocol 2.1"), "{response}");
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn the_retired_post_legs_answer_unknown_endpoint() {
+        let cert = cert();
+        let store = SyncStore::open_in_memory("primary-1").unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(6));
+        for path in ["/v1/status", "/v1/download", "/v1/rollup", "/v1/device/display-name", "/v1/recovery", "/v1/disconnect"] {
+            let request = format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nx-tokenme-wire-version: 2.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let response = raw_tls_request(&cert, addr, request.as_bytes());
+            assert!(response.starts_with("HTTP/1.1 404"), "{path}: {response}");
+            assert!(response.contains("unknown sync endpoint"), "{path}: {response}");
+        }
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -2960,7 +2668,7 @@ mod tests {
         let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
         let addr = server.local_addr().unwrap();
         let handle = thread::spawn(move || server.run_connections(1));
-        let response = raw_tls_request(&cert, addr, b"POST /v1/status HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 0\r\nx-tokenme-wire-version: 3.1\r\nConnection: close\r\n\r\n");
+        let response = raw_tls_request(&cert, addr, b"POST /v1/pairing/request HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 0\r\nx-tokenme-wire-version: 3.1\r\nConnection: close\r\n\r\n");
         assert!(response.starts_with("HTTP/1.1 426"), "{response}");
         assert!(response.contains("peer announced sync protocol 3.1"), "{response}");
         assert!(handle.join().unwrap().is_ok());
@@ -2973,68 +2681,6 @@ mod tests {
         assert!(matches!(validate_response_wire(200, Some((3, 0)), body), Err(TransportError::Unsupported(message)) if message.contains("3.0")));
         assert!(matches!(validate_response_wire(200, None, body), Err(TransportError::Unsupported(message)) if message.contains("did not announce")));
         assert!(matches!(validate_response_wire(426, None, body), Err(TransportError::Unsupported(message)) if message.contains("other machine")));
-    }
-
-    #[test]
-    fn a_signed_request_nonce_is_answered_only_once() {
-        let cert = cert();
-        let device = DeviceIdentity::create("replay-secondary", "Replay").unwrap();
-        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
-        let invite = store.create_pairing_invite("https://localhost:47821", &"22".repeat(32), i64::MAX).unwrap();
-        let pairing = PairingRequest::new(&invite, &device, "linux").unwrap();
-        let pending = store.receive_pairing_request(&pairing, 1).unwrap();
-        store.approve_pairing(&pending.request_id, 2).unwrap();
-        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
-        let addr = server.local_addr().unwrap();
-        let handle = thread::spawn(move || server.run_connections(3));
-        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
-        let request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
-        assert_eq!(client.status(&request).unwrap().status, "paired");
-        let replay = client.status(&request).unwrap_err();
-        assert!(matches!(replay, TransportError::HttpStatus { status: 401, .. }), "{replay:?}");
-        let next = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
-        assert_eq!(client.status(&next).unwrap().status, "paired");
-        assert!(handle.join().unwrap().is_ok());
-    }
-
-    #[test]
-    fn nonce_cache_releases_failed_actions_but_never_admits_a_replay() {
-        let mut cache = NonceReplayCache::default();
-        let nonce = [7u8; 16];
-        assert_eq!(cache.claim("status", nonce, 1_000), NonceClaim::Fresh);
-        assert_eq!(cache.claim("status", nonce, 1_000), NonceClaim::Replay);
-        // The same bytes are a different request on another endpoint.
-        assert_eq!(cache.claim("download", nonce, 1_000), NonceClaim::Fresh);
-        cache.release("status", nonce);
-        assert_eq!(cache.claim("status", nonce, 1_000), NonceClaim::Fresh);
-        // Entries age out after the signed-request freshness window.
-        assert_eq!(cache.claim("download", [8u8; 16], 1_000 + REPLAY_RETENTION_MS + 1), NonceClaim::Fresh);
-        assert_eq!(cache.claim("status", nonce, 1_000 + REPLAY_RETENTION_MS + 1), NonceClaim::Fresh);
-    }
-
-    #[test]
-    fn download_page_wire_is_binary_and_rejects_trailing_or_future_frames() {
-        let device = DeviceIdentity::create("download-wire", "Wire").unwrap();
-        let request = AuthenticatedDownloadRequest::new_at(&device, "primary-1", None, 0, now_ms()).unwrap();
-        let row = NetworkRow { key: Some("key:p".into()), occurrence_id: None, tool: "codex".into(), ts_ms: 10, session: "s".into(), project: None, model: None, meter: "tokens".into(), source: "local".into(), counts: NetworkCounts::all_zero(), calls: vec![] };
-        let package = NetworkPackage::from_rows_with_snapshot_complete(device.origin.clone(), usage_index::INDEX_SCHEMA_VERSION, 0, 100, &[row], 4, true).unwrap();
-        let page = PrimaryDownloadPage { request_nonce: request.nonce, enabled: true, preparing: false, package: Some(package.clone()), next_identity: Some("key:p".into()), next_dirty_revision: 4, complete: true };
-        let encoded = encode_primary_download_page(page).unwrap();
-        assert!(encoded.starts_with(DOWNLOAD_MAGIC));
-        assert_ne!(encoded.first(), Some(&b'{'));
-        assert!(encoded.windows(package.gzip_bytes.len()).any(|window| window == package.gzip_bytes.as_slice()));
-        let decoded = decode_primary_download_page(&encoded, &request).unwrap();
-        assert!(decoded.enabled && decoded.complete && !decoded.preparing);
-        assert_eq!(decoded.request_nonce, request.nonce);
-        assert_eq!(decoded.next_identity.as_deref(), Some("key:p"));
-        assert_eq!(decoded.next_dirty_revision, 4);
-        assert_eq!(decoded.package, Some(package));
-        let mut future = encoded.clone();
-        future[8] = DOWNLOAD_PAGE_VERSION + 1;
-        assert!(matches!(decode_primary_download_page(&future, &request), Err(TransportError::Unsupported(_))));
-        let mut trailing = encoded;
-        trailing.push(0);
-        assert!(matches!(decode_primary_download_page(&trailing, &request), Err(TransportError::Protocol(message)) if message.contains("trailing")));
     }
 
     #[test]
@@ -3138,33 +2784,6 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_blackhole_status_closes_the_client_socket() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let mut bytes = Vec::new();
-            let _ = socket.read_to_end(&mut bytes);
-        });
-        let device = DeviceIdentity::create("cancel-status", "Linux").unwrap();
-        let request = crate::AuthenticatedStatusRequest::new_at(&device, "primary-1", true, now_ms()).unwrap();
-        let cert = cert();
-        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
-            format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
-        )).unwrap();
-        let cancellation = client.cancellation();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let join = thread::spawn(move || tx.send(client.status(&request)).unwrap());
-        thread::sleep(Duration::from_millis(50));
-        cancellation.cancel();
-        let result = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(matches!(result, Err(TransportError::Cancelled)), "result: {result:?}");
-        join.join().unwrap();
-        server.join().unwrap();
-    }
-
-    #[test]
     fn cancelling_a_blackhole_upload_closes_the_client_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3192,7 +2811,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_after_tls_handshake_unblocks_a_status_waiting_for_http_response() {
+    fn cancellation_after_tls_handshake_unblocks_a_post_waiting_for_http_response() {
         let cert = cert();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3236,14 +2855,16 @@ mod tests {
                 }
             }
         });
-        let device = DeviceIdentity::create("cancel-http-status", "Linux").unwrap();
-        let request = crate::AuthenticatedStatusRequest::new_at(&device, "primary-1", true, now_ms()).unwrap();
+        let device = DeviceIdentity::create("cancel-http-post", "Linux").unwrap();
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let invite: PairingInvite = store.create_pairing_invite("https://localhost:47821", "4444444444444444444444444444444444444444444444444444444444444444", i64::MAX).unwrap();
+        let request = PairingRequest::new(&invite, &device, "linux").unwrap();
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
         )).unwrap();
         let cancellation = client.cancellation();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let join = thread::spawn(move || result_tx.send(client.status(&request)).unwrap());
+        let join = thread::spawn(move || result_tx.send(client.send_pairing_request(&request)).unwrap());
         ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         cancellation.cancel();
         let result = result_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -3456,7 +3077,9 @@ mod tests {
             }
         });
         let device = DeviceIdentity::create("slow-trickle", "Linux").unwrap();
-        let request = AuthenticatedStatusRequest::new_at(&device, "primary-1", true, now_ms()).unwrap();
+        let mut store = SyncStore::open_in_memory("primary-1").unwrap();
+        let invite: PairingInvite = store.create_pairing_invite("https://localhost:47821", "5555555555555555555555555555555555555555555555555555555555555555", i64::MAX).unwrap();
+        let request = PairingRequest::new(&invite, &device, "linux").unwrap();
         let mut config = HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
         );
@@ -3464,7 +3087,7 @@ mod tests {
         config.request_timeout = Duration::from_millis(150);
         let mut client = Tls13HttpsTransport::new(config).unwrap();
         let started = Instant::now();
-        let result = client.status(&request);
+        let result = client.send_pairing_request(&request);
         assert!(matches!(result, Err(TransportError::Timeout)), "result: {result:?}");
         assert!(started.elapsed() < Duration::from_secs(2), "request exceeded bounded test window: {:?}", started.elapsed());
         server.join().unwrap();
@@ -3493,15 +3116,210 @@ mod tests {
         let (store, _upload) = package(&device);
         let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
         let addr = server.local_addr().unwrap();
+        let sink = Arc::new(Mutex::new(None));
+        let sink_ref = Arc::clone(&sink);
+        server.set_disconnect_sink(move |device_id| *sink_ref.lock().unwrap() = Some(device_id.to_string())).unwrap();
         let handle = thread::spawn(move || server.run_connections(2));
         let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
             format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der,
         )).unwrap();
         let request = AuthenticatedStatusRequest::new_disconnect_at(&device, "primary-1", now_ms()).unwrap();
         client.disconnect(&request).unwrap();
-        let status_request = AuthenticatedStatusRequest::new_at(&device, "primary-1", false, now_ms()).unwrap();
-        assert_eq!(client.status(&status_request).unwrap().status, "revoked");
+        assert_eq!(sink.lock().unwrap().as_deref(), Some(device.device_id.as_str()), "the clean notice must reach the primary's disconnect sink");
+        // The device is now revoked: a second notice meets a refused session
+        // handshake, surfaced as the same 401 the retired POST leg produced.
+        let request = AuthenticatedStatusRequest::new_disconnect_at(&device, "primary-1", now_ms()).unwrap();
+        let second = client.disconnect(&request).unwrap_err();
+        assert!(matches!(second, TransportError::HttpStatus { status: 401, ref message } if message == "device is not authorized"), "{second:?}");
         assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn ws_rollup_fetch_round_trips_the_primary_snapshot() {
+        let cert = cert();
+        let device = DeviceIdentity::create("rollup-fetch", "Linux").unwrap();
+        let (mut store, _upload) = package(&device);
+        // The primary's own rollup row (origin = ''), plus a foreign-origin
+        // row that must never travel the downlink. Data sharing is on: the
+        // fetch is served only to a paired device of a sharing primary.
+        store.save_primary_config(&PrimarySyncConfig {
+            auto_approve_pairing: false,
+            primary_id: "primary-1".into(), bind_addr: "127.0.0.1:47821".into(),
+            advertise_host: Some("127.0.0.1".into()), allow_lan: false, enabled: true,
+            share_data_with_secondaries: true,
+        }, 5).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)
+             VALUES('2026-10-22', '', 'codex', 'primary-session', '', '', 'tokens', 9, 0, 0, 0, 0, 0, 1, 1, 1000, 2000)", [],
+        ).unwrap();
+        store.index().conn().execute(
+            "INSERT INTO event_rollup(day, origin, tool, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts)
+             VALUES('2026-10-22', 'other-origin', 'codex', 's', '', '', 'tokens', 99, 0, 0, 0, 0, 0, 1, 1, 1000, 2000)", [],
+        ).unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let snapshot = client.ws_rollup_fetch().unwrap();
+        assert_eq!(snapshot.origin, usage_index::hostname(), "the label the secondary groups the rows under");
+        assert_eq!(snapshot.rows.len(), 1, "only the primary's own local-origin rows travel");
+        assert_eq!(snapshot.rows[0].in_tok, 9.0);
+        // The resident session serves the uplink on the same leg afterwards.
+        let origin = client.ws_rollup_sync(&rollup_rows(2)).unwrap();
+        assert_eq!(origin, device.origin);
+        drop(client);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn rollup_fetch_refuses_a_primary_that_does_not_share_data() {
+        let cert = cert();
+        let device = DeviceIdentity::create("no-sharing-fetch", "Linux").unwrap();
+        let (store, _upload) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let error = client.ws_rollup_fetch().unwrap_err();
+        assert!(error.to_string().to_ascii_lowercase().contains("sharing"), "{error}");
+        drop(client);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn ws_update_display_name_lands_in_the_primary_registry() {
+        let cert = cert();
+        let device = DeviceIdentity::create("display-name-ws", "Linux").unwrap();
+        let primary_dir = tempfile::tempdir().unwrap();
+        let primary_path = primary_dir.path().join("index.db");
+        // File-backed so the test can read the applied name back after the
+        // server (which owns its own connection) is gone.
+        let mut primary = SyncStore::open(&primary_path, "primary-1").unwrap();
+        let invite = primary.create_pairing_invite("https://localhost:47821", "6666666666666666666666666666666666666666666666666666666666666666", i64::MAX).unwrap();
+        let pairing = PairingRequest::new(&invite, &device, "linux").unwrap();
+        let state = primary.receive_pairing_request(&pairing, 1).unwrap();
+        primary.approve_pairing(&state.request_id, 2).unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), primary).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        client.ws_update_display_name("Renamed Over WS").unwrap();
+        drop(client);
+        assert!(handle.join().unwrap().is_ok());
+        let reopened = SyncStore::open(&primary_path, "primary-1").unwrap();
+        let record = reopened.device(&device.device_id).unwrap().unwrap();
+        assert_eq!(record.display_name, "Renamed Over WS");
+    }
+
+    #[test]
+    fn server_push_reaches_a_live_authenticated_socket() {
+        let cert = cert();
+        let device = DeviceIdentity::create("push-target", "Linux").unwrap();
+        let (store, _upload) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let push_handle = server.diagnostics_handle();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        // Park the heartbeat BEFORE the session exists: its 3 s cycle reads
+        // one frame per ping without re-checking the stop flag, so a cycle
+        // already in flight would swallow the push this test is waiting for.
+        // The spawn checks the flag first thing and exits.
+        client.heartbeat_stop.store(true, AtomicOrdering::Release);
+        client.ws_rollup_sync(&rollup_rows(1)).unwrap();
+        // No live socket for a stranger: the push is a silent no-op.
+        push_handle.push_device_state("some-other-device", "revoked", false);
+        // The paired device's live socket gets the advisory.
+        push_handle.push_device_state(&device.device_id, "paused", false);
+        // The resident socket is inside the transport; read the pushed frame
+        // directly from the slot (the parked heartbeat cannot steal it).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pushed = loop {
+            assert!(Instant::now() < deadline, "no DeviceState push arrived");
+            let frame = {
+                let mut guard = lock_recover(&client.ws_client);
+                let Some((ws, _)) = guard.as_mut() else { panic!("session dropped") };
+                match ws.read() {
+                    Ok(tungstenite::Message::Text(t)) => serde_json::from_str::<crate::ws::WsSyncFrame>(&t).ok(),
+                    Ok(_) => None,
+                    Err(_) => None,
+                }
+            };
+            match frame {
+                Some(frame @ crate::ws::WsSyncFrame::DeviceState { .. }) => break frame,
+                Some(other) => panic!("expected a device-state push, got {other:?}"),
+                None => thread::sleep(Duration::from_millis(50)),
+            }
+        };
+        match pushed {
+            crate::ws::WsSyncFrame::DeviceState { status, data_sharing } => {
+                assert_eq!(status, "paused");
+                assert!(!data_sharing);
+            }
+            other => panic!("expected a device-state push, got {other:?}"),
+        }
+        // A queued push is not a reply: the next round trip skips it and
+        // still finds its own ack on the same session.
+        push_handle.push_device_state(&device.device_id, "paired", true);
+        let origin = client.ws_rollup_sync(&rollup_rows(1)).unwrap();
+        assert_eq!(origin, device.origin, "the round trip must skip the queued advisory and find its ack");
+        drop(client);
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn an_unauthenticated_session_cannot_fetch_or_disconnect() {
+        let cert = cert();
+        let device = DeviceIdentity::create("unauth-session", "Linux").unwrap();
+        let (store, _upload) = package(&device);
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(2));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        client.set_ws_session_identity("unpaired-device", "unpaired-origin");
+        let fetch = client.ws_rollup_fetch().unwrap_err();
+        assert!(fetch.to_string().contains("not in paired state"), "{fetch}");
+        let disconnect = client.ws_disconnect_notify().unwrap_err();
+        assert!(disconnect.to_string().contains("not in paired state"), "{disconnect}");
+        drop(client);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn a_refused_session_surfaces_the_registry_status_word() {
+        let revoked_cert = cert();
+        let cert = cert();
+        let device = DeviceIdentity::create("status-word", "Linux").unwrap();
+        let (mut store, _upload) = package(&device);
+        // The secondary's only carrier for the registry word is the refusal
+        // message: paused must read as recoverable, revoked as terminal.
+        store.pause_device(&device.device_id).unwrap();
+        let server = HttpsSyncServer::bind(server_config(&cert), store).unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = thread::spawn(move || server.run_connections(1));
+        let mut client = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr.port()), "localhost", cert.cert_der)).unwrap();
+        client.set_ws_session_identity(device.device_id.clone(), device.origin.clone());
+        let paused = client.ws_rollup_fetch().unwrap_err();
+        assert!(paused.to_string().contains("paused"), "{paused}");
+        // A revoked device's refusal carries its own word on the same path.
+        let device2 = DeviceIdentity::create("status-word-revoked", "Linux").unwrap();
+        let (mut store2, _upload2) = package(&device2);
+        store2.revoke_device(&device2.device_id, 3).unwrap();
+        let server2 = HttpsSyncServer::bind(server_config(&revoked_cert), store2).unwrap();
+        let addr2 = server2.local_addr().unwrap();
+        let handle2 = thread::spawn(move || server2.run_connections(1));
+        let mut client2 = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(format!("https://127.0.0.1:{}", addr2.port()), "localhost", revoked_cert.cert_der)).unwrap();
+        client2.set_ws_session_identity(device2.device_id.clone(), device2.origin.clone());
+        let revoked = client2.ws_rollup_fetch().unwrap_err();
+        assert!(revoked.to_string().contains("revoked"), "{revoked}");
+        drop(client);
+        drop(client2);
+        assert!(handle.join().unwrap().is_ok());
+        assert!(handle2.join().unwrap().is_ok());
     }
 
     #[test]

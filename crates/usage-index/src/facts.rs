@@ -1810,6 +1810,200 @@ mod golden {
         assert_f64("day cost partition", local.day.summary.cost + remote_r.day.summary.cost, all.day.summary.cost);
     }
 
+    // ---- symmetric rollup sync at the fold ------------------------------------
+    //
+    // The sibling `scoped_folds` tests merge a remote machine through the event
+    // path (bundle import stamps `linux:<origin>:` sources). Rollup-level sync
+    // never lands events: the primary holds a secondary's aggregates in
+    // `remote_rollup`, keyed by the registry origin, and the fold unions them
+    // in `fetch_rollup`. These tests prove the figures a primary shows come
+    // out right from `remote_rollup` alone.
+
+    /// One aggregate row in either rollup table, the shape the sync apply
+    /// lands (`apply_remote_rollup` writes the secondary's own aggregates under
+    /// the registry origin). `table` picks `event_rollup` (this index's own
+    /// cache) or `remote_rollup` (a peer's snapshot); min/max ts stay 0 — no
+    /// assertion here reads them.
+    fn rollup_row(idx: &Index, table: &str, origin: &str, day: &str, in_tok: f64, n: i64) {
+        idx.conn
+            .execute(
+                &format!(
+                    "INSERT INTO {table}(day, origin, tool, session, project, model, meter, \
+                            in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts) \
+                     VALUES(?1, ?2, 'claude', 'dep1', '/dep', 'glm-4.7', 'tokens', ?3, 0, 0, 0, 0, 0, ?4, ?4, 0, 0)"
+                ),
+                params![day, origin, in_tok, n],
+            )
+            .unwrap();
+    }
+
+    /// The local half of every fixture below: two events through the public
+    /// ingest, so `event_rollup` carries this machine's rows (origin '') the
+    /// maintained way.
+    fn local_fixture(idx: &mut Index) {
+        let mock = Mock::new(
+            PathBuf::from("/fixture/remote-fold.jsonl"),
+            vec![
+                ev("claude", ms_of(2026, 9, 30, 9), "loc1", Some("glm-4.7"), Some("/work"), counts(100.0)),
+                ev("claude", ms_of(2026, 9, 29, 9), "loc1", Some("glm-4.7"), Some("/work"), counts(200.0)),
+            ],
+        );
+        idx.ingest_adapter(&mock, &DateFilter::default()).unwrap();
+    }
+
+    /// The secondary's aggregate snapshot exactly as the primary holds it:
+    /// four days under one registry origin, today included — 15_000 tokens.
+    fn secondary_fixture(idx: &Index) {
+        rollup_row(idx, "remote_rollup", "departed-host", "2026-09-30", 1_000.0, 1);
+        rollup_row(idx, "remote_rollup", "departed-host", "2026-09-29", 2_000.0, 2);
+        rollup_row(idx, "remote_rollup", "departed-host", "2026-09-28", 4_000.0, 3);
+        rollup_row(idx, "remote_rollup", "departed-host", "2026-09-05", 8_000.0, 4);
+    }
+
+    /// The fold-level contract of rollup sync: a machine this index has never
+    /// held an event for shows up in the primary's figures from `remote_rollup`
+    /// alone — its menu row with a real today volume (the remote-today
+    /// projection in `fetch_live` is the only path that can put a foreign
+    /// origin into LIVE_TODAY), its tokens in every window's cur/prev, and in
+    /// all_time through the `fetch_rollup` union.
+    #[test]
+    fn remote_rollup_folds_a_secondary_into_machines_windows_and_today() {
+        let p = pricing();
+        let mut idx = Index::open_in_memory().unwrap();
+        local_fixture(&mut idx);
+        secondary_fixture(&idx);
+
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
+        assert!(!facts.rebuilt, "ingest maintained the local rollup; remote rows are not this cache's business");
+        let remote: f64 = facts.rollup.iter().filter(|r| r.origin == "departed-host").map(|r| r.counts.input).sum();
+        assert_eq!(remote, 15_000.0, "all four days ride the union");
+        let today = facts
+            .live
+            .iter()
+            .find(|f| f.bucket == LIVE_TODAY && f.origin == "departed-host")
+            .expect("the remote today row is projected into LIVE_TODAY");
+        assert_eq!(today.counts.input, 1_000.0);
+        assert_eq!(today.requests, 1);
+
+        let report = summarize_facts(&facts, &golden_opts(&p));
+        let names: Vec<&str> = report.machines.iter().map(|m| m.origin.as_str()).collect();
+        assert_eq!(names, vec!["", "departed-host"], "the menu lists both, local first");
+        assert_eq!(report.machines[0].today_tokens, 100.0);
+        assert_eq!(report.machines[1].today_tokens, 1_000.0);
+        // Day cur is live-only for the rollup (no whole day inside the window):
+        // local today + the projected remote row.
+        assert_eq!(report.day.summary.total_tokens, 1_100.0);
+        // Day prev: yesterday's rollup rows of both tables.
+        assert_eq!(report.day.prev.total_tokens, 2_200.0);
+        // Week cur: Mon + Tue rollup days (local 200 + remote 6_000) + today 1_100.
+        assert_eq!(report.week.summary.total_tokens, 7_300.0);
+        // Month cur also takes the 09-05 row, which sits outside the week.
+        assert_eq!(report.month.summary.total_tokens, 15_300.0);
+        assert_eq!(report.all_time.total_tokens, 15_300.0, "every rollup row of both tables");
+    }
+
+    /// The detach half of the same contract: `exclude_origins` drops a device
+    /// from every figure the fold computes — machines, windows, all_time —
+    /// including a pre-migration-era copy the old row-level download left in
+    /// `event_rollup` under the origin (the union makes the filter table-blind).
+    /// `report_facts_excluding` is the fetch half: the session top-N excludes
+    /// the origin in SQL, where a post-hoc filter could only shorten the list.
+    #[test]
+    fn exclude_origins_detaches_the_remote_rollup_from_every_figure() {
+        let p = pricing();
+        let mut idx = Index::open_in_memory().unwrap();
+        local_fixture(&mut idx);
+        secondary_fixture(&idx);
+        rollup_row(&idx, "event_rollup", "departed-host", "2026-09-29", 40.0, 1);
+
+        let excluded = vec!["departed-host".to_string()];
+        // The fold half: a plain read still fetches the origin's rows; the
+        // fold's detached filter owns the figures.
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
+        assert!(facts.sessions.iter().any(|s| s.origin == "departed-host"), "the SQL top-N keeps the head on a plain read");
+        let mut opts = golden_opts(&p);
+        opts.exclude_origins = excluded.clone();
+        let report = summarize_facts(&facts, &opts);
+        assert_eq!(report.machines.iter().map(|m| m.origin.as_str()).collect::<Vec<_>>(), vec![""], "a detached origin is no machine at all");
+        assert!(report.recent_sessions.iter().all(|s| s.origin != "departed-host"));
+        assert_eq!(report.day.summary.total_tokens, 100.0);
+        assert_eq!(report.day.prev.total_tokens, 200.0, "the remote 2_000 and the event-table copy 40 both vanish");
+        assert_eq!(report.week.summary.total_tokens, 300.0);
+        assert_eq!(report.all_time.total_tokens, 300.0);
+
+        // The fetch half: the same list keeps the origin out of the session
+        // top-N at the source, so the list and the figures agree there too.
+        let facts = idx.report_facts_excluding(&plan(), &MachineScope::All, &excluded).unwrap();
+        assert!(facts.sessions.iter().all(|s| s.origin != "departed-host"), "the SQL top-N excludes the detached origin");
+        let report = summarize_facts(&facts, &opts);
+        assert_eq!(report.machines.len(), 1);
+        assert_eq!(report.all_time.total_tokens, 300.0);
+    }
+
+    /// The scope half: `Origin` folds only that machine's rows, `Local` none of
+    /// them — the partition law of `scoped_folds_match_the_event_path_oracle`,
+    /// now over rows no event ever carried — while `machines` stays unscoped
+    /// under every scope (the menu lists every machine while one is selected).
+    #[test]
+    fn machine_scope_partitions_the_remote_rollup_rows() {
+        let p = pricing();
+        let mut idx = Index::open_in_memory().unwrap();
+        local_fixture(&mut idx);
+        secondary_fixture(&idx);
+
+        let scope = MachineScope::Origin { name: "departed-host".into() };
+        let mut opts = golden_opts(&p);
+        opts.scope = scope.clone();
+        let facts = idx.report_facts(&plan(), &scope).unwrap();
+        let remote = summarize_facts(&facts, &opts);
+        assert_eq!(remote.day.summary.total_tokens, 1_000.0, "the remote's today alone");
+        assert_eq!(remote.day.prev.total_tokens, 2_000.0);
+        assert_eq!(remote.week.summary.total_tokens, 7_000.0);
+        assert_eq!(remote.all_time.total_tokens, 15_000.0);
+        assert_eq!(
+            remote.machines.iter().map(|m| m.origin.as_str()).collect::<Vec<_>>(),
+            vec!["", "departed-host"],
+            "the menu is unscoped by definition"
+        );
+
+        let mut opts = golden_opts(&p);
+        opts.scope = MachineScope::Local;
+        let facts = idx.report_facts(&plan(), &MachineScope::Local).unwrap();
+        let local = summarize_facts(&facts, &opts);
+        assert_eq!(local.day.summary.total_tokens, 100.0);
+        assert_eq!(local.day.prev.total_tokens, 200.0);
+        assert_eq!(local.week.summary.total_tokens, 300.0);
+        assert_eq!(local.all_time.total_tokens, 300.0, "none of the remote folds into Local");
+        assert_eq!(
+            local.machines.iter().map(|m| m.origin.as_str()).collect::<Vec<_>>(),
+            vec!["", "departed-host"],
+        );
+    }
+
+    /// The fold trusts each table's own rows: the same (day, origin) group in
+    /// both `event_rollup` and `remote_rollup` sums once per table row —
+    /// 500 + 700, no cross-table dedupe and no drop. The sync's apply owns the
+    /// one-origin-per-table discipline that makes this a non-issue in practice;
+    /// this pins the fold's side of that contract with fixture-exact figures.
+    #[test]
+    fn the_fold_sums_each_tables_own_rows_without_cross_table_dedupe() {
+        let p = pricing();
+        let mut idx = Index::open_in_memory().unwrap();
+        rollup_row(&idx, "event_rollup", "dup-host", "2026-09-29", 500.0, 2);
+        rollup_row(&idx, "remote_rollup", "dup-host", "2026-09-29", 700.0, 3);
+
+        let facts = idx.report_facts(&plan(), &MachineScope::All).unwrap();
+        assert!(!facts.rebuilt, "an empty event table has nothing to rebuild");
+        assert_eq!(facts.rollup.len(), 2, "one row per table, both survive the union");
+        let report = summarize_facts(&facts, &golden_opts(&p));
+        assert_eq!(report.day.summary.total_tokens, 0.0, "yesterday rows never leak into today's live slice");
+        assert_eq!(report.day.prev.total_tokens, 1_200.0, "both tables' rows sum into the same window");
+        assert_eq!(report.all_time.total_tokens, 1_200.0);
+        assert_eq!(report.all_time.requests, 5, "n sums per table row too");
+        assert_eq!(report.machines.iter().map(|m| m.origin.as_str()).collect::<Vec<_>>(), vec!["dup-host"]);
+        assert_eq!(report.machines[0].today_tokens, 0.0, "no today row in either table");
+    }
+
     /// The upgrade path for the origin column: an index written by the older
     /// build holds a 6-column-PK `event_rollup` (no origin, and no
     /// `schema_version` bump either — it is a cache). Opening it again must
