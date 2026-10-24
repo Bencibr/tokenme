@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use usage_core::pricing::PricingOptions;
 use usage_core::report::{now_ms, AggregatePlan, QuotaView, ReportOptions};
 use usage_core::{DateFilter, DetectedSource, MachineScope, PricingMap, Report, SourceAdapter, SourceFile, SourceStatus};
-use usage_index::{Index, IngestOptions, Watcher, RETENTION_DAYS};
+use usage_index::{Index, IngestOptions, Watcher};
 
 use crate::notify;
 use crate::settings::Settings;
@@ -292,24 +292,12 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
 
     // An index that cannot be opened is not a quiet day either: every pass would
     // return without publishing and the webview would sit on "indexing" forever.
-    let mut index = match Index::open_recovering_corruption(index_path()) {
-        Ok((index, true)) => {
-            crate::logging::error(
-                "integrity: the index could not be opened; the original image was preserved and a new index was created for local re-scan",
-            );
-            Some(index)
-        }
-        Ok((index, false)) => Some(index),
-        Err(e) => {
-            app.state::<Shared>().set_startup_error(format!(
-                "index could not be opened; local usage is unavailable until it is repaired: {e}"
-            ));
-            crate::logging::error(&format!(
-                "index could not be opened — no data can be published until it is: {e}"
-            ));
-            None
-        }
-    };
+    let mut index = open_index_or_set_error(
+        &app,
+        "integrity: the index could not be opened; the original image was preserved and a new index was created for local re-scan",
+        "index could not be opened; local usage is unavailable until it is repaired: ",
+        "index could not be opened — no data can be published until it is: ",
+    );
     let at_index = boot.elapsed();
 
     let roots: Vec<PathBuf> = detected.iter().flat_map(|d| d.roots.clone()).collect();
@@ -423,9 +411,7 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
                 last_pass = Instant::now();
                 ingest(&app, &mut index, &adapters, &detected, &pricing, reason, &mut last_publish,
                     &mut snapshot, &mut snapshot_at, &mut wake_roots);
-                last_pass_cost = last_pass_cost
-                    .max(pass_started.elapsed())
-                    .min(MAX_PASS_COST);
+                last_pass_cost = pass_started.elapsed().min(MAX_PASS_COST);
             }
             Work::Resummarize => {
                 crate::logging::info("pricing refreshed — re-summarizing indexed events");
@@ -566,7 +552,11 @@ fn drain_debounce(
             }
             Ok(Msg::Scope) => return Drained::Scope,
             Ok(Msg::Refresh) => {
-                usage_quota::clear_cache();
+                // Bust the flag rather than clearing the probe cache here: cache
+                // clearing is centralized in `quota_pass` (the refresh pass below
+                // reaches it with poll_quota=true), so a refresh that somehow
+                // never publishes cannot have thrown away the kept answer.
+                QUOTA_PASS_BUST.store(true, Ordering::Relaxed);
                 return Drained::Refresh;
             }
             Err(RecvTimeoutError::Timeout) => return Drained::Wakes,
@@ -591,25 +581,17 @@ fn ingest<R: Runtime>(
     // A second ingest while one is running adds nothing but latency.
     let Ok(_guard) = shared.ingesting.try_lock() else { return };
     if index.is_none() {
-        match Index::open_recovering_corruption(index_path()) {
-            Ok((opened, true)) => {
-                crate::logging::error(
-                    "integrity: the index was repaired on retry; the original image was preserved",
-                );
+        match open_index_or_set_error(
+            &app,
+            "integrity: the index was repaired on retry; the original image was preserved",
+            "index could not be repaired; local usage is unavailable until it is repaired: ",
+            "index retry failed: ",
+        ) {
+            Some(opened) => {
                 *index = Some(opened);
                 shared.clear_startup_error();
             }
-            Ok((opened, false)) => {
-                *index = Some(opened);
-                shared.clear_startup_error();
-            }
-            Err(e) => {
-                shared.set_startup_error(format!(
-                    "index could not be repaired; local usage is unavailable until it is repaired: {e}"
-                ));
-                crate::logging::error(&format!("index retry failed: {e}"));
-                return;
-            }
+            None => return,
         }
     }
     let Some(index) = index.as_mut() else { return };
@@ -1138,6 +1120,31 @@ fn fallback_sources(detected: &[DetectedSource]) -> Vec<SourceStatus> {
         .collect()
 }
 
+/// The one open of the index shared by the boot (`run`) and the mid-run retry
+/// (`ingest`): `Ok(_, true)` is the integrity-preserving recreate, `Err` names
+/// the failure through the startup-error slot and the log. The three message
+/// tails keep the boot and the retry distinguishable in `panel.log` while the
+/// branch shape exists exactly once; the error text is appended by the helper.
+fn open_index_or_set_error<R: Runtime>(
+    app: &AppHandle<R>,
+    recovered_log: &'static str,
+    failed_startup: &'static str,
+    failed_log: &'static str,
+) -> Option<Index> {
+    match Index::open_recovering_corruption(index_path()) {
+        Ok((index, true)) => {
+            crate::logging::error(recovered_log);
+            Some(index)
+        }
+        Ok((index, false)) => Some(index),
+        Err(e) => {
+            app.state::<Shared>().set_startup_error(format!("{failed_startup}{e}"));
+            crate::logging::error(&format!("{failed_log}{e}"));
+            None
+        }
+    }
+}
+
 /// `Index::default_path()` wins; a missing platform dir falls back to cache.
 pub(crate) fn index_path() -> PathBuf {
     Index::default_path().unwrap_or_else(|| {
@@ -1149,7 +1156,7 @@ pub(crate) fn index_path() -> PathBuf {
 }
 
 fn cutoff_ms() -> i64 {
-    now_ms() - RETENTION_DAYS * 86_400_000
+    usage_index::retention_cutoff(now_ms())
 }
 
 #[cfg(test)]
