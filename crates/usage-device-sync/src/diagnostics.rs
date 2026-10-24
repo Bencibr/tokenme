@@ -1314,13 +1314,11 @@ impl DiagnosticsService {
                 }
                 let config = store.primary_config()?;
                 let devices = store.devices()?.into_iter().map(Into::into).collect::<Vec<crate::store::DeviceStatusView>>();
-                let outbox = store.outbox_summary()?;
                 Ok(serde_json::json!({
                     "primary_id": store.primary_id(),
                     "listener": config.as_ref().map(|value| value.enabled).unwrap_or(false),
                     "allow_lan": config.as_ref().map(|value| value.allow_lan).unwrap_or(false),
                     "devices": devices,
-                    "outbox": outbox,
                 }))
             }
             ToolId::SyncGetRequests => {

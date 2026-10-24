@@ -453,7 +453,6 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // upload is a rollup snapshot now — done once the primary has stored it,
   // wait until then — and the primary-data downlink (absent until the
   // primary shares its first page).
-  const uploadQueued = snapshot.pending + snapshot.in_flight;
   const uploadState = snapshot.upload_complete === true
     ? t("sync.prog.done")
     : t("sync.prog.wait");
@@ -539,9 +538,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
         {device.role === "secondary" && device.status === "paired" && deviceMeta ? <span className="sync-dev-when">{deviceMeta}</span> : null}
         <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
           request: isSecondary ? { action: "stop" } : { action: "revoke", device_id: device.device_id },
-          message: isSecondary && uploadQueued > 0
-            ? t("sync.revoke.pending_confirm", { name: hostName, count: uploadQueued })
-            : t("sync.revoke.confirm", { name: hostName }),
+          message: t("sync.revoke.confirm", { name: hostName }),
         })}>{t("sync.disconnect")}</button>
       </div>
     );
@@ -704,13 +701,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   </div>
                   <div className="role-right">
                     <span className={`role-state role-state-${status.kind}`} aria-live="polite">{status.label}</span>
-                    <button type="button" className="stopbtn" disabled={commandBusy || (!snapshot.service_running && snapshot.role !== "secondary")} onClick={() => {
-                      if (isSecondary && uploadQueued > 0) {
-                        setPendingConfirm({ request: { action: "stop" }, message: t("sync.stop.pending_confirm", { count: uploadQueued }) });
-                        return;
-                      }
-                      void run({ action: "stop" });
-                    }} aria-label={t("sync.stop_disconnect")}>
+                    <button type="button" className="stopbtn" disabled={commandBusy || (!snapshot.service_running && snapshot.role !== "secondary")} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>
                   </div>
@@ -807,9 +798,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                       <code>{awaitingSecondaryApproval ? t("sync.state.starting") : secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
                       <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
                         request: { action: "stop" },
-                        message: uploadQueued > 0
-                          ? t("sync.revoke.pending_confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary"), count: uploadQueued })
-                          : t("sync.revoke.confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary") }),
+                        message: t("sync.revoke.confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary") }),
                       })}>{t("sync.disconnect")}</button>
                     </div>
                   )}

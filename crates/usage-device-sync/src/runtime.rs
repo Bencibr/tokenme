@@ -11,18 +11,14 @@
 //! unpaired device's frames are refused, and that refusal is the cut-off
 //! trigger. No outbox, no pages, no per-pass status poll.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use usage_core::{CallKind, Meter, UsageEvent};
-use usage_index::Index;
 
 use crate::{
-    DeviceIdentity, NetworkCall, NetworkCounts, NetworkPackage, NetworkRow,
-    ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
+    DeviceIdentity, ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
     TransportError,
 };
 
@@ -67,28 +63,21 @@ impl SyncRuntimeConfig {
     }
 }
 
-/// One sync pass's counters. The outbox-era fields survive as public API,
-/// but the rollup pipeline has no claim/ack bookkeeping for the sender: the
-/// push's `Ok` return IS the acknowledgment.
+/// One sync pass's counters, rollup-era. The rollup pipeline keeps no
+/// claim/ack bookkeeping for the sender — the push's `Ok` return IS the
+/// acknowledgment, and push failures surface as pass errors with backoff —
+/// so the only things a pass reports are what it pushed and what the
+/// session moved.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeRunReport {
-    /// Always 0: the outbox claim loop is gone.
-    pub claimed: u64,
     /// Rollup rows carried by this pass's uplink push — the whole local
     /// snapshot, so the snapshot's size whenever local data changed; 0 when
     /// the change fingerprint matched the last delivered push (or the pass
     /// had nothing paired to do). `run_until` totals its passes' pushes.
     pub uploaded: u64,
-    /// Always 0: a delivered rollup push needs no separate ack bookkeeping.
-    pub acknowledged: u64,
-    /// Always 0: push failures surface as pass errors with backoff instead
-    /// of outbox retries.
-    pub retried: u64,
-    pub pending: u64,
-    pub in_flight: u64,
     /// Rollup payload bytes this pass moved over the session: the uplink
     /// push's rows plus the downlink snapshot's rows. `run_until` totals its
-    /// passes; the legacy outbox-backlog meaning is gone with the outbox.
+    /// passes.
     pub bytes: u64,
     pub last_error: Option<String>,
 }
@@ -137,12 +126,6 @@ pub struct SyncRuntime {
     /// every pass committed a write transaction twice per 5 s poll while the
     /// 15-minute lease was nowhere near expiry.
     lease_renewed_at_ms: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct LocalSnapshot {
-    pub package: NetworkPackage,
-    pub rows: Vec<NetworkRow>,
 }
 
 impl SyncRuntime {
@@ -287,8 +270,7 @@ impl SyncRuntime {
                 Err(error) if self.secondary_identity.is_some() && retryable_secondary_error(&error) => {
                     let message = error.to_string();
                     let _ = self.store.set_secondary_last_error(Some(&message), now_ms());
-                    let summary = self.store.outbox_summary()?;
-                    Ok(RuntimeRunReport { pending: summary.pending, in_flight: summary.in_flight, bytes: summary.bytes, last_error: Some(message), ..RuntimeRunReport::default() })
+                    Ok(RuntimeRunReport { last_error: Some(message), ..RuntimeRunReport::default() })
                 }
                 Err(error) => Err(error),
             };
@@ -300,12 +282,7 @@ impl SyncRuntime {
                     return Err(error);
                 }
             };
-            total.claimed = total.claimed.saturating_add(pass.claimed);
             total.uploaded = total.uploaded.saturating_add(pushed_rows);
-            total.acknowledged = total.acknowledged.saturating_add(pass.acknowledged);
-            total.retried = total.retried.saturating_add(pass.retried);
-            total.pending = pass.pending;
-            total.in_flight = pass.in_flight;
             total.bytes = total.bytes.saturating_add(pass.bytes).saturating_add(push_bytes);
             let pass_had_error = pass.last_error.is_some();
             let waiting_for_primary = pass.last_error.as_deref().is_some_and(|message| message.contains("awaiting approval") || message.contains("primary paused this device"));
@@ -363,9 +340,6 @@ impl SyncRuntime {
             && self.store.secondary_config()?.is_some_and(|config| !config.enabled)
         {
             self.close_idle_session(now_ms());
-            let summary = self.store.outbox_summary()?;
-            report.pending = summary.pending;
-            report.in_flight = summary.in_flight;
             return Ok(report);
         }
         // The uplink push already ran inside `prepare_secondary`; this half
@@ -421,9 +395,6 @@ impl SyncRuntime {
         } else if self.secondary_identity.is_some() {
             self.close_idle_session(now_ms());
         }
-        let summary = self.store.outbox_summary()?;
-        report.pending = summary.pending;
-        report.in_flight = summary.in_flight;
         if self.secondary_identity.is_some() && report.last_error.is_none() {
             let _ = self.store.set_secondary_last_error(None, now_ms());
         }
@@ -647,83 +618,6 @@ fn is_unrecoverable_sync_error(message: &str) -> bool {
         || lower.contains("unexpected end of file")
 }
 
-/// Export the complete local-origin projection used by the secondary runtime.
-/// A full projection keeps keyless multiplicity deterministic across rebuilds;
-/// remote `linux:` rows are excluded so a primary never receives a re-export.
-pub fn export_index_snapshot(index: &Index, origin: &str, days: i64, now_ms: i64) -> SyncResult<LocalSnapshot> {
-    let mut snapshots = export_index_snapshots(index, origin, days, now_ms)?;
-    if snapshots.len() != 1 {
-        return Err(SyncError::Limit(format!("snapshot contains {} segments; use export_index_snapshots", snapshots.len())));
-    }
-    Ok(snapshots.remove(0))
-}
-
-/// Builds deterministic, bounded package segments from one Index read view.
-/// Dirty rows outside the initial rolling coverage are added to the same view,
-/// so a long-offline device cannot lose a late call-only update.
-pub fn export_index_snapshots(index: &Index, origin: &str, days: i64, now_ms: i64) -> SyncResult<Vec<LocalSnapshot>> {
-    if days <= 0 || days > 3650 { return Err(SyncError::Invalid("snapshot days must be in 1..=3650".into())); }
-    if origin.is_empty() || origin.contains(':') || origin.contains('/') || origin.contains('\\') {
-        return Err(SyncError::Invalid("snapshot origin is not safe".into()));
-    }
-    let snapshot = index.sync_snapshot(now_ms, days).map_err(SyncError::from)?;
-    export_index_snapshots_from_snapshot(index, origin, snapshot)
-}
-
-pub fn export_index_snapshots_from_snapshot(index: &Index, origin: &str, snapshot: usage_index::SyncSnapshot) -> SyncResult<Vec<LocalSnapshot>> {
-    let snapshot_hi_ms = snapshot.coverage_hi_ms;
-    let occurrence_ids = index.sync_occurrence_ids(&snapshot.events).map_err(SyncError::from)?;
-    let mut rows_by_identity = BTreeMap::<String, NetworkRow>::new();
-    for (event, occurrence_id) in snapshot.events.into_iter().zip(occurrence_ids) {
-        let row = network_row(event, occurrence_id)?;
-        rows_by_identity.insert(row.identity_material()?.to_string(), row);
-    }
-    for dirty in snapshot.dirty_events {
-        let row = network_row(dirty.event, dirty.occurrence_id)?;
-        rows_by_identity.insert(row.identity_material()?.to_string(), row);
-    }
-    let mut rows: Vec<NetworkRow> = rows_by_identity.into_values().collect();
-    rows.sort_by(|left, right| left.identity_material().unwrap_or("").cmp(right.identity_material().unwrap_or("")));
-    const SEGMENT_ROWS: usize = 50_000;
-    let window_lo_ms = rows.iter().map(|row| row.ts_ms).min().unwrap_or(snapshot.coverage_lo_ms).min(snapshot.coverage_lo_ms);
-    let window_hi_ms = rows.iter().map(|row| row.ts_ms.saturating_add(1)).max().unwrap_or(snapshot.coverage_hi_ms).max(snapshot.coverage_hi_ms);
-    let mut out = Vec::new();
-    for chunk in rows.chunks(SEGMENT_ROWS) {
-        let generated_at_ms = chunk.iter().map(|row| row.ts_ms).max().unwrap_or(window_lo_ms);
-        let package = NetworkPackage::from_rows(origin, usage_index::INDEX_SCHEMA_VERSION, window_lo_ms, window_hi_ms, chunk, generated_at_ms)?;
-        out.push(LocalSnapshot { package, rows: chunk.to_vec() });
-    }
-    if out.is_empty() {
-        let package = NetworkPackage::from_rows(origin, usage_index::INDEX_SCHEMA_VERSION, window_lo_ms, window_hi_ms, &[], snapshot_hi_ms)?;
-        out.push(LocalSnapshot { package, rows: Vec::new() });
-    }
-    Ok(out)
-}
-
-pub(crate) fn network_row(event: UsageEvent, occurrence_id: Option<String>) -> SyncResult<NetworkRow> {
-    let key = event.dedupe_key.filter(|key| !key.is_empty());
-    if key.is_none() && occurrence_id.as_deref().is_none_or(str::is_empty) {
-        return Err(SyncError::UnstableOccurrence);
-    }
-    let mut calls = event.calls.into_iter().map(|call| NetworkCall {
-        kind: match call.kind { CallKind::Mcp => "mcp", CallKind::Skill => "skill" }.into(),
-        name: call.name,
-    }).collect::<Vec<_>>();
-    calls.sort_by(|left, right| left.kind.cmp(&right.kind).then(left.name.cmp(&right.name)));
-    Ok(NetworkRow {
-        key, occurrence_id, tool: event.tool, ts_ms: event.ts_ms, session: event.session,
-        project: event.project, model: event.model,
-        meter: match event.meter { Meter::Tokens => "tokens", Meter::Credits => "credits" }.into(),
-        source: if event.source.is_empty() { "local".into() } else { event.source },
-        counts: NetworkCounts {
-            in_tok: Some(event.counts.input), cc_tok: Some(event.counts.cache_creation),
-            cr_tok: Some(event.counts.cache_read), out_tok: Some(event.counts.output),
-            reason_tok: Some(event.counts.reasoning), credits: Some(event.counts.credits),
-        },
-        calls,
-    })
-}
-
 fn idle_interval(poll_interval: Duration, consecutive_errors: u32) -> Duration {
     let base = poll_interval.saturating_mul(1_u32 << consecutive_errors.min(6));
     jittered(base.min(RETRY_MAX))
@@ -877,7 +771,6 @@ mod tests {
 
         let report = runtime.run_once_with_clock(|| now + 10).unwrap();
         assert_eq!(report.uploaded, 0, "the secondary owns no local rows: the establishing push is empty");
-        assert_eq!(report.acknowledged, 0, "the push's Ok is the ack; there is no separate bookkeeping");
         assert!(report.bytes > 0, "the fetched snapshot's payload counts into the pass report");
         assert!(report.last_error.is_none());
         assert!(runtime.primary_download_complete, "one session rollup fetch completes the downlink");
@@ -958,7 +851,6 @@ mod tests {
         );
         let report = runtime.run_once_with_clock(|| first_now).unwrap();
         assert_eq!(report.uploaded, 5, "the first pass pushes the whole local snapshot");
-        assert_eq!(report.acknowledged, 0, "the push's Ok is the ack; there is no separate bookkeeping");
         assert!(report.bytes > 0, "the pushed snapshot's payload counts into the pass report");
         assert_eq!(remote(&primary_admin), (5, 15.0), "the primary stored the snapshot under the device origin");
         assert!(runtime.last_upload_fingerprint.is_some(), "the delivered push left its fingerprint behind");

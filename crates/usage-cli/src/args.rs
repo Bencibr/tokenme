@@ -273,14 +273,6 @@ pub enum SyncCmd {
         primary_id: String,
     },
 
-    /// Issue a fresh stream receipt for a paired device.
-    OpenStream {
-        #[arg(long, value_name = "ID")]
-        device_id: String,
-        #[arg(long, value_name = "ID")]
-        primary_id: String,
-    },
-
     /// Run the primary HTTPS/TLS 1.3 service.
     Serve {
         #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:47821")]

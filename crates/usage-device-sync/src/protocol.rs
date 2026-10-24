@@ -38,7 +38,6 @@ pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 pub const MAX_ROWS: usize = 500_000;
 pub const MAX_STRING_BYTES: usize = 16 * 1024;
 const MAX_CALLS_PER_ROW: usize = 4096;
-const IDENTITY_DOMAIN: &[u8] = b"tokenme-device-sync/identity/v1";
 const UPLOAD_DOMAIN: &[u8] = b"tokenme-device-sync/upload-signature/v1";
 const PAIRING_DOMAIN: &[u8] = b"tokenme-device-sync/pairing/v1";
 const STATUS_DOMAIN: &[u8] = b"tokenme-device-sync/status/v1";
@@ -1042,15 +1041,6 @@ impl PairingRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StreamOpenReceipt {
-    pub primary_id: String,
-    pub device_id: String,
-    pub stream_id: String,
-    pub data_epoch: u64,
-    pub expected_generation: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthenticatedStatusRequest {
     pub protocol_id: String,
@@ -1133,11 +1123,6 @@ impl AuthenticatedStatusRequest {
             .map_err(|_| SyncError::Auth("authenticated status signature verification failed".into()))
     }
 
-    pub(crate) fn is_fresh(&self, now_ms: i64) -> bool {
-        self.issued_at_ms > now_ms.saturating_sub(MAX_AUTH_REQUEST_AGE_MS)
-            && self.issued_at_ms <= now_ms.saturating_add(MAX_AUTH_REQUEST_FUTURE_SKEW_MS)
-    }
-
     fn signing_bytes(&self) -> Vec<u8> {
         let mut checkpoint = [0u8; 9];
         if let Some(generation) = self.checkpoint_generation {
@@ -1208,11 +1193,6 @@ impl AuthenticatedDownloadRequest {
             valid_text("download identity cursor", identity, false)?;
         }
         Ok(())
-    }
-
-    pub(crate) fn is_fresh(&self, now_ms: i64) -> bool {
-        self.issued_at_ms > now_ms.saturating_sub(MAX_AUTH_REQUEST_AGE_MS)
-            && self.issued_at_ms <= now_ms.saturating_add(MAX_AUTH_REQUEST_FUTURE_SKEW_MS)
     }
 
     fn signing_bytes(&self) -> Vec<u8> {
@@ -1336,10 +1316,6 @@ mod option_hash_serde {
         let value = Option::<Vec<u8>>::deserialize(deserializer)?;
         value.map(|bytes| bytes.try_into().map_err(|_| serde::de::Error::custom("receipt hash must be 32 bytes"))).transpose()
     }
-}
-
-pub(crate) fn network_event_key(device_id: &str, original: &str) -> String {
-    format!("device-sync:v1:{}", hex(&hash_bytes(&identity_bytes(IDENTITY_DOMAIN, &[device_id.as_bytes(), original.as_bytes()]))))
 }
 
 pub(crate) fn public_key_from_bytes(bytes: &[u8]) -> SyncResult<VerifyingKey> {

@@ -1762,24 +1762,20 @@ pub fn sync_status(ctx: &Ctx) -> Result<(), String> {
     let secondary = SyncStore::read_secondary_config(&ctx.db_path).map_err(|e| e.to_string())?;
     let running = secondary_runtime_status(&ctx.db_path);
     if ctx.g.json {
-        let outbox = secondary.as_ref().and_then(|config| SyncStore::open(&ctx.db_path, config.primary_id.clone()).ok()?.outbox_summary().ok());
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "registry": status,
             "secondary": secondary,
             "runtime_running": running,
-            "outbox": outbox,
         })).map_err(|e| e.to_string())?);
     } else {
         println!("primary: {}", status.primary_id.as_deref().unwrap_or_else(|| secondary.as_ref().map(|config| config.primary_id.as_str()).unwrap_or("not initialized")));
         if let Some(config) = secondary {
-            let outbox = SyncStore::open(&ctx.db_path, config.primary_id.clone()).ok().and_then(|store| store.outbox_summary().ok());
             println!("secondary: {}", if running { "running" } else if config.enabled { "stopped" } else { "disabled" });
             println!("endpoint: {}", config.endpoint);
             println!("certificate_pin: {}", hex_bytes(&config.certificate_pin));
             println!("stream: {}", config.stream_id.as_deref().unwrap_or("not opened"));
             println!("data_epoch: {}", config.data_epoch.map(|value| value.to_string()).unwrap_or_else(|| "-".into()));
             println!("last_connected_at_ms: {}", config.last_connected_at_ms.map(|value| value.to_string()).unwrap_or_else(|| "-".into()));
-            println!("pending: {}", outbox.as_ref().map(|summary| summary.pending).unwrap_or(0));
             if let Some(error) = config.last_error { println!("last_error: {error}"); }
         }
         for device in status.devices {
@@ -1866,10 +1862,10 @@ pub fn sync_stop(ctx: &Ctx) -> Result<(), String> {
 pub fn sync_reset(ctx: &Ctx) -> Result<(), String> {
     let config = SyncStore::read_secondary_config(&ctx.db_path)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "this device is not a paired secondary; only a secondary keeps stream/outbox checkpoints to reset".to_string())?;
+        .ok_or_else(|| "this device is not a paired secondary; only a secondary keeps session checkpoints to reset".to_string())?;
     // The resident runtime holds the scheduler lease and an in-memory view of
-    // the outbox; deleting rows under it would let the next pass resurrect
-    // half of the old sequence. Stop it first.
+    // the session; resetting under it would let the next pass resurrect half
+    // of the old state. Stop it first.
     if secondary_runtime_status(&ctx.db_path) {
         return Err("secondary sync runtime is running; run `tokenme sync stop` before `tokenme sync reset`".into());
     }
@@ -1878,14 +1874,12 @@ pub fn sync_reset(ctx: &Ctx) -> Result<(), String> {
     if ctx.g.json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "device_id": summary.device_id,
-            "discarded_packages": summary.discarded_packages,
-            "discarded_journal_rows": summary.discarded_journal_rows,
             "events_kept": store.index().event_count().map_err(|error| error.to_string())?,
-            "next": "run `tokenme sync run` to recover a fresh stream and re-sync",
+            "next": "run `tokenme sync run` to re-establish the session and re-sync",
         })).map_err(|error| error.to_string())?);
     } else {
-        println!("reset {}: {} package(s), {} journal row(s) discarded; local events kept", summary.device_id, summary.discarded_packages, summary.discarded_journal_rows);
-        println!("next: `tokenme sync run` recovers a fresh stream and re-sends the full local projection");
+        println!("reset {}: session checkpoints discarded; local events kept", summary.device_id);
+        println!("next: `tokenme sync run` re-establishes the session and re-ships the local rollup snapshot");
     }
     Ok(())
 }
@@ -2098,7 +2092,7 @@ fn run_secondary_service(
     }
     let report = result?;
     if json { print_json(&report); }
-    else { println!("secondary runtime stopped: {} pending package(s), {} acknowledged", report.pending, report.acknowledged); }
+    else { println!("secondary runtime stopped — {} rollup rows, {} bytes moved this session", report.uploaded, report.bytes); }
     Ok(())
 }
 
@@ -2138,7 +2132,7 @@ fn run_secondary_service(
         store.set_secondary_enabled(false, usage_core::report::now_ms()).map_err(|error| error.to_string())?;
     }
     if json { print_json(&report); }
-    else { println!("secondary runtime stopped: {} pending package(s), {} acknowledged", report.pending, report.acknowledged); }
+    else { println!("secondary runtime stopped — {} rollup rows, {} bytes moved this session", report.uploaded, report.bytes); }
     Ok(())
 }
 
@@ -2283,14 +2277,6 @@ fn cli_sync_dir_for_db(db_path: &std::path::Path) -> Result<PathBuf, String> {
     #[cfg(unix)]
     std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|error| format!("cannot protect private sync directory: {error}"))?;
     Ok(root)
-}
-
-pub fn sync_open_stream(ctx: &Ctx, device_id: String, primary_id: String) -> Result<(), String> {
-    let mut store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| e.to_string())?;
-    let receipt = store.open_stream_for_registered(&device_id, ctx.now_ms).map_err(|e| e.to_string())?;
-    if ctx.g.json { println!("{}", serde_json::json!({"primary_id": receipt.primary_id, "device_id": receipt.device_id, "stream_id": receipt.stream_id, "data_epoch": receipt.data_epoch, "expected_generation": receipt.expected_generation})); }
-    else { println!("stream_id {} data_epoch {} generation {}", receipt.stream_id, receipt.data_epoch, receipt.expected_generation); }
-    Ok(())
 }
 
 pub fn sync_serve(ctx: &Ctx, bind: String, cert: Option<PathBuf>, key: Option<PathBuf>, primary_id: String, allow_lan: bool) -> Result<(), String> {

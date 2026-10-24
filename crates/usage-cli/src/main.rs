@@ -80,7 +80,7 @@ fn main() {
     if !matches!(
         command,
         Cmd::Detect | Cmd::Index { .. } | Cmd::Icons | Cmd::DiagnosticsStdio | Cmd::Import { .. } | Cmd::Export { .. }
-            | Cmd::Sync { action: SyncCmd::Status | SyncCmd::Run | SyncCmd::Stop | SyncCmd::Reset | SyncCmd::Invite { .. } | SyncCmd::Pair { .. } | SyncCmd::Approve { .. } | SyncCmd::OpenStream { .. } | SyncCmd::Serve { .. } }
+            | Cmd::Sync { action: SyncCmd::Status | SyncCmd::Run | SyncCmd::Stop | SyncCmd::Reset | SyncCmd::Invite { .. } | SyncCmd::Pair { .. } | SyncCmd::Approve { .. } | SyncCmd::Serve { .. } }
     ) {
         if let Err(msg) = ctx.prepare() {
             fail(&msg);
@@ -115,7 +115,6 @@ fn main() {
         Cmd::Sync { action: SyncCmd::Invite { endpoint, pin_sha256, certificate, server_name, expires_at_ms, primary_id } } => commands::sync_invite(&ctx, endpoint, pin_sha256, certificate, server_name, expires_at_ms, primary_id),
         Cmd::Sync { action: SyncCmd::Pair { invite, endpoint, server_name, trust_cert, pin_sha256, invite_id, invite_secret_hex, identity, origin, os } } => commands::sync_pair(&ctx, invite, endpoint, server_name, trust_cert, pin_sha256, invite_id, invite_secret_hex, identity, origin, os),
         Cmd::Sync { action: SyncCmd::Approve { request_id, primary_id } } => commands::sync_approve(&ctx, request_id, primary_id),
-        Cmd::Sync { action: SyncCmd::OpenStream { device_id, primary_id } } => commands::sync_open_stream(&ctx, device_id, primary_id),
         Cmd::Sync { action: SyncCmd::Serve { bind, cert, key, primary_id, allow_lan } } => commands::sync_serve(&ctx, bind, cert, key, primary_id, allow_lan),
         Cmd::Sync { action: SyncCmd::Upload { endpoint, server_name, trust_cert, pin_sha256, identity, origin, primary_id, stream_id, data_epoch, generation, days } } => commands::sync_upload(&mut ctx, endpoint, server_name, trust_cert, pin_sha256, identity, origin, primary_id, stream_id, data_epoch, generation, days),
     };

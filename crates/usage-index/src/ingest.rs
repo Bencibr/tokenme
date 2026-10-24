@@ -1,7 +1,7 @@
 //! The ingest pass: discover → diff against `file_state` → parallel read →
 //! one transaction per file.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,10 +10,7 @@ use chrono::{Local, NaiveDate, TimeZone};
 use rusqlite::{params, OptionalExtension, Transaction};
 use usage_core::{Call, DateFilter, ReadCursor, Result, SourceAdapter, SourceFile, UsageEvent, local_day_of, origin_of};
 
-use crate::{
-    call_kind_str, mark_sync_dirty, meter_str, now_ms, sql_err, sync_dirty_enabled,
-    persist_sync_event_identity, sync_event_identity, sync_occurrence_for_ingest, Index, INSERT_EVENT, ORIGIN_SQL,
-};
+use crate::{call_kind_str, meter_str, now_ms, sql_err, Index, INSERT_EVENT, ORIGIN_SQL};
 
 /// Nothing older than this stays in the index, which is also how far `rebuild`
 /// re-reads. `report`'s heatmap spans 742 days (two years — the year view's
@@ -790,9 +787,7 @@ fn persist(
         .conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(sql_err)?;
-    let sync_enabled = sync_dirty_enabled(&tx)?;
     let mut inserted = 0i64;
-    let mut occurrence_used = BTreeMap::<[u8; 32], BTreeSet<i64>>::new();
     {
         let mut ins_event = tx.prepare(INSERT_EVENT).map_err(sql_err)?;
         let mut sel_existing = tx
@@ -849,11 +844,6 @@ fn persist(
                 emitted
             };
             let c = &ev.counts;
-            let occurrence_id = if sync_enabled && ev.dedupe_key.as_deref().is_none_or(|key| key.is_empty()) {
-                Some(sync_occurrence_for_ingest(&tx, &key, ev, full_rescan, &mut occurrence_used, now_ms())?)
-            } else {
-                None
-            };
             let existing: Option<(i64, f64, f64, f64, f64, f64, f64, i64, String, String)> =
                 if let Some(dk) = ev.dedupe_key.as_deref() {
                     sel_existing
@@ -964,17 +954,7 @@ fn persist(
                     }
                     changed = true;
                 }
-                if sync_enabled {
-                    // A keyed row may have been indexed before the additive
-                    // identity table existed.  Reasserting the mapping is
-                    // cheap and lets a later paged export repair that row.
-                    persist_sync_event_identity(&tx, old_id, ev, occurrence_id.as_deref())?;
-                }
                 if changed {
-                    if sync_enabled {
-                        let dirty_identity = sync_event_identity(ev, occurrence_id.as_deref())?;
-                        mark_sync_dirty(&tx, sync_enabled, &dirty_identity, &key, occurrence_id.as_deref(), old_id, old_ts, now_ms())?;
-                    }
                 } else {
                     acc.deduped += 1;
                     *acc.deduped_by_tool.entry(tool.to_string()).or_default() += 1;
@@ -1012,24 +992,11 @@ fn persist(
             *acc.new_by_tool.entry(tool.to_string()).or_default() += 1;
             inserted += 1;
             let id = tx.last_insert_rowid();
-            if let Some(occurrence_id) = occurrence_id.as_deref() {
-                tx.execute(
-                    "INSERT INTO sync_event_occurrence(event_id, occurrence_id) VALUES(?1, ?2)",
-                    params![id, occurrence_id],
-                ).map_err(sql_err)?;
-            }
-            if sync_enabled {
-                persist_sync_event_identity(&tx, id, ev, occurrence_id.as_deref())?;
-            }
             insert_call_rows_tx(&tx, id, &ev.calls)?;
             if let Some(q) = ev.quota.as_ref() {
                 ins_quota
                     .execute(params![id, q.used_percent, q.window_minutes, q.resets_at_ms, q.label])
                     .map_err(sql_err)?;
-            }
-            if sync_enabled {
-                let dirty_identity = sync_event_identity(ev, occurrence_id.as_deref())?;
-                mark_sync_dirty(&tx, sync_enabled, &dirty_identity, &key, occurrence_id.as_deref(), id, ev.ts_ms, now_ms())?;
             }
             // Same transaction as the event row above: the rollup is a cache of
             // exactly these rows, and a crash may lose both or neither, never
@@ -1190,18 +1157,6 @@ impl Index {
         tx
             .execute(
                 "DELETE FROM quota WHERE event_id IN (SELECT id FROM event WHERE source = ?1)",
-                params![key],
-            )
-            .map_err(sql_err)?;
-        tx
-            .execute(
-                "DELETE FROM sync_event_occurrence WHERE event_id IN (SELECT id FROM event WHERE source = ?1)",
-                params![key],
-            )
-            .map_err(sql_err)?;
-        tx
-            .execute(
-                "DELETE FROM sync_event_identity WHERE event_id IN (SELECT id FROM event WHERE source = ?1)",
                 params![key],
             )
             .map_err(sql_err)?;

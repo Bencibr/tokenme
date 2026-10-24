@@ -2430,7 +2430,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{DeviceIdentity, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite, PROTOCOL_ID, SignedUpload, UploadEnvelope};
+    use crate::protocol::{DeviceIdentity, PairingInvite, SignedUpload};
     use crate::{DiagnosticsHost, DiagnosticsRequestAuth, PairingRequest, PrimarySyncConfig, SyncStore};
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::thread;
@@ -2488,17 +2488,13 @@ mod tests {
         }).collect()
     }
 
-    fn package(device: &DeviceIdentity) -> (SyncStore, SignedUpload) {
+    fn package(device: &DeviceIdentity) -> (SyncStore, Option<SignedUpload>) {
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         let invite = store.create_pairing_invite("https://localhost:47821", "2222222222222222222222222222222222222222222222222222222222222222", 100_000).unwrap();
         let pairing = PairingRequest::new(&invite, device, "linux").unwrap();
         let state = store.receive_pairing_request(&pairing, 1).unwrap();
         store.approve_pairing(&state.request_id, 2).unwrap();
-        let stream = store.open_stream(&device.device_id, &device.public_key(), 3).unwrap();
-        let row = NetworkRow { key: Some("k".into()), occurrence_id: None, tool: "codex".into(), ts_ms: 10, session: "s".into(), project: None, model: None, meter: "tokens".into(), source: "local".into(), counts: NetworkCounts::all_zero(), calls: vec![] };
-        let pkg = NetworkPackage::from_rows(device.origin.clone(), usage_index::INDEX_SCHEMA_VERSION, 0, 100, &[row], 4).unwrap();
-        let upload = SignedUpload::sign(UploadEnvelope { protocol_id: PROTOCOL_ID.into(), primary_id: "primary-1".into(), device_id: device.device_id.clone(), origin: device.origin.clone(), stream_id: stream.stream_id, data_epoch: 1, generation: 1, manifest_bytes: pkg.manifest_bytes, gzip_sha256: hash_bytes(&pkg.gzip_bytes) }, &device.signing_key, pkg.gzip_bytes).unwrap();
-        (store, upload)
+        (store, None)
     }
 
     #[test]

@@ -457,9 +457,6 @@ export interface SyncDevicesSnapshot {
   /** Secondary only: primary-data downlink completion. `null` until the
    *  primary shares its first page, `false` while the backfill runs. */
   download_complete: boolean | null;
-  pending: number;
-  in_flight: number;
-  pending_bytes: number;
   last_error: string | null;
   discovery_error: string | null;
   last_connected_at_ms: number | null;

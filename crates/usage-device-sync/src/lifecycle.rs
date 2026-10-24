@@ -30,7 +30,7 @@ pub fn deliver_disconnect_notice(config: &SecondarySyncConfig, now_ms: i64) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{hash_bytes, DeviceStatus, HttpsServerConfig, HttpsSyncServer, NetworkCounts, NetworkPackage, NetworkRow, PairingRequest, SyncStore};
+    use crate::{hash_bytes, DeviceStatus, HttpsServerConfig, HttpsSyncServer, PairingRequest, SyncStore};
     use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
     use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
     use std::thread::{self, JoinHandle};
@@ -98,16 +98,10 @@ mod tests {
         let path = dir.path().join("index.db");
         let mut secondary = SyncStore::open(&path, "primary-1").unwrap();
         secondary.save_secondary_config(&config, 1).unwrap();
-        let package = NetworkPackage::from_rows(&config.origin, usage_index::INDEX_SCHEMA_VERSION, 0, 100,
-            &[NetworkRow { key: Some("old-event".into()), occurrence_id: None, tool: "codex".into(), ts_ms: 5, session: "session".into(), project: None, model: None, meter: "tokens".into(), source: "fixture.jsonl".into(), counts: NetworkCounts::all_zero(), calls: vec![] }], 2).unwrap();
-        secondary.enqueue_outbox_auto(&identity.device_id, &identity.origin, "old-stream", 1,
-            package.manifest_bytes, package.gzip_bytes, &identity.signing_key, &[], 2).unwrap();
         let started = Instant::now();
         secondary.request_secondary_disconnect(3).unwrap();
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(secondary.secondary_config().unwrap().is_none());
-        assert_eq!(secondary.outbox_summary().unwrap().pending, 0);
-        assert_eq!(secondary.index().conn().query_row::<i64, _, _>("SELECT count(*) FROM device_sync_outbox WHERE state='retired'", [], |row| row.get(0)).unwrap(), 1);
         assert!(config.identity_path.is_file());
         secondary.request_secondary_disconnect(4).unwrap(); // repeat stop is idempotent
         drop(secondary);
@@ -123,32 +117,6 @@ mod tests {
         assert_eq!(SyncStore::read_disconnect_notices(&path, i64::MAX).unwrap().len(), 1, "switching roles must not erase a pending remote revoke");
         reopened.finish_disconnect_notice(&identity.device_id, 15_004, None).unwrap();
         assert!(SyncStore::read_disconnect_notices(&path, i64::MAX).unwrap().is_empty());
-    }
-
-    #[test]
-    fn pending_approval_rejection_expiry_and_cancellation_are_authenticated() {
-        let dir = test_dir();
-        let (identity, _, _) = fixture(dir.path());
-        let mut primary = SyncStore::open_in_memory("primary-1").unwrap();
-        let id = request(&mut primary, &identity, 10);
-        let status = AuthenticatedStatusRequest::new_at(&identity, "primary-1", false, 20).unwrap();
-        assert_eq!(primary.authenticated_status(&status, 20).unwrap().status, "pending");
-        assert!(primary.disconnect_device(&status, 20).is_err(), "a status request must not double as a disconnect notice");
-        let stranger = DeviceIdentity::create("fixture-host", "Stranger").unwrap();
-        let mut forged = AuthenticatedStatusRequest::new_disconnect_at(&stranger, "primary-1", 20).unwrap();
-        forged.device_id = identity.device_id.clone();
-        assert!(primary.authenticated_status(&forged, 20).is_err());
-        assert!(primary.disconnect_device(&forged, 20).is_err());
-        let disconnect = AuthenticatedStatusRequest::new_disconnect_at(&identity, "primary-1", 20).unwrap();
-        primary.disconnect_device(&disconnect, 20).unwrap();
-        assert!(primary.approve_pairing(&id, 21).is_err(), "cancelled requests cannot be approved later");
-        assert_eq!(primary.authenticated_status(&status, 21).unwrap().status, "rejected");
-        let disconnect = AuthenticatedStatusRequest::new_disconnect_at(&identity, "primary-1", 22).unwrap();
-        primary.disconnect_device(&disconnect, 22).unwrap();
-        let id = request(&mut primary, &identity, 30);
-        let expired = AuthenticatedStatusRequest::new_at(&identity, "primary-1", false, 60_030).unwrap();
-        assert_eq!(primary.authenticated_status(&expired, 60_030).unwrap().status, "expired");
-        assert!(primary.approve_pairing(&id, 60_030).is_err());
     }
 
     #[test]
@@ -211,49 +179,19 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_recovery_preserves_stream_progress_and_cannot_resurrect_a_stopped_binding() {
+    fn endpoint_recovery_updates_only_the_transport_and_cannot_resurrect_a_stopped_binding() {
         let dir = test_dir();
         let (_, config, _) = fixture(dir.path());
         let mut store = SyncStore::open_in_memory("primary-1").unwrap();
         store.save_secondary_config(&config, 1).unwrap();
-        store.update_secondary_stream(&crate::StreamOpenReceipt {
-            primary_id: config.primary_id.clone(), device_id: config.device_id.clone(), stream_id: "stream-1".into(), data_epoch: 1, expected_generation: 2,
-        }, 2).unwrap();
         assert!(store.update_secondary_endpoint(&config.device_id, &config.endpoint, "https://127.0.0.1:47825", 3).unwrap());
         let next = store.secondary_config().unwrap().unwrap();
-        assert_eq!(next.stream_id.as_deref(), Some("stream-1"));
-        assert_eq!(next.expected_generation, Some(2));
+        assert_eq!(next.endpoint, "https://127.0.0.1:47825");
         assert_eq!(next.certificate_pin, config.certificate_pin);
         assert!(!store.update_secondary_endpoint(&config.device_id, &config.endpoint, "https://127.0.0.1:47826", 4).unwrap());
         store.request_secondary_disconnect(5).unwrap();
         assert!(!store.update_secondary_endpoint(&config.device_id, &next.endpoint, "https://127.0.0.1:47826", 6).unwrap());
         assert!(store.secondary_config().unwrap().is_none());
-    }
-
-    #[test]
-    fn revocation_is_checked_before_retrying_an_immutable_pending_package() {
-        let dir = test_dir();
-        let (identity, mut config, key) = fixture(dir.path());
-        let mut primary = SyncStore::open_in_memory("primary-1").unwrap();
-        let now = usage_core::report::now_ms();
-        let request_id = request(&mut primary, &identity, now);
-        primary.approve_pairing(&request_id, now).unwrap();
-        let stream = primary.open_stream_for_registered(&identity.device_id, now).unwrap();
-        primary.revoke_device(&identity.device_id, now).unwrap();
-        let _server = serve(primary, &mut config, key, dir.path());
-        config.stream_id = Some(stream.stream_id.clone());
-        config.data_epoch = Some(stream.data_epoch);
-        config.expected_generation = Some(1);
-        let mut secondary = SyncStore::open_in_memory("primary-1").unwrap();
-        secondary.save_secondary_config(&config, now).unwrap();
-        let package = NetworkPackage::from_rows(&config.origin, usage_index::INDEX_SCHEMA_VERSION, 0, 100, &[], now).unwrap();
-        secondary.enqueue_outbox_auto(&identity.device_id, &identity.origin, &stream.stream_id, stream.data_epoch,
-            package.manifest_bytes, package.gzip_bytes, &identity.signing_key, &[], now).unwrap();
-        let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(&config.endpoint, &config.server_name, config.certificate_der.clone())).unwrap();
-        let mut runtime = crate::SyncRuntime::new_secondary(secondary, transport, crate::SyncRuntimeConfig::new("revoked-test").unwrap(), identity);
-        assert!(matches!(runtime.run_once_with_clock(|| now), Err(crate::SyncError::Revoked(_))));
-        assert!(!runtime.store().secondary_config().unwrap().unwrap().enabled);
-        assert_eq!(runtime.store().outbox_summary().unwrap().pending, 1, "a terminal auth error retains unacknowledged bytes");
     }
 
     #[test]

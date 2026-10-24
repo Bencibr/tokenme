@@ -56,7 +56,7 @@ fn setup_server_config(cert: &CertFixture, staging_dir: PathBuf, max_concurrent:
     }
 }
 
-fn pair_secondary(store: &mut SyncStore, device: &DeviceIdentity, _primary_id: &str) -> String {
+fn pair_secondary(store: &mut SyncStore, device: &DeviceIdentity, _primary_id: &str) {
     let invite = store
         .create_pairing_invite(
             "https://localhost:47821",
@@ -67,8 +67,6 @@ fn pair_secondary(store: &mut SyncStore, device: &DeviceIdentity, _primary_id: &
     let pairing = PairingRequest::new(&invite, device, "test-os").unwrap();
     let req = store.receive_pairing_request(&pairing, 1).unwrap();
     store.approve_pairing(&req.request_id, 2).unwrap();
-    let stream = store.open_stream(&device.device_id, &device.public_key(), 3).unwrap();
-    stream.stream_id
 }
 
 /// The rows a secondary ships: its local-origin aggregate, so each row's own
@@ -116,7 +114,7 @@ fn test_primary_secondary_ws_full_cycle() {
     let mut store = SyncStore::open_in_memory(primary_id).unwrap();
 
     let secondary = DeviceIdentity::create("sec-node-1", "macOS-Client").unwrap();
-    let _stream_id = pair_secondary(&mut store, &secondary, primary_id);
+    pair_secondary(&mut store, &secondary, primary_id);
 
     let config = setup_server_config(&cert, staging, 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
@@ -290,7 +288,7 @@ fn test_multi_secondary_concurrent_websocket_sync() {
 
     for i in 0..num_secondaries {
         let sec = DeviceIdentity::create(&format!("sec-node-{i}"), &format!("OS-{i}")).unwrap();
-        let _sid = pair_secondary(&mut store, &sec, primary_id);
+        pair_secondary(&mut store, &sec, primary_id);
         secondaries.push(sec);
     }
 
@@ -392,7 +390,7 @@ fn test_secondary_reconnect_and_sequential_batches() {
     let mut store = SyncStore::open_in_memory(primary_id).unwrap();
 
     let sec = DeviceIdentity::create("sec-persistent", "Desktop-Workstation").unwrap();
-    let _stream_id = pair_secondary(&mut store, &sec, primary_id);
+    pair_secondary(&mut store, &sec, primary_id);
 
     let config = setup_server_config(&cert, staging, 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
@@ -497,7 +495,7 @@ fn test_stale_sync_push_rejected_and_clean_recovery() {
     let mut store = SyncStore::open_in_memory(primary_id).unwrap();
 
     let sec = DeviceIdentity::create("sec-stale", "Stale-Device").unwrap();
-    let _stream_id = pair_secondary(&mut store, &sec, primary_id);
+    pair_secondary(&mut store, &sec, primary_id);
 
     let config = setup_server_config(&cert, staging, 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
@@ -588,7 +586,7 @@ fn test_repeated_rollup_sync_lands_rows_under_registry_origin() {
     let mut store = SyncStore::open(&index_path, primary_id).unwrap();
 
     let sec = DeviceIdentity::create("sec-replace", "Replace-Device").unwrap();
-    let _stream_id = pair_secondary(&mut store, &sec, primary_id);
+    pair_secondary(&mut store, &sec, primary_id);
 
     let config = setup_server_config(&cert, temp_dir.path().join("staging"), 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
@@ -675,7 +673,7 @@ fn test_secondary_disconnect_notifies_primary_and_halts_communication() {
 
     let id_path = temp_dir.path().join("sec_identity.json");
     let sec = DeviceIdentity::load_or_create(&id_path, "sec-disc", "Disconnect-Device").unwrap();
-    let stream_id = pair_secondary(&mut store, &sec, primary_id);
+    pair_secondary(&mut store, &sec, primary_id);
 
     let config = setup_server_config(&cert, temp_dir.path().join("staging"), 4);
     let server = HttpsSyncServer::bind(config, store).unwrap();
@@ -734,9 +732,9 @@ fn test_secondary_disconnect_notifies_primary_and_halts_communication() {
         device_id: sec.device_id.clone(),
         origin: sec.origin.clone(),
         identity_path: id_path,
-        stream_id: Some(stream_id.clone()),
-        data_epoch: Some(1),
-        expected_generation: Some(1),
+        stream_id: None,
+        data_epoch: None,
+        expected_generation: None,
         enabled: true,
         capture_enabled: true,
         last_error: None,
