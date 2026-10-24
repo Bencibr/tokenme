@@ -2555,6 +2555,35 @@ impl Index {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
     }
 
+    /// Per-session token totals folded from `event_rollup` — the same shape
+    /// as [`Self::tool_session_totals`] at ~2k rollup rows instead of the
+    /// full event table. Semantics mirror `tool_events`/`tool_session_totals`:
+    /// no origin filter, so merged remote rows of the same tool count too,
+    /// exactly as the event-scan version did.
+    pub fn tool_session_totals_from_rollup(&self, tool: &str) -> Result<Vec<ToolSessionTotals>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session, IFNULL(sum(in_tok), 0), IFNULL(sum(cc_tok), 0), \
+                        IFNULL(sum(cr_tok), 0), IFNULL(sum(out_tok), 0), sum(n) \
+                 FROM event_rollup WHERE tool = ?1 GROUP BY session ORDER BY session",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![tool], |r| {
+                Ok(ToolSessionTotals {
+                    session: r.get(0)?,
+                    input: r.get(1)?,
+                    cache_creation: r.get(2)?,
+                    cache_read: r.get(3)?,
+                    output: r.get(4)?,
+                    events: r.get::<_, i64>(5)?.max(0) as u64,
+                })
+            })
+            .map_err(sql_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
+    }
+
     /// Per-session token totals for one tool, ordered by session. `IFNULL`
     /// matches `fetch`: a sum over all-NULL columns is 0, not NULL.
     pub fn tool_session_totals(&self, tool: &str) -> Result<Vec<ToolSessionTotals>> {
