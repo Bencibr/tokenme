@@ -17,13 +17,13 @@ for ARCH in x86_64 aarch64; do
     echo "==> $TAR missing; building it"
     ./scripts/build-linux.sh "$ARCH"
   fi
-  TMP=$(mktemp -d)
-  trap 'rm -rf "$TMP"' EXIT
-  tar -xzf "$TAR" -C "$TMP"
-  BIN=$(find "$TMP" -type f -name tokenme | head -1)
+  STAGE=$(mktemp -d)
+  trap 'rm -rf "$STAGE"' EXIT
+  tar -xzf "$TAR" -C "$STAGE"
+  BIN=$(find "$STAGE" -type f -name tokenme | head -1)
   [[ -n "$BIN" ]] || { echo "no tokenme binary inside $TAR" >&2; exit 1; }
   install -m 0755 "$BIN" "$OUT/tokenme-$ARCH"
-  rm -rf "$TMP"
+  rm -rf "$STAGE"
   trap - EXIT
   echo "bundled: $OUT/tokenme-$ARCH ($(du -h "$OUT/tokenme-$ARCH" | cut -f1))"
 done
