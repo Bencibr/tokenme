@@ -1929,21 +1929,22 @@ fn rotate_index_sync_state_tx(tx: &Transaction<'_>, now_ms: i64) -> SyncResult<(
     // Only the lease survives the row-era cleanup; the conflict/recovery
     // tables were dropped with it, so there is nothing else to clear.
     tx.execute("DELETE FROM device_sync_scheduler_lease", []).map_err(sql_err)?;
-    const DOWNLOAD_KEY_PREFIX: &str = "device-sync:v1:%";
+    const DOWNLOAD_KEY_LO: &str = "device-sync:v1:";
+    const DOWNLOAD_KEY_HI: &str = "device-sync:v1;";
     let doomed_ts: Vec<i64> = {
         let mut stmt = tx.prepare(&format!(
-            "SELECT ts_ms FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}'"
+            "SELECT ts_ms FROM event WHERE dedupe_key >= '{DOWNLOAD_KEY_LO}' AND dedupe_key < '{DOWNLOAD_KEY_HI}'"
         )).map_err(sql_err)?;
         let rows = stmt.query_map([], |row| row.get(0)).map_err(sql_err)?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?
     };
     if !doomed_ts.is_empty() {
         tx.execute(
-            &format!("DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}')"),
+            &format!("DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE dedupe_key >= '{DOWNLOAD_KEY_LO}' AND dedupe_key < '{DOWNLOAD_KEY_HI}')"),
             [],
         ).map_err(sql_err)?;
         tx.execute(
-            &format!("DELETE FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}'"),
+            &format!("DELETE FROM event WHERE dedupe_key >= '{DOWNLOAD_KEY_LO}' AND dedupe_key < '{DOWNLOAD_KEY_HI}'"),
             [],
         ).map_err(sql_err)?;
         usage_index::recompute_network_days(tx, &doomed_ts).map_err(SyncError::from)?;
