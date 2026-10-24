@@ -1040,14 +1040,23 @@ impl SyncStore {
     ) -> SyncResult<()> {
         validate_identifier("origin_label", origin_label)?;
         self.index.with_network_transaction(|tx| {
+            // Per-LABEL gate: the label is the primary's live hostname, and
+            // hostnames change — a gate keyed once globally would skip the
+            // row-era retirement whenever the label differs from the pinned
+            // export origin the old downloads merged under, leaving those
+            // rows to double count beside the snapshot.
             let migrated: Option<String> = tx
                 .query_row(
-                    "SELECT value FROM meta WHERE key = 'device_sync_rollup_migrated'",
-                    [], |row| row.get(0),
+                    "SELECT value FROM meta WHERE key = ?1",
+                    params![format!("device_sync_rollup_migrated:{origin_label}")],
+                    |row| row.get(0),
                 )
                 .optional().map_err(sql_err)?;
             if migrated.is_none() {
-                // One-time retirement of the row-level download era.
+                // One-time retirement of the row-level download era, for this
+                // label: the old downloads merged under the pinned export
+                // origin, which equals this label whenever the label is the
+                // one this device has been syncing under.
                 tx.execute(
                     &format!(
                         "DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE ({ORIGIN_SQL}) = ?1)"
@@ -1062,12 +1071,28 @@ impl SyncStore {
                     "DELETE FROM event_rollup WHERE origin = ?1",
                     params![origin_label],
                 ).map_err(sql_err)?;
+                // A renamed primary leaves its old label's snapshot rows
+                // behind; this device pairs exactly one primary, so any other
+                // label's rows are stale by definition.
                 tx.execute(
-                    "INSERT INTO meta(key, value) VALUES('device_sync_rollup_migrated', ?1)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    "DELETE FROM remote_rollup WHERE origin != ?1",
                     params![origin_label],
                 ).map_err(sql_err)?;
+                tx.execute(
+                    "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![format!("device_sync_rollup_migrated:{origin_label}"), origin_label],
+                ).map_err(sql_err)?;
             }
+            // The 分家 detach reads this label (`read_detached_origins`): a
+            // self-disabled or disconnected pairing detaches it from the
+            // figures. The downlink era recorded it from merged event rows;
+            // the rollup era has no rows to scan, so the apply is the writer.
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES('device_sync_downlink_origin', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![origin_label],
+            ).map_err(sql_err)?;
             tx.execute("DELETE FROM remote_rollup WHERE origin = ?1", params![origin_label]).map_err(sql_err)?;
             for row in rows {
                 tx.execute(
@@ -1445,6 +1470,25 @@ impl SyncStore {
                 params![error, now_ms, self.primary_id],
             ).map_err(sql_err)?;
             Ok(())
+        })
+    }
+
+    /// The primary acknowledged this device's last rollup push: stamp it in
+    /// the SECONDARY's own index so `upload_cursor_complete_conn` can answer
+    /// truthfully on the next panel poll. The primary's copy of the same key
+    /// lives in its index and means the same thing from its side.
+    pub fn mark_uplink_rollup_acked(&mut self, at_ms: i64) -> SyncResult<()> {
+        let device_id = self
+            .secondary_config()?
+            .ok_or_else(|| SyncError::NotPaired("rollup ack requires a paired secondary".into()))?
+            .device_id;
+        self.index.with_network_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![format!("{UPLINK_ROLLUP_ACKED_PREFIX}{device_id}"), at_ms.to_string()],
+            ).map_err(sql_err)?;
+            Ok::<_, SyncError>(())
         })
     }
 
@@ -2001,7 +2045,19 @@ fn index_schema_complete(conn: &Connection) -> bool {
         ),
         [], |row| row.get(0),
     ) { tables = value; }
-    tables == DEVICE_INDEX_TABLES.len() as i64
+    if tables != DEVICE_INDEX_TABLES.len() as i64 { return false; }
+    // A pre-wave-3 database already has every kept table, so the count above
+    // alone would take the fast path and the row-era DROP batch would never
+    // run on it. Complete means: kept tables present AND dead tables gone.
+    let dead: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN (
+             'device_stream', 'device_receipt', 'device_package_marker',
+             'device_package_tombstone', 'device_highwater', 'device_sync_outbox',
+             'device_sync_outbox_sequence', 'device_sync_journal', 'device_sync_snapshot_cursor'
+         )",
+        [], |row| row.get(0),
+    ).unwrap_or(1);
+    dead == 0
 }
 
 /// The one upsert behind `save_primary_config` and its state-only static

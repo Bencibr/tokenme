@@ -308,6 +308,12 @@ fn process_server_frame(
             // import did.
             match store.ws_device_status(device_id) {
                 Ok(Some(status)) if status == "paired" => {}
+                // The registry status word must ride the refusal: the
+                // secondary's taxonomy maps "paused" onto the recoverable
+                // arm, while a generic "not authorized" reads as revoked.
+                Ok(Some(status)) => return Ok((Some(WsSyncFrame::Error {
+                    message: format!("device is not authorized to upload: registry status is {status}"),
+                }), None)),
                 Ok(_) => return Ok((Some(WsSyncFrame::Error {
                     message: "device is not authorized to upload".into(),
                 }), None)),

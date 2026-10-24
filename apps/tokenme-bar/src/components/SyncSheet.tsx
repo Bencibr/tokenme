@@ -350,7 +350,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   }, [pickedRole, snapshot.role, snapshot.service_running]);
 
   useEffect(() => {
-    if (snapshot.role !== "secondary" || !snapshot.service_running || snapshot.stream_id) {
+    if (snapshot.role !== "secondary" || !snapshot.service_running || snapshot.stream_id || snapshot.upload_complete === true) {
       setSecondaryConnectingElapsed(false);
       return;
     }
@@ -369,7 +369,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // approved but unreachable, and the error box plus the recovering state tell
   // that story instead of a stale waiting banner.
   const awaitingApprovalError = snapshot.last_error?.toLowerCase().includes("awaiting approval") ?? false;
-  const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id && (awaitingApprovalError || (!snapshot.last_error && secondaryConnectingElapsed));
+  const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id && snapshot.upload_complete !== true && (awaitingApprovalError || (!snapshot.last_error && secondaryConnectingElapsed));
   const secondaryServiceMayChange = snapshot.role === "secondary" && snapshot.service_running;
   const primaryDeviceStateMayChange = snapshot.role === "primary" && snapshot.devices.some((device) => device.role === "secondary" && device.status === "paired");
   // The fast-accepted start leaves role empty until the worker finishes, but
@@ -470,12 +470,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // to the role-selection cards while that banner is the whole point.
   useEffect(() => {
     if (screen !== "waiting") return;
-    if (snapshot.stream_id) { setScreen("overview"); return; }
+    if (snapshot.stream_id || snapshot.upload_complete === true) { setScreen("overview"); return; }
     if (rejectedByPrimary) {
       rejectedScanReturn.current = true;
       setScreen("discovery");
     }
-  }, [screen, snapshot.stream_id, rejectedByPrimary]);
+  }, [screen, snapshot.stream_id, snapshot.upload_complete, rejectedByPrimary]);
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {

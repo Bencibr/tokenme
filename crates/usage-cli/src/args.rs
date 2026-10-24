@@ -209,15 +209,15 @@ pub enum SyncCmd {
     /// Show registered devices and pending pairing requests without writing.
     Status,
 
-    /// Run the paired secondary outbox/snapshot runtime in the foreground.
+    /// Run the paired secondary rollup-sync runtime in the foreground.
     Run,
 
     /// Stop the user-level secondary runtime through its private local control channel.
     Stop,
 
-    /// Forget this secondary's stream, outbox and ACK checkpoints, then recover
-    /// a fresh stream and re-sync from scratch. Local usage history and the
-    /// pairing are kept. Stop the resident runtime first.
+    /// Forget this secondary's rollup sync progress, then re-sync from
+    /// scratch. Local usage history and the pairing are kept. Stop the
+    /// resident runtime first.
     Reset,
 
     /// Create a one-time invite on the primary.

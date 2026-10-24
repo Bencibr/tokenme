@@ -481,6 +481,11 @@ impl SyncRuntime {
         // still reaches the cut-off path through `remember_secondary_error`.
         match self.transport.ws_rollup_sync(&rows) {
             Ok(_origin) => {
+                // The ack stamp is a PERSISTENT write that can lose the
+                // ingest engine's lock race; it must land before the
+                // in-memory fingerprint latches, or a lost race skips every
+                // future push and the stamp never lands at all.
+                self.store.mark_uplink_rollup_acked(now_ms)?;
                 self.last_upload_fingerprint = Some(fingerprint);
                 self.last_upload_pushed_at = Some(now_ms);
                 self.last_session_activity_ms = now_ms;
@@ -851,6 +856,11 @@ mod tests {
         );
         let report = runtime.run_once_with_clock(|| first_now).unwrap();
         assert_eq!(report.uploaded, 5, "the first pass pushes the whole local snapshot");
+        let stamped: i64 = runtime.store().index().conn().query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key LIKE 'device_sync_uplink_rollup_acked_at_ms:%')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stamped, 1, "the ack stamp must persist for the panel");
         assert!(report.bytes > 0, "the pushed snapshot's payload counts into the pass report");
         assert_eq!(remote(&primary_admin), (5, 15.0), "the primary stored the snapshot under the device origin");
         assert!(runtime.last_upload_fingerprint.is_some(), "the delivered push left its fingerprint behind");
