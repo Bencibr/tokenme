@@ -319,10 +319,14 @@ fn pass<'a>(
     if clear_first {
         idx.clear_local_for_rebuild()?;
     }
+    // One snapshot of `file_state` for the whole pass, read before any adapter
+    // runs: every adapter diffs against the same pre-pass state, and the query
+    // is paid once instead of once per tool.
+    let stored = stored_state(idx)?;
     for adapter in adapters {
         // One broken adapter must degrade to "that tool is missing this pass",
-        // never to a failed report for everything else.
-        if let Err(e) = one_adapter(idx, adapter, filter, &mut acc, hints) {
+        // never to a failed pass report for everything else.
+        if let Err(e) = one_adapter(idx, adapter, filter, &mut acc, hints, &stored) {
             acc.errors.push(format!("{}: {e}", adapter.id()));
         }
     }
@@ -429,6 +433,7 @@ fn one_adapter(
     filter: &DateFilter,
     acc: &mut Acc,
     hints: &DiscoverHint<'_>,
+    stored: &BTreeMap<String, Stored>,
 ) -> Result<()> {
     let tool = adapter.id();
     // The one declaration the pass cannot read off an event: whether an emitted
@@ -448,7 +453,6 @@ fn one_adapter(
             }
         },
     };
-    let stored = stored_state(idx)?;
 
     let mut jobs: Vec<Job> = Vec::new();
     for file in files {
