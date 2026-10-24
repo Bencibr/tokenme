@@ -467,16 +467,13 @@ pub fn send_test() {
 /// must reach the owner even with quota alerts muted.
 pub fn post_pairing_request(device_name: &str, auto_approved: bool) {
     let zh = crate::lang::get() == crate::lang::Lang::Zh;
-    let title = if zh { "TokenMe 设备同步" } else { "TokenMe device sync" };
     let body = match (zh, auto_approved) {
         (true, true) => format!("「{device_name}」已免认证接入，同步开始。"),
         (true, false) => format!("「{device_name}」请求接入，请打开同步面板确认。"),
         (false, true) => format!("\"{device_name}\" was auto-approved — sync has started."),
         (false, false) => format!("\"{device_name}\" wants to pair — approve it in the sync panel."),
     };
-    if let Err(e) = post(title, &body) {
-        crate::logging::error(&format!("notify: pairing toast failed — {e}"));
-    }
+    post_sync(zh, body, "pairing toast failed");
 }
 
 /// The primary cut this device off (learned from a status poll): the panel
@@ -484,7 +481,6 @@ pub fn post_pairing_request(device_name: &str, auto_approved: bool) {
 /// tag ("revoked" / "security" / "rejected").
 pub fn post_cut_off(reason: &str) {
     let zh = crate::lang::get() == crate::lang::Lang::Zh;
-    let title = if zh { "TokenMe 设备同步" } else { "TokenMe device sync" };
     let body = match (zh, reason) {
         (true, "revoked") => "主端已移除本设备的同步授权，同步已停止。可重新扫描配对恢复。".to_string(),
         (true, "security") => "同步因安全校验失败而停止。请重新扫描配对。".to_string(),
@@ -493,23 +489,28 @@ pub fn post_cut_off(reason: &str) {
         (false, "security") => "Sync stopped on a security verification failure. Re-pair to restore.".to_string(),
         (false, _) => "The primary rejected the pairing request — sync was not established.".to_string(),
     };
-    if let Err(e) = post(title, &body) {
-        crate::logging::error(&format!("notify: cut-off toast failed — {e}"));
-    }
+    post_sync(zh, body, "cut-off toast failed");
 }
 
 /// A paired secondary explicitly disconnected: the primary's list is about to
 /// refresh; toast the owner so the departure is not silent.
 pub fn post_secondary_left(device_name: &str) {
     let zh = crate::lang::get() == crate::lang::Lang::Zh;
-    let title = if zh { "TokenMe 设备同步" } else { "TokenMe device sync" };
     let body = if zh {
         format!("「{device_name}」已断开同步连接。")
     } else {
         format!("\"{device_name}\" has disconnected from sync.")
     };
+    post_sync(zh, body, "secondary-left toast failed");
+}
+
+/// The one sender behind every device-sync toast: the fixed bilingual title
+/// and the failure log lived in three copies that had already drifted in
+/// their error tags.
+fn post_sync(zh: bool, body: String, failure_tag: &str) {
+    let title = if zh { "TokenMe 设备同步" } else { "TokenMe device sync" };
     if let Err(e) = post(title, &body) {
-        crate::logging::error(&format!("notify: secondary-left toast failed — {e}"));
+        crate::logging::error(&format!("notify: {failure_tag} — {e}"));
     }
 }
 
