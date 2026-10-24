@@ -125,9 +125,15 @@ pub fn bundle_dirs() -> Vec<PathBuf> {
 
 /// `tool id → data:image/png;base64,…`, only for tools whose icon could be read.
 pub fn icon_data_urls() -> BTreeMap<String, String> {
-    let mut out = icons_from(&bundle_dirs(), APP_BUNDLES);
-    insert_bundled(&mut out, BUNDLED_ICONS);
-    out
+    // Installed-app icons cannot change while this process runs, and the
+    // extraction (read every bundle's .icns, decode, re-encode, base64) is
+    // real work per panel open. Cache the first answer for the process.
+    static CACHE: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut out = icons_from(&bundle_dirs(), APP_BUNDLES);
+        insert_bundled(&mut out, BUNDLED_ICONS);
+        out
+    }).clone()
 }
 
 /// Fills the shipped icons in, but never over pixels a real bundle produced.
