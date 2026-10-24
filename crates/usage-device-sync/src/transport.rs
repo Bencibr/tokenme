@@ -3332,7 +3332,16 @@ mod tests {
         let device = DeviceIdentity::create("lan-linux", "Linux").unwrap();
         let (store, _) = package(&device);
         let mut config = server_config(&cert);
-        config.bind_addr = "0.0.0.0:0".parse().unwrap();
+        // Windows Defender throws its allow-this-app firewall prompt at every
+        // freshly compiled test binary that listens off-loopback — one prompt
+        // per cargo hash exe (usage_device_sync-<hash>.exe) on each rebuild.
+        // The off-loopback bind gate is covered above; on Windows the TLS
+        // round trip runs on loopback, elsewhere it keeps the 0.0.0.0 bind.
+        #[cfg(windows)]
+        let bind: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        #[cfg(not(windows))]
+        let bind: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+        config.bind_addr = bind;
         config.allow_lan = true;
         let server = HttpsSyncServer::bind(config, store).unwrap();
         let addr = server.local_addr().unwrap();
