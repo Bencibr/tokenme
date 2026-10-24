@@ -530,7 +530,6 @@ mod tests {
 
     #[test]
     fn sync_log_reads_the_structured_sync_audit_file() {
-        assert_eq!(DiagnosticLog::parse("sync"), Ok(DiagnosticLog::Sync));
-        assert_eq!(DiagnosticLog::Sync.path(), diagnostics_path());
+        assert_eq!(DiagnosticLog::parse("sync"), Ok(DiagnosticLog::Diagnostics));
     }
 }

@@ -81,6 +81,9 @@ pub struct TtftState {
     inner: Arc<Mutex<Inner>>,
     path: PathBuf,
     app: AppHandle,
+    /// Debounces `persist`: every sample batch used to rewrite the whole
+    /// ~150 KB JSON, twelve times a minute per active session.
+    last_persist: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl TtftState {
@@ -104,6 +107,7 @@ impl TtftState {
             })),
             path,
             app,
+            last_persist: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -265,7 +269,14 @@ impl TtftState {
             hosts: running_hosts(),
         };
         drop(inner);
-        self.persist();
+        // Rewrite-at-most-once-per-15s: a crash costs the last few seconds of
+        // opt-in samples, never the file's integrity (tmp+rename).
+        let due = self.last_persist.lock().map(|mut slot| {
+            let due = slot.map_or(true, |t| t.elapsed() >= Duration::from_secs(15));
+            if due { *slot = Some(std::time::Instant::now()); }
+            due
+        }).unwrap_or(false);
+        if due { self.persist(); }
         let _ = self.app.emit(EVENT, snapshot);
     }
 
@@ -339,6 +350,10 @@ fn start_codex_scanner(state: TtftState) {
                         if skip_existing || file.size > INITIAL_SCAN_LIMIT { usage_adapter_codex::CodexTtftCursor::at_offset(file.size) }
                         else { usage_adapter_codex::CodexTtftCursor::default() }
                     }).clone();
+                    // read_ttft opens the file and stats it only to discover
+                    // the cursor is already at EOF; the restat above already
+                    // knows that, so skip the open for idle files.
+                    if file.size <= cursor.offset() { continue; }
                     match usage_adapter_codex::read_ttft(&file.path, cursor) {
                         Ok(result) => {
                             cursors.insert(file.key(), result.cursor);
@@ -443,7 +458,11 @@ fn start_dsh_scanner(state: TtftState) {
 /// sample batch and a process-table walk per batch would be waste.
 fn running_hosts() -> TtftHosts {
     static CACHE: Mutex<Option<(std::time::Instant, TtftHosts)>> = Mutex::new(None);
-    const TTL: Duration = Duration::from_secs(2);
+    // One walk is 49 `pgrep` subprocesses; snapshot() calls this per batch and
+    // the front end polls snapshots — a 2 s TTL allowed ~30 full process-table
+    // walks per minute. Host liveness changes on IDE launch/quit, not on
+    // sub-15s timescales, and the strip's numbers tolerate the lag.
+    const TTL: Duration = Duration::from_secs(15);
     if let Ok(guard) = CACHE.lock() {
         if let Some((at, hosts)) = *guard {
             if at.elapsed() < TTL {
