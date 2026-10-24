@@ -5651,6 +5651,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "httparse",
+ "if-addrs 0.13.4",
  "mac-usernotifications",
  "mdns-sd",
  "notify-rust",

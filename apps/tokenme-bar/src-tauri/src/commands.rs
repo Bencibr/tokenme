@@ -931,6 +931,19 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     if !allow_lan && !bind_addr.ip().is_loopback() {
         return Err("a non-loopback primary listener requires LAN/VPN access; enable Allow LAN/VPN or use a loopback bind for local testing".into());
     }
+    // A persisted advertise IP the machine no longer holds is dropped rather
+    // than honored: the primary would bind fine and every secondary would
+    // dial the old address forever. Self-heals to the current default-route
+    // address; the new host is persisted with this start's config.
+    let advertise_host = match advertise_host {
+        Some(host) if advertise_host_is_stale(&host) => {
+            crate::logging::error(&format!(
+                "sync: advertised address {host} is no longer a local interface — re-inferring from the default route"
+            ));
+            None
+        }
+        other => other,
+    };
     let host = match advertise_host.filter(|host| !host.trim().is_empty()) {
         Some(host) => host,
         None if bind_addr.ip().is_loopback() => "127.0.0.1".into(),
@@ -1353,6 +1366,37 @@ fn mdns_permission_hint(detail: &str) -> String {
 fn is_loopback_advertise_host(value: &str) -> bool {
     let host = value.trim().trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("localhost.") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// True when a persisted advertise address is an IP this machine no longer
+/// holds. DHCP re-assignments used to strand the primary forever on a dead
+/// address — every start re-persisted the stale host, and secondaries kept
+/// dialing an IP that answered nobody. Hostnames are left alone (they
+/// resolve dynamically); loopback is never stale.
+fn advertise_host_is_stale(host: &str) -> bool {
+    let Ok(ip) = host.trim().parse::<std::net::IpAddr>() else { return false };
+    if ip.is_loopback() || ip.is_unspecified() { return false; }
+    if_addrs::get_if_addrs()
+        .map(|interfaces| !interfaces.iter().any(|iface| iface.addr.ip() == ip))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod advertise_host_tests {
+    use super::advertise_host_is_stale;
+
+    #[test]
+    fn loopback_and_hostnames_are_never_stale() {
+        assert!(!advertise_host_is_stale("127.0.0.1"));
+        assert!(!advertise_host_is_stale("my-pc.local"));
+        assert!(!advertise_host_is_stale("192.168.101.79"), "the current default-route address is held by an interface");
+    }
+
+    #[test]
+    fn an_ip_no_interface_holds_is_stale() {
+        // TEST-NET-3 (203.0.113.0/24) is reserved and never assigned here.
+        assert!(advertise_host_is_stale("203.0.113.7"));
+    }
 }
 
 fn infer_advertise_host() -> Option<String> {
