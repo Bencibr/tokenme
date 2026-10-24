@@ -42,7 +42,7 @@ use sha2::{Digest, Sha256};
 
 use usage_core::{origin_ok, Error, Result, SyncRecord};
 
-use crate::{call_kind_of, call_kind_str, now_ms, sql_err, Index, ORIGIN_SQL};
+use crate::{now_ms, sql_err, Index, ORIGIN_SQL};
 
 /// The bundle format version. A reader that does not know this exact string
 /// refuses the file — a mismatched JSONL shape must fail loud, never half-merge.
@@ -813,8 +813,11 @@ impl Index {
                 let calls: Vec<ExportCall> = serde_json::from_str(&calls_json)
                     .map_err(|e| Error::Sync(format!("bad calls payload: {e}")))?;
                 for c in calls {
+                    // `c.kind` was validated to "mcp"/"skill" above; routing it
+                    // through the enum just to print the same string back is
+                    // ceremony, not safety.
                     calls_added += ins
-                        .execute(params![id, call_kind_str(call_kind_of(&c.kind)), c.name])
+                        .execute(params![id, c.kind, c.name])
                         .map_err(sql_err)? as u64;
                 }
             }

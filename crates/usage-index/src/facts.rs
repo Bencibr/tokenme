@@ -163,6 +163,13 @@ fn opt_of(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+/// The shared cycle-tokens filter: the two `sum_tokens*` queries must stay
+/// byte-identical in their WHERE clauses or the per-model rows can disagree
+/// with the total they are supposed to sum to.
+const CYCLE_TOKENS_WHERE: &str = "tool = ?1 AND source NOT LIKE 'linux:%' AND meter = 'tokens' \
+ AND ts_ms >= ?2 AND ts_ms < ?3 \
+ AND (?4 IS NULL OR lower(COALESCE(model, '')) LIKE '%' || lower(?4) || '%')";
+
 impl Index {
     /// Attach local token accounting to the live quota rows. The event table is
     /// indexed by `(tool, ts_ms)`, so bounded sums stay cheap and do not require
@@ -223,34 +230,17 @@ impl Index {
                 let effective = state.meter.clone().unwrap_or_else(|| {
                     if trusted { "confirmed".to_string() } else if unverified { "unverified".to_string() } else { "unknown".to_string() }
                 });
+                // The stale branch replays the cached state through the same
+                // gates the live branch computes; the helpers below keep the
+                // two matches from drifting (they once showed different
+                // statuses for the same window).
                 let estimated_tokens = if state.period_end_ms > state.last_sampled_at_ms {
-                    match effective.as_str() {
-                        // data-proven: the reconciliation itself vouches for the meter
-                        "confirmed" if state.meter.is_some() => estimate_cycle_tokens(state.observed_tokens, state.last_used_percent),
-                        // hand-verified seed: the older, stricter terms
-                        "confirmed" if state.identity != "unknown" && state.last_used_percent >= 1.0 => estimate_cycle_tokens(state.observed_tokens, state.last_used_percent),
-                        // assumed: the caveat rides along, the gates stay lenient
-                        "unverified" => estimate_cycle_tokens(state.observed_tokens, state.last_used_percent),
-                        _ => None,
-                    }
+                    cycle_estimate_for(&effective, state.meter.is_some(), state.identity != "unknown", state.last_used_percent, state.observed_tokens, true)
                 } else {
                     None
                 };
-                let status = match effective.as_str() {
-                    "unverified" => CycleStatus::Unverified,
-                    "incompatible" | "unknown" => CycleStatus::Unavailable,
-                    _ if state.complete => CycleStatus::Complete,
-                    _ if state.period_end_ms > state.last_sampled_at_ms => CycleStatus::Partial,
-                    _ => CycleStatus::Collecting,
-                };
-                let models = if matches!(effective.as_str(), "confirmed" | "unverified") {
-                    self.sum_tokens_by_model(&q.tool, state.period_start_ms, observed_until, model_family_hint(q.label.as_deref()))?
-                    .into_iter()
-                    .map(|(model, tokens)| CycleModelUsage { model, tokens })
-                    .collect()
-                } else {
-                    Vec::new()
-                };
+                let status = cycle_status_for(&effective, state.complete, state.period_end_ms > state.last_sampled_at_ms);
+                let models = self.cycle_models_for(&effective, &q.tool, state.period_start_ms, observed_until, q.label.as_deref())?;
                 q.cycle = Some(CycleUsage {
                     observed_tokens: state.observed_tokens,
                     estimated_tokens,
@@ -344,26 +334,11 @@ impl Index {
                 if trusted { "confirmed".to_string() } else if unverified_seed { "unverified".to_string() } else { "unknown".to_string() }
             });
             let estimated_tokens = if known_boundary && !account_changed && observed_tokens > 0.0 {
-                let allowed = match effective.as_str() {
-                    // data-proven: the reconciliation itself vouches for the meter
-                    "confirmed" if meter.is_some() => q.used_percent >= 0.1,
-                    // hand-verified seed: the older, stricter terms
-                    "confirmed" => identity != "unknown" && q.used_percent >= 1.0,
-                    // assumed: the caveat rides along, the gates stay lenient
-                    "unverified" => q.used_percent >= 0.1,
-                    _ => false,
-                };
-                allowed.then(|| estimate_cycle_tokens(observed_tokens, q.used_percent)).flatten()
+                cycle_estimate_for(&effective, meter.is_some(), identity != "unknown", q.used_percent, observed_tokens, false)
             } else {
                 None
             };
-            let status = match effective.as_str() {
-                "unverified" => CycleStatus::Unverified,
-                "incompatible" | "unknown" => CycleStatus::Unavailable,
-                _ if complete => CycleStatus::Complete,
-                _ if q.resets_at_ms > observed_until => CycleStatus::Partial,
-                _ => CycleStatus::Collecting,
-            };
+            let status = cycle_status_for(&effective, complete, q.resets_at_ms > observed_until);
             let state = CycleState {
                 identity: effective_identity.to_string(),
                 period_start_ms: start,
@@ -383,14 +358,7 @@ impl Index {
                     params![key, serde_json::to_string(&state).map_err(|e| usage_core::Error::Sqlite(e.to_string()))?],
                 )
                 .map_err(sql_err)?;
-            let models = if matches!(effective.as_str(), "confirmed" | "unverified") {
-                self.sum_tokens_by_model(&q.tool, start, observed_until, model_family_hint(q.label.as_deref()))?
-                .into_iter()
-                .map(|(model, tokens)| CycleModelUsage { model, tokens })
-                .collect()
-            } else {
-                Vec::new()
-            };
+            let models = self.cycle_models_for(&effective, &q.tool, start, observed_until, q.label.as_deref())?;
             q.cycle = Some(CycleUsage {
                 observed_tokens,
                 estimated_tokens,
@@ -406,6 +374,25 @@ impl Index {
         Ok(())
     }
 
+    /// The per-model breakdown for a cycle row, gated the same way in both
+    /// the live and the stale branch.
+    fn cycle_models_for(
+        &self,
+        effective: &str,
+        tool: &str,
+        start_ms: i64,
+        end_ms: i64,
+        label: Option<&str>,
+    ) -> Result<Vec<CycleModelUsage>> {
+        if !matches!(effective, "confirmed" | "unverified") {
+            return Ok(Vec::new());
+        }
+        Ok(self.sum_tokens_by_model(tool, start_ms, end_ms, model_family_hint(label))?
+            .into_iter()
+            .map(|(model, tokens)| CycleModelUsage { model, tokens })
+            .collect())
+    }
+
     /// The same meter and machine scope as [`Self::sum_tokens`], grouped by the
     /// event's model id, heaviest first. Family-hinted rows (Claude's
     /// Sonnet/Opus buckets) filter like `sum_tokens` so the breakdown sums to
@@ -417,14 +404,12 @@ impl Index {
         end_ms: i64,
         model_family: Option<&str>,
     ) -> Result<Vec<(String, f64)>> {
-        let mut stmt = self.conn.prepare_cached(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT COALESCE(NULLIF(model, ''), 'unknown') AS m, \
              COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) \
-             FROM event WHERE tool = ?1 AND source NOT LIKE 'linux:%' AND meter = 'tokens' \
-             AND ts_ms >= ?2 AND ts_ms < ?3 \
-             AND (?4 IS NULL OR lower(COALESCE(model, '')) LIKE '%' || lower(?4) || '%') \
+             FROM event WHERE {CYCLE_TOKENS_WHERE} \
              GROUP BY m ORDER BY 2 DESC LIMIT 8",
-        ).map_err(sql_err)?;
+        )).map_err(sql_err)?;
         let rows = stmt
             .query_map(rusqlite::params![tool, start_ms, end_ms, model_family], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
@@ -444,7 +429,7 @@ impl Index {
         // shortcut: events have no quota-account fingerprint, so aggregation is per tool; upgrade when adapters persist one.
         self.conn
             .query_row(
-                "SELECT COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) FROM event WHERE tool = ?1 AND source NOT LIKE 'linux:%' AND meter = 'tokens' AND ts_ms >= ?2 AND ts_ms < ?3 AND (?4 IS NULL OR lower(COALESCE(model, '')) LIKE '%' || lower(?4) || '%')",
+                &format!("SELECT COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) FROM event WHERE {CYCLE_TOKENS_WHERE}"),
                 rusqlite::params![tool, start_ms, end_ms, model_family],
                 |r| r.get(0),
             )
@@ -944,6 +929,42 @@ impl Index {
             });
         }
         Ok(out)
+    }
+}
+
+/// The shared estimation gate behind the live and stale cycle branches. The
+/// thresholds differ per branch by design — live needs the boundary known,
+/// stale only needs the window open at sampling time — so `live` selects the
+/// per-branch tolerance while the meter-classification rules stay in one place.
+fn cycle_estimate_for(
+    effective: &str,
+    has_meter: bool,
+    identity_known: bool,
+    used_percent: f64,
+    observed_tokens: f64,
+    stale: bool,
+) -> Option<f64> {
+    let allowed = match effective {
+        // data-proven: the reconciliation itself vouches for the meter
+        "confirmed" if has_meter => if stale { true } else { used_percent >= 0.1 },
+        // hand-verified seed: the older, stricter terms
+        "confirmed" => if stale { identity_known && used_percent >= 1.0 } else { identity_known && used_percent >= 1.0 },
+        // assumed: the caveat rides along, the gates stay lenient
+        "unverified" => if stale { true } else { used_percent >= 0.1 },
+        _ => false,
+    };
+    allowed.then(|| estimate_cycle_tokens(observed_tokens, used_percent)).flatten()
+}
+
+/// The one meter-classification → CycleStatus mapping; the live and stale
+/// branches must never show different statuses for the same window.
+fn cycle_status_for(effective: &str, complete: bool, boundary_known: bool) -> CycleStatus {
+    match effective {
+        "unverified" => CycleStatus::Unverified,
+        "incompatible" | "unknown" => CycleStatus::Unavailable,
+        _ if complete => CycleStatus::Complete,
+        _ if boundary_known => CycleStatus::Partial,
+        _ => CycleStatus::Collecting,
     }
 }
 
