@@ -1007,22 +1007,22 @@ pub fn summarize(events: &[UsageEvent], opts: &ReportOptions) -> Report {
             HourCell { total_tokens, cost, requests }
         })
         .collect();
+    // Single pass, like hourly above: the old shape re-scanned every history
+    // row once per bucket — 96 × ~390k comparisons for 95 empty buckets.
+    let mut quarter_map: std::collections::BTreeMap<u32, (f64, f64, u64)> = std::collections::BTreeMap::new();
+    for r in &rows {
+        if let Some(local) = Local.timestamp_millis_opt(r.ev.ts_ms).single() {
+            if local.date_naive() == today {
+                let q = local.hour() * 4 + local.minute() / 15;
+                let slot = quarter_map.entry(q).or_insert((0.0, 0.0, 0));
+                slot.0 += r.tokens(); slot.1 += r.cost; slot.2 += 1;
+            }
+        }
+    }
     let quarter_hourly = (0..96)
         .map(|q| {
-            let start = today.and_hms_opt((q / 4) as u32, (q % 4 * 15) as u32, 0)
-                .and_then(|naive| Local.from_local_datetime(&naive).single())
-                .map(|dt| dt.timestamp_millis())
-                .unwrap_or(opts.now_ms);
-            let end = if q == 95 { start_of_day_ms(today + chrono::Duration::days(1)) } else {
-                today.and_hms_opt((q / 4) as u32, (q % 4 * 15 + 15) as u32, 0)
-                    .and_then(|naive| Local.from_local_datetime(&naive).single())
-                    .map(|dt| dt.timestamp_millis()).unwrap_or(start + 15 * 60 * 1000)
-            };
-            let mut s = (0.0, 0.0, 0u64);
-            for r in &rows {
-                if r.ev.ts_ms >= start && r.ev.ts_ms < end { s.0 += r.tokens(); s.1 += r.cost; s.2 += 1; }
-            }
-            HourCell { total_tokens: s.0, cost: s.1, requests: s.2 }
+            let (total_tokens, cost, requests) = quarter_map.get(&q).copied().unwrap_or((0.0, 0.0, 0));
+            HourCell { total_tokens, cost, requests }
         })
         .collect();
 
