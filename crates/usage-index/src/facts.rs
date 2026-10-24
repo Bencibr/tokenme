@@ -170,6 +170,65 @@ const CYCLE_TOKENS_WHERE: &str = "tool = ?1 AND source NOT LIKE 'linux:%' AND me
  AND ts_ms >= ?2 AND ts_ms < ?3 \
  AND (?4 IS NULL OR lower(COALESCE(model, '')) LIKE '%' || lower(?4) || '%')";
 
+/// The rollup twin of [`CYCLE_TOKENS_WHERE`]: the same scope — one tool, this
+/// machine's rows only (`origin = ''` is the rollup's spelling of "not a
+/// `linux:<origin>:` merge row"; merges always stamp that colon, so the two
+/// spellings partition identically), the token meter, the optional
+/// model-family filter — with the ts range expressed as whole interior days.
+/// A group counts only when its `[min_ts, max_ts]` lies fully inside the
+/// window AND its local day is strictly between the endpoints' days; the
+/// first condition is implied by the second for a healthy rollup, and
+/// together they keep the rollup half and the edge-day event slices an exact
+/// partition of the window: nothing twice, nothing missing.
+const CYCLE_ROLLUP_WHERE: &str = "tool = ?1 AND origin = '' AND meter = 'tokens' \
+ AND min_ts >= ?2 AND max_ts < ?3 \
+ AND day > ?4 AND day < ?5 \
+ AND (?6 IS NULL OR lower(COALESCE(model, '')) LIKE '%' || lower(?6) || '%')";
+
+/// The cycle window `[start_ms, end_ms)` split into what the rollup may
+/// answer and what must still walk `event`. A rollup row is a whole local
+/// day, so it can serve the window only when that day lies entirely inside
+/// it: the days strictly between the two endpoints' local days, compared as
+/// ISO day keys. The two endpoint days come back as clamped half-open
+/// `event` slices — one whole-window slice when both endpoints share a local
+/// day, and none when `end` sits exactly on a local midnight. Returns `None`
+/// when the local calendar cannot represent an endpoint (no local midnight):
+/// callers fall back to the plain event query over the whole window, which
+/// is why the rollup halves answer zero on the same `None`.
+fn cycle_window_split(start_ms: i64, end_ms: i64) -> Option<(String, String, Vec<(i64, i64)>)> {
+    let start_day = local_day_of(start_ms)?;
+    let end_day = local_day_of(end_ms)?;
+    let mut edges: Vec<(i64, i64)> = Vec::with_capacity(2);
+    if end_ms > start_ms {
+        if start_day == end_day {
+            edges.push((start_ms, end_ms));
+        } else {
+            let (_, start_day_hi) = local_day_bounds(start_day)?;
+            let (end_day_lo, _) = local_day_bounds(end_day)?;
+            if start_ms < start_day_hi {
+                edges.push((start_ms, start_day_hi.min(end_ms)));
+            }
+            if end_day_lo < end_ms {
+                edges.push((end_day_lo.max(start_ms), end_ms));
+            }
+        }
+    }
+    Some((
+        start_day.format("%Y-%m-%d").to_string(),
+        end_day.format("%Y-%m-%d").to_string(),
+        edges,
+    ))
+}
+
+/// The original single query's tail, applied once over the folded parts:
+/// heaviest first, at most 8 rows, non-positive totals dropped only after the
+/// cap — a zero-token model still consumed a slot while the LIMIT ran in SQL.
+fn cap_cycle_models(mut rows: Vec<(String, f64)>) -> Vec<(String, f64)> {
+    rows.truncate(8);
+    rows.retain(|(_, tokens)| *tokens > 0.0);
+    rows
+}
+
 impl Index {
     /// Attach local token accounting to the live quota rows. The event table is
     /// indexed by `(tool, ts_ms)`, so bounded sums stay cheap and do not require
@@ -397,7 +456,67 @@ impl Index {
     /// event's model id, heaviest first. Family-hinted rows (Claude's
     /// Sonnet/Opus buckets) filter like `sum_tokens` so the breakdown sums to
     /// the row's observed total; unbounded names are capped at 8 rows.
+    ///
+    /// Whole interior days come from the rollup, the two endpoint days from
+    /// `event`, and the parts fold on the model name before one ranking runs —
+    /// a per-part LIMIT 8 could drop a model that only the other part carried
+    /// into the top 8.
     fn sum_tokens_by_model(
+        &self,
+        tool: &str,
+        start_ms: i64,
+        end_ms: i64,
+        model_family: Option<&str>,
+    ) -> Result<Vec<(String, f64)>> {
+        let Some((_, _, edges)) = cycle_window_split(start_ms, end_ms) else {
+            return Ok(cap_cycle_models(self.sum_tokens_by_model_events(tool, start_ms, end_ms, model_family)?));
+        };
+        let mut merged: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+        for (model, tokens) in self.sum_tokens_by_model_via_rollup(tool, start_ms, end_ms, model_family)? {
+            *merged.entry(model).or_insert(0.0) += tokens;
+        }
+        for (lo, hi) in &edges {
+            for (model, tokens) in self.sum_tokens_by_model_events(tool, *lo, *hi, model_family)? {
+                *merged.entry(model).or_insert(0.0) += tokens;
+            }
+        }
+        let mut rows: Vec<(String, f64)> = merged.into_iter().collect();
+        rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(cap_cycle_models(rows))
+    }
+
+    /// The rollup half of [`Self::sum_tokens_by_model`]: the whole local days
+    /// strictly inside the window, grouped by model. `''` is the rollup's NULL
+    /// sentinel for model, so `COALESCE(NULLIF(...))` maps it to `unknown`
+    /// exactly like the event path maps a NULL model.
+    fn sum_tokens_by_model_via_rollup(
+        &self,
+        tool: &str,
+        start_ms: i64,
+        end_ms: i64,
+        model_family: Option<&str>,
+    ) -> Result<Vec<(String, f64)>> {
+        let Some((day_lo, day_hi, _)) = cycle_window_split(start_ms, end_ms) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT COALESCE(NULLIF(model, ''), 'unknown') AS m, \
+             COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) \
+             FROM event_rollup WHERE {CYCLE_ROLLUP_WHERE} \
+             GROUP BY m ORDER BY 2 DESC",
+        )).map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![tool, start_ms, end_ms, day_lo, day_hi, model_family], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })
+            .map_err(sql_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
+    }
+
+    /// The event half of [`Self::sum_tokens_by_model`] over one ts slice — the
+    /// original single query, uncapped: the ranking happens once over the
+    /// folded parts.
+    fn sum_tokens_by_model_events(
         &self,
         tool: &str,
         start_ms: i64,
@@ -408,29 +527,54 @@ impl Index {
             "SELECT COALESCE(NULLIF(model, ''), 'unknown') AS m, \
              COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) \
              FROM event WHERE {CYCLE_TOKENS_WHERE} \
-             GROUP BY m ORDER BY 2 DESC LIMIT 8",
+             GROUP BY m ORDER BY 2 DESC",
         )).map_err(sql_err)?;
         let rows = stmt
-            .query_map(rusqlite::params![tool, start_ms, end_ms, model_family], |r| {
+            .query_map(params![tool, start_ms, end_ms, model_family], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
             })
             .map_err(sql_err)?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (model, tokens) = row.map_err(sql_err)?;
-            if tokens > 0.0 {
-                out.push((model, tokens));
-            }
-        }
-        Ok(out)
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
     }
 
+    /// The cycle tally for one quota row: the window's whole interior days
+    /// read from the ~2.2k-row rollup, the two edge days from `event` — the
+    /// same answer the single event scan used to give, at a fraction of the
+    /// cost once the window spans several days.
     fn sum_tokens(&self, tool: &str, start_ms: i64, end_ms: i64, model_family: Option<&str>) -> Result<f64> {
         // shortcut: events have no quota-account fingerprint, so aggregation is per tool; upgrade when adapters persist one.
+        let Some((_, _, edges)) = cycle_window_split(start_ms, end_ms) else {
+            return self.sum_tokens_events(tool, start_ms, end_ms, model_family);
+        };
+        let mut total = self.sum_tokens_via_rollup(tool, start_ms, end_ms, model_family)?;
+        for (lo, hi) in &edges {
+            total += self.sum_tokens_events(tool, *lo, *hi, model_family)?;
+        }
+        Ok(total)
+    }
+
+    /// The rollup half of [`Self::sum_tokens`]: the whole local days strictly
+    /// inside the window. Zero when the window split failed — the caller then
+    /// walks `event` over the whole window instead, so the sum stays exact.
+    fn sum_tokens_via_rollup(&self, tool: &str, start_ms: i64, end_ms: i64, model_family: Option<&str>) -> Result<f64> {
+        let Some((day_lo, day_hi, _)) = cycle_window_split(start_ms, end_ms) else {
+            return Ok(0.0);
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) \
+             FROM event_rollup WHERE {CYCLE_ROLLUP_WHERE}",
+        )).map_err(sql_err)?;
+        stmt.query_row(params![tool, start_ms, end_ms, day_lo, day_hi, model_family], |r| r.get(0)).map_err(sql_err)
+    }
+
+    /// The event-path tally for one ts slice — the original single-query
+    /// `sum_tokens`, now called once per edge day and once over the whole
+    /// window when the rollup split is unavailable.
+    fn sum_tokens_events(&self, tool: &str, start_ms: i64, end_ms: i64, model_family: Option<&str>) -> Result<f64> {
         self.conn
             .query_row(
                 &format!("SELECT COALESCE(SUM(COALESCE(in_tok, 0) + COALESCE(cc_tok, 0) + COALESCE(cr_tok, 0) + COALESCE(out_tok, 0)), 0) FROM event WHERE {CYCLE_TOKENS_WHERE}"),
-                rusqlite::params![tool, start_ms, end_ms, model_family],
+                params![tool, start_ms, end_ms, model_family],
                 |r| r.get(0),
             )
             .map_err(sql_err)
@@ -2036,6 +2180,53 @@ mod golden {
         assert!(quotas.iter().all(|q| q.cycle.is_some()));
         assert_eq!(quotas[0].cycle.as_ref().unwrap().observed_tokens, 1_000.0);
         assert_eq!(quotas[1].cycle.as_ref().unwrap().observed_tokens, 2_000.0);
+    }
+
+    /// The window split's equivalence: a 7-day window reads its interior days
+    /// from the rollup and its two endpoint days from `event`, and must land
+    /// exactly where the single event scan it replaced would — interior days
+    /// whole, both edge days clipped at the window boundary, an event past the
+    /// window's end still excluded, and the per-model ranking taken once over
+    /// the folded parts. Raw inserts plus the lazy rebuild keep `event` and
+    /// the rollup consistent at `tool = 'codex'` — an adapter ingest stamps
+    /// its own id over the event's tool, and only the event table would get
+    /// the test's UPDATE.
+    #[test]
+    fn cycle_window_reads_interior_days_from_the_rollup_and_edges_from_event() {
+        let now = now_fixture();
+        let idx = Index::open_in_memory().unwrap();
+        raw_insert(
+            &idx,
+            &[
+                // start = resets - 7d = 09-27 14:00: the 15:00 event is an
+                // hour inside it on the start's edge day, the 09-28/09-29
+                // events are whole interior days, the 09-30 13:00 event is on
+                // the end's edge day, and 15:00 sits past the end (14:00).
+                ev("codex", ms_of(2026, 9, 27, 15), "span-a", Some("m-early"), None, counts(100.0)),
+                ev("codex", ms_of(2026, 9, 28, 10), "span-b", Some("m-inner-a"), None, counts(200.0)),
+                ev("codex", ms_of(2026, 9, 29, 10), "span-c", Some("m-inner-b"), None, counts(400.0)),
+                ev("codex", ms_of(2026, 9, 30, 13), "span-d", Some("m-late"), None, counts(800.0)),
+                ev("codex", ms_of(2026, 9, 30, 15), "span-e", Some("m-future"), None, counts(1_600.0)),
+            ],
+        );
+        let mut idx = idx;
+        // The read lazily builds the rollup from these raw events, so both
+        // halves of the split see the same rows.
+        idx.report_facts(&plan(), &MachineScope::All).unwrap();
+        let mut quotas = vec![QuotaView {
+            tool: "codex".into(), used_percent: 25.0, window_minutes: 10_080,
+            resets_at_ms: now + 4 * 86_400_000, sampled_at_ms: now, label: Some("周".into()),
+            id: Some("acct:span:10080".into()), origin: QuotaOrigin::Probe, cycle: None,
+        }];
+        idx.attach_cycle_usage(&mut quotas, now).unwrap();
+        let cycle = quotas[0].cycle.as_ref().unwrap();
+        assert_eq!(cycle.observed_tokens, 1_500.0, "interior rollup days + both clipped edges");
+        assert_eq!(
+            cycle.models.iter().map(|m| m.model.as_str()).collect::<Vec<_>>(),
+            vec!["m-late", "m-inner-b", "m-inner-a", "m-early"],
+            "one ranking over the folded rollup and event parts"
+        );
+        assert_eq!(cycle.models.iter().map(|m| m.tokens).collect::<Vec<_>>(), vec![800.0, 400.0, 200.0, 100.0]);
     }
 
     #[test]
