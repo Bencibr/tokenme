@@ -3351,21 +3351,28 @@ fn rotate_index_sync_state_tx(tx: &Transaction<'_>, now_ms: i64) -> SyncResult<(
     ] {
         tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
     }
-    const DOWNLOAD_KEY_PREFIX: &str = "device-sync:v1:%";
+    // Downloaded rows are keyed by `network_event_key`: a lowercase literal
+    // plus lowercase hex, so the ASCII range ['device-sync:v1:', 'device-sync:v1;')
+    // selects exactly the rows `LIKE 'device-sync:v1:%'` did — and, unlike the
+    // LIKE (case-insensitive by default, which reduced event_dedupe to a bare
+    // index scan), it can seek. ';' is ':' + 1, and no other key family
+    // collides with the prefix under any casing.
+    const DOWNLOAD_KEY_LO: &str = "device-sync:v1:";
+    const DOWNLOAD_KEY_HI: &str = "device-sync:v1;";
     let doomed_ts: Vec<i64> = {
         let mut stmt = tx.prepare(&format!(
-            "SELECT ts_ms FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}'"
+            "SELECT ts_ms FROM event WHERE dedupe_key >= '{DOWNLOAD_KEY_LO}' AND dedupe_key < '{DOWNLOAD_KEY_HI}'"
         )).map_err(sql_err)?;
         let rows = stmt.query_map([], |row| row.get(0)).map_err(sql_err)?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)?
     };
     if !doomed_ts.is_empty() {
         tx.execute(
-            &format!("DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}')"),
+            &format!("DELETE FROM call WHERE event_id IN (SELECT id FROM event WHERE dedupe_key >= '{DOWNLOAD_KEY_LO}' AND dedupe_key < '{DOWNLOAD_KEY_HI}')"),
             [],
         ).map_err(sql_err)?;
         tx.execute(
-            &format!("DELETE FROM event WHERE dedupe_key LIKE '{DOWNLOAD_KEY_PREFIX}'"),
+            &format!("DELETE FROM event WHERE dedupe_key >= '{DOWNLOAD_KEY_LO}' AND dedupe_key < '{DOWNLOAD_KEY_HI}'"),
             [],
         ).map_err(sql_err)?;
         usage_index::recompute_network_days(tx, &doomed_ts).map_err(SyncError::from)?;
@@ -3420,27 +3427,32 @@ fn sync_capture_enabled_state(state: &Connection) -> SyncResult<bool> {
 /// against prune.  The consumer count and floor are read from the state
 /// registry before this index-side cleanup runs.
 fn release_acked_dirty_tx(tx: &Transaction<'_>, consumers: i64, ack_floor: i64) -> SyncResult<()> {
-    // Count only the legacy JSON bytes about to be deleted. A full sum here
-    // rescanned every dirty row on every ACK; current rows carry X'' and add
-    // nothing.
-    let removed_json_bytes: i64 = if consumers == 0 {
-        tx.query_row(
-            "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty WHERE length(event_json) > 0",
-            [], |row| row.get(0),
-        ).map_err(sql_err)?
-    } else {
-        tx.query_row(
-            "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty WHERE revision <= ?1 AND length(event_json) > 0",
-            params![ack_floor], |row| row.get(0),
-        ).map_err(sql_err)?
-    };
+    // The `device_sync_dirty_json_bytes` counter answers first: ingest writes
+    // only X'' payloads and the open-time backfill keeps the counter honest for
+    // the legacy JSON rows, so a zero (or missing) counter means no sum can
+    // find anything and the whole release costs one DELETE. Only a release
+    // that really removed rows while the counter claims legacy JSON exists
+    // pays one full-table recompute, which also re-anchors the counter to
+    // reality instead of trusting a delta over the deleted rows.
+    let counter: i64 = tx.query_row(
+        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'device_sync_dirty_json_bytes'), 0)",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
     let removed = if consumers == 0 {
         tx.execute("DELETE FROM sync_dirty", []).map_err(sql_err)?
     } else {
         tx.execute("DELETE FROM sync_dirty WHERE revision <= ?1", params![ack_floor]).map_err(sql_err)?
     };
-    if removed > 0 {
-        adjust_dirty_json_bytes_tx(tx, -removed_json_bytes)?;
+    if removed > 0 && counter > 0 {
+        let remaining: i64 = tx.query_row(
+            "SELECT COALESCE(sum(length(event_json)), 0) FROM sync_dirty",
+            [], |row| row.get(0),
+        ).map_err(sql_err)?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES('device_sync_dirty_json_bytes', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![remaining.to_string()],
+        ).map_err(sql_err)?;
     }
     Ok(())
 }
@@ -3497,6 +3509,11 @@ fn index_schema_complete(conn: &Connection) -> bool {
         [], |row| row.get(0),
     ).unwrap_or(false);
     if !has_claim_index { return false; }
+    let has_ack_index: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'device_sync_journal_ack')",
+        [], |row| row.get(0),
+    ).unwrap_or(false);
+    if !has_ack_index { return false; }
     let has_column = |table: &str, column: &str| -> bool {
         let mut stmt = match conn.prepare(&format!("PRAGMA table_info({table})")) { Ok(stmt) => stmt, Err(_) => return false };
         let names = match stmt.query_map([], |row| row.get::<_, String>(1)) {
@@ -3615,6 +3632,12 @@ fn migrate(index: &mut Index) -> SyncResult<()> {
                  created_at_ms INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS device_sync_journal_outbox ON device_sync_journal(outbox_id, id);
+             -- The per-package ACK probes the journal by (outbox_id, identity,
+             -- dirty_revision >= cursor); the outbox index only covers the
+             -- first column, so the EXISTS walked every journal row of the
+             -- package per dirty candidate.
+             CREATE INDEX IF NOT EXISTS device_sync_journal_ack
+                 ON device_sync_journal(outbox_id, identity, dirty_revision);
              CREATE TABLE IF NOT EXISTS device_sync_outbox_sequence(
                  device_id TEXT NOT NULL, stream_id TEXT NOT NULL, data_epoch INTEGER NOT NULL,
                  last_generation INTEGER NOT NULL, last_revision INTEGER NOT NULL,
