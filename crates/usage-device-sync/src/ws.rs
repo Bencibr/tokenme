@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use tungstenite::protocol::WebSocket;
 use tungstenite::{Message, Error as WsError};
 
-use crate::protocol::DeviceIdentity;
 use crate::store::{DeviceStatus, SyncError, SyncResult, SyncStore};
 use crate::transport::{primary_local_rollup_snapshot, RollupSnapshot};
 
@@ -443,50 +442,10 @@ fn session_update_display_name(store: &mut SyncStore, device_id: &str, name: &st
     Ok(())
 }
 
-/// Client-side WebSocket connection controller.
-/// Maintains an auto-reconnecting long-lived session with exponential backoff.
-pub struct WsSecondaryClient {
-    pub identity: DeviceIdentity,
-    pub primary_endpoint: String,
-    pub stop: Arc<AtomicBool>,
-}
-
-impl WsSecondaryClient {
-    pub fn new(identity: DeviceIdentity, primary_endpoint: String, stop: Arc<AtomicBool>) -> Self {
-        Self { identity, primary_endpoint, stop }
-    }
-
-    /// Converts an http/https endpoint string to a ws/wss endpoint.
-    pub fn websocket_url(&self) -> Result<String, String> {
-        let endpoint = self.primary_endpoint.trim();
-        if endpoint.starts_with("https://") {
-            Ok(format!("wss://{}/v2/sync-ws", &endpoint["https://".len()..]))
-        } else if endpoint.starts_with("http://") {
-            Ok(format!("ws://{}/v2/sync-ws", &endpoint["http://".len()..]))
-        } else if endpoint.starts_with("wss://") || endpoint.starts_with("ws://") {
-            Ok(format!("{endpoint}/v2/sync-ws"))
-        } else {
-            Ok(format!("ws://{endpoint}/v2/sync-ws"))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::PairingRequest;
-
-    #[test]
-    fn websocket_url_formatting() {
-        let identity = DeviceIdentity::create("dev-test", "test").unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let client1 = WsSecondaryClient::new(identity.clone(), "http://192.168.1.10:47821".into(), stop.clone());
-        assert_eq!(client1.websocket_url().unwrap(), "ws://192.168.1.10:47821/v2/sync-ws");
-
-        let client2 = WsSecondaryClient::new(identity, "https://primary.local:47821".into(), stop);
-        assert_eq!(client2.websocket_url().unwrap(), "wss://primary.local:47821/v2/sync-ws");
-    }
+    use crate::protocol::{DeviceIdentity, PairingRequest};
 
     #[test]
     fn frame_serialization_roundtrip() {

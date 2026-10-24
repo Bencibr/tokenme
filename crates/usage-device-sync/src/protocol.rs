@@ -1138,76 +1138,6 @@ impl AuthenticatedStatusRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AuthenticatedDownloadRequest {
-    pub protocol_id: String,
-    pub primary_id: String,
-    pub device_id: String,
-    pub origin: String,
-    pub nonce: [u8; 16],
-    pub issued_at_ms: i64,
-    pub after_identity: Option<String>,
-    pub after_dirty_revision: u64,
-    #[serde(with = "signature_serde")]
-    pub signature: [u8; 64],
-}
-
-impl AuthenticatedDownloadRequest {
-    pub fn new_at(
-        identity: &DeviceIdentity,
-        primary_id: impl Into<String>,
-        after_identity: Option<String>,
-        after_dirty_revision: u64,
-        issued_at_ms: i64,
-    ) -> SyncResult<Self> {
-        let mut request = Self {
-            protocol_id: PROTOCOL_ID.into(),
-            primary_id: primary_id.into(),
-            device_id: identity.device_id.clone(),
-            origin: identity.origin.clone(),
-            nonce: random_bytes::<16>()?,
-            issued_at_ms,
-            after_identity,
-            after_dirty_revision,
-            signature: [0; 64],
-        };
-        request.validate_fields()?;
-        request.signature = identity.signing_key.sign(&request.signing_bytes()).to_bytes();
-        Ok(request)
-    }
-
-    pub fn verify(&self, public_key: &VerifyingKey) -> SyncResult<()> {
-        self.validate_fields()?;
-        public_key.verify(&self.signing_bytes(), &Signature::from_bytes(&self.signature))
-            .map_err(|_| SyncError::Auth("authenticated download signature verification failed".into()))
-    }
-
-    fn validate_fields(&self) -> SyncResult<()> {
-        if self.protocol_id != PROTOCOL_ID || self.after_dirty_revision > i64::MAX as u64 {
-            return Err(SyncError::Auth("invalid authenticated download request".into()));
-        }
-        valid_text("primary_id", &self.primary_id, false)?;
-        valid_text("device_id", &self.device_id, false)?;
-        valid_text("origin", &self.origin, false)?;
-        if !origin_ok(&self.origin) { return Err(SyncError::Auth("invalid authenticated download origin".into())); }
-        if let Some(identity) = self.after_identity.as_deref() {
-            valid_text("download identity cursor", identity, false)?;
-        }
-        Ok(())
-    }
-
-    fn signing_bytes(&self) -> Vec<u8> {
-        let cursor_present = [u8::from(self.after_identity.is_some())];
-        identity_bytes(DOWNLOAD_DOMAIN, &[
-            self.protocol_id.as_bytes(), self.primary_id.as_bytes(), self.device_id.as_bytes(),
-            self.origin.as_bytes(), &self.nonce, &self.issued_at_ms.to_be_bytes(),
-            &cursor_present, self.after_identity.as_deref().unwrap_or("").as_bytes(),
-            &self.after_dirty_revision.to_be_bytes(),
-        ])
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AuthenticatedDisplayNameRequest {
     pub protocol_id: String,
     pub primary_id: String,
@@ -1467,20 +1397,6 @@ mod tests {
         request.verify(&public_key).unwrap();
         request.display_name = "forged name".into();
         assert!(matches!(request.verify(&public_key), Err(SyncError::Auth(_))));
-    }
-
-    #[test]
-    fn authenticated_download_request_binds_both_cursors() {
-        let identity = DeviceIdentity::create("secondary-origin", "Secondary").unwrap();
-        let key = identity.signing_key.verifying_key();
-        let mut request = AuthenticatedDownloadRequest::new_at(&identity, "primary-1", Some("key:a".into()), 7, 10).unwrap();
-        request.verify(&key).unwrap();
-        request.after_identity = Some("key:b".into());
-        assert!(matches!(request.verify(&key), Err(SyncError::Auth(_))));
-
-        let mut request = AuthenticatedDownloadRequest::new_at(&identity, "primary-1", Some("key:a".into()), 7, 10).unwrap();
-        request.after_dirty_revision = 8;
-        assert!(matches!(request.verify(&key), Err(SyncError::Auth(_))));
     }
 
     #[test]

@@ -1926,9 +1926,9 @@ fn rotate_state_primary_id_tx(tx: &Transaction<'_>, new_primary_id: &str) -> Syn
 /// double-count every origin in the report. The days the rows touched are
 /// recomputed in the same transaction, the way the import path did.
 fn rotate_index_sync_state_tx(tx: &Transaction<'_>, now_ms: i64) -> SyncResult<()> {
-    for table in ["device_sync_conflict", "device_sync_scheduler_lease", "device_sync_recovery"] {
-        tx.execute(&format!("DELETE FROM {table}"), []).map_err(sql_err)?;
-    }
+    // Only the lease survives the row-era cleanup; the conflict/recovery
+    // tables were dropped with it, so there is nothing else to clear.
+    tx.execute("DELETE FROM device_sync_scheduler_lease", []).map_err(sql_err)?;
     const DOWNLOAD_KEY_PREFIX: &str = "device-sync:v1:%";
     let doomed_ts: Vec<i64> = {
         let mut stmt = tx.prepare(&format!(
@@ -2029,7 +2029,7 @@ fn save_secondary_config_tx(tx: &Transaction<'_>, config: &SecondarySyncConfig, 
 /// database, so additions go in both places. The row-era stream/receipt/outbox
 /// tables are dropped by `migrate`, not recreated.
 const DEVICE_INDEX_TABLES: &[&str] = &[
-    "device_sync_conflict", "device_sync_scheduler_lease", "device_sync_recovery",
+    "device_sync_scheduler_lease",
 ];
 
 /// Read-only probe for the device tables `migrate` ensures. A complete schema
@@ -2053,7 +2053,8 @@ fn index_schema_complete(conn: &Connection) -> bool {
         "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN (
              'device_stream', 'device_receipt', 'device_package_marker',
              'device_package_tombstone', 'device_highwater', 'device_sync_outbox',
-             'device_sync_outbox_sequence', 'device_sync_journal', 'device_sync_snapshot_cursor'
+             'device_sync_outbox_sequence', 'device_sync_journal', 'device_sync_snapshot_cursor',
+             'device_sync_conflict', 'device_sync_recovery'
          )",
         [], |row| row.get(0),
     ).unwrap_or(1);
@@ -2105,22 +2106,11 @@ fn migrate(index: &mut Index) -> SyncResult<()> {
              DROP TABLE IF EXISTS device_sync_outbox_sequence;
              DROP TABLE IF EXISTS device_sync_journal;
              DROP TABLE IF EXISTS device_sync_snapshot_cursor;
-             CREATE TABLE IF NOT EXISTS device_sync_conflict(
-                 device_id TEXT NOT NULL, dedupe_key TEXT NOT NULL, field_schema TEXT NOT NULL,
-                 old_hash BLOB NOT NULL, new_hash BLOB NOT NULL, created_at_ms INTEGER NOT NULL,
-                 PRIMARY KEY(device_id, dedupe_key, field_schema, old_hash, new_hash)
-             );
+             DROP TABLE IF EXISTS device_sync_conflict;
+             DROP TABLE IF EXISTS device_sync_recovery;
              CREATE TABLE IF NOT EXISTS device_sync_scheduler_lease(
                  lease_key TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at_ms INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS device_sync_recovery(
-                 device_id TEXT NOT NULL, nonce BLOB NOT NULL, stream_id TEXT NOT NULL,
-                 data_epoch INTEGER NOT NULL, expected_generation INTEGER NOT NULL,
-                 issued_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
-                 PRIMARY KEY(device_id, nonce)
-             );
-             CREATE INDEX IF NOT EXISTS device_sync_recovery_expiry
-                 ON device_sync_recovery(device_id, expires_at_ms);",
+             );",
         ).map_err(sql_err)?;
         Ok::<_, SyncError>(())
     })

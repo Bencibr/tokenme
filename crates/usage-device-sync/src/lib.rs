@@ -13,7 +13,7 @@ mod store;
 mod transport;
 pub mod ws;
 
-pub use ws::{WsSyncFrame, WsSecondaryClient, handle_server_websocket, WS_PROTOCOL_VERSION};
+pub use ws::{WsSyncFrame, handle_server_websocket, WS_PROTOCOL_VERSION};
 
 pub use diagnostics::{
     diagnostics_tool_registry, DiagnosticsAuditEvent, DiagnosticsAuthority, DiagnosticsCheckResult,
@@ -35,7 +35,7 @@ pub use diagnostics::{
 pub use protocol::{
     hash_bytes, identity_bytes, DeviceIdentity, NetworkCall, NetworkCounts, NetworkManifest,
     NetworkPackage, NetworkRow, PairingInvite, PairingRequest, PrimaryDownloadPage, SignedUpload,
-    AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest, AuthenticatedStatus, AuthenticatedStatusRequest,
+    AuthenticatedDisplayNameRequest, AuthenticatedStatus, AuthenticatedStatusRequest,
     PairingInviteDetails, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES, MAX_LINE_BYTES, MAX_MANIFEST_BYTES,
     MAX_ROWS, MAX_STRING_BYTES, PROTOCOL_ID, SYNC_FORMAT,
 };
