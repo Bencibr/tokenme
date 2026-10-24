@@ -847,6 +847,52 @@ pub(crate) fn load_event_tx(tx: &Transaction<'_>, event_id: i64) -> Result<Usage
     events.pop().ok_or_else(|| Error::Sync(format!("event {event_id} disappeared while marking sync dirty")))
 }
 
+/// One raw sync_dirty row as read off the wire of the shared page query.
+type DirtyRow = (String, Option<String>, Option<i64>, Vec<u8>, i64);
+
+/// The one dirty-page query behind `sync_dirty_events_page`,
+/// `sync_snapshot_page_mode` and `sync_snapshot`. The caller owns decoding
+/// the rows it yields (via `load_dirty_rows_tx`).
+fn read_dirty_rows_tx(tx: &Transaction<'_>, after: i64, limit: i64) -> Result<Vec<DirtyRow>> {
+    let mut stmt = tx.prepare(
+        "SELECT identity, occurrence_id, event_id, event_json, revision FROM sync_dirty
+          WHERE revision > ?1 ORDER BY revision, identity LIMIT ?2",
+    ).map_err(sql_err)?;
+    let rows = stmt.query_map(params![after, limit], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, i64>(4)?))
+    }).map_err(sql_err)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_err)
+}
+
+/// Decodes raw dirty rows into events. Rows carrying an event id are fetched
+/// in ONE `load_events_tx` batch — the per-row `load_events_tx(&[id])` shape
+/// cost three prepares per row and was the exact pattern `load_events_tx`'s
+/// own comment says it retired for event pages.
+fn load_dirty_rows_tx(tx: &Transaction<'_>, rows: Vec<DirtyRow>) -> Result<Vec<SyncDirtyEvent>> {
+    let ids: Vec<i64> = rows.iter().filter_map(|row| row.2).collect();
+    let mut by_id = std::collections::HashMap::new();
+    if !ids.is_empty() {
+        let loaded = load_events_tx(tx, &ids)?;
+        for (position, event) in loaded.into_iter().enumerate() {
+            if let Some(id) = ids.get(position) { by_id.insert(*id, event); }
+        }
+    }
+    rows.into_iter().map(|(identity, occurrence_id, event_id, event_json, revision)| {
+        if revision <= 0 {
+            return Err(Error::Sync("sync dirty revision is invalid".into()));
+        }
+        let event = if let Some(event_id) = event_id {
+            by_id.remove(&event_id).ok_or_else(|| Error::Sync(format!("event {event_id} disappeared while reading a sync dirty page")))?
+        } else if !event_json.is_empty() {
+            serde_json::from_slice(&event_json)
+                .map_err(|error| Error::Sync(format!("decode legacy sync dirty event: {error}")))?
+        } else {
+            return Err(Error::Sync(format!("sync dirty row {identity} has no event reference")));
+        };
+        Ok(SyncDirtyEvent { identity, occurrence_id, event, revision: revision as u64 })
+    }).collect()
+}
+
 fn load_sync_dirty_event_tx(
     tx: &Transaction<'_>, identity: String, occurrence_id: Option<String>,
     event_id: Option<i64>, event_json: Vec<u8>, revision: i64,
@@ -1427,6 +1473,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if funide_proj.is_none() {
+            repairs_applied += 1;
             const FUNIDE_PROJ_ROWS: &str = "(SELECT id FROM event WHERE tool = 'funide' \
                  AND dedupe_key LIKE 'funide#%' AND dedupe_key NOT LIKE 'funide#%#%' \
                  AND source NOT LIKE 'linux:%')";
@@ -1471,6 +1518,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if hermes_key.is_none() {
+            repairs_applied += 1;
             const HERMES_LOCAL_ROWS: &str =
                 "(SELECT id FROM event WHERE tool = 'hermes' AND source NOT LIKE 'linux:%')";
             conn.execute(&format!("DELETE FROM call WHERE event_id IN ({HERMES_LOCAL_ROWS})"), [])
@@ -1514,6 +1562,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if kimicode_key.is_none() {
+            repairs_applied += 1;
             const KIMICODE_LOCAL_ROWS: &str =
                 "(SELECT id FROM event WHERE tool = 'kimicode' AND source NOT LIKE 'linux:%')";
             conn.execute(&format!("DELETE FROM call WHERE event_id IN ({KIMICODE_LOCAL_ROWS})"), [])
@@ -1553,6 +1602,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if cline_key.is_none() {
+            repairs_applied += 1;
             const CLINE_LOCAL_ROWS: &str =
                 "(SELECT id FROM event WHERE tool = 'cline' AND source NOT LIKE 'linux:%')";
             conn.execute(&format!("DELETE FROM call WHERE event_id IN ({CLINE_LOCAL_ROWS})"), [])
@@ -1592,6 +1642,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if qoder_key.is_none() {
+            repairs_applied += 1;
             const QODER_LOCAL_ROWS: &str =
                 "(SELECT id FROM event WHERE tool IN ('qoder', 'qoder_cn') AND source NOT LIKE 'linux:%')";
             conn.execute(&format!("DELETE FROM call WHERE event_id IN ({QODER_LOCAL_ROWS})"), [])
@@ -1635,6 +1686,7 @@ impl Index {
             .optional()
             .map_err(sql_err)?;
         if catpaw_key.is_none() {
+            repairs_applied += 1;
             const CATPAW_LOCAL_ROWS: &str =
                 "(SELECT id FROM event WHERE tool = 'catpaw' AND source NOT LIKE 'linux:%')";
             conn.execute(&format!("DELETE FROM call WHERE event_id IN ({CATPAW_LOCAL_ROWS})"), [])
@@ -1913,18 +1965,6 @@ impl Index {
             .map_err(sql_err)
     }
 
-    /// Attach the destructive device-sync state database. The caller owns the
-    /// migration/schema; this method only opens the second file on the same
-    /// SQLite connection so cross-file sync transactions remain atomic.
-    pub fn attach_sync_state(&self, path: &Path, busy_timeout_ms: i64) -> Result<()> {
-        if busy_timeout_ms < 0 { return Err(Error::Sqlite("busy timeout must be non-negative".into())); }
-        let escaped = path.to_string_lossy().replace('\'', "''");
-        self.conn.execute_batch(&format!("ATTACH DATABASE '{escaped}' AS sync; PRAGMA sync.busy_timeout={busy_timeout_ms};")).map_err(sql_err)
-    }
-
-    /// Runs an ACK-bearing device-sync write on this same SQLite connection.
-    /// The generic error keeps protocol errors distinguishable from SQLite
-    /// failures while receipt, event, call and rollup writes share one commit.
     pub fn with_network_transaction<T, E, F>(&mut self, f: F) -> std::result::Result<T, E>
     where
         E: From<Error>,
@@ -1952,15 +1992,7 @@ impl Index {
 
     // ---- ingestion ------------------------------------------------------
 
-    pub fn ingest(
-        &mut self,
-        adapters: &[Box<dyn SourceAdapter>],
-        filter: &DateFilter,
-    ) -> Result<IngestReport> {
-        self.ingest_with(adapters, filter, &IngestOptions::default())
-    }
-
-    /// `ingest` with the claim policy spelled out: the app's timer uses the
+    /// Ingest with the claim policy spelled out: the app's timer uses the
     /// defaults (skip when a peer holds the lease), a manual refresh may force.
     pub fn ingest_with(
         &mut self,
@@ -2082,19 +2114,8 @@ impl Index {
         }
         let after = i64::try_from(after_revision).map_err(|_| Error::Sync("sync dirty revision is too large".into()))?;
         let tx = self.conn.unchecked_transaction().map_err(sql_err)?;
-        let mut stmt = tx.prepare(
-            "SELECT identity, occurrence_id, event_id, event_json, revision FROM sync_dirty
-              WHERE revision > ?1 ORDER BY revision, identity LIMIT ?2",
-        ).map_err(sql_err)?;
-        let rows = stmt.query_map(params![after, limit as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, i64>(4)?))
-        }).map_err(sql_err)?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (identity, occurrence_id, event_id, event_json, revision) = row.map_err(sql_err)?;
-            out.push(load_sync_dirty_event_tx(&tx, identity, occurrence_id, event_id, event_json, revision)?);
-        }
-        drop(stmt);
+        let rows = read_dirty_rows_tx(&tx, after, limit as i64)?;
+        let out = load_dirty_rows_tx(&tx, rows)?;
         tx.commit().map_err(sql_err)?;
         Ok(out)
     }
@@ -2174,16 +2195,8 @@ impl Index {
         let mut dirty_cursor = after_dirty_revision;
         {
             let after = i64::try_from(after_dirty_revision).map_err(|_| Error::Sync("sync dirty revision is too large".into()))?;
-            let mut stmt = tx.prepare(
-                "SELECT identity, occurrence_id, event_id, event_json, revision FROM sync_dirty
-                   WHERE revision > ?1 ORDER BY revision, identity LIMIT ?2",
-            ).map_err(sql_err)?;
-            let rows = stmt.query_map(params![after, max_rows as i64], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, i64>(4)?))
-            }).map_err(sql_err)?;
-            for row in rows {
-                let (identity, occurrence_id, event_id, event_json, revision) = row.map_err(sql_err)?;
-                let dirty = load_sync_dirty_event_tx(&tx, identity, occurrence_id, event_id, event_json, revision)?;
+            let raw_rows = read_dirty_rows_tx(&tx, after, max_rows as i64)?;
+            for dirty in load_dirty_rows_tx(&tx, raw_rows)? {
                 let encoded_len = serde_json::to_vec(&dirty.event).map_err(|error| Error::Sync(format!("encode sync dirty event: {error}")))?.len();
                 if encoded_len > SYNC_SNAPSHOT_MAX_ROW_BYTES {
                     return Err(Error::Sync(format!("sync dirty row exceeds {SYNC_SNAPSHOT_MAX_ROW_BYTES} bytes")));
@@ -2194,7 +2207,7 @@ impl Index {
                 }
                 if bytes_used.saturating_add(row_bytes) > max_bytes { break; }
                 bytes_used = bytes_used.saturating_add(row_bytes);
-                dirty_cursor = revision as u64;
+                dirty_cursor = dirty.revision as u64;
                 dirty_events.push(dirty);
             }
         }
@@ -2288,19 +2301,8 @@ impl Index {
         let mut dirty_events = Vec::new();
         let mut after_revision = 0_i64;
         loop {
-            let mut stmt = tx.prepare(
-                "SELECT identity, occurrence_id, event_id, event_json, revision FROM sync_dirty
-                   WHERE revision > ?1 ORDER BY revision, identity LIMIT ?2",
-            ).map_err(sql_err)?;
-            let rows = stmt.query_map(params![after_revision, SYNC_DIRTY_PAGE_SIZE as i64], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, i64>(4)?))
-            }).map_err(sql_err)?;
-            let mut page = Vec::new();
-            for row in rows {
-                let (identity, occurrence_id, event_id, event_json, revision) = row.map_err(sql_err)?;
-                page.push(load_sync_dirty_event_tx(&tx, identity, occurrence_id, event_id, event_json, revision)?);
-            }
-            drop(stmt);
+            let raw_rows = read_dirty_rows_tx(&tx, after_revision, SYNC_DIRTY_PAGE_SIZE as i64)?;
+            let page = load_dirty_rows_tx(&tx, raw_rows)?;
             if page.is_empty() { break; }
             after_revision = page.last().map(|event| event.revision as i64).ok_or_else(|| Error::Sync("empty sync dirty page".into()))?;
             dirty_events.extend(page);
@@ -2479,31 +2481,12 @@ impl Index {
         let mut events: Vec<UsageEvent> = Vec::new();
         {
             let mut stmt = self.conn.prepare(&event_sql).map_err(sql_err)?;
+            // event_from_row is the one decoder for SELECT_EVENT_COLS; a
+            // hand-rolled copy here used to drift whenever the column list
+            // changed.
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(since_ms), |r| {
-                    let id: i64 = r.get(0)?;
-                    let counts = TokenCounts {
-                        input: r.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
-                        cache_creation: r.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
-                        cache_read: r.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
-                        output: r.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
-                        reasoning: r.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
-                        credits: r.get::<_, Option<f64>>(12)?.unwrap_or(0.0),
-                    };
-                    let ev = UsageEvent {
-                        tool: r.get(1)?,
-                        ts_ms: r.get(2)?,
-                        session: r.get(3)?,
-                        project: r.get(4)?,
-                        model: r.get(5)?,
-                        counts,
-                        meter: meter_of(&r.get::<_, String>(6)?),
-                        dedupe_key: r.get(13)?,
-                        calls: Vec::new(),
-                        quota: None,
-                        source: r.get(14)?,
-                    };
-                    Ok((id, ev))
+                    Ok((r.get::<_, i64>(0)?, event_from_row(r)?))
                 })
                 .map_err(sql_err)?;
             for row in rows {
