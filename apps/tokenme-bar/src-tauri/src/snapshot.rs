@@ -69,7 +69,13 @@ pub fn write(report: &Report) {
         }
         let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
         file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
+        // No fsync on purpose: the snapshot's durability bar is only "the next
+        // launch can read the most recent copy", and the atomic rename below
+        // already guarantees the on-disk file is whole for as long as the
+        // system is up. A crash costs at most the last publish — the previous
+        // snapshot or the boot rescan covers that — and a file that did not
+        // survive a power loss parses as unusable, which read() already treats
+        // as "no snapshot, scan as usual".
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

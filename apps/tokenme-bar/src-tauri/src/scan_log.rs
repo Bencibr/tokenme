@@ -110,6 +110,15 @@ pub fn pass(
     // in no particular order, so a row-to-row comparison measures the
     // iteration order, not the store — every quiet pass reported fake
     // regressions that way.
+    // The DSH reconciliation reads every projection file in DSH's cache
+    // directory and re-pulls the tool's event rows — MB-level re-reads were
+    // paid on every changed pass for an audit artifact. Hourly is plenty for a
+    // drift check (the codex replay below draws the same line), so it rides
+    // the heartbeat too; between heartbeats the fields carry a note instead.
+    let mut dsh_regressions: Vec<String> = Vec::new();
+    let mut dsh_sessions: Vec<_> = Vec::new();
+    let dsh_due = heartbeat_due;
+    if dsh_due {
     let dsh_rows = index.tool_events("dsh").unwrap_or_default();
     let sums = sum_rows(&dsh_rows);
     let mut last_totals = LAST_TOTALS.lock().unwrap();
@@ -170,6 +179,10 @@ pub fn pass(
         }
     }
 
+    }
+    if !dsh_due {
+        dsh_sessions.push(json!({ "note": "dsh reconciliation runs hourly; next heartbeat" }));
+    }
     // The codex replay audit rides the heartbeat line only: re-parsing every
     // rollout from scratch is the one expensive fact here (hundreds of ms on a
     // heavy machine), and hourly is plenty for a remote double-count check.

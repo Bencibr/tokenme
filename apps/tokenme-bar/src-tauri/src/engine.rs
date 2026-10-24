@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, RecvTimeoutError};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -70,10 +70,14 @@ static QUOTA_PASS: Mutex<Option<(Instant, Vec<QuotaView>)>> = Mutex::new(None);
 static QUOTA_PASS_BUST: AtomicBool = AtomicBool::new(false);
 
 /// How long one discovered-file snapshot is reused (restatted, not re-walked)
-/// before the engine pays a full `discover` again. Bounds how long a file the
-/// watcher never saw can stay invisible. Any wake naming a declared root
-/// forces a full walk for every tool, ahead of the TTL.
-const SNAPSHOT_TTL: Duration = Duration::from_secs(30);
+/// before the engine pays a full `discover` again. The watcher covers every
+/// incremental change — new, grown and vanished files all surface on the next
+/// wake — so the TTL is only the backstop for a file the watcher never saw:
+/// eight minutes is the longest one can stay invisible, long enough that idle
+/// passes never pay a full re-walk of every adapter tree on a schedule. Any
+/// wake naming a declared root forces a full walk for every tool, ahead of
+/// the TTL.
+const SNAPSHOT_TTL: Duration = Duration::from_secs(480);
 
 pub enum Msg {
     /// A watched root changed; the payload is the root the watcher named.
@@ -714,6 +718,18 @@ fn ingest<R: Runtime>(
     }
 }
 
+/// Process-local sha256 cache for sync bundles, keyed by (size, mtime_ns, path).
+/// The on-disk `sync_file_memo` only saves the *import*; the sha it is compared
+/// against still had to come from a full read of every bundle on every pass.
+/// Stat first and reuse the hash while the stat is unchanged, so a busy pass
+/// pays a couple of stats per bundle instead of re-reading each one in full; a
+/// bundle whose stat moved re-hashes on its next pass, and a restart re-reads
+/// once. Deliberately process-local — the memo table stays the library's, and
+/// import semantics (memo consulted, memo written by `import_sync`) are
+/// unchanged.
+static SYNC_SHA_CACHE: LazyLock<Mutex<HashMap<(u64, i64, PathBuf), String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Merges every bundle sitting in `~/tokenme-sync` that this index has not
 /// seen at its current content hash yet. Same function `tokenme import` uses —
 /// hash check, key-based reconciliation, one transaction — so a bundle that
@@ -726,6 +742,7 @@ fn import_sync_dir(index: &mut Index) -> bool {
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     let mut merged = false;
+    let mut live: HashSet<PathBuf> = HashSet::new();
     for entry in entries {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
@@ -735,12 +752,31 @@ fn import_sync_dir(index: &mut Index) -> bool {
         if !name.ends_with(".jsonl.gz") {
             continue;
         }
-        let sha = match usage_index::sha256_file(&path) {
-            Ok(sha) => sha,
-            Err(e) => {
-                crate::logging::error(&format!("sync: cannot hash {name}: {e}"));
-                continue;
-            }
+        live.insert(path.clone());
+        // Stat identity for the sha cache: an unchanged (size, mtime) reuses the
+        // hash a previous pass computed instead of reading the bundle again. A
+        // stat-less or pre-epoch mtime bypasses the cache and hashes as before —
+        // the odd case pays, the common one does not.
+        let stat = std::fs::metadata(&path).ok().and_then(|meta| {
+            let ns = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+            Some((meta.len(), ns.as_nanos() as i64, path.clone()))
+        });
+        let sha = match stat.as_ref().and_then(|key| SYNC_SHA_CACHE.lock().ok()?.get(key).cloned()) {
+            Some(sha) => sha,
+            None => match usage_index::sha256_file(&path) {
+                Ok(sha) => {
+                    if let Some(key) = stat {
+                        if let Ok(mut cache) = SYNC_SHA_CACHE.lock() {
+                            cache.insert(key, sha.clone());
+                        }
+                    }
+                    sha
+                }
+                Err(e) => {
+                    crate::logging::error(&format!("sync: cannot hash {name}: {e}"));
+                    continue;
+                }
+            },
         };
         match index.sync_file_memo(&name) {
             Ok(Some(known)) if known.eq_ignore_ascii_case(&sha) => continue,
@@ -770,6 +806,11 @@ fn import_sync_dir(index: &mut Index) -> bool {
                 crate::logging::error(&format!("sync: {name} rejected (kept for retry): {e}"));
             }
         }
+    }
+    // The cache keys on paths; drop entries for bundles that left the directory
+    // so renamed or deleted files cannot grow it without bound.
+    if let Ok(mut cache) = SYNC_SHA_CACHE.lock() {
+        cache.retain(|(_, _, p), _| live.contains(p));
     }
     merged
 }
