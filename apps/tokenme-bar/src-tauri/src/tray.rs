@@ -151,19 +151,25 @@ fn on_main<R: Runtime, F: FnOnce() + Send + 'static>(app: &AppHandle<R>, body: F
 }
 
 /// Pushes the current numbers onto the status bar. Callable from any thread;
-/// the painting itself is marshalled onto the main thread.
+/// the painting itself is marshalled onto the main thread. Everything paint
+/// needs is computed here, on the thread that already holds the report —
+/// crossing to main carries two strings, not a deep clone of the report.
 pub fn refresh<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
     let handle = app.clone();
-    let report = report.clone();
-    on_main(app, move || paint(&handle, &report, mode));
+    let mode = effective_mode(mode);
+    let (title, tooltip) = label_for(report, mode);
+    on_main(app, move || paint(&handle, mode, title, tooltip));
 }
 
-fn paint<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
-    let mode = effective_mode(mode);
+fn paint<R: Runtime>(
+    app: &AppHandle<R>,
+    mode: TrayMode,
+    title: Option<String>,
+    tooltip: String,
+) {
     #[cfg(target_os = "windows")]
     crate::windows_tray::refresh(app);
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
-    let (title, tooltip) = label_for(report, mode);
     // Re-setting the image repaints the status item — visible as a flicker on
     // every engine cycle. The image only depends on the mode, so touch it
     // when the mode actually changes and leave it alone otherwise.

@@ -238,6 +238,16 @@ fn nearest_existing(path: &Path) -> Option<PathBuf> {
 
 /// The declared root an event path belongs to, or `None` when it matches none.
 fn matching_root(expected: &[(PathBuf, bool, PathBuf)], path: &Path) -> Option<PathBuf> {
+    // Fast path: backends usually report the path in the same spelling the
+    // watcher target was registered with (macOS FSEvents reports canonical
+    // paths for existing files). A plain prefix check answers the common case
+    // with zero syscalls; only paths that match no root go through the
+    // canonicalizing walk, which stats once per missing ancestor.
+    if let Some((_, _, declared)) = expected.iter().find(|(e, coarse, _)| {
+        path.starts_with(e) || (*coarse && e.starts_with(path))
+    }) {
+        return Some(declared.clone());
+    }
     let resolved = nearest_existing(path)?;
     expected
         .iter()
