@@ -62,10 +62,19 @@ fn live_quota(report: &Report, now_ms: i64) -> Option<&QuotaView> {
         .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent))
 }
 
+/// The platform's real tray shape: Windows and Linux retain an icon even
+/// with an old text-only preference, so both collapse to TrayOnly. One
+/// helper instead of two cfg blocks that had to stay in sync.
+fn effective_mode(mode: TrayMode) -> TrayMode {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    { let _ = mode; TrayMode::TrayOnly }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    mode
+}
+
 /// `(title, tooltip)`. Icon-only trays repeat the numbers in the tooltip.
 pub fn label_for(report: &Report, mode: TrayMode) -> (Option<String>, String) {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let mode = { let _ = mode; TrayMode::TrayOnly };
+    let mode = effective_mode(mode);
     let now_ms = report.generated_at_ms;
     let day = &report.day;
     let quota = live_quota(report, now_ms);
@@ -150,9 +159,7 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) 
 }
 
 fn paint<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
-    // Windows and Linux retain an icon even with an old text-only preference.
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let mode = { let _ = mode; TrayMode::TrayOnly };
+    let mode = effective_mode(mode);
     #[cfg(target_os = "windows")]
     crate::windows_tray::refresh(app);
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
@@ -189,17 +196,17 @@ fn paint<R: Runtime>(app: &AppHandle<R>, report: &Report, mode: TrayMode) {
     // string — otherwise 仅托盘 keeps the previous mode's text forever.
     // Same-value writes are skipped entirely: see LastPaint.
     let title_str = title.clone().unwrap_or_default();
-    let mut changed = true;
+    let mut text_changed = true;
     if let Some(paint) = app.try_state::<LastPaint>() {
         if let Ok(mut last) = paint.0.lock() {
             if last.0 == title_str && last.1 == tooltip {
-                changed = false;
+                text_changed = false;
             } else {
                 *last = (title_str.clone(), tooltip.clone());
             }
         }
     }
-    if changed {
+    if text_changed {
         let _ = tray.set_title(Some(title_str.as_str()));
         let _ = tray.set_tooltip(Some(tooltip));
     }
