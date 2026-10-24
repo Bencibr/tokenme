@@ -184,7 +184,6 @@ pub fn sync_event(action: &str, ok: bool, error_code: Option<&str>) {
 enum DiagnosticLog {
     Panel,
     Scan,
-    Sync,
     Diagnostics,
 }
 
@@ -193,8 +192,9 @@ impl DiagnosticLog {
         match value {
             "panel" => Ok(Self::Panel),
             "scan" => Ok(Self::Scan),
-            "sync" => Ok(Self::Sync),
-            "diagnostics" => Ok(Self::Diagnostics),
+            // The wire name "sync" predates the diagnostics ledger; both
+            // names read the same file, so one variant carries them both.
+            "sync" | "diagnostics" => Ok(Self::Diagnostics),
             _ => Err("log must be one of panel, scan, sync, diagnostics".into()),
         }
     }
@@ -206,7 +206,6 @@ impl DiagnosticLog {
                 .get()
                 .and_then(|path| path.parent().map(|dir| dir.join("scan.log")))
                 .unwrap_or_else(|| log_dir().join("scan.log")),
-            Self::Sync => diagnostics_path(),
             Self::Diagnostics => diagnostics_path(),
         }
     }
@@ -402,7 +401,10 @@ pub fn checkin(msg: &str) {
     let path = base.with_file_name("checkin.log");
     let _guard = LOCK.lock();
     let now = Local::now();
-    rotate(&path, &now);
+    // Its own prefix: the shared "panel" prefix made a day-rotated checkin
+    // ledger collide with panel.log's own rotation of the same day, and the
+    // later rename silently destroyed the earlier generation.
+    rotate_named(&path, &now, "checkin");
     let line = format!("{} {msg}\n", now.format("%Y-%m-%d %H:%M:%S"));
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(line.as_bytes());
@@ -490,7 +492,9 @@ fn cleanup(path: &Path, now: &DateTime<Local>) {
             || name == "panel.log.1"
             || name == "scan.log.1"
             || (name.starts_with("diagnostics-") && name.ends_with(".log"))
-            || name == "diagnostics.log.1";
+            || name == "diagnostics.log.1"
+            || (name.starts_with("checkin-") && name.ends_with(".log"))
+            || name == "checkin.log.1";
         if !ours {
             continue;
         }
