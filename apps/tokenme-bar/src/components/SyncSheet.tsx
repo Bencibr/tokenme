@@ -524,9 +524,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const deviceRow = (device: (typeof snapshot.devices)[number]) => {
     const hostName = device.display_name.trim() || device.origin.trim() || device.device_id;
     const deviceMeta = [
-      !device.snapshot_complete ? t("sync.device.snapshot_incomplete") : "",
-      device.last_generation != null ? t("sync.device.gen", { n: device.last_generation }) : "",
-      device.last_merged_at_ms != null ? t("sync.device.merged", { time: relTime(device.last_merged_at_ms) }) : "",
+      device.last_sync_at_ms != null ? t("sync.device.last_sync", { time: relTime(device.last_sync_at_ms) }) : "",
     ].filter(Boolean).join(" · ");
     const live = device.role === "secondary" ? device.live : true;
     return (

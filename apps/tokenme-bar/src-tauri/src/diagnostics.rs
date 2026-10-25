@@ -1655,10 +1655,7 @@ fn safe_sync_view(status: &SyncDevicesView) -> Value {
             "role": device.role,
             "status": device.status,
             "data_epoch": device.data_epoch,
-            "active_stream_id": device.active_stream_id,
-            "last_generation": device.last_generation,
-            "last_merged_at_ms": device.last_merged_at_ms,
-            "snapshot_complete": device.snapshot_complete,
+            "last_sync_at_ms": device.last_sync_at_ms,
         })).collect::<Vec<_>>(),
     })
 }

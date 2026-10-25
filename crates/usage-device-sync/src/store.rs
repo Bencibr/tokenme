@@ -150,10 +150,11 @@ pub struct DeviceRecord {
     pub role: DeviceRole,
     pub status: DeviceStatus,
     pub data_epoch: u64,
-    pub active_stream_id: Option<String>,
-    pub last_generation: Option<u64>,
-    pub last_merged_at_ms: Option<i64>,
-    pub snapshot_complete: bool,
+    /// Last authenticated rollup contact from this device — an uplink push
+    /// or a downlink fetch, whichever landed later. The row-era progress
+    /// fields (stream, generation, merge) died with the row-sync era; a
+    /// live device implies its origin's rows are current.
+    pub last_sync_at_ms: Option<i64>,
 }
 
 /// Device registry fields safe for a status/UI reader. The long-term public
@@ -167,10 +168,7 @@ pub struct DeviceStatusView {
     pub role: DeviceRole,
     pub status: DeviceStatus,
     pub data_epoch: u64,
-    pub active_stream_id: Option<String>,
-    pub last_generation: Option<u64>,
-    pub last_merged_at_ms: Option<i64>,
-    pub snapshot_complete: bool,
+    pub last_sync_at_ms: Option<i64>,
 }
 
 impl From<DeviceRecord> for DeviceStatusView {
@@ -183,10 +181,7 @@ impl From<DeviceRecord> for DeviceStatusView {
             role: record.role,
             status: record.status,
             data_epoch: record.data_epoch,
-            active_stream_id: record.active_stream_id,
-            last_generation: record.last_generation,
-            last_merged_at_ms: record.last_merged_at_ms,
-            snapshot_complete: record.snapshot_complete,
+            last_sync_at_ms: record.last_sync_at_ms,
         }
     }
 }
@@ -1116,7 +1111,7 @@ impl SyncStore {
         ).optional().map_err(sql_err)?
             .ok_or_else(|| SyncError::NotPaired(device_id.to_string()))?;
         validate_identifier("origin_label", &origin)?;
-        self.index.with_network_transaction(move |tx| {
+        let origin = self.index.with_network_transaction(move |tx| {
             let migrated: Option<String> = tx
                 .query_row(
                     "SELECT value FROM meta WHERE key = ?1",
@@ -1167,7 +1162,9 @@ impl SyncStore {
                 params![format!("{UPLINK_ROLLUP_ACKED_PREFIX}{device_id}"), at_ms.to_string()],
             ).map_err(sql_err)?;
             Ok::<_, SyncError>(origin)
-        })
+        })?;
+        self.mark_device_synced(device_id, at_ms)?;
+        Ok(origin)
     }
 
     /// The sender side of the uplink: this machine's own rollup rows,
@@ -1767,6 +1764,17 @@ impl SyncStore {
         })
     }
 
+    /// Records an authenticated rollup contact (uplink push or downlink
+    /// fetch) as the device's last-sync time. Status-view telemetry, not a
+    /// gate: an unknown device id updates zero rows and stays silent.
+    pub fn mark_device_synced(&mut self, device_id: &str, at_ms: i64) -> SyncResult<()> {
+        self.state.execute(
+            "UPDATE device_registry SET last_sync_at_ms = ?2 WHERE device_id = ?1",
+            params![device_id, at_ms],
+        ).map_err(sql_err)?;
+        Ok(())
+    }
+
     pub fn revoke_device(&mut self, device_id: &str, now_ms: i64) -> SyncResult<u64> {
         let new_epoch = Self::state_tx(&mut self.state, |tx| {
             let epoch: Option<i64> = tx.query_row("SELECT data_epoch FROM device_registry WHERE device_id = ?1", params![device_id], |row| row.get(0)).optional().map_err(sql_err)?;
@@ -2116,7 +2124,8 @@ fn migrate_state(state: &mut Connection, primary_id: &str) -> SyncResult<()> {
              CREATE TABLE IF NOT EXISTS device_registry(
                  device_id TEXT PRIMARY KEY, origin TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
                  os TEXT NOT NULL, public_key BLOB NOT NULL, status TEXT NOT NULL,
-                 data_epoch INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, revoked_at_ms INTEGER
+                 data_epoch INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, revoked_at_ms INTEGER,
+                 last_sync_at_ms INTEGER
              );
              CREATE TABLE IF NOT EXISTS device_sync_secondary_config(
                  config_key TEXT PRIMARY KEY,
@@ -2157,6 +2166,7 @@ fn migrate_state(state: &mut Connection, primary_id: &str) -> SyncResult<()> {
                  SELECT request_id, invite_id, device_id, origin, display_name, os, status, public_key
                  FROM device_pairing_request;",
         ).map_err(sql_err)?;
+        ensure_column(&tx, "device_registry", "last_sync_at_ms", "INTEGER")?;
         ensure_column(&tx, "device_sync_primary_config", "share_data_with_secondaries", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&tx, "device_sync_primary_config", "auto_approve_pairing", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&tx, "device_sync_secondary_config", "last_connected_at_ms", "INTEGER")?;
@@ -2443,23 +2453,32 @@ fn read_status_conn(state: &Connection, index: &Connection) -> SyncResult<Device
     Ok(DeviceSyncSnapshot { primary_id, devices, pairing_requests })
 }
 
-/// Registry fields come from the state database; the row-era stream progress
-/// reader is gone with the row-era streams, so the stream/progress fields
-/// answer empty. `index` is today unused but keeps the reader shape the status
-/// bridge and registry callers were written against.
+/// Registry fields come from the state database; the rollup handlers keep
+/// `last_sync_at_ms` current on every authenticated push and fetch. `index`
+/// is today unused but keeps the reader shape the status bridge and registry
+/// callers were written against.
 fn device_tx(state: &Connection, _index: &Connection, device_id: &str) -> SyncResult<Option<DeviceRecord>> {
-    let row: Option<(String, String, String, Vec<u8>, String, i64)> = state.query_row(
-        "SELECT origin, display_name, os, public_key, status, data_epoch FROM device_registry WHERE device_id = ?1",
+    // The read-only status probe skips migrations, so a state database from
+    // before the last-sync column must still answer — with NULL, which is
+    // the truth (no contact could be marked before the column existed).
+    let has_last_sync: bool = state.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_registry') WHERE name = 'last_sync_at_ms')",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
+    let row: Option<(String, String, String, Vec<u8>, String, i64, Option<i64>)> = state.query_row(
+        &format!(
+            "SELECT origin, display_name, os, public_key, status, data_epoch, {} FROM device_registry WHERE device_id = ?1",
+            if has_last_sync { "last_sync_at_ms" } else { "NULL" },
+        ),
         params![device_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
     ).optional().map_err(sql_err)?;
-    let Some((origin, display_name, os, public_key, status, data_epoch)) = row else { return Ok(None); };
+    let Some((origin, display_name, os, public_key, status, data_epoch, last_sync_at_ms)) = row else { return Ok(None); };
     let public_key: [u8; 32] = public_key.as_slice().try_into().map_err(|_| SyncError::Security("registered public key length is invalid".into()))?;
     let status = DeviceStatus::parse(&status)?;
     Ok(Some(DeviceRecord {
         device_id: device_id.to_string(), origin, display_name, os, public_key,
-        role: DeviceRole::Secondary, status, data_epoch: data_epoch as u64,
-        active_stream_id: None, last_generation: None, last_merged_at_ms: None, snapshot_complete: false,
+        role: DeviceRole::Secondary, status, data_epoch: data_epoch as u64, last_sync_at_ms,
     }))
 }
 
@@ -3210,6 +3229,23 @@ mod tests {
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_scheduler_lease'", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(exists, 1, "the probe sees the hole and the DDL batch refills it");
+    }
+
+    #[test]
+    fn read_status_answers_a_registry_that_predates_the_last_sync_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let mut store = SyncStore::open(&path, "primary-1").unwrap();
+            store.state.execute(
+                "INSERT INTO device_registry(device_id, origin, display_name, os, public_key, status, data_epoch, created_at_ms)
+                 VALUES('dev-old', 'lab-old', 'Old Lab', 'Linux', zeroblob(32), 'paired', 0, 1)", [],
+            ).unwrap();
+            store.state.execute("ALTER TABLE device_registry DROP COLUMN last_sync_at_ms", []).unwrap();
+        }
+        let status = SyncStore::read_status(&path).unwrap();
+        assert_eq!(status.devices.len(), 1, "the pre-column registry still answers the read-only probe");
+        assert_eq!(status.devices[0].last_sync_at_ms, None, "no contact could be marked before the column existed");
     }
 
     #[test]

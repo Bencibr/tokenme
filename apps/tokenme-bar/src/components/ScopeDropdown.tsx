@@ -120,7 +120,7 @@ export function ScopeDropdown({
     // Strict device-sync receipts are newer than the legacy report.syncs
     // records. Prefer them so a paired device cannot inherit an unrelated
     // manual-import timestamp such as "1 week ago".
-    const importedAt = device?.last_merged_at_ms ?? rec?.imported_at_ms ?? null;
+    const importedAt = device?.last_sync_at_ms ?? rec?.imported_at_ms ?? null;
     return {
       origin: m.origin,
       name: local ? t("scope.local") : (device?.display_name || m.origin),
@@ -130,7 +130,7 @@ export function ScopeDropdown({
       importedAt,
       age: importedAt === null ? null : relativeTime(importedAt, now),
       stale: importedAt === null || now - importedAt > STALE_MS
-        || (device !== undefined && (device.status !== "paired" || !device.snapshot_complete)),
+        || (device !== undefined && device.status !== "paired"),
       device,
     };
   });

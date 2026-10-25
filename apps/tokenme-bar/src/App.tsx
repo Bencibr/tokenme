@@ -477,17 +477,18 @@ const [page, setPage] = useState<PageKey>(() => {
     // Device-sync merges never write Report.syncs records (that list is the
     // legacy Linux-collector import log), so the paired machines themselves
     // are the freshness source for their origins: on the primary each paired
-    // secondary carries its last merge, and on the secondary the primary's
-    // last contact stands in for its downlink. Legacy records win only when
-    // they are newer for the same origin.
+    // secondary carries its last authenticated contact (a live device implies
+    // its origin's rows are current — it pushes when they change), and on the
+    // secondary the primary's last contact stands in for its downlink.
+    // Legacy records win only when they are newer for the same origin.
     const deviceRecords: SyncRecord[] = [];
     if (syncDevices.role === "primary") {
       for (const device of syncDevices.devices) {
-        if (device.status !== "paired" || device.last_merged_at_ms == null) continue;
+        if (device.status !== "paired" || device.last_sync_at_ms == null) continue;
         deviceRecords.push({
           origin: device.origin, file: "device-sync", rows: 0,
-          imported_at_ms: device.last_merged_at_ms,
-          window_lo_ms: device.last_merged_at_ms, window_hi_ms: device.last_merged_at_ms + 1,
+          imported_at_ms: device.last_sync_at_ms,
+          window_lo_ms: device.last_sync_at_ms, window_hi_ms: device.last_sync_at_ms + 1,
         });
       }
     } else if (syncDevices.role === "secondary") {

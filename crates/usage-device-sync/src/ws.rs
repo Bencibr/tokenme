@@ -359,6 +359,9 @@ fn process_server_frame(
                     message: "the primary is not sharing data with secondaries".into(),
                 }), None));
             }
+            // A served fetch is a sync: the device is alive and its origin's
+            // rows are current-by-implication (it pushes when they change).
+            store.mark_device_synced(device_id, now_ms())?;
             match primary_local_rollup_snapshot(store) {
                 Ok(snapshot) => Ok((Some(WsSyncFrame::RollupSnapshot { snapshot }), None)),
                 Err(err) => Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
@@ -546,6 +549,7 @@ mod tests {
             [&device.origin], |row| row.get(0),
         ).unwrap();
         assert_eq!(stored, 2, "both rows must land under the registry origin");
+        assert_eq!(store.device(&device.device_id).unwrap().unwrap().last_sync_at_ms, Some(1_000), "an applied push marks the device's last sync");
     }
 
     fn no_disconnect_sink() -> impl Fn(&str) {
@@ -586,6 +590,7 @@ mod tests {
             }
             other => panic!("expected the snapshot frame, got {other:?}"),
         }
+        assert_eq!(store.device(&device.device_id).unwrap().unwrap().last_sync_at_ms, Some(1_000), "a served fetch marks the device's last sync");
     }
 
     #[test]

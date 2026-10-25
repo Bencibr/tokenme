@@ -385,10 +385,8 @@ pub struct SyncDeviceView {
     pub role: String,
     pub status: String,
     pub data_epoch: u64,
-    pub active_stream_id: Option<String>,
-    pub last_generation: Option<u64>,
-    pub last_merged_at_ms: Option<i64>,
-    pub snapshot_complete: bool,
+    /// Last authenticated rollup contact (push or fetch) the primary saw.
+    pub last_sync_at_ms: Option<i64>,
     /// Live authenticated upload socket right now (primary's view only).
     pub live: bool,
 }
@@ -453,10 +451,7 @@ fn sync_device_view(device: DeviceStatusView) -> SyncDeviceView {
             DeviceStatus::ReconcileRequired => "reconcile_required",
         }.into(),
         data_epoch: device.data_epoch,
-        active_stream_id: device.active_stream_id,
-        last_generation: device.last_generation,
-        last_merged_at_ms: device.last_merged_at_ms,
-        snapshot_complete: device.snapshot_complete,
+        last_sync_at_ms: device.last_sync_at_ms,
     }
 }
 
@@ -1720,10 +1715,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
                         role: "primary".into(),
                         status: if state.runtime.is_some() { "paired".into() } else { "paused".into() },
                         data_epoch: config.data_epoch.unwrap_or(0),
-                        active_stream_id: config.stream_id.clone(),
-                        last_generation: None,
-                        last_merged_at_ms: config.last_connected_at_ms,
-                        snapshot_complete: panel.download_complete.unwrap_or(false),
+                        last_sync_at_ms: config.last_connected_at_ms,
                         live: primary_link_live().load(std::sync::atomic::Ordering::Relaxed),
                     };
                     if !devices.iter().any(|d| d.device_id == config.primary_id) {
