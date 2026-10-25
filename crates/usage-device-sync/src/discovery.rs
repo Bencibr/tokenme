@@ -224,6 +224,10 @@ mod tests {
                 prefixlen: prefix,
             }),
             index: None,
+            // Windows-only field on this locked version; the sweep itself
+            // never reads it.
+            #[cfg(windows)]
+            adapter_name: "wlo1".into(),
         }
     }
 

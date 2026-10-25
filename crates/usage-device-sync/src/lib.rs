@@ -14,7 +14,7 @@ mod store;
 mod transport;
 pub mod ws;
 
-pub use ws::{WsSyncFrame, WsSecondaryClient, handle_server_websocket, WS_PROTOCOL_VERSION};
+pub use ws::{WsSyncFrame, handle_server_websocket, WS_PROTOCOL_VERSION};
 
 pub use diagnostics::{
     diagnostics_tool_registry, DiagnosticsAuditEvent, DiagnosticsAuthority, DiagnosticsCheckResult,
@@ -35,20 +35,19 @@ pub use diagnostics::{
 };
 pub use protocol::{
     hash_bytes, identity_bytes, DeviceIdentity, NetworkCall, NetworkCounts, NetworkManifest,
-    NetworkPackage, NetworkRow, PairingInvite, PairingRequest, PrimaryDownloadPage, SignedUpload, StreamOpenReceipt,
-    AuthenticatedDisplayNameRequest, AuthenticatedDownloadRequest, AuthenticatedStatus, AuthenticatedStatusRequest,
+    NetworkPackage, NetworkRow, PairingInvite, PairingRequest, PrimaryDownloadPage, SignedUpload,
+    AuthenticatedDisplayNameRequest, AuthenticatedStatus, AuthenticatedStatusRequest,
     PairingInviteDetails, UploadEnvelope, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES, MAX_LINE_BYTES, MAX_MANIFEST_BYTES,
     MAX_ROWS, MAX_STRING_BYTES, PROTOCOL_ID, SYNC_FORMAT,
 };
 pub use store::{
-    DeviceRecord, DeviceRole, DeviceStatus, DeviceStatusView, DeviceSyncRead, DeviceSyncSnapshot, ImportReceipt,
-    DirtyJournalEntry, DirtyJournalInput, MergeOutcome, OutboxEntry, OutboxState, OutboxSummary,
-    DisconnectNotice, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SecondaryResetSummary, SnapshotCursor, SyncError, SyncResult, SyncStore,
+    DeviceRecord, DeviceRole, DeviceStatus, DeviceStatusView, DeviceSyncRead, DeviceSyncSnapshot,
+    DisconnectNotice, PairingRequestState, PrimarySyncConfig, SecondarySyncConfig, SecondaryResetSummary, SyncError, SyncResult, SyncStore,
 };
 pub use lifecycle::deliver_disconnect_notice;
-pub use runtime::{export_index_snapshot, export_index_snapshots, export_index_snapshots_from_snapshot, LocalSnapshot, RuntimeRunReport, SyncRuntime, SyncRuntimeConfig};
+pub use runtime::{RuntimeRunReport, SyncRuntime, SyncRuntimeConfig};
 pub use transport::{
     ensure_server_certificate, load_pem_certificate, load_pem_private_key, ClientSocketGuard, ClientTransportCancellation, HttpsServerConfig,
-    AuthenticatedRollupRequest, RollupRow, RollupSnapshot,
+    RollupRow, RollupSnapshot,
     HttpsSyncServer, HttpsSyncServerHandle, HttpsTransportConfig, ParsedEndpoint, Tls13HttpsTransport, TransportError,
 };

@@ -12,14 +12,16 @@ use std::time::Duration;
 use chrono::{Datelike, Local, TimeZone};
 use base64::Engine as _;
 use serde::Deserialize;
-use usage_core::{summarize, CallKind, DateFilter, Item, Meter, Summary, UsageEvent, Window};
+use usage_core::{summarize, DateFilter, Item, Summary, UsageEvent, Window};
 use usage_device_sync::{
-    hash_bytes, identity_bytes, ClientTransportCancellation, DeviceIdentity, DiagnosticsGrant,
+    hash_bytes, ClientTransportCancellation, DeviceIdentity, DiagnosticsGrant,
     DiagnosticsMcpRequest, DiagnosticsRequestAuth, DiagnosticsService, HttpsServerConfig,
-    HttpsTransportConfig, NetworkCall, NetworkCounts, NetworkPackage, NetworkRow, PairingInvite,
-    PairingRequest, RuntimeRunReport, SignedUpload, SyncRuntime, SyncRuntimeConfig, SyncStore,
+    HttpsTransportConfig, PairingInvite,
+    PairingRequest, SyncRuntime, SyncRuntimeConfig, SyncStore,
     Tls13HttpsTransport,
 };
+#[cfg(unix)]
+use usage_device_sync::RuntimeRunReport;
 use usage_index::{retention_cutoff, IngestReport};
 
 use crate::args::{Group, Win};
@@ -1713,10 +1715,13 @@ pub fn import_sync(ctx: &mut Ctx, file: &std::path::Path, dry_run: bool) -> Resu
     Ok(())
 }
 
-/// Strict network sync command. This intentionally does not use the legacy
-/// JSONL/SSH importer and does not remove a local package after an ACK: the
-/// outbox/journal lifecycle is a later slice, so the command sends one bounded
-/// snapshot and leaves the source index untouched.
+/// Symmetric rollup uplink. The command ships this machine's whole
+/// local-origin rollup snapshot to the primary over the pinned WebSocket
+/// session; the primary applies the rows under this device's registry origin
+/// and answers the resolved label. Nothing is removed locally: the snapshot
+/// is a projection, not a move. The retired package-era flags (`--stream-id`,
+/// `--data-epoch`, `--generation`, `--days`) stay parsed for compatibility
+/// but no longer shape the transfer.
 pub fn sync_upload(
     ctx: &mut Ctx,
     endpoint: String,
@@ -1726,152 +1731,30 @@ pub fn sync_upload(
     identity_path: PathBuf,
     origin: String,
     primary_id: String,
-    stream_id: String,
-    data_epoch: u64,
-    generation: u64,
-    days: i64,
+    _stream_id: String,
+    _data_epoch: u64,
+    _generation: u64,
+    _days: i64,
 ) -> Result<(), String> {
-    if days <= 0 {
-        return Err("--days must be positive".into());
-    }
-    if data_epoch == 0 || generation == 0 {
-        return Err("--data-epoch and --generation start at 1".into());
-    }
     let identity = DeviceIdentity::load_or_create(&identity_path, origin, "tokenme-cli")
         .map_err(|e| format!("cannot load sync identity {}: {e}", identity_path.display()))?;
-    let hi_ms = ctx.now_ms.saturating_add(1);
-    let lo_ms = ctx.now_ms.saturating_sub(days.saturating_mul(MS_DAY));
-    let all_events = ctx.index.all_events().map_err(|e| e.to_string())?;
-    let keyless_ids = stable_keyless_occurrences(&all_events);
-    let mut keyless_seen: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
-    let mut rows = Vec::new();
-    for event in all_events.into_iter().filter(|event| event.ts_ms >= lo_ms) {
-        if event.ts_ms < lo_ms || event.ts_ms >= hi_ms || event.source.starts_with("linux:") {
-            continue;
-        }
-        let (key, occurrence_id) = match event.dedupe_key.clone() {
-            Some(key) => (Some(key), None),
-            None => {
-                let fingerprint = keyless_fingerprint(&event);
-                let ordinal = keyless_seen.entry(fingerprint.clone()).or_insert(0);
-                let occurrence = keyless_ids
-                    .get(&fingerprint)
-                    .and_then(|ids| ids.get(*ordinal))
-                    .cloned()
-                    .ok_or_else(|| "strict sync could not assign a stable keyless occurrence".to_string())?;
-                *ordinal += 1;
-                (None, Some(occurrence))
-            }
-        };
-        let calls = event.calls.iter().map(|call| NetworkCall {
-            kind: match call.kind { CallKind::Mcp => "mcp", CallKind::Skill => "skill" }.into(),
-            name: call.name.clone(),
-        }).collect::<Vec<_>>();
-        rows.push(NetworkRow {
-            key,
-            occurrence_id,
-            tool: event.tool,
-            ts_ms: event.ts_ms,
-            session: event.session,
-            project: event.project,
-            model: event.model,
-            meter: match event.meter { Meter::Tokens => "tokens", Meter::Credits => "credits" }.into(),
-            source: if event.source.is_empty() { "local".into() } else { event.source },
-            counts: NetworkCounts {
-                in_tok: Some(event.counts.input),
-                cc_tok: Some(event.counts.cache_creation),
-                cr_tok: Some(event.counts.cache_read),
-                out_tok: Some(event.counts.output),
-                reason_tok: Some(event.counts.reasoning),
-                credits: Some(event.counts.credits),
-            },
-            calls,
-        });
-    }
-    let package = NetworkPackage::from_rows(
-        identity.origin.clone(),
-        usage_index::INDEX_SCHEMA_VERSION,
-        lo_ms,
-        hi_ms,
-        &rows,
-        ctx.now_ms,
-    ).map_err(|e| format!("cannot build strict sync package: {e}"))?;
-    let envelope = usage_device_sync::UploadEnvelope {
-        protocol_id: usage_device_sync::PROTOCOL_ID.into(),
-        primary_id,
-        device_id: identity.device_id.clone(),
-        origin: identity.origin.clone(),
-        stream_id,
-        data_epoch,
-        generation,
-        manifest_bytes: package.manifest_bytes.clone(),
-        gzip_sha256: usage_device_sync::hash_bytes(&package.gzip_bytes),
-    };
-    let upload = SignedUpload::sign(envelope, &identity.signing_key, package.gzip_bytes)
-        .map_err(|e| format!("cannot sign strict sync package: {e}"))?;
     let cert_der = usage_device_sync::load_pem_certificate(&trust_cert)
         .map_err(|e| format!("cannot load pinned trust certificate {}: {e}", trust_cert.display()))?;
     let pin = parse_sha256(&pin_sha256)?;
     let mut transport_config = HttpsTransportConfig::pinned(endpoint, server_name, cert_der);
     transport_config.pinned_certificate_sha256 = pin;
     let mut transport = Tls13HttpsTransport::new(transport_config).map_err(|e| e.to_string())?;
-    let receipt = transport.ws_upload(&upload).map_err(|e| format!("strict sync upload failed: {e}"))?;
+    transport.set_ws_session_identity(identity.device_id.clone(), identity.origin.clone());
+    let store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| format!("cannot open sync store {}: {e}", ctx.db_path.display()))?;
+    let rows = store.local_rollup_snapshot().map_err(|e| format!("cannot build local rollup snapshot: {e}"))?;
+    let count = rows.len();
+    let resolved = transport.ws_rollup_sync(&rows).map_err(|e| format!("rollup sync upload failed: {e}"))?;
     if ctx.g.json {
-        print_json(&receipt);
+        print_json(&serde_json::json!({ "origin": resolved, "accepted": true, "rows": count }));
     } else {
-        println!("uploaded {} row(s): inserted {}, updated {}, deduped {}", receipt.rows, receipt.inserted, receipt.updated, receipt.deduped);
-        println!("receipt {} / generation {}", hex_bytes(&receipt.receipt_hash), receipt.generation);
-        println!("local index and pending source data were retained; this command has no outbox cleanup");
+        println!("rollup snapshot {} rows — primary origin {}", count, resolved);
     }
     Ok(())
-}
-
-/// A keyless adapter row cannot use SQLite rowid: rebuild/prune may recreate it.
-/// Derive its identity from stable source content and keep a deterministic
-/// multiplicity for exact duplicates. The complete snapshot makes a window
-/// export a projection of one numbering, not a fresh numbering of a dirty subset.
-fn stable_keyless_occurrences(events: &[UsageEvent]) -> BTreeMap<Vec<u8>, Vec<String>> {
-    let mut fingerprints: Vec<Vec<u8>> = events
-        .iter()
-        .filter(|event| event.dedupe_key.is_none())
-        .map(keyless_fingerprint)
-        .collect();
-    fingerprints.sort();
-    let mut result = BTreeMap::new();
-    let mut counts: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
-    for fingerprint in fingerprints {
-        let ordinal = counts.entry(fingerprint.clone()).or_insert(0);
-        result.entry(fingerprint.clone()).or_insert_with(Vec::new).push(format!(
-            "codex-occ-v1:{}:{}",
-            hex_bytes(&hash_bytes(&identity_bytes(b"tokenme/device-sync/keyless-occurrence/v1", &[&fingerprint]))),
-            *ordinal,
-        ));
-        *ordinal += 1;
-    }
-    result
-}
-
-fn keyless_fingerprint(event: &UsageEvent) -> Vec<u8> {
-    let meter = match event.meter { Meter::Tokens => "tokens", Meter::Credits => "credits" };
-    let mut call_names = event.calls.iter().map(|call| {
-        let kind = match call.kind { CallKind::Mcp => "mcp", CallKind::Skill => "skill" };
-        format!("{kind}\u{1f}{name}", name = call.name)
-    }).collect::<Vec<_>>();
-    call_names.sort();
-    let calls = call_names.join("\u{1e}");
-    let count_bits = [
-        event.counts.input.to_bits(), event.counts.cache_creation.to_bits(),
-        event.counts.cache_read.to_bits(), event.counts.output.to_bits(),
-        event.counts.reasoning.to_bits(), event.counts.credits.to_bits(),
-    ];
-    let ts = event.ts_ms.to_be_bytes();
-    let count_bytes = count_bits.iter().flat_map(|bits| bits.to_be_bytes()).collect::<Vec<_>>();
-    let fields = [
-        event.tool.as_bytes(), &ts, event.session.as_bytes(), event.project.as_deref().unwrap_or("").as_bytes(),
-        event.model.as_deref().unwrap_or("").as_bytes(), meter.as_bytes(), event.source.as_bytes(),
-        count_bytes.as_slice(), calls.as_bytes(),
-    ];
-    identity_bytes(b"tokenme/device-sync/keyless-fingerprint/v1", &fields)
 }
 
 pub fn sync_status(ctx: &Ctx) -> Result<(), String> {
@@ -1879,24 +1762,20 @@ pub fn sync_status(ctx: &Ctx) -> Result<(), String> {
     let secondary = SyncStore::read_secondary_config(&ctx.db_path).map_err(|e| e.to_string())?;
     let running = secondary_runtime_status(&ctx.db_path);
     if ctx.g.json {
-        let outbox = secondary.as_ref().and_then(|config| SyncStore::open(&ctx.db_path, config.primary_id.clone()).ok()?.outbox_summary().ok());
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "registry": status,
             "secondary": secondary,
             "runtime_running": running,
-            "outbox": outbox,
         })).map_err(|e| e.to_string())?);
     } else {
         println!("primary: {}", status.primary_id.as_deref().unwrap_or_else(|| secondary.as_ref().map(|config| config.primary_id.as_str()).unwrap_or("not initialized")));
         if let Some(config) = secondary {
-            let outbox = SyncStore::open(&ctx.db_path, config.primary_id.clone()).ok().and_then(|store| store.outbox_summary().ok());
             println!("secondary: {}", if running { "running" } else if config.enabled { "stopped" } else { "disabled" });
             println!("endpoint: {}", config.endpoint);
             println!("certificate_pin: {}", hex_bytes(&config.certificate_pin));
             println!("stream: {}", config.stream_id.as_deref().unwrap_or("not opened"));
             println!("data_epoch: {}", config.data_epoch.map(|value| value.to_string()).unwrap_or_else(|| "-".into()));
             println!("last_connected_at_ms: {}", config.last_connected_at_ms.map(|value| value.to_string()).unwrap_or_else(|| "-".into()));
-            println!("pending: {}", outbox.as_ref().map(|summary| summary.pending).unwrap_or(0));
             if let Some(error) = config.last_error { println!("last_error: {error}"); }
         }
         for device in status.devices {
@@ -1983,10 +1862,10 @@ pub fn sync_stop(ctx: &Ctx) -> Result<(), String> {
 pub fn sync_reset(ctx: &Ctx) -> Result<(), String> {
     let config = SyncStore::read_secondary_config(&ctx.db_path)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "this device is not a paired secondary; only a secondary keeps stream/outbox checkpoints to reset".to_string())?;
+        .ok_or_else(|| "this device is not a paired secondary; only a secondary keeps session checkpoints to reset".to_string())?;
     // The resident runtime holds the scheduler lease and an in-memory view of
-    // the outbox; deleting rows under it would let the next pass resurrect
-    // half of the old sequence. Stop it first.
+    // the session; resetting under it would let the next pass resurrect half
+    // of the old state. Stop it first.
     if secondary_runtime_status(&ctx.db_path) {
         return Err("secondary sync runtime is running; run `tokenme sync stop` before `tokenme sync reset`".into());
     }
@@ -1995,14 +1874,12 @@ pub fn sync_reset(ctx: &Ctx) -> Result<(), String> {
     if ctx.g.json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "device_id": summary.device_id,
-            "discarded_packages": summary.discarded_packages,
-            "discarded_journal_rows": summary.discarded_journal_rows,
             "events_kept": store.index().event_count().map_err(|error| error.to_string())?,
-            "next": "run `tokenme sync run` to recover a fresh stream and re-sync",
+            "next": "run `tokenme sync run` to re-establish the session and re-sync",
         })).map_err(|error| error.to_string())?);
     } else {
-        println!("reset {}: {} package(s), {} journal row(s) discarded; local events kept", summary.device_id, summary.discarded_packages, summary.discarded_journal_rows);
-        println!("next: `tokenme sync run` recovers a fresh stream and re-sends the full local projection");
+        println!("reset {}: session checkpoints discarded; local events kept", summary.device_id);
+        println!("next: `tokenme sync run` re-establishes the session and re-ships the local rollup snapshot");
     }
     Ok(())
 }
@@ -2062,6 +1939,7 @@ fn restart_delay(consecutive_failures: u32) -> Duration {
 }
 
 /// Sleeps in short slices so `sync stop` is honored during a restart backoff.
+#[cfg(any(unix, test))]
 fn sleep_until_retry(stop: &AtomicBool, delay: Duration) -> bool {
     let deadline = std::time::Instant::now() + delay;
     while !stop.load(Ordering::Acquire) {
@@ -2075,6 +1953,7 @@ fn sleep_until_retry(stop: &AtomicBool, delay: Duration) -> bool {
 /// The binding is re-read before every restart: a revoked/unpaired device
 /// disables its config, which is the terminal signal. Everything else — a
 /// transient SQLite failure, a lost lease, a panic — gets a new runtime.
+#[cfg(unix)]
 fn secondary_binding_enabled(db_path: &std::path::Path) -> bool {
     SyncStore::read_secondary_config(db_path).ok().flatten().is_some_and(|config| config.enabled)
 }
@@ -2213,7 +2092,7 @@ fn run_secondary_service(
     }
     let report = result?;
     if json { print_json(&report); }
-    else { println!("secondary runtime stopped: {} pending package(s), {} acknowledged", report.pending, report.acknowledged); }
+    else { println!("secondary runtime stopped — {} rollup rows, {} bytes moved this session", report.uploaded, report.bytes); }
     Ok(())
 }
 
@@ -2253,7 +2132,7 @@ fn run_secondary_service(
         store.set_secondary_enabled(false, usage_core::report::now_ms()).map_err(|error| error.to_string())?;
     }
     if json { print_json(&report); }
-    else { println!("secondary runtime stopped: {} pending package(s), {} acknowledged", report.pending, report.acknowledged); }
+    else { println!("secondary runtime stopped — {} rollup rows, {} bytes moved this session", report.uploaded, report.bytes); }
     Ok(())
 }
 
@@ -2398,14 +2277,6 @@ fn cli_sync_dir_for_db(db_path: &std::path::Path) -> Result<PathBuf, String> {
     #[cfg(unix)]
     std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|error| format!("cannot protect private sync directory: {error}"))?;
     Ok(root)
-}
-
-pub fn sync_open_stream(ctx: &Ctx, device_id: String, primary_id: String) -> Result<(), String> {
-    let mut store = SyncStore::open(&ctx.db_path, primary_id).map_err(|e| e.to_string())?;
-    let receipt = store.open_stream_for_registered(&device_id, ctx.now_ms).map_err(|e| e.to_string())?;
-    if ctx.g.json { println!("{}", serde_json::json!({"primary_id": receipt.primary_id, "device_id": receipt.device_id, "stream_id": receipt.stream_id, "data_epoch": receipt.data_epoch, "expected_generation": receipt.expected_generation})); }
-    else { println!("stream_id {} data_epoch {} generation {}", receipt.stream_id, receipt.data_epoch, receipt.expected_generation); }
-    Ok(())
 }
 
 pub fn sync_serve(ctx: &Ctx, bind: String, cert: Option<PathBuf>, key: Option<PathBuf>, primary_id: String, allow_lan: bool) -> Result<(), String> {

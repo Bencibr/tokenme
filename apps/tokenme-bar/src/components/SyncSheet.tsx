@@ -350,7 +350,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   }, [pickedRole, snapshot.role, snapshot.service_running]);
 
   useEffect(() => {
-    if (snapshot.role !== "secondary" || !snapshot.service_running || snapshot.stream_id) {
+    if (snapshot.role !== "secondary" || !snapshot.service_running || snapshot.stream_id || snapshot.upload_complete === true) {
       setSecondaryConnectingElapsed(false);
       return;
     }
@@ -369,7 +369,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // approved but unreachable, and the error box plus the recovering state tell
   // that story instead of a stale waiting banner.
   const awaitingApprovalError = snapshot.last_error?.toLowerCase().includes("awaiting approval") ?? false;
-  const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id && (awaitingApprovalError || (!snapshot.last_error && secondaryConnectingElapsed));
+  const awaitingSecondaryApproval = snapshot.role === "secondary" && snapshot.service_running && !snapshot.stream_id && snapshot.upload_complete !== true && (awaitingApprovalError || (!snapshot.last_error && secondaryConnectingElapsed));
   const secondaryServiceMayChange = snapshot.role === "secondary" && snapshot.service_running;
   const primaryDeviceStateMayChange = snapshot.role === "primary" && snapshot.devices.some((device) => device.role === "secondary" && device.status === "paired");
   // The fast-accepted start leaves role empty until the worker finishes, but
@@ -450,22 +450,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   const errorDetail = awaitingSecondaryApproval && rawErrorDetail?.toLowerCase().includes("awaiting approval") ? null : rawErrorDetail;
   const visibleError = syncErrorMessage(errorDetail);
   // The two halves of a secondary's sync, each with its own finish line: the
-  // initial upload snapshot (pages still ACKing → queued items) and the
-  // primary-data downlink (absent until the primary shares its first page).
-  const uploadQueued = snapshot.pending + snapshot.in_flight;
-  // The opaque first-sync wait had a name all along: the one-time history
-  // materialization walks every local event before the first snapshot page.
-  // Show its honest percentage instead of 等待开始.
-  const [historyDone, historyTotal] = snapshot.history_init ?? [0, 0];
-  const historyPreparing = snapshot.history_init != null && historyDone < historyTotal;
-  const historyPercent = historyTotal > 0 ? Math.min(100, Math.floor((historyDone / historyTotal) * 100)) : 0;
+  // upload is a rollup snapshot now — done once the primary has stored it,
+  // wait until then — and the primary-data downlink (absent until the
+  // primary shares its first page).
   const uploadState = snapshot.upload_complete === true
     ? t("sync.prog.done")
-    : snapshot.upload_complete === false
-      ? uploadQueued > 0 ? t("sync.prog.running_items", { n: uploadQueued }) : t("sync.prog.running")
-      : historyPreparing
-        ? t("sync.prog.preparing", { percent: historyPercent })
-        : t("sync.prog.wait");
+    : t("sync.prog.wait");
   const downloadState = snapshot.download_complete === true
     ? t("sync.prog.done")
     : snapshot.download_complete === false
@@ -480,12 +470,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // to the role-selection cards while that banner is the whole point.
   useEffect(() => {
     if (screen !== "waiting") return;
-    if (snapshot.stream_id) { setScreen("overview"); return; }
+    if (snapshot.stream_id || snapshot.upload_complete === true) { setScreen("overview"); return; }
     if (rejectedByPrimary) {
       rejectedScanReturn.current = true;
       setScreen("discovery");
     }
-  }, [screen, snapshot.stream_id, rejectedByPrimary]);
+  }, [screen, snapshot.stream_id, snapshot.upload_complete, rejectedByPrimary]);
 
   const nextFromSetup = () => {
     if (pickedRole === "primary") {
@@ -548,9 +538,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
         {device.role === "secondary" && device.status === "paired" && deviceMeta ? <span className="sync-dev-when">{deviceMeta}</span> : null}
         <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
           request: isSecondary ? { action: "stop" } : { action: "revoke", device_id: device.device_id },
-          message: isSecondary && uploadQueued > 0
-            ? t("sync.revoke.pending_confirm", { name: hostName, count: uploadQueued })
-            : t("sync.revoke.confirm", { name: hostName }),
+          message: t("sync.revoke.confirm", { name: hostName }),
         })}>{t("sync.disconnect")}</button>
       </div>
     );
@@ -713,13 +701,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   </div>
                   <div className="role-right">
                     <span className={`role-state role-state-${status.kind}`} aria-live="polite">{status.label}</span>
-                    <button type="button" className="stopbtn" disabled={commandBusy || (!snapshot.service_running && snapshot.role !== "secondary")} onClick={() => {
-                      if (isSecondary && uploadQueued > 0) {
-                        setPendingConfirm({ request: { action: "stop" }, message: t("sync.stop.pending_confirm", { count: uploadQueued }) });
-                        return;
-                      }
-                      void run({ action: "stop" });
-                    }} aria-label={t("sync.stop_disconnect")}>
+                    <button type="button" className="stopbtn" disabled={commandBusy || (!snapshot.service_running && snapshot.role !== "secondary")} onClick={() => void run({ action: "stop" })} aria-label={t("sync.stop_disconnect")}>
                       <span className="stopicon" aria-hidden="true" />{t("sync.stop_disconnect")}
                     </button>
                   </div>
@@ -816,9 +798,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                       <code>{awaitingSecondaryApproval ? t("sync.state.starting") : secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
                       <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
                         request: { action: "stop" },
-                        message: uploadQueued > 0
-                          ? t("sync.revoke.pending_confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary"), count: uploadQueued })
-                          : t("sync.revoke.confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary") }),
+                        message: t("sync.revoke.confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary") }),
                       })}>{t("sync.disconnect")}</button>
                     </div>
                   )}

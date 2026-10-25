@@ -409,10 +409,6 @@ pub struct SyncDevicesView {
     pub primary_data_sharing_enabled: bool,
     /// Primary only: pairing requests are approved on arrival while on.
     pub primary_auto_approve_enabled: bool,
-    /// Secondary only: one-time history materialization progress as
-    /// (last processed event id, max local event id). `None` on a primary or
-    /// when there is nothing to materialize.
-    pub history_init: Option<(i64, i64)>,
     pub service_health: Option<String>,
     pub endpoint: Option<String>,
     pub certificate_pin: Option<String>,
@@ -424,9 +420,6 @@ pub struct SyncDevicesView {
     /// Secondary only: primary-data downlink completion. `None` until the
     /// primary shares its first page, `Some(false)` while the backfill runs.
     pub download_complete: Option<bool>,
-    pub pending: u64,
-    pub in_flight: u64,
-    pub pending_bytes: u64,
     pub last_error: Option<String>,
     pub discovery_error: Option<String>,
     pub last_connected_at_ms: Option<i64>,
@@ -1571,7 +1564,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     }
     let index_path = sync_index_path()?;
     // One state read and one index read answer the whole poll: role configs,
-    // registry, outbox totals and snapshot cursors. Opening each field through
+    // registry and snapshot cursors. Opening each field through
     // its own connection queued every five-second tick behind writers ~10 times.
     let panel = SyncStore::read_panel_state(&index_path)
         .map_err(|error| format!("cannot read device sync state: {error}"))?;
@@ -1715,7 +1708,6 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         primary_starting: state.primary_starting,
         primary_data_sharing_enabled,
         primary_auto_approve_enabled,
-        history_init: panel.occurrence_init,
         service_health,
         endpoint,
         certificate_pin,
@@ -1723,9 +1715,6 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         data_epoch,
         upload_complete,
         download_complete,
-        pending: panel.outbox.pending,
-        in_flight: panel.outbox.in_flight,
-        pending_bytes: panel.outbox.bytes,
         last_error,
         discovery_error: state.discovery_error.clone(),
         last_connected_at_ms: secondary_config.as_ref().and_then(|config| config.last_connected_at_ms),
@@ -2174,6 +2163,25 @@ fn resume_pending_pairing(state: &mut SyncControlState, index_path: &std::path::
     }
 }
 
+/// The primary's current sharing answer for a `DeviceState` push. A failed
+/// read answers `false`: the device stops asking for the downlink until its
+/// next session re-syncs, and never uploads against a sharing-off primary.
+fn primary_sharing_enabled(index_path: &std::path::Path) -> bool {
+    SyncStore::read_primary_config(index_path).ok().flatten().is_some_and(|config| config.share_data_with_secondaries)
+}
+
+/// Best-effort `DeviceState` push onto a device's live upload session, so a
+/// revoke/pause/resume or a sharing flip reaches the secondary instantly
+/// instead of on its next (up to 30 s) rollup refusal. The server enqueue is
+/// a no-op when no socket is live — the device re-syncs on its next session
+/// regardless — and the call cannot fail, so the command that triggered it
+/// never does either. Device ids stay out of the log per the panel-log rule.
+fn push_device_state(state: &SyncControlState, device_id: &str, status: &str, data_sharing: bool) {
+    if let Some(service) = state.service.as_ref() {
+        service.diagnostics.push_device_state(device_id, status, data_sharing);
+    }
+}
+
 fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, diagnostics_app: Option<AppHandle>) -> Result<(), String> {
     let is_status = matches!(&action, SyncManagementRequest::Status);
     if !is_status { state.phase = SyncPhase::Running; }
@@ -2241,7 +2249,17 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
                 .ok_or_else(|| "primary sync is not configured".to_string())?;
             // State-only write: never opens the usage index, so the toggle
             // cannot queue behind the ingest engine's write lock.
-            SyncStore::write_primary_data_sharing(&index_path, &config.primary_id, enabled, current_ms()).map_err(|error| error.to_string())
+            SyncStore::write_primary_data_sharing(&index_path, &config.primary_id, enabled, current_ms()).map_err(|error| error.to_string())?;
+            // The flip moves every secondary's downlink gate at once: tell
+            // each paired device on a live session now instead of waiting
+            // for its next rollup refusal. Only a paired device holds a
+            // session (the Auth gate refuses the rest), so only they are
+            // pushed; the write above touches no device rows, so the
+            // snapshot taken on entry is still the registry's truth.
+            for device in &snapshot.devices {
+                if matches!(device.status, DeviceStatus::Paired) { push_device_state(state, &device.device_id, "paired", enabled); }
+            }
+            Ok(())
         }
         SyncManagementRequest::SetPrimaryAutoApprove { enabled } => {
             if state.role != "primary" { return Err("only the primary can change auto-approve".into()); }
@@ -2425,15 +2443,20 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
         }
         SyncManagementRequest::Pause { device_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
-            SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.pause_device(&device_id).map_err(|e| e.to_string())
+            SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.pause_device(&device_id).map_err(|e| e.to_string())?;
+            push_device_state(state, &device_id, "paused", primary_sharing_enabled(&index_path));
+            Ok(())
         }
         SyncManagementRequest::Resume { device_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
-            SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.resume_device(&device_id).map_err(|e| e.to_string())
+            SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.resume_device(&device_id).map_err(|e| e.to_string())?;
+            push_device_state(state, &device_id, "paired", primary_sharing_enabled(&index_path));
+            Ok(())
         }
         SyncManagementRequest::Revoke { device_id } => {
             let primary_id = state_primary_id(state, &snapshot)?;
             SyncStore::open(&index_path, primary_id).map_err(|e| e.to_string())?.revoke_device(&device_id, current_ms()).map(|_| ()).map_err(|e| e.to_string())?;
+            push_device_state(state, &device_id, "revoked", primary_sharing_enabled(&index_path));
             if let Some(channel) = diagnostics_app.as_ref().and_then(|app| app.try_state::<EngineChannel>()) {
                 let _ = channel.0.send(Msg::Refresh);
             }

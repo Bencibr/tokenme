@@ -1433,7 +1433,7 @@ fn sync_database_probe(path: &Path) -> Result<(), String> {
     };
     let store = usage_device_sync::SyncStore::open(path.to_path_buf(), primary_id)
         .map_err(|error| format!("sync database open failed: {error}"))?;
-    store.outbox_summary().map(|_| ()).map_err(|error| format!("sync database outbox check failed: {error}"))
+    store.devices().map(|_| ()).map_err(|error| format!("sync database device check failed: {error}"))
 }
 
 fn default_sync_database_probe() -> Result<(), String> {
@@ -1575,7 +1575,7 @@ async fn run_checks(app: &AppHandle, params: &Value) -> Result<Value, Diagnostic
                 (valid, if valid { "certificate pin shape valid" } else { "certificate pin unavailable or invalid" }.into())
             }
             "database" => match probes.as_ref().map(|probes| &probes.database) {
-                Some(Ok(())) => (true, "sync database and outbox probe succeeded".into()),
+                Some(Ok(())) => (true, "sync database probe succeeded".into()),
                 Some(Err(detail)) => (false, detail.clone()),
                 None => (false, "database probe unavailable".into()),
             },
@@ -1633,9 +1633,6 @@ fn safe_sync_view(status: &SyncDevicesView) -> Value {
         "endpoint": status.endpoint,
         "stream_id": status.stream_id,
         "data_epoch": status.data_epoch,
-        "pending": status.pending,
-        "in_flight": status.in_flight,
-        "pending_bytes": status.pending_bytes,
         "has_error": status.last_error.is_some(),
         "last_error_code": status.last_error.as_deref().map(safe_sync_error_code),
         "has_discovery_error": status.discovery_error.is_some(),
@@ -2236,7 +2233,6 @@ mod tests {
             primary_starting: false,
             primary_data_sharing_enabled: false,
             primary_auto_approve_enabled: false,
-            history_init: None,
             service_health: Some("stopped".into()),
             endpoint: Some("https://127.0.0.1:47821".into()),
             certificate_pin: Some("a".repeat(64)),
@@ -2246,9 +2242,6 @@ mod tests {
             download_complete: None,
             primary_display_name: None,
             primary_os: None,
-            pending: 0,
-            in_flight: 0,
-            pending_bytes: 0,
             last_error: None,
             discovery_error: None,
             last_connected_at_ms: None,

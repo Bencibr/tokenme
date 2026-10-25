@@ -445,23 +445,18 @@ export interface SyncDevicesSnapshot {
   primary_data_sharing_enabled: boolean;
   /** Primary only: pairing requests are approved on arrival while on. */
   primary_auto_approve_enabled: boolean;
-  /** Secondary only: one-time history materialization progress as
-   *  [last processed event id, max local event id]; null on a primary. */
-  history_init: [number, number] | null;
   service_health: string | null;
   endpoint: string | null;
   certificate_pin: string | null;
   stream_id: string | null;
   data_epoch: number | null;
-  /** Secondary only: initial upload snapshot completion. `null` before a
-   *  stream exists, `false` while snapshot pages are still being ACKed. */
+  /** Secondary only: upload completion. `true` once the primary has stored
+   *  this device's rollup snapshot; anything else is the pre-ack wait (the
+   *  `false` spelling comes from a legacy cursor on upgraded secondaries). */
   upload_complete: boolean | null;
   /** Secondary only: primary-data downlink completion. `null` until the
    *  primary shares its first page, `false` while the backfill runs. */
   download_complete: boolean | null;
-  pending: number;
-  in_flight: number;
-  pending_bytes: number;
   last_error: string | null;
   discovery_error: string | null;
   last_connected_at_ms: number | null;
