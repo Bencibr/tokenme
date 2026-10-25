@@ -24,6 +24,19 @@ struct CertFixture {
     key_der: Vec<u8>,
 }
 
+/// Reads the next frame that is not the server's one unsolicited frame — the
+/// fresh-session `DeviceState` advisory every auth now opens with. Pongs stay
+/// application frames here: these tests ping deliberately.
+fn read_app_msg(ws: &mut tungstenite::protocol::WebSocket<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>>) -> tungstenite::Message {
+    loop {
+        let msg = ws.read().unwrap();
+        let is_advisory = msg.to_text().ok()
+            .and_then(|text| serde_json::from_str::<WsSyncFrame>(&text).ok())
+            .is_some_and(|frame| matches!(frame, WsSyncFrame::DeviceState { .. }));
+        if !is_advisory { return msg; }
+    }
+}
+
 fn generate_cert() -> CertFixture {
     let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let key_der = key.serialize_der();
@@ -140,7 +153,7 @@ fn test_primary_secondary_ws_full_cycle() {
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
 
-    let ack_msg = ws.read().unwrap();
+    let ack_msg = read_app_msg(&mut ws);
     match ack_msg {
         tungstenite::Message::Text(text) => {
             let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -164,7 +177,7 @@ fn test_primary_secondary_ws_full_cycle() {
     ))
     .unwrap();
 
-    let pong_msg = ws.read().unwrap();
+    let pong_msg = read_app_msg(&mut ws);
     match pong_msg {
         tungstenite::Message::Text(text) => {
             let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -182,7 +195,7 @@ fn test_primary_secondary_ws_full_cycle() {
     let push = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&secondary.origin, 10) };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&push).unwrap())).unwrap();
 
-    let sync_ack_msg = ws.read().unwrap();
+    let sync_ack_msg = read_app_msg(&mut ws);
     match sync_ack_msg {
         tungstenite::Message::Text(text) => {
             let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -202,7 +215,7 @@ fn test_primary_secondary_ws_full_cycle() {
     let status_req = WsSyncFrame::StatusRequest { device_id: secondary.device_id.clone() };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&status_req).unwrap())).unwrap();
 
-    let status_resp_msg = ws.read().unwrap();
+    let status_resp_msg = read_app_msg(&mut ws);
     match status_resp_msg {
         tungstenite::Message::Text(text) => {
             let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -255,7 +268,7 @@ fn test_unauthorized_secondary_ws_rejected() {
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
 
-    let ack_msg = ws.read().unwrap();
+    let ack_msg = read_app_msg(&mut ws);
     match ack_msg {
         tungstenite::Message::Text(text) => {
             let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -327,7 +340,7 @@ fn test_multi_secondary_concurrent_websocket_sync() {
             };
             ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
 
-            let ack = ws.read().unwrap();
+            let ack = read_app_msg(&mut ws);
             match ack {
                 tungstenite::Message::Text(text) => {
                     let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -344,14 +357,14 @@ fn test_multi_secondary_concurrent_websocket_sync() {
                 serde_json::to_string(&WsSyncFrame::Ping { client_time_ms: 1000 + i as i64 }).unwrap(),
             ))
             .unwrap();
-            let pong = ws.read().unwrap();
+            let pong = read_app_msg(&mut ws);
             assert!(matches!(pong, tungstenite::Message::Text(_)));
 
             // 3. RollupSync
             let push = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, count) };
             ws.send(tungstenite::Message::Text(serde_json::to_string(&push).unwrap())).unwrap();
 
-            let reply = ws.read().unwrap();
+            let reply = read_app_msg(&mut ws);
             match reply {
                 tungstenite::Message::Text(text) => {
                     let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -417,12 +430,12 @@ fn test_secondary_reconnect_and_sequential_batches() {
             version: WS_PROTOCOL_VERSION.into(),
         };
         ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
-        let _ = ws.read().unwrap(); // AuthAck
+        let _ = read_app_msg(&mut ws); // AuthAck
 
         let push1 = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, 7) };
         ws.send(tungstenite::Message::Text(serde_json::to_string(&push1).unwrap())).unwrap();
 
-        let ack1 = ws.read().unwrap();
+        let ack1 = read_app_msg(&mut ws);
         match ack1 {
             tungstenite::Message::Text(text) => {
                 let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -460,12 +473,12 @@ fn test_secondary_reconnect_and_sequential_batches() {
             version: WS_PROTOCOL_VERSION.into(),
         };
         ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
-        let _ = ws.read().unwrap(); // AuthAck
+        let _ = read_app_msg(&mut ws); // AuthAck
 
         let push2 = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, 9) };
         ws.send(tungstenite::Message::Text(serde_json::to_string(&push2).unwrap())).unwrap();
 
-        let ack2 = ws.read().unwrap();
+        let ack2 = read_app_msg(&mut ws);
         match ack2 {
             tungstenite::Message::Text(text) => {
                 let frame: WsSyncFrame = serde_json::from_str(&text).unwrap();
@@ -520,7 +533,7 @@ fn test_stale_sync_push_rejected_and_clean_recovery() {
         version: WS_PROTOCOL_VERSION.into(),
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
-    let auth_ack = ws.read().unwrap();
+    let auth_ack = read_app_msg(&mut ws);
     assert!(matches!(
         serde_json::from_str::<WsSyncFrame>(&auth_ack.to_text().unwrap()).unwrap(),
         WsSyncFrame::AuthAck { status, .. } if status == "connected"
@@ -532,7 +545,7 @@ fn test_stale_sync_push_rejected_and_clean_recovery() {
 
     // 3. Verify the primary answers the standard error shape without killing
     // the session or corrupting the database.
-    let reject_ack = ws.read().unwrap();
+    let reject_ack = read_app_msg(&mut ws);
     let reject_frame: WsSyncFrame = serde_json::from_str(reject_ack.to_text().unwrap()).unwrap();
     match reject_frame {
         WsSyncFrame::Error { message } => {
@@ -549,7 +562,7 @@ fn test_stale_sync_push_rejected_and_clean_recovery() {
     ws.send(tungstenite::Message::Text(serde_json::to_string(&clean_push).unwrap())).unwrap();
 
     // 5. Verify the primary accepts the recovered snapshot.
-    let recovery_ack = ws.read().unwrap();
+    let recovery_ack = read_app_msg(&mut ws);
     let recovery_frame: WsSyncFrame = serde_json::from_str(recovery_ack.to_text().unwrap()).unwrap();
     match recovery_frame {
         WsSyncFrame::RollupAck { origin, accepted, n } => {
@@ -565,7 +578,7 @@ fn test_stale_sync_push_rejected_and_clean_recovery() {
         serde_json::to_string(&WsSyncFrame::StatusRequest { device_id: sec.device_id.clone() }).unwrap(),
     ))
     .unwrap();
-    let status_ack = ws.read().unwrap();
+    let status_ack = read_app_msg(&mut ws);
     match serde_json::from_str::<WsSyncFrame>(status_ack.to_text().unwrap()).unwrap() {
         WsSyncFrame::StatusResponse { status, .. } => {
             assert_eq!(status, "paired");
@@ -611,14 +624,14 @@ fn test_repeated_rollup_sync_lands_rows_under_registry_origin() {
         version: WS_PROTOCOL_VERSION.into(),
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
-    let _ = ws.read().unwrap(); // AuthAck
+    let _ = read_app_msg(&mut ws); // AuthAck
 
     // 2. Push a first 3-row snapshot
     let push1 = WsSyncFrame::RollupSync {
         snapshot: RollupSnapshot { origin: sec.origin.clone(), rows: rollup_rows_on("2026-11", 3) },
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&push1).unwrap())).unwrap();
-    let ack1 = ws.read().unwrap();
+    let ack1 = read_app_msg(&mut ws);
     assert!(matches!(
         serde_json::from_str::<WsSyncFrame>(ack1.to_text().unwrap()).unwrap(),
         WsSyncFrame::RollupAck { accepted: true, n: 3, .. }
@@ -629,7 +642,7 @@ fn test_repeated_rollup_sync_lands_rows_under_registry_origin() {
         snapshot: RollupSnapshot { origin: sec.origin.clone(), rows: rollup_rows_on("2026-12", 2) },
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&push2).unwrap())).unwrap();
-    let ack2 = ws.read().unwrap();
+    let ack2 = read_app_msg(&mut ws);
     assert!(matches!(
         serde_json::from_str::<WsSyncFrame>(ack2.to_text().unwrap()).unwrap(),
         WsSyncFrame::RollupAck { accepted: true, n: 2, .. }
@@ -706,7 +719,7 @@ fn test_secondary_disconnect_notifies_primary_and_halts_communication() {
         version: WS_PROTOCOL_VERSION.into(),
     };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
-    let auth_ack = ws.read().unwrap();
+    let auth_ack = read_app_msg(&mut ws);
     assert!(matches!(
         serde_json::from_str::<WsSyncFrame>(auth_ack.to_text().unwrap()).unwrap(),
         WsSyncFrame::AuthAck { status, .. } if status == "connected"
@@ -715,7 +728,7 @@ fn test_secondary_disconnect_notifies_primary_and_halts_communication() {
     // 2. Upload initial rollup snapshot before disconnect
     let push1 = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, 5) };
     ws.send(tungstenite::Message::Text(serde_json::to_string(&push1).unwrap())).unwrap();
-    let ack1 = ws.read().unwrap();
+    let ack1 = read_app_msg(&mut ws);
     assert!(matches!(
         serde_json::from_str::<WsSyncFrame>(ack1.to_text().unwrap()).unwrap(),
         WsSyncFrame::RollupAck { accepted: true, .. }

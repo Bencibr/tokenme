@@ -75,6 +75,13 @@ pub const WHOAMI_PATH: &str = "/v1/whoami";
 /// and re-check the stop flag; also the upper bound on push delivery latency.
 const WS_PUSH_POLL: Duration = Duration::from_millis(250);
 const CONNECT_POLL_SLICE: Duration = Duration::from_millis(100);
+/// Session read budgets. Data calls wait out server-side frame work that
+/// legitimately queues behind the ingest engine's index writes — multi-second
+/// engine passes are routine on the primary. The heartbeat's tighter budget
+/// only has to cover its own Pong. The old single 15 s budget killed healthy
+/// sessions mid-frame under load while the network was fine the whole time.
+const WS_DATA_READ: Duration = Duration::from_secs(60);
+const WS_HEARTBEAT_READ: Duration = Duration::from_secs(20);
 // A transient accept failure (EMFILE, a peer that vanishes between SYN and
 // accept) is not a reason to stop serving. Only a listener that has failed
 // this many times in a row is handed back to the owner for a clean rebind.
@@ -335,6 +342,7 @@ pub struct Tls13HttpsTransport {
     /// the watchdog proves the resident socket dead, `true` the moment a new
     /// one is up. The panel reads this instead of guessing from poll results.
     ws_link_hook: Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>>,
+    ws_device_state_hook: Mutex<Option<Arc<dyn Fn(&str, bool) + Send + Sync>>>,
 }
 
 /// A TCP stream whose every read/write is bounded by one absolute request
@@ -439,17 +447,34 @@ impl Tls13HttpsTransport {
             ws_session_identity: Mutex::new(None),
             heartbeat_stop: Arc::new(AtomicBool::new(false)),
             ws_link_hook: Mutex::new(None),
+            ws_device_state_hook: Mutex::new(None),
         })
     }
 
     /// Real-time primary-link state for the embedding UI. `false` fires the
     /// moment the heartbeat watchdog proves the resident socket dead;
-    /// `true` the moment a rebuilt one authenticates.
+    /// `true` the moment a rebuilt one authenticates — and on every healthy
+    /// heartbeat tick, so the reader can treat it as a freshness signal
+    /// instead of a latch (a session the device rebuilds in seconds must not
+    /// read as an outage).
     pub fn set_ws_link_hook(
         &self,
         hook: impl Fn(bool) + Send + Sync + 'static,
     ) {
         *lock_recover(&self.ws_link_hook) = Some(Arc::new(hook));
+    }
+
+    /// Receives the server's `DeviceState` advisories (registry status word +
+    /// current data-sharing answer) from both the reply loop and the
+    /// heartbeat. The advisory is the only carrier of a sharing flip the
+    /// device did not ask about: dropping it in transit — which the reply
+    /// loop used to do — stranded the secondary on a stale answer until a
+    /// restart.
+    pub fn set_device_state_hook(
+        &self,
+        hook: impl Fn(&str, bool) + Send + Sync + 'static,
+    ) {
+        *lock_recover(&self.ws_device_state_hook) = Some(Arc::new(hook));
     }
 
     pub fn config(&self) -> &HttpsTransportConfig {
@@ -504,6 +529,9 @@ impl Tls13HttpsTransport {
         let ws_url = format!("wss://{}/v2/sync-ws", parsed.host(&self.config.endpoint));
         let (ws, _response) = tungstenite::client::client(ws_url, stream)
             .map_err(|e| TransportError::Protocol(format!("ws handshake: {e}")))?;
+        // The handshake keeps its tight budget above; the session's reads wait
+        // out server-side frame work under the full data budget.
+        ws.get_ref().sock.set_read_timeout(Some(WS_DATA_READ)).map_err(|e| self.map_io(e))?;
         Ok((ws, socket))
     }
 
@@ -516,11 +544,12 @@ impl Tls13HttpsTransport {
     }
 
     /// Opens the resident session if absent (Auth included), sends `frame`,
-    /// and reads the reply skipping heartbeat Pings/Pongs and unsolicited
-    /// `DeviceState` pushes. On any send or read failure the leg is dropped so
-    /// the next attempt meets the primary with a fresh handshake; semantic
-    /// failures (Error frames, unexpected replies) leave the drop to the
-    /// caller, which knows whether the answer was session-fatal.
+    /// and reads the reply skipping heartbeat Pings/Pongs, delivering
+    /// `DeviceState` advisories to the hook. On any send or read failure the
+    /// leg is dropped so the next attempt meets the primary with a fresh
+    /// handshake; semantic failures (Error frames, unexpected replies) leave
+    /// the drop to the caller, which knows whether the answer was
+    /// session-fatal.
     fn ws_round_trip(
         &mut self,
         frame: crate::ws::WsSyncFrame,
@@ -559,6 +588,10 @@ impl Tls13HttpsTransport {
             return Err(TransportError::Protocol("ws unavailable".into()));
         };
 
+        // The heartbeat lowers this budget for its own tick; a data call
+        // always reads under the full session budget.
+        let _ = ws.get_ref().sock.set_read_timeout(Some(WS_DATA_READ));
+
         let push_msg = serde_json::to_string(&frame).map_err(|e| TransportError::Protocol(e.to_string()))?;
         if let Err(e) = ws.send(tungstenite::Message::Text(push_msg)) {
             *ws_guard = None;
@@ -567,13 +600,17 @@ impl Tls13HttpsTransport {
         }
 
         // The heartbeat interleaves Ping/Pong frames with pushes; a Pong that
-        // lands between our request and its reply must not kill the leg, and
-        // a server-initiated `DeviceState` push is an advisory to skip, not
-        // the answer.
+        // lands between our request and its reply must not kill the leg. A
+        // server-initiated `DeviceState` advisory is delivered to the hook —
+        // skipping it silently used to strand sharing flips until restart.
         loop {
             match ws.read() {
                 Ok(tungstenite::Message::Text(t)) => match serde_json::from_str::<crate::ws::WsSyncFrame>(&t) {
-                    Ok(crate::ws::WsSyncFrame::Pong { .. }) | Ok(crate::ws::WsSyncFrame::Ping { .. }) | Ok(crate::ws::WsSyncFrame::DeviceState { .. }) => continue,
+                    Ok(crate::ws::WsSyncFrame::Pong { .. }) | Ok(crate::ws::WsSyncFrame::Ping { .. }) => continue,
+                    Ok(crate::ws::WsSyncFrame::DeviceState { status, data_sharing }) => {
+                        if let Some(hook) = lock_recover(&self.ws_device_state_hook).clone() { hook(&status, data_sharing); }
+                        continue;
+                    }
                     Ok(other) => break Ok(other),
                     Err(e) => {
                         *ws_guard = None;
@@ -746,6 +783,7 @@ impl Tls13HttpsTransport {
         let cancel = Arc::clone(&self.cancel);
         let heartbeat_stop = Arc::clone(&self.heartbeat_stop);
         let hook = lock_recover(&self.ws_link_hook).clone();
+        let state_hook = lock_recover(&self.ws_device_state_hook).clone();
         let _ = std::thread::Builder::new().name("ws-heartbeat".into()).spawn(move || {
             loop {
                 if cancel.load(AtomicOrdering::Acquire) || heartbeat_stop.load(AtomicOrdering::Acquire) { return; }
@@ -754,11 +792,29 @@ impl Tls13HttpsTransport {
                 let outcome = (|ws_client: &Arc<Mutex<Option<(tungstenite::protocol::WebSocket<StreamOwned<ClientConnection, TcpStream>>, ClientSocketGuard)>>>| {
                     let mut guard = lock_recover(ws_client);
                     let Some((ws, _)) = guard.as_mut() else { return 0 };
+                    // This tick's read budget is the Pong's alone; data calls
+                    // raise it back to the full session budget on entry.
+                    let _ = ws.get_ref().sock.set_read_timeout(Some(WS_HEARTBEAT_READ));
                     let ping = crate::ws::WsSyncFrame::Ping { client_time_ms: 0 };
                     let Ok(msg) = serde_json::to_string(&ping).map(tungstenite::Message::Text) else { return 1 };
                     if ws.send(msg).is_err() { return 1; }
-                    if matches!(ws.read(), Err(_)) { return 1; }
-                    2
+                    // Wait out the Pong, delivering DeviceState advisories on
+                    // the way — the old single-frame read swallowed them, and
+                    // a dropped advisory strands a sharing flip until the
+                    // device restarts.
+                    loop {
+                        match ws.read() {
+                            Err(_) => return 1,
+                            Ok(tungstenite::Message::Text(text)) => match serde_json::from_str::<crate::ws::WsSyncFrame>(&text) {
+                                Ok(crate::ws::WsSyncFrame::Pong { .. }) => return 2,
+                                Ok(crate::ws::WsSyncFrame::DeviceState { status, data_sharing }) => {
+                                    if let Some(state_hook) = &state_hook { state_hook(&status, data_sharing); }
+                                }
+                                _ => {}
+                            },
+                            Ok(_) => {}
+                        }
+                    }
                 })(&ws_client);
                 // 0: transport shut the leg down — the watchdog's Arc clone
                 // must not keep it alive, so exit without proving anything.
@@ -768,11 +824,7 @@ impl Tls13HttpsTransport {
                     if let Some(hook) = &hook { hook(false); }
                     return;
                 }
-                if outcome == 1 {
-                    *lock_recover(&ws_client) = None;
-                    if let Some(hook) = &hook { hook(false); }
-                    return;
-                }
+                if let Some(hook) = &hook { hook(true); }
             }
         });
     }
@@ -1449,15 +1501,9 @@ impl ServerContext {
         }
     }
 
-    /// Retires a dead upload socket and wakes the embedding UI. No-op for a
-    /// device that never authenticated (its handshake was refused).
-    fn ws_mark_dead(&self, device_id: &str) {
-        if lock_recover(&self.ws_live).remove(device_id).is_some() {
-            if let Some(hook) = lock_recover(&self.ws_event_sink).clone() {
-                hook(device_id, false);
-            }
-        }
-    }
+    /// Presence is a freshness window the reader ages out — there is no
+    /// dead-marking step: a dying socket's late drop must not erase a newer
+    /// session's mark, which the old device-keyed removal did exactly.
 
     /// Registers this connection as the push target for an authenticated
     /// device. A re-auth replaces the entry; a dying socket's late
@@ -1555,7 +1601,6 @@ impl ServerContext {
             };
             let on_dead = |device: &str| {
                 self.ws_unregister_push(push_token, device);
-                self.ws_mark_dead(device);
             };
             let on_disconnect = |device: &str| self.notify_disconnect(device);
             crate::ws::handle_server_websocket(ws, store, now_ms, &self.cancel, &on_live, &on_dead, &on_disconnect, &push_rx).map_err(TransportError::State)?;
@@ -2477,6 +2522,19 @@ mod tests {
     /// Up rows for the rollup uplink: the snapshot the secondary ships is its
     /// local-origin aggregate, so each row's own `origin` is empty by
     /// construction and the primary resolves the label from the registry.
+    /// Raw-socket reads in these tests meet the server's advisory frames —
+    /// the fresh-session DeviceState, interleaved Pongs. Skip to the next
+    /// application frame the test actually asked about.
+    fn read_application_frame(ws: &mut tungstenite::protocol::WebSocket<StreamOwned<ClientConnection, TcpStream>>) -> crate::ws::WsSyncFrame {
+        loop {
+            let msg = ws.read().unwrap();
+            match serde_json::from_str::<crate::ws::WsSyncFrame>(msg.to_text().unwrap()).unwrap() {
+                crate::ws::WsSyncFrame::DeviceState { .. } | crate::ws::WsSyncFrame::Ping { .. } | crate::ws::WsSyncFrame::Pong { .. } => continue,
+                other => return other,
+            }
+        }
+    }
+
     fn rollup_rows(count: usize) -> Vec<RollupRow> {
         (0..count).map(|i| RollupRow {
             day: format!("2026-10-{:02}", 10 + i), origin: String::new(), tool: "codex".into(), session: "session".into(),
@@ -3356,7 +3414,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_lifecycle_reports_live_and_dead_in_real_time() {
+    fn ws_presence_marks_live_and_never_reports_dead() {
         let cert = cert();
         let device = DeviceIdentity::create("ws-lifecycle", "macOS").unwrap();
         let (store, _) = package(&device);
@@ -3380,15 +3438,12 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(events.lock().unwrap().iter().any(|(id, live)| *id == device.device_id && *live), "auth must mark the device live");
-        // …and dropping the transport kills the socket, which reports it dead.
+        // ...and socket death records NO dead event: presence is a freshness
+        // window the reader ages out. A dying socket's late event used to
+        // erase a newer session's mark — the race the window exists to kill.
         drop(client);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            let all = events.lock().unwrap().clone();
-            if all.iter().any(|(id, live)| *id == device.device_id && !*live) { break; }
-            thread::sleep(Duration::from_millis(20));
-        }
-        assert!(events.lock().unwrap().iter().any(|(id, live)| *id == device.device_id && !*live), "socket death must mark the device dead");
+        thread::sleep(Duration::from_millis(300));
+        assert!(events.lock().unwrap().iter().all(|(id, live)| *live || *id != device.device_id), "presence never reports dead; it ages out");
         let _ = handle.join();
     }
 
@@ -3444,16 +3499,14 @@ mod tests {
         // answers the standard error shape and keeps the session.
         let stale = r#"{"type":"sync_push","batch_id":"b","envelope":null,"signature":[],"gzip_bytes":""}"#;
         ws.send(tungstenite::Message::Text(stale.into())).unwrap();
-        let reply = ws.read().unwrap();
-        match serde_json::from_str::<crate::ws::WsSyncFrame>(reply.to_text().unwrap()).unwrap() {
+        match read_application_frame(&mut ws) {
             crate::ws::WsSyncFrame::Error { message } => assert!(message.contains("invalid frame"), "{message}"),
             other => panic!("expected the wire error frame, got {other:?}"),
         }
         // The same session still accepts the symmetric rollup uplink.
         let snapshot = RollupSnapshot { origin: device.origin.clone(), rows: rollup_rows(2) };
         ws.send(tungstenite::Message::Text(serde_json::to_string(&crate::ws::WsSyncFrame::RollupSync { snapshot }).unwrap())).unwrap();
-        let reply = ws.read().unwrap();
-        match serde_json::from_str::<crate::ws::WsSyncFrame>(reply.to_text().unwrap()).unwrap() {
+        match read_application_frame(&mut ws) {
             crate::ws::WsSyncFrame::RollupAck { origin, accepted, n } => {
                 assert_eq!(origin, device.origin, "the ack must resolve the device's registry origin");
                 assert!(accepted);

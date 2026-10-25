@@ -25,20 +25,38 @@ use crate::tray;
 
 const DEFAULT_PRIMARY_BIND: &str = "0.0.0.0:47821";
 
-/// Process-wide live upload sockets on the primary (device ids), written by
-/// the WS lifecycle hook the moment a socket comes up or dies. Read by every
-/// status snapshot, so the panel renders online/offline in real time instead
-/// of inferring it from merge timestamps.
-fn ws_live_registry() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
-    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+/// Process-wide device presence on the primary: device id → the instant of
+/// its last authenticated frame (the session heartbeat refreshes it every
+/// 3 s). "Online" is a freshness window, not a socket latch — the sync
+/// sessions rebuild routinely (idle churn, restarts, transport retries), and
+/// a latch turned every rebuild into a visible outage while the network was
+/// never broken.
+fn ws_live_seen() -> &'static std::sync::Mutex<std::collections::HashMap<String, i64>> {
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// The secondary's view of the primary link, set by the heartbeat watchdog
-/// the moment the resident socket dies — not by a failed poll.
-fn primary_link_live() -> &'static std::sync::atomic::AtomicBool {
-    static FLAG: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
-    FLAG.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+/// How long a device counts as online after its last authenticated frame.
+/// Generous against one missed heartbeat window plus a reconnect with
+/// backoff; tight enough that a quit device goes red inside a poll or two.
+const DEVICE_LIVE_TTL_MS: i64 = 30_000;
+
+fn device_is_live(seen: Option<i64>, now_ms: i64) -> bool {
+    seen.is_some_and(|at| now_ms - at < DEVICE_LIVE_TTL_MS)
+}
+
+/// The secondary's view of the primary link: the instant of the last healthy
+/// heartbeat round-trip, refreshed every tick. Read through the same
+/// freshness window as device presence — the latch this replaces flagged an
+/// outage for the seconds a rebuilt session needs, every time it rebuilt.
+fn primary_link_seen() -> &'static std::sync::atomic::AtomicU64 {
+    static SEEN: std::sync::OnceLock<std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
+    SEEN.get_or_init(|| std::sync::atomic::AtomicU64::new(0))
+}
+
+fn primary_link_fresh() -> bool {
+    let seen = primary_link_seen().load(std::sync::atomic::Ordering::Acquire) as i64;
+    seen != 0 && device_is_live(Some(seen), current_ms())
 }
 const SYNC_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -434,7 +452,7 @@ pub struct SyncDevicesView {
 }
 
 fn sync_device_view(device: DeviceStatusView) -> SyncDeviceView {
-    let live = ws_live_registry().lock().map(|set| set.contains(&device.device_id)).unwrap_or(false);
+    let live = ws_live_seen().lock().map(|seen| device_is_live(seen.get(&device.device_id).copied(), current_ms())).unwrap_or(false);
     SyncDeviceView {
         live,
         device_id: device.device_id,
@@ -560,7 +578,7 @@ fn reap_service(state: &mut SyncControlState) {
 fn stop_service(state: &mut SyncControlState) {
     state.runtime.take();
     state.service.take();
-    primary_link_live().store(false, std::sync::atomic::Ordering::Release);
+    primary_link_seen().store(0, std::sync::atomic::Ordering::Release);
 }
 
 fn retry_disconnect_notifications(index_path: &std::path::Path) -> Result<(), String> {
@@ -645,7 +663,7 @@ fn clear_secondary_state(state: &mut SyncControlState) {
 }
 
 fn clear_primary_state(state: &mut SyncControlState) {
-    ws_live_registry().lock().unwrap_or_else(|p| p.into_inner()).clear();
+    ws_live_seen().lock().unwrap_or_else(|p| p.into_inner()).clear();
     state.role.clear();
     state.primary_id = None;
     state.endpoint = None;
@@ -862,12 +880,22 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     let ever_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ever_live_hook = Arc::clone(&ever_live);
     transport.set_ws_link_hook(move |live| {
-        let previous = primary_link_live().swap(live, std::sync::atomic::Ordering::Release);
-        // Every transition is instant UI news: without this wake the sheet
-        // learns a dead link only through the next 5 s poll, and the device
-        // row's dot lingers green over an offline peer.
-        if live != previous { wake_sync_ui(); }
-        if live && !previous && (ever_live_hook.swap(true, std::sync::atomic::Ordering::Relaxed) || hook_started.elapsed() > std::time::Duration::from_secs(60)) {
+        // The hook fires on every healthy heartbeat tick (3 s) and once with
+        // `false` when the watchdog proves the socket dead. The panel's link
+        // state is the freshness window over these stamps, so the wake and
+        // the announcement fire on the stale→fresh transition — a session
+        // rebuilt within the window is not news, which is the point.
+        let woke = if live {
+            let was_stale = !primary_link_fresh();
+            primary_link_seen().store(current_ms() as u64, std::sync::atomic::Ordering::Release);
+            was_stale
+        } else {
+            // A dead socket ages out of the window and the poll renders it;
+            // nothing the user can see has changed yet.
+            false
+        };
+        if woke { wake_sync_ui(); }
+        if woke && (ever_live_hook.swap(true, std::sync::atomic::Ordering::Relaxed) || hook_started.elapsed() > std::time::Duration::from_secs(60)) {
             crate::notify::post_primary_online(&primary_name);
         }
     });
@@ -1008,13 +1036,21 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     {
         let app_for_ws = diagnostics_app.clone();
         server.set_ws_event_sink(move |device_id, live| {
-            {
-                let mut set = ws_live_registry().lock().unwrap_or_else(|p| p.into_inner());
-                if live { set.insert(device_id.to_string()); } else { set.remove(device_id); }
-            }
-            if let Some(app) = &app_for_ws {
-                use tauri::Emitter;
-                let _ = app.emit("sync-devices-changed", device_id.to_string());
+            // The mark arrives on every authenticated frame (the 3 s session
+            // heartbeat), so the map stays fresh; the panel is woken only
+            // when the freshness window flips — waking per tick would be
+            // spam, the poll cadence renders the rest.
+            let woke = live && {
+                let mut seen = ws_live_seen().lock().unwrap_or_else(|p| p.into_inner());
+                let was_stale = !device_is_live(seen.get(device_id).copied(), current_ms());
+                seen.insert(device_id.to_string(), current_ms());
+                was_stale
+            };
+            if woke {
+                if let Some(app) = &app_for_ws {
+                    use tauri::Emitter;
+                    let _ = app.emit("sync-devices-changed", device_id.to_string());
+                }
             }
         }).map_err(|error| format!("cannot configure ws event sink: {error}"))?;
     }
@@ -1698,7 +1734,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let primary_auto_approve_enabled = primary_config.as_ref().is_some_and(|config| config.auto_approve_pairing);
     Ok(SyncDevicesView {
         primary_id,
-        primary_link_live: primary_link_live().load(std::sync::atomic::Ordering::Relaxed),
+        primary_link_live: primary_link_fresh(),
         primary_display_name: secondary_config.as_ref().and_then(|config| config.primary_display_name.clone()),
         primary_os: secondary_config.as_ref().and_then(|config| config.primary_os.clone()),
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
@@ -1740,7 +1776,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
                         last_generation: None,
                         last_merged_at_ms: config.last_connected_at_ms,
                         snapshot_complete: panel.download_complete.unwrap_or(false),
-                        live: primary_link_live().load(std::sync::atomic::Ordering::Relaxed),
+                        live: primary_link_fresh(),
                     };
                     if !devices.iter().any(|d| d.device_id == config.primary_id) {
                         devices.insert(0, primary_device);
@@ -3322,6 +3358,15 @@ pub fn set_report_scope(app: AppHandle, scope: MachineScope) -> Result<(), Strin
 
 #[cfg(test)]
 mod sync_tests {
+    #[test]
+    fn device_presence_is_a_freshness_window_not_a_latch() {
+        let now = 1_000_000;
+        assert!(!super::device_is_live(None, now), "never seen: offline");
+        assert!(super::device_is_live(Some(now - 1), now), "just seen: online");
+        assert!(super::device_is_live(Some(now - super::DEVICE_LIVE_TTL_MS + 1), now), "within the window: online");
+        assert!(!super::device_is_live(Some(now - super::DEVICE_LIVE_TTL_MS), now), "window expired: offline");
+    }
+
     #[test]
     fn stop_latches_before_a_pairing_transport_is_installed() {
         let interrupt = super::SyncInterrupt::default();

@@ -31,12 +31,6 @@ const DEFAULT_POLL_MS: u64 = 5_000;
 // a ~300 KB response. Thirty seconds keeps it fresh without hammering the
 // primary; there is no backfill to resume because there are no rows.
 const ROLLUP_FETCH_INTERVAL_MS: i64 = 30_000;
-// A paired device with nothing to exchange (sharing refused, or the uplink
-// fingerprint idle with the fetch interval not yet due) does not keep its
-// session leg open forever: after this much idle time the next pass drops it,
-// and the next due call rebuilds it. Errors close the leg inside the
-// transport already.
-const SESSION_IDLE_CLOSE_MS: i64 = 10 * 60 * 1000;
 const RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 const POLL_JITTER_PERCENT: u64 = 20;
 
@@ -97,7 +91,12 @@ pub struct SyncRuntime {
     /// would correct it live once the transport records those frames —
     /// today they are read-loop advisories, so no slot is exposed to
     /// consume here.
-    primary_data_sharing: bool,
+    /// The primary's current answer to "may I pull your data". Shared with
+    /// the transport's `DeviceState` hook: the advisory is the only in-band
+    /// carrier of a flip the device did not ask about, and the old plain
+    /// bool could never see it — a refused fetch latched the flag off until
+    /// a restart.
+    primary_data_sharing: Arc<AtomicBool>,
     primary_download_complete: bool,
     /// Embedding-UI wake for the moment the primary cuts this device off
     /// (revoked/blocked) and the runtime self-disables. Receives a short
@@ -113,10 +112,6 @@ pub struct SyncRuntime {
     /// skipped as unchanged, so it doubles as the "something actually went
     /// out" marker tests and the panel read.
     last_upload_pushed_at: Option<i64>,
-    /// Pass clock of the last session call that actually round-tripped (a
-    /// delivered push or an applied fetch). Drives the idle-leg close; 0
-    /// until the first exchange.
-    last_session_activity_ms: i64,
     /// The display name the primary last acknowledged via the session's
     /// `DisplayNameUpdate` frame. The session's Auth frame announces the name
     /// on every fresh leg; this frame covers renames — sent once per change,
@@ -130,7 +125,7 @@ pub struct SyncRuntime {
 
 impl SyncRuntime {
     pub fn new(store: SyncStore, transport: Tls13HttpsTransport, config: SyncRuntimeConfig) -> Self {
-        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: false, primary_download_complete: false, last_rollup_fetch: None, last_upload_fingerprint: None, last_upload_pushed_at: None, last_session_activity_ms: 0, last_display_name_sent: None, lease_renewed_at_ms: 0, on_cut_off: None }
+        Self { store, transport, config, secondary_identity: None, secondary_display_name: None, primary_data_sharing: Arc::new(AtomicBool::new(false)), primary_download_complete: false, last_rollup_fetch: None, last_upload_fingerprint: None, last_upload_pushed_at: None, last_display_name_sent: None, lease_renewed_at_ms: 0, on_cut_off: None }
     }
 
     pub fn new_secondary(
@@ -142,7 +137,16 @@ impl SyncRuntime {
         // Every session frame authenticates with this identity; pinning it
         // once here covers rebuilt legs too.
         transport.set_ws_session_identity(identity.device_id.clone(), identity.origin.clone());
-        Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: true, primary_download_complete: false, last_rollup_fetch: None, last_upload_fingerprint: None, last_upload_pushed_at: None, last_session_activity_ms: 0, last_display_name_sent: None, lease_renewed_at_ms: 0, on_cut_off: None }
+        let runtime = Self { store, transport, config, secondary_identity: Some(identity), secondary_display_name: None, primary_data_sharing: Arc::new(AtomicBool::new(true)), primary_download_complete: false, last_rollup_fetch: None, last_upload_fingerprint: None, last_upload_pushed_at: None, last_display_name_sent: None, lease_renewed_at_ms: 0, on_cut_off: None };
+        // The advisory channel is the in-band truth for the sharing answer:
+        // the fresh-session advisory carries it on every new leg, so a flag
+        // the primary flipped while this device was between sessions still
+        // lands instead of waiting out a restart.
+        let sharing = Arc::clone(&runtime.primary_data_sharing);
+        runtime.transport.set_device_state_hook(move |_status, sharing_now| {
+            sharing.store(sharing_now, Ordering::Release);
+        });
+        runtime
     }
 
     pub fn new_secondary_with_display_name(
@@ -337,7 +341,9 @@ impl SyncRuntime {
         if self.secondary_identity.is_some()
             && self.store.secondary_config()?.is_some_and(|config| !config.enabled)
         {
-            self.close_idle_session(now_ms());
+            // A disabled device drops its leg at once — the socket exists to
+            // sync, and there is nothing left to sync.
+            self.transport.ws_close();
             return Ok(report);
         }
         // The uplink push already ran inside `prepare_secondary`; this half
@@ -345,14 +351,16 @@ impl SyncRuntime {
         // call of a pass and stays resident across passes — a LAN keepalive
         // link beats a fresh TCP+TLS+WS handshake every 30 seconds, and with
         // the status poll gone there is no per-pass HTTP call left to starve
-        // behind a held slot. A pass with nothing to exchange drops the leg
-        // once it has idled past SESSION_IDLE_CLOSE_MS.
+        // behind a held slot. The heartbeat (3 s) keeps the leg honest, and
+        // the panel's presence window reads that heartbeat as liveness, so
+        // the leg is never dropped for idling: every rebuild reads as an
+        // outage on both UIs, and it had no data reason.
         //
         // Rollup-level downlink: one authenticated full-snapshot fetch per
         // ROLLUP_FETCH_INTERVAL over the session replaces the row-level page
         // walk entirely — a 500k-event primary lands in one ~300 KB response,
         // so there is no backfill and nothing to resume.
-        if self.secondary_identity.is_some() && self.primary_data_sharing {
+        if self.secondary_identity.is_some() && self.primary_data_sharing.load(Ordering::Acquire) {
             let due = self.last_rollup_fetch.map_or(true, |at| {
                 now_ms().saturating_sub(at) >= ROLLUP_FETCH_INTERVAL_MS
             });
@@ -370,10 +378,10 @@ impl SyncRuntime {
                             // sharing ("the primary is not sharing data with
                             // secondaries"): a configuration answer, not a
                             // device-state problem — learn it and stop
-                            // asking, no last_error, no backoff. The session's
-                            // DeviceState push (or a restart) re-opens the
-                            // question.
-                            self.primary_data_sharing = false;
+                            // asking, no last_error, no backoff. The fresh-
+                            // session DeviceState advisory (or the hook's
+                            // live push) re-opens the question.
+                            self.primary_data_sharing.store(false, Ordering::Release);
                             self.primary_download_complete = true;
                         } else if is_cut_off_error(&error) {
                             // A refused fetch is also a revocation sensor for
@@ -390,8 +398,6 @@ impl SyncRuntime {
             } else {
                 self.primary_download_complete = true;
             }
-        } else if self.secondary_identity.is_some() {
-            self.close_idle_session(now_ms());
         }
         if self.secondary_identity.is_some() && report.last_error.is_none() {
             let _ = self.store.set_secondary_last_error(None, now_ms());
@@ -408,7 +414,6 @@ impl SyncRuntime {
         let snapshot = self.transport.ws_rollup_fetch().map_err(|error| map_session_error(self.secondary_identity.as_ref(), error))?;
         let payload_bytes = serde_json::to_vec(&snapshot.rows).map(|bytes| bytes.len() as u64).unwrap_or(0);
         self.store.apply_remote_rollup(&snapshot.origin, &snapshot.rows, now_ms)?;
-        self.last_session_activity_ms = now_ms;
         self.store.mark_secondary_connected(now_ms)?;
         Ok(payload_bytes)
     }
@@ -486,7 +491,6 @@ impl SyncRuntime {
                 self.store.mark_uplink_rollup_acked(now_ms)?;
                 self.last_upload_fingerprint = Some(fingerprint);
                 self.last_upload_pushed_at = Some(now_ms);
-                self.last_session_activity_ms = now_ms;
                 self.store.mark_secondary_connected(now_ms)?;
                 Ok((rows.len() as u64, payload_bytes))
             }
@@ -538,15 +542,6 @@ impl SyncRuntime {
         match self.transport.ws_update_display_name(&name) {
             Ok(()) => self.last_display_name_sent = Some(name),
             Err(error) => eprintln!("tokenme sync: display-name update failed: {error}"),
-        }
-    }
-
-    /// Drops the resident session leg after SESSION_IDLE_CLOSE_MS without a
-    /// round-trip. The next due call rebuilds it, so a device with nothing
-    /// to exchange stops holding a primary slot.
-    fn close_idle_session(&mut self, now_ms: i64) {
-        if self.last_session_activity_ms != 0 && now_ms.saturating_sub(self.last_session_activity_ms) >= SESSION_IDLE_CLOSE_MS {
-            self.transport.ws_close();
         }
     }
 }

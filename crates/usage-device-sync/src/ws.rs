@@ -193,13 +193,32 @@ where
                     let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
                     process_server_frame(&frame, &mut s, &mut authenticated_device, &now_ms, on_disconnect)?
                 };
-                if let Some(device) = response.1 {
+                if let Some(ref device) = response.1 {
                     session.device = Some(device.clone());
-                    on_live(&device);
+                    on_live(device);
+                } else if let Some(device) = authenticated_device.as_deref() {
+                    // Every authenticated frame refreshes the device's presence:
+                    // the 3 s session heartbeat is the freshest signal the
+                    // panel's presence window can read.
+                    on_live(device);
                 }
                 if let Some(resp) = response.0 {
                     let resp_text = serde_json::to_string(&resp).map_err(|e| SyncError::Protocol(e.to_string()))?;
                     ws.send(Message::Text(resp_text)).map_err(|e| SyncError::Protocol(format!("ws send: {e}")))?;
+                }
+                // The fresh-session advisory rides AFTER the auth ack — the
+                // client's handshake read does not skip frames, so anything
+                // ahead of the ack would fail the very session it advises.
+                if let Some(device) = &response.1 {
+                    let advisory = {
+                        let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
+                        device_state_advisory(&mut s, device)
+                    };
+                    if let Some(advisory) = advisory {
+                        if let Ok(text) = serde_json::to_string(&advisory) {
+                            let _ = ws.send(Message::Text(text));
+                        }
+                    }
                 }
                 drain_pushes(&mut ws, push_rx);
             }
@@ -216,13 +235,26 @@ where
                     let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
                     process_server_frame(&frame, &mut s, &mut authenticated_device, &now_ms, on_disconnect)?
                 };
-                if let Some(device) = response.1 {
+                if let Some(ref device) = response.1 {
                     session.device = Some(device.clone());
-                    on_live(&device);
+                    on_live(device);
+                } else if let Some(device) = authenticated_device.as_deref() {
+                    on_live(device);
                 }
                 if let Some(resp) = response.0 {
                     let resp_text = serde_json::to_string(&resp).map_err(|e| SyncError::Protocol(e.to_string()))?;
                     ws.send(Message::Text(resp_text)).map_err(|e| SyncError::Protocol(format!("ws send: {e}")))?;
+                }
+                if let Some(device) = &response.1 {
+                    let advisory = {
+                        let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
+                        device_state_advisory(&mut s, device)
+                    };
+                    if let Some(advisory) = advisory {
+                        if let Ok(text) = serde_json::to_string(&advisory) {
+                            let _ = ws.send(Message::Text(text));
+                        }
+                    }
                 }
                 drain_pushes(&mut ws, push_rx);
             }
@@ -239,6 +271,16 @@ where
     }
 
     Ok(())
+}
+
+/// The out-of-band advisory a fresh session opens with: this device's
+/// registry status word and the primary's current data-sharing answer.
+/// Best-effort by construction — a failure to send it leaves the secondary
+/// on its previous answer, which the next session retries.
+fn device_state_advisory(store: &mut SyncStore, device_id: &str) -> Option<WsSyncFrame> {
+    let status = store.ws_device_status(device_id).ok()??;
+    let data_sharing = store.primary_config().ok().flatten().is_some_and(|config| config.share_data_with_secondaries);
+    Some(WsSyncFrame::DeviceState { status, data_sharing })
 }
 
 /// Returns the reply frame plus the device id when this frame authenticated
@@ -362,8 +404,12 @@ fn process_server_frame(
             // A served fetch is a sync too — owner's call 2026-10-25: an idle
             // secondary whose unchanged data skips the deduped push must still
             // land a recency stamp, or its row reads as never-synced while it
-            // polls every interval.
-            store.mark_device_fetched(device_id, now_ms())?;
+            // polls every interval. A store error here is retryable, not
+            // session-fatal: it rides the standard Error frame like every
+            // other store refusal.
+            if let Err(err) = store.mark_device_fetched(device_id, now_ms()) {
+                return Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None));
+            }
             match primary_local_rollup_snapshot(store) {
                 Ok(snapshot) => Ok((Some(WsSyncFrame::RollupSnapshot { snapshot }), None)),
                 Err(err) => Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
@@ -412,7 +458,10 @@ fn process_server_frame(
             }
         }
         WsSyncFrame::StatusRequest { device_id } => {
-            let status = store.ws_device_status(device_id)?.unwrap_or_else(|| "unpaired".into());
+            let status = match store.ws_device_status(device_id) {
+                Ok(status) => status.unwrap_or_else(|| "unpaired".into()),
+                Err(err) => return Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
+            };
             Ok((Some(WsSyncFrame::StatusResponse {
                 primary_id: store.primary_id().to_string(),
                 status,
