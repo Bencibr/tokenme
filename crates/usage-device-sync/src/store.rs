@@ -431,6 +431,29 @@ impl SyncStore {
         Ok(())
     }
 
+    /// Counts the pre-split pairing records still parked inside the index
+    /// database (the device tables lived there before the sync_state split,
+    /// which sheds them without migrating). The panel runs this BEFORE the
+    /// first read-write open — once that open runs the migration batch the
+    /// records are gone — and turns a nonzero count into an explicit
+    /// re-pairing notice instead of a silently empty device list.
+    pub fn count_legacy_pairing_state(path: impl Into<PathBuf>) -> SyncResult<usize> {
+        let path = path.into();
+        let conn = open_read_only(&path)?;
+        let has_table = |name: &str| -> SyncResult<bool> {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                params![name], |row| row.get::<_, i64>(0),
+            ).map_err(sql_err)? == 1)
+        };
+        let mut count = 0;
+        if has_table("device_registry")? {
+            count += conn.query_row("SELECT count(*) FROM device_registry", [], |row| row.get::<_, i64>(0)).map_err(sql_err)? as usize;
+        }
+        if has_table("device_sync_secondary_config")? { count += 1; }
+        Ok(count)
+    }
+
     pub fn open(path: impl Into<PathBuf>, primary_id: impl Into<String>) -> SyncResult<Self> {
         let path = path.into();
         let index = Index::open_preserving_corruption(&path).map_err(SyncError::from)?;
@@ -2059,7 +2082,8 @@ fn index_schema_complete(conn: &Connection) -> bool {
              'device_stream', 'device_receipt', 'device_package_marker',
              'device_package_tombstone', 'device_highwater', 'device_sync_outbox',
              'device_sync_outbox_sequence', 'device_sync_journal', 'device_sync_snapshot_cursor',
-             'device_sync_conflict', 'device_sync_recovery'
+             'device_sync_conflict', 'device_sync_recovery', 'device_registry',
+             'device_sync_secondary_config'
          )",
         [], |row| row.get(0),
     ).unwrap_or(1);
@@ -2113,6 +2137,8 @@ fn migrate(index: &mut Index) -> SyncResult<()> {
              DROP TABLE IF EXISTS device_sync_snapshot_cursor;
              DROP TABLE IF EXISTS device_sync_conflict;
              DROP TABLE IF EXISTS device_sync_recovery;
+             DROP TABLE IF EXISTS device_registry;
+             DROP TABLE IF EXISTS device_sync_secondary_config;
              CREATE TABLE IF NOT EXISTS device_sync_scheduler_lease(
                  lease_key TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at_ms INTEGER NOT NULL
              );",

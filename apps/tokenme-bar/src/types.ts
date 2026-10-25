@@ -469,6 +469,10 @@ export interface SyncDevicesSnapshot {
   /** Secondary only: the heartbeat watchdog's real-time read of the
    *  resident upload socket — instant, not poll-derived. */
   primary_link_live: boolean;
+  /** Device stale→fresh transitions since panel start (session rebuilds). */
+  sessions_since_boot: number;
+  /** The presence window behind the online dot, for diagnostics. */
+  presence_window_ms: number;
 }
 
 export interface Report {

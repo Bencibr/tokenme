@@ -45,6 +45,13 @@ fn device_is_live(seen: Option<i64>, now_ms: i64) -> bool {
     seen.is_some_and(|at| now_ms - at < DEVICE_LIVE_TTL_MS)
 }
 
+/// Device stale→fresh transitions since panel start: one per session rebuild
+/// that crossed the presence window, the soak metric in user-visible form.
+fn sessions_since_boot() -> &'static std::sync::atomic::AtomicU64 {
+    static COUNT: std::sync::OnceLock<std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
+    COUNT.get_or_init(|| std::sync::atomic::AtomicU64::new(0))
+}
+
 /// The secondary's view of the primary link: the instant of the last healthy
 /// heartbeat round-trip, refreshed every tick. Read through the same
 /// freshness window as device presence — the latch this replaces flagged an
@@ -447,6 +454,11 @@ pub struct SyncDevicesView {
     pub invite_expires_at_ms: Option<i64>,
     pub pairing_pending: bool,
     pub discovered_primaries: Vec<DiscoveredPrimaryView>,
+    /// How many times a device crossed stale→fresh since this panel started:
+    /// the reconnect-count a user can read without parsing logs.
+    pub sessions_since_boot: u64,
+    /// The presence window, for the diagnostics screen to explain the dot.
+    pub presence_window_ms: i64,
     pub devices: Vec<SyncDeviceView>,
     pub pairing_requests: Vec<PairingRequestState>,
 }
@@ -486,6 +498,22 @@ fn sync_dir() -> Result<PathBuf, String> {
 
 fn sync_index_path() -> Result<PathBuf, String> {
     usage_index::Index::default_path().ok_or_else(|| "no platform data directory available".into())
+}
+
+/// Surfaces pre-split pairing records before the first read-write open sheds
+/// them: the upgrade that moved pairing into sync_state.db does not migrate,
+/// and a silently empty device list would read as lost data. Runs on the
+/// status path, so the notice is on screen within one poll; the records are
+/// dropped by the next SyncStore::open and the notice never fires again.
+fn note_legacy_pairing_state(state: &mut SyncControlState, index_path: &std::path::Path) {
+    if state.last_error.is_some() { return; }
+    match SyncStore::count_legacy_pairing_state(index_path) {
+        Ok(0) => {}
+        Ok(count) => state.last_error = Some(format!(
+            "legacy pairing storage found in the index database: {count} record(s) need re-pairing after this upgrade — invite the devices again from the device sheet"
+        )),
+        Err(_) => {}
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -929,6 +957,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let stage = |name: &str, at: Instant| crate::logging::info(&format!("sync: action=start_primary stage={name} elapsed_ms={}", at.elapsed().as_millis()));
     let index_path = sync_index_path()?;
     stage("path", started);
+    note_legacy_pairing_state(state, &index_path);
     reap_service(state);
     if state.service.is_some() { return Ok(()); }
     if state.runtime.is_some() {
@@ -1046,6 +1075,9 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
                 seen.insert(device_id.to_string(), current_ms());
                 was_stale
             };
+            if woke {
+                sessions_since_boot().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if woke {
                 if let Some(app) = &app_for_ws {
                     use tauri::Emitter;
@@ -1735,6 +1767,8 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     Ok(SyncDevicesView {
         primary_id,
         primary_link_live: primary_link_fresh(),
+        sessions_since_boot: sessions_since_boot().load(std::sync::atomic::Ordering::Relaxed),
+        presence_window_ms: DEVICE_LIVE_TTL_MS,
         primary_display_name: secondary_config.as_ref().and_then(|config| config.primary_display_name.clone()),
         primary_os: secondary_config.as_ref().and_then(|config| config.primary_os.clone()),
         role: if state.role.is_empty() { "unconfigured".into() } else { state.role.clone() },
@@ -2221,6 +2255,7 @@ fn run_sync_action(state: &mut SyncControlState, action: SyncManagementRequest, 
     if !is_status { state.phase = SyncPhase::Running; }
     let result = (|| {
         let index_path = sync_index_path()?;
+        note_legacy_pairing_state(state, &index_path);
         let snapshot = SyncStore::read_status(&index_path).map_err(|e| format!("cannot read device sync status: {e}"))?;
         match action {
         SyncManagementRequest::Status => {

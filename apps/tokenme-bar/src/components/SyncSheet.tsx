@@ -80,6 +80,7 @@ function syncErrorMessage(error: string | null): string | null {
   if (normalized.includes("reconcile")) return t("sync.error.reconcile");
   if (normalized.includes("primary download")) return t("sync.error.download");
   if (normalized.includes("database") || normalized.includes("sqlite") || normalized.includes("corrupt")) return t("sync.error.database");
+  if (normalized.includes("legacy pairing")) return t("sync.error.legacy_state");
   if (normalized.includes("pairing invite") && normalized.includes("expired")) return t("sync.error.invite_expired");
   if (normalized.includes("invalid pairing invite")) return t("sync.error.invite_invalid");
   if (normalized.includes("pairing request was rejected")) return t("sync.error.rejected");

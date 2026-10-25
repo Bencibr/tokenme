@@ -396,6 +396,89 @@ fn test_multi_secondary_concurrent_websocket_sync() {
 }
 
 #[test]
+fn test_eight_secondaries_full_load_with_a_heavy_pusher() {
+    // The capacity promise this release makes: one primary serves 8 paired
+    // secondaries concurrently, one of them shipping a heavy (4000-row)
+    // snapshot twice, inside the session read budgets — nothing starves,
+    // nothing drops. The concurrency gate is configured at 16; this holds
+    // the promised half of it under real sockets.
+    let cert = generate_cert();
+    let primary_id = "primary-full-load";
+    let staging = staging_path("full-load");
+    let mut store = SyncStore::open_in_memory(primary_id).unwrap();
+
+    let light_counts = [3, 6, 9, 12, 15, 18, 21];
+    let heavy_count = 4_000;
+    let mut secondaries = Vec::new();
+    for i in 0..8 {
+        let sec = DeviceIdentity::create(&format!("load-node-{i}"), &format!("OS-{i}")).unwrap();
+        pair_secondary(&mut store, &sec, primary_id);
+        secondaries.push(sec);
+    }
+
+    let config = setup_server_config(&cert, staging, 16);
+    let server = HttpsSyncServer::bind(config, store).unwrap();
+    let addr = server.local_addr().unwrap();
+    let server_handle = thread::spawn(move || server.run_connections(8));
+
+    let mut client_threads = Vec::new();
+    for i in 0..8 {
+        let sec = secondaries[i].clone();
+        let count = if i == 7 { heavy_count } else { light_counts[i] };
+        let cert_der = cert.cert_der.clone();
+        let port = addr.port();
+
+        let handle = thread::spawn(move || {
+            let transport = Tls13HttpsTransport::new(HttpsTransportConfig::pinned(
+                format!("https://127.0.0.1:{port}"), "localhost", cert_der,
+            )).unwrap();
+            let (mut ws, _guard) = transport.connect_ws().unwrap();
+
+            let auth = WsSyncFrame::Auth {
+                device_id: sec.device_id.clone(),
+                origin: sec.origin.clone(),
+                display_name: format!("Loader-{i}"),
+                version: WS_PROTOCOL_VERSION.into(),
+            };
+            ws.send(tungstenite::Message::Text(serde_json::to_string(&auth).unwrap())).unwrap();
+            match read_app_msg(&mut ws) {
+                tungstenite::Message::Text(text) => match serde_json::from_str::<WsSyncFrame>(&text).unwrap() {
+                    WsSyncFrame::AuthAck { status, .. } => assert_eq!(status, "connected", "client {i}"),
+                    other => panic!("client {i} expected AuthAck, got {other:?}"),
+                },
+                other => panic!("expected text frame, got {other:?}"),
+            }
+
+            // The heavy client ships its full snapshot twice on one session:
+            // the second push proves the leg survives big frames end to end.
+            let rounds = if count == heavy_count { 2 } else { 1 };
+            for round in 0..rounds {
+                let push = WsSyncFrame::RollupSync { snapshot: rollup_snapshot(&sec.origin, count) };
+                ws.send(tungstenite::Message::Text(serde_json::to_string(&push).unwrap())).unwrap();
+                match read_app_msg(&mut ws) {
+                    tungstenite::Message::Text(text) => match serde_json::from_str::<WsSyncFrame>(&text).unwrap() {
+                        WsSyncFrame::RollupAck { origin, accepted, n } => {
+                            assert!(accepted, "secondary {i} round {round} push failed");
+                            assert_eq!(origin, sec.origin);
+                            assert_eq!(n, count);
+                        }
+                        other => panic!("client {i} expected RollupAck, got {other:?}"),
+                    },
+                    other => panic!("expected text frame, got {other:?}"),
+                }
+            }
+            let _ = ws.close(None);
+        });
+        client_threads.push(handle);
+    }
+
+    for (i, h) in client_threads.into_iter().enumerate() {
+        h.join().unwrap_or_else(|_| panic!("client thread {i} failed"));
+    }
+    assert!(server_handle.join().unwrap().is_ok());
+}
+
+#[test]
 fn test_secondary_reconnect_and_sequential_batches() {
     let cert = generate_cert();
     let primary_id = "primary-reconnect-hub";

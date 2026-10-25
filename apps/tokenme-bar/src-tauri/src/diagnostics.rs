@@ -1666,6 +1666,7 @@ fn safe_sync_view(status: &SyncDevicesView) -> Value {
 fn safe_sync_error_code(error: &str) -> &'static str {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("reconcile") { "reconcile_required" }
+    else if normalized.contains("legacy pairing storage") { "legacy_pairing" }
     else if normalized.contains("primary download") { "primary_download" }
     else if normalized.contains("certificate") || normalized.contains("pin mismatch") || normalized.contains("tls handshake") { "tls_or_pin" }
     else if normalized.contains("connection refused") || normalized.contains("connection reset") || normalized.contains("no route") || normalized.contains("transport i/o") || normalized.contains("timed out") { "transport_unreachable" }
@@ -2227,6 +2228,8 @@ mod tests {
     fn stopped_sync_service_cannot_report_listener_or_tls_ok() {
         let status = SyncDevicesView {
             primary_link_live: false,
+            sessions_since_boot: 0,
+            presence_window_ms: 30_000,
             primary_id: Some("primary-1".into()),
             role: "primary".into(),
             service_running: false,
