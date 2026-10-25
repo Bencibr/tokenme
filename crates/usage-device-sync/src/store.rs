@@ -2182,6 +2182,17 @@ fn migrate_state(state: &mut Connection, primary_id: &str) -> SyncResult<()> {
         // can never show when a secondary last landed its snapshot.
         ensure_column(&tx, "device_registry", "last_merged_at_ms", "INTEGER")?;
         ensure_column(&tx, "device_registry", "snapshot_complete", "INTEGER NOT NULL DEFAULT 0")?;
+        // A parallel line of the same fix briefly shipped a last_sync_at_ms
+        // column here; the merged tree stamps the two columns above instead,
+        // so a registry carrying the orphan sheds it instead of keeping a
+        // second, unread recency stamp beside the real ones.
+        let has_orphan: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_registry') WHERE name = 'last_sync_at_ms')",
+            [], |row| row.get(0),
+        ).map_err(sql_err)?;
+        if has_orphan {
+            tx.execute_batch("ALTER TABLE device_registry DROP COLUMN last_sync_at_ms").map_err(sql_err)?;
+        }
         ensure_column(&tx, "device_sync_secondary_config", "capture_enabled", "INTEGER NOT NULL DEFAULT 1")?;
         ensure_column(&tx, "device_sync_secondary_config", "primary_display_name", "TEXT")?;
         ensure_column(&tx, "device_sync_secondary_config", "primary_os", "TEXT")?;
@@ -2468,8 +2479,20 @@ fn read_status_conn(state: &Connection, index: &Connection) -> SyncResult<Device
 /// answer empty. `index` is today unused but keeps the reader shape the status
 /// bridge and registry callers were written against.
 fn device_tx(state: &Connection, _index: &Connection, device_id: &str) -> SyncResult<Option<DeviceRecord>> {
+    // The read-only status probe skips migrations, so a state database from
+    // before the merge-recency columns must still answer — with NULL/false,
+    // which is the truth: nothing could stamp them before the columns
+    // existed, and the next read-write open backfills them via ensure_column.
+    let has_recency: bool = state.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('device_registry') WHERE name = 'last_merged_at_ms')",
+        [], |row| row.get(0),
+    ).map_err(sql_err)?;
     let row: Option<(String, String, String, Vec<u8>, String, i64, Option<i64>, i64)> = state.query_row(
-        "SELECT origin, display_name, os, public_key, status, data_epoch, last_merged_at_ms, snapshot_complete FROM device_registry WHERE device_id = ?1",
+        &format!(
+            "SELECT origin, display_name, os, public_key, status, data_epoch, {}, {} FROM device_registry WHERE device_id = ?1",
+            if has_recency { "last_merged_at_ms" } else { "NULL" },
+            if has_recency { "snapshot_complete" } else { "0" },
+        ),
         params![device_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get::<_, Option<i64>>(6)?, row.get::<_, i64>(7)?)),
     ).optional().map_err(sql_err)?;
@@ -3230,6 +3253,43 @@ mod tests {
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'device_sync_scheduler_lease'", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(exists, 1, "the probe sees the hole and the DDL batch refills it");
+    }
+
+    #[test]
+    fn read_status_answers_a_registry_that_predates_the_merge_recency_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let store = SyncStore::open(&path, "primary-1").unwrap();
+            store.state.execute(
+                "INSERT INTO device_registry(device_id, origin, display_name, os, public_key, status, data_epoch, created_at_ms)
+                 VALUES('dev-old', 'lab-old', 'Old Lab', 'Linux', zeroblob(32), 'paired', 0, 1)", [],
+            ).unwrap();
+            store.state.execute_batch(
+                "ALTER TABLE device_registry DROP COLUMN last_merged_at_ms;
+                 ALTER TABLE device_registry DROP COLUMN snapshot_complete;",
+            ).unwrap();
+        }
+        let status = SyncStore::read_status(&path).unwrap();
+        assert_eq!(status.devices.len(), 1, "the pre-column registry still answers the read-only probe");
+        assert_eq!(status.devices[0].last_merged_at_ms, None, "nothing could stamp a merge before the columns existed");
+        assert!(!status.devices[0].snapshot_complete, "same for the completeness flag");
+    }
+
+    #[test]
+    fn migrate_sheds_the_orphan_last_sync_column_from_the_duplicate_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let store = SyncStore::open(&path, "primary-1").unwrap();
+            store.state.execute("ALTER TABLE device_registry ADD COLUMN last_sync_at_ms INTEGER", []).unwrap();
+        }
+        let store = SyncStore::open(&path, "primary-1").unwrap();
+        let columns = store.state.prepare("SELECT name FROM pragma_table_info('device_registry')").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(!columns.contains(&"last_sync_at_ms".into()), "the orphan column is dropped, not kept beside the real stamps");
+        assert!(columns.contains(&"last_merged_at_ms".into()) && columns.contains(&"snapshot_complete".into()));
     }
 
     #[test]
