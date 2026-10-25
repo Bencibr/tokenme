@@ -526,7 +526,7 @@ fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostics_path, DiagnosticLog};
+    use super::DiagnosticLog;
 
     #[test]
     fn sync_log_reads_the_structured_sync_audit_file() {

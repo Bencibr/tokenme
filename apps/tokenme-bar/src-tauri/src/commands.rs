@@ -1030,7 +1030,7 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
             // The list refresh covers the UI; the toast covers the owner who
             // is not looking at it. Resolve the device's display name off the
             // busy-tolerant read path, then toast off this connection thread.
-            let (device_id, sink_index, refresh_app) = (device_id.to_string(), sink_index.clone(), refresh_app.clone());
+            let (device_id, sink_index) = (device_id.to_string(), sink_index.clone());
             tauri::async_runtime::spawn_blocking(move || {
                 let name = SyncStore::read_status(&sink_index).ok()
                     .and_then(|status| status.devices.into_iter().find(|d| d.device_id == device_id))
@@ -1376,13 +1376,18 @@ fn advertise_host_is_stale(host: &str) -> bool {
 
 #[cfg(test)]
 mod advertise_host_tests {
-    use super::advertise_host_is_stale;
+    use super::{advertise_host_is_stale, infer_advertise_host};
 
     #[test]
     fn loopback_and_hostnames_are_never_stale() {
         assert!(!advertise_host_is_stale("127.0.0.1"));
         assert!(!advertise_host_is_stale("my-pc.local"));
-        assert!(!advertise_host_is_stale("192.168.101.79"), "the current default-route address is held by an interface");
+        // A hardcoded address breaks on the next DHCP reassignment; whatever
+        // the default route holds right now is by definition one an
+        // interface answers for.
+        if let Some(ip) = infer_advertise_host() {
+            assert!(!advertise_host_is_stale(&ip), "{ip} is held by an interface");
+        }
     }
 
     #[test]

@@ -42,7 +42,6 @@ const UPLOAD_DOMAIN: &[u8] = b"tokenme-device-sync/upload-signature/v1";
 const PAIRING_DOMAIN: &[u8] = b"tokenme-device-sync/pairing/v1";
 const STATUS_DOMAIN: &[u8] = b"tokenme-device-sync/status/v1";
 const DISPLAY_NAME_DOMAIN: &[u8] = b"tokenme-device-sync/display-name/v1";
-const DOWNLOAD_DOMAIN: &[u8] = b"tokenme-device-sync/download/v1";
 // A status request and a disconnect notice share one struct shape. The
 // purpose is signed so a captured status request cannot be replayed as a
 // disconnect (which would revoke the device).

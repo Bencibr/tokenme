@@ -115,7 +115,7 @@ pub fn pass(
     // paid on every changed pass for an audit artifact. Hourly is plenty for a
     // drift check (the codex replay below draws the same line), so it rides
     // the heartbeat too; between heartbeats the fields carry a note instead.
-    let mut dsh_regressions: Vec<String> = Vec::new();
+    let dsh_regressions: Vec<String> = Vec::new();
     let mut dsh_sessions: Vec<_> = Vec::new();
     let dsh_due = heartbeat_due;
     if dsh_due {
