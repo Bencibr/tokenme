@@ -277,7 +277,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       }).catch((e) => {
         if (alive && generation === operationGeneration.current) setError(e instanceof Error ? e.message : String(e));
       }).finally(() => {
-        if (alive && generation === operationGeneration.current) setInitializing(false);
+        // The generation guard belongs on the data writes above only. A newer
+        // operation advancing the generation (the retry poll runs every 5 s
+        // while the primary is unreachable) must not strand `initializing`:
+        // this is the only place that clears it, and a stranded true disables
+        // every button on the sheet — a 重试连接 that does nothing at all.
+        if (alive) setInitializing(false);
       });
     }, 0);
     return () => { alive = false; window.clearTimeout(statusTimer); };
