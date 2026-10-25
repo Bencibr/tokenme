@@ -873,8 +873,15 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     });
     state.interrupt.install(&transport);
     let cancellation = transport.cancellation();
-    let store = SyncStore::open(&index_path, config.primary_id.clone())
+    let mut store = SyncStore::open(&index_path, config.primary_id.clone())
         .map_err(|error| format!("cannot open secondary sync store: {error}"))?;
+    // The panel is single-instance: a lease still held under this device's
+    // panel-secondary prefix belongs to a process that died without releasing
+    // (installer stop, crash, reboot). Reclaim it now instead of letting the
+    // fresh runtime wait out the whole 15-minute TTL with the link dark.
+    if store.steal_stale_panel_lease(&config.device_id).map_err(|error| format!("cannot reclaim the stale panel lease: {error}"))? {
+        crate::logging::info("sync: reclaimed a stale panel-secondary scheduler lease left by a killed process");
+    }
     let owner = format!("panel-secondary-{}", identity.device_id);
     let runtime_config = SyncRuntimeConfig::new(owner).map_err(|error| error.to_string())?;
     let mut runtime = SyncRuntime::new_secondary_with_display_name(
