@@ -465,8 +465,12 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // 0 / 33 / 66 / 100 percent.
   const linkLive = snapshot.service_running !== false && snapshot.primary_link_live === true;
   const upDone = linkLive && snapshot.upload_complete === true;
-  const downPending = snapshot.download_complete === false;
-  const progressPercent = !linkLive ? 0 : upDone ? (downPending ? 66 : 100) : 33;
+  // download_complete is three-state: null — the primary has not shipped its
+  // first page (sharing off or the downlink never started) — is NOT done;
+  // only an explicit true finishes the pipeline. null used to fall into the
+  // "nothing pending" branch and read 100% while the primary's data had not
+  // arrived at all.
+  const progressPercent = !linkLive ? 0 : upDone ? (snapshot.download_complete === true ? 100 : 66) : 33;
   const uploadState = !linkLive
     ? t("sync.prog.retrying")
     : upDone
@@ -478,7 +482,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       ? t("sync.prog.wait")
       : snapshot.download_complete === true
         ? t("sync.prog.done")
-        : downPending
+        : snapshot.download_complete === false
           ? t("sync.prog.running")
           : t("sync.prog.wait_share");
   const rejectedByPrimary = errorDetail?.toLowerCase().includes("pairing request was rejected") ?? false;
