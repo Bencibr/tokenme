@@ -926,29 +926,6 @@ pub(crate) fn meter_of(s: &str) -> Meter {
     }
 }
 
-/// The one decoder for SELECT_EVENT_COLS; a hand-rolled copy at a call site
-/// used to drift whenever the column list changed.
-fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageEvent> {
-    let input: Option<f64> = row.get(7)?;
-    let cache_creation: Option<f64> = row.get(8)?;
-    let cache_read: Option<f64> = row.get(9)?;
-    let output: Option<f64> = row.get(10)?;
-    let reasoning: Option<f64> = row.get(11)?;
-    let credits: Option<f64> = row.get(12)?;
-    let meter: String = row.get(6)?;
-    Ok(UsageEvent {
-        tool: row.get(1)?, ts_ms: row.get(2)?, session: row.get(3)?,
-        project: row.get(4)?, model: row.get(5)?,
-        counts: TokenCounts {
-            input: input.unwrap_or(0.0), cache_creation: cache_creation.unwrap_or(0.0),
-            cache_read: cache_read.unwrap_or(0.0), output: output.unwrap_or(0.0),
-            reasoning: reasoning.unwrap_or(0.0), credits: credits.unwrap_or(0.0),
-        },
-        meter: meter_of(&meter), dedupe_key: row.get(13)?, calls: Vec::new(), quota: None,
-        source: row.get(14)?,
-    })
-}
-
 pub(crate) fn call_kind_str(k: CallKind) -> &'static str {
     match k {
         CallKind::Mcp => "mcp",
