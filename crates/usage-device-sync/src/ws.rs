@@ -546,6 +546,14 @@ mod tests {
             [&device.origin], |row| row.get(0),
         ).unwrap();
         assert_eq!(stored, 2, "both rows must land under the registry origin");
+        // The registry stamp is the primary panel's display of this device's
+        // sync recency — the ack alone leaves the row without a merge time
+        // and flagged as an incomplete snapshot.
+        let record = store.devices().unwrap().into_iter()
+            .find(|record| record.device_id == device.device_id)
+            .expect("the paired device row must still exist");
+        assert_eq!(record.last_merged_at_ms, Some(1_000), "a successful apply stamps the merge time");
+        assert!(record.snapshot_complete, "a rollup snapshot is complete by construction");
     }
 
     fn no_disconnect_sink() -> impl Fn(&str) {
