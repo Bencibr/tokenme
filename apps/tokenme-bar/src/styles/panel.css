@@ -4167,6 +4167,40 @@
   font-size: 12px;
 }
 
+.sync-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sync-progress-head span {
+  color: var(--ink-2);
+}
+
+.sync-progress-head code {
+  flex: none;
+  color: var(--ink);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-progress-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--hair);
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.sync-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 400ms ease;
+}
+
 .sync-progress-row {
   display: flex;
   align-items: center;

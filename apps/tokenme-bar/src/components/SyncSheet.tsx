@@ -452,15 +452,30 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // The two halves of a secondary's sync, each with its own finish line: the
   // upload is a rollup snapshot now — done once the primary has stored it,
   // wait until then — and the primary-data downlink (absent until the
-  // primary shares its first page).
-  const uploadState = snapshot.upload_complete === true
-    ? t("sync.prog.done")
-    : t("sync.prog.wait");
-  const downloadState = snapshot.download_complete === true
-    ? t("sync.prog.done")
-    : snapshot.download_complete === false
-      ? t("sync.prog.running")
-      : t("sync.prog.wait_share");
+  // primary shares its first page). The flags behind these labels are sticky
+  // from the last completed pass, so a dead link must override them: showing
+  // "已完成" beside "最近联系 21 分钟前" reads as a lie. The exchange itself is
+  // two atomic halves (push, then fetch), so the pipeline's honest progress
+  // is three stages — link up, uplink stored, downlink applied — rendered as
+  // 0 / 33 / 66 / 100 percent.
+  const linkLive = snapshot.service_running !== false && snapshot.primary_link_live === true;
+  const upDone = linkLive && snapshot.upload_complete === true;
+  const downPending = snapshot.download_complete === false;
+  const progressPercent = !linkLive ? 0 : upDone ? (downPending ? 66 : 100) : 33;
+  const uploadState = !linkLive
+    ? t("sync.prog.retrying")
+    : upDone
+      ? t("sync.prog.done")
+      : t("sync.prog.running");
+  const downloadState = !linkLive
+    ? t("sync.prog.retrying")
+    : !upDone
+      ? t("sync.prog.wait")
+      : snapshot.download_complete === true
+        ? t("sync.prog.done")
+        : downPending
+          ? t("sync.prog.running")
+          : t("sync.prog.wait_share");
   const rejectedByPrimary = errorDetail?.toLowerCase().includes("pairing request was rejected") ?? false;
 
   // The waiting screen ends exactly two ways: a live stream means the primary
@@ -739,6 +754,13 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
               {isSecondary ? (
                 <>
                   <div className="sync-progress" aria-live="polite">
+                    <div className="sync-progress-head">
+                      <span>{t("sync.prog.title")}</span>
+                      <code>{progressPercent}%</code>
+                    </div>
+                    <div className="sync-progress-bar" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100}>
+                      <span style={{ width: `${progressPercent}%` }} />
+                    </div>
                     <div className="sync-progress-row"><span>{t("sync.prog.upload")}</span><code>{uploadState}</code></div>
                     <div className="sync-progress-row"><span>{t("sync.prog.download")}</span><code>{downloadState}</code></div>
                   </div>
