@@ -631,15 +631,6 @@ impl SyncStore {
         upload_cursor_complete_conn(&conn, config)
     }
 
-    /// Read-only downlink completion for the panel's status bridge. `None`
-    /// means the primary has not shared a rollup snapshot yet, `Some(true)`
-    /// that one has been fetched and applied.
-    pub fn read_download_cursor_complete(path: impl AsRef<std::path::Path>, primary_id: &str) -> Option<bool> {
-        // The fetch stamp lives in the index (see read_upload_cursor_complete).
-        let conn = open_read_only(path.as_ref()).ok()?;
-        download_cursor_complete_conn(&conn, primary_id)
-    }
-
     /// The origins whose remote rows must not count in the figures — the
     /// disconnect side of the fold-time exclusion (see
     /// `ReportOptions::exclude_origins`), keyed on exact origins so the
@@ -928,27 +919,6 @@ impl SyncStore {
                 params![primary_id],
             ).map_err(sql_err)?;
             Ok(())
-        })
-    }
-
-    /// The readable origin download pages are exported under: the hostname
-    /// pinned on the first primary start, falling back to the primary id when
-    /// no readable name was ever pinned (older installs, fixtures).
-    pub fn primary_export_origin(&self) -> String {
-        let pinned = self.index.conn()
-            .query_row("SELECT value FROM meta WHERE key = 'device_sync_primary_origin'", [], |row| row.get::<_, String>(0))
-            .optional().ok().flatten();
-        pinned.filter(|origin| usage_core::origin_ok(origin)).unwrap_or_else(|| self.primary_id.clone())
-    }
-
-    /// Pins the export origin once per index. A later hostname change must not
-    /// relabel rows that already reached a secondary as another machine, so
-    /// only the first writable name is kept.
-    pub fn pin_primary_export_origin(&mut self, origin: &str) -> SyncResult<()> {
-        if !usage_core::origin_ok(origin) { return Ok(()); }
-        self.index.with_network_transaction(|tx| {
-            tx.execute("INSERT INTO meta(key, value) VALUES('device_sync_primary_origin', ?1) ON CONFLICT(key) DO NOTHING", params![origin]).map_err(sql_err)?;
-            Ok::<_, SyncError>(())
         })
     }
 

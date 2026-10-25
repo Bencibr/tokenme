@@ -17,9 +17,6 @@ use crate::store::{DeviceStatus, SyncError, SyncResult, SyncStore};
 use crate::transport::{primary_local_rollup_snapshot, RollupSnapshot};
 
 pub const WS_PROTOCOL_VERSION: &str = "tokenme-ws-v2";
-pub const DEFAULT_WS_PING_INTERVAL: Duration = Duration::from_secs(15);
-pub const DEFAULT_WS_RECONNECT_MIN: Duration = Duration::from_secs(1);
-pub const DEFAULT_WS_RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 /// Messages exchanged across the WebSocket sync channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]

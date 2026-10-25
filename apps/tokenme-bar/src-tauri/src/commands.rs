@@ -945,10 +945,9 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
     let endpoint_host = advertised_endpoint_host(&host, allow_lan)?;
     let existing_primary_id = SyncStore::read_status(&index_path).map_err(|error| format!("cannot read sync role: {error}"))?.primary_id;
     let current_primary_id = existing_primary_id.unwrap_or_else(|| identity.device_id.clone());
-    // Deferred open: no journal release, no capture mirror write — those are
-    // index write transactions that queue for seconds behind the ingest
-    // engine, and the start's banner must not wait for them. The background
-    // start_converge pass performs them once the listener is up.
+    // Deferred open: skips the index write transactions that queue for
+    // seconds behind the ingest engine, so the start's banner never waits
+    // for them.
     let mut store = SyncStore::open_deferred(&index_path, current_primary_id.clone()).map_err(|e| format!("cannot open sync store: {e}"))?;
     stage("store_open", started);
     if current_primary_id != identity.device_id {
@@ -1062,28 +1061,6 @@ fn start_primary(state: &mut SyncControlState, bind: Option<String>, advertise_h
         current_ms(),
     ).map_err(|e| format!("cannot persist primary sync configuration: {e}"))?;
     stage("persist_config", started);
-    // Index-side convergence the start no longer waits for: the readable
-    // downlink origin pin (this machine's hostname, so secondaries see a name,
-    // not a device id) plus the journal release and capture mirror refresh a
-    // full open performs. Secondaries cannot attach before pairing, so a pin
-    // landing seconds after the banner clears still precedes every reader.
-    {
-        let converge_path = index_path.clone();
-        let converge_primary = identity.device_id.clone();
-        thread::spawn(move || {
-            let started = Instant::now();
-            let outcome = (|| {
-                let mut store = match SyncStore::open(&converge_path, converge_primary) {
-                    Ok(store) => store,
-                    Err(error) => return Err(format!("cannot open sync store: {error}")),
-                };
-                store.pin_primary_export_origin(&usage_index::hostname())
-                    .map_err(|error| format!("cannot pin the primary export origin: {error}"))?;
-                Ok(())
-            })();
-            log_sync_action("start_converge", started, outcome.as_ref().err().map(String::as_str));
-        });
-    }
     let mdns = if allow_lan {
         let certificate_pin = hex_bytes(&hash_bytes(&certificate_der));
         match register_mdns_primary(&identity.device_id, &certificate_pin, &endpoint) {

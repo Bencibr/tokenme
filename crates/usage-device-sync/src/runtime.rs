@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DeviceIdentity, ClientTransportCancellation, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
+    DeviceIdentity, SyncError, SyncResult, SyncStore, Tls13HttpsTransport,
     TransportError,
 };
 
@@ -169,8 +169,6 @@ impl SyncRuntime {
     /// The pass clock of the last delivered rollup push, if any. It does not
     /// move while pushes are skipped as unchanged (see the field's doc).
     pub fn last_upload_pushed_at(&self) -> Option<i64> { self.last_upload_pushed_at }
-
-    pub fn transport_cancellation(&self) -> ClientTransportCancellation { self.transport.cancellation() }
 
     pub fn run_until_real(&mut self, stop: &AtomicBool) -> SyncResult<RuntimeRunReport> {
         self.run_until(stop, current_time_ms)

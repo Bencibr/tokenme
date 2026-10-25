@@ -412,10 +412,6 @@ pub struct NetworkCounts {
 }
 
 impl NetworkCounts {
-    pub fn all_zero() -> Self {
-        Self { in_tok: Some(0.0), cc_tok: Some(0.0), cr_tok: Some(0.0), out_tok: Some(0.0), reason_tok: Some(0.0), credits: Some(0.0) }
-    }
-
     pub(crate) fn validate(&self) -> SyncResult<()> {
         let present = [&self.in_tok, &self.cc_tok, &self.cr_tok, &self.out_tok, &self.reason_tok]
             .into_iter().filter(|v| v.is_some()).count();

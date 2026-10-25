@@ -442,14 +442,6 @@ impl Tls13HttpsTransport {
         })
     }
 
-    /// Stops the heartbeat and closes the resident socket: the watchdog holds
-    /// an Arc clone of the socket slot, so without this an dropped transport
-    /// would leave the connection — and the peer's handler — alive forever.
-    pub fn shutdown_link(&self) {
-        self.heartbeat_stop.store(true, AtomicOrdering::Release);
-        *lock_recover(&self.ws_client) = None;
-    }
-
     /// Real-time primary-link state for the embedding UI. `false` fires the
     /// moment the heartbeat watchdog proves the resident socket dead;
     /// `true` the moment a rebuilt one authenticates.
@@ -1215,11 +1207,6 @@ impl HttpsSyncServer {
     ) -> Result<(), TransportError> {
         *lock_recover(&self.context.ws_event_sink) = Some(Arc::new(sink));
         Ok(())
-    }
-
-    /// The devices with a live authenticated upload socket right now.
-    pub fn ws_live_devices(&self) -> Vec<String> {
-        lock_recover(&self.context.ws_live).keys().cloned().collect()
     }
 
     /// Best-effort server push of a device's registry state change onto its
