@@ -8,8 +8,6 @@
 
 import type petSkinManifest from "./assets/pets/pet-skins.json";
 
-export type Meter = "tokens" | "credits";
-
 /** `usage_core::TokenCounts` — the four Anthropic-style stages plus reasoning/credits. */
 export interface TokenCounts {
   input: number;
