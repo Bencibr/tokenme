@@ -4110,8 +4110,7 @@
 }
 
 .sync-dev-dot.is-offline {
-  background: var(--ink-4, var(--ink-3));
-  opacity: 0.45;
+  background: var(--bad);
 }
 
 .sync-dev-dot.is-error {

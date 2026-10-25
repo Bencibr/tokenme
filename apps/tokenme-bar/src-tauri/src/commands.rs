@@ -863,6 +863,10 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     let ever_live_hook = Arc::clone(&ever_live);
     transport.set_ws_link_hook(move |live| {
         let previous = primary_link_live().swap(live, std::sync::atomic::Ordering::Release);
+        // Every transition is instant UI news: without this wake the sheet
+        // learns a dead link only through the next 5 s poll, and the device
+        // row's dot lingers green over an offline peer.
+        if live != previous { wake_sync_ui(); }
         if live && !previous && (ever_live_hook.swap(true, std::sync::atomic::Ordering::Relaxed) || hook_started.elapsed() > std::time::Duration::from_secs(60)) {
             crate::notify::post_primary_online(&primary_name);
         }
