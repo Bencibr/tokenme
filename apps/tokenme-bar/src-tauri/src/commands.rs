@@ -851,9 +851,21 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     let transport = secondary_transport(&config)?;
     // The heartbeat watchdog proves the primary link dead within one 3 s
     // cycle; the flag feeds the status snapshots, so the panel flips to
-    // 重试连接 without waiting for a failed poll.
-    transport.set_ws_link_hook(|live| {
-        primary_link_live().store(live, std::sync::atomic::Ordering::Release);
+    // 重试连接 without waiting for a failed poll. The same edge drives the
+    // recovery banner: a down→up transition means the primary came back
+    // while nobody was watching. Two guards keep it from crying wolf: the
+    // first connect of a fresh runtime (app launch, 重试连接) is not news
+    // unless the runtime had been struggling past a minute, and a blip is
+    // only announced after this session has actually carried a live link.
+    let primary_name = config.primary_display_name.clone().filter(|name| !name.trim().is_empty()).unwrap_or_else(|| config.primary_id.clone());
+    let hook_started = std::time::Instant::now();
+    let ever_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ever_live_hook = Arc::clone(&ever_live);
+    transport.set_ws_link_hook(move |live| {
+        let previous = primary_link_live().swap(live, std::sync::atomic::Ordering::Release);
+        if live && !previous && (ever_live_hook.swap(true, std::sync::atomic::Ordering::Relaxed) || hook_started.elapsed() > std::time::Duration::from_secs(60)) {
+            crate::notify::post_primary_online(&primary_name);
+        }
     });
     state.interrupt.install(&transport);
     let cancellation = transport.cancellation();

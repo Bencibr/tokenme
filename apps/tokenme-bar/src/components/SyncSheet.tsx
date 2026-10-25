@@ -543,13 +543,16 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
       device.last_generation != null ? t("sync.device.gen", { n: device.last_generation }) : "",
       device.last_merged_at_ms != null ? t("sync.device.merged", { time: relTime(device.last_merged_at_ms) }) : "",
     ].filter(Boolean).join(" · ");
-    const live = device.role === "secondary" ? device.live : true;
+    // A secondary's row lives or dies by its own last contact; a primary row
+    // (only on a secondary's sheet) lives or dies by this device's session —
+    // the old unconditional `true` kept the dot green through a total outage.
+    const live = device.role === "secondary" ? device.live : isSecondary ? linkLive : true;
     return (
       <div className="sync-dev" key={device.device_id}>
         <span className={`sync-dev-dot${device.status === "paused" ? " is-paused" : live ? "" : " is-offline"}`} aria-hidden="true" />
         <span className="sync-dev-platform" role="img" aria-label={device.os || "unknown system"} title={device.os || "unknown system"}><IconDevicePlatform os={device.os} size={14} /></span>
         <span className="sync-dev-name" title={hostName}>{hostName}</span>
-        {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : device.role === "secondary" && device.status === "paired" && !live ? <code>{t("sync.device.offline")}</code> : null}
+        {device.status === "pending" ? <code>{t("sync.device.pending")}</code> : device.status === "paused" ? <code>{t("sync.device.paused")}</code> : device.status === "reconcile_required" ? <code>{t("sync.device.reconcile")}</code> : device.status === "paired" && !live ? <code>{t("sync.device.offline")}</code> : null}
         {device.role === "secondary" && device.status === "paired" && deviceMeta ? <span className="sync-dev-when">{deviceMeta}</span> : null}
         <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
           request: isSecondary ? { action: "stop" } : { action: "revoke", device_id: device.device_id },
@@ -811,13 +814,15 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
                   <div className="sync-sect2">{t("sync.ov.paired_sect_sec")}</div>
                   {primaryDevices.length ? primaryDevices.map((device) => deviceRow(device)) : (
                     <div className="sync-dev" key={snapshot.primary_id}>
-                      <span className={`sync-dev-dot${secondaryRecovering ? " is-paused" : secondaryDegraded ? " is-error" : ""}`} aria-hidden="true" />
+                      <span className={`sync-dev-dot${!awaitingSecondaryApproval && !linkLive ? " is-offline" : secondaryRecovering ? " is-paused" : secondaryDegraded ? " is-error" : ""}`} aria-hidden="true" />
                       <span className="sync-dev-platform" role="img" aria-label={snapshot.primary_os || "unknown system"} title={snapshot.primary_os || "unknown system"}><IconDevicePlatform os={snapshot.primary_os ?? ""} size={14} /></span>
                       <span className="sync-dev-name">{snapshot.primary_display_name?.trim() || snapshot.discovered_primaries.find((primary) => primary.primary_id === snapshot.primary_id)?.display_name.trim() || t("sync.role.primary")}<code>{snapshot.endpoint ?? snapshot.primary_id}</code></span>
                       {/* Same override as the chip: a pairing wait refreshed
                           `last_connected`, so the raw degraded/recovering
-                          verdicts would read 已连接 · 同步异常 over a live wait. */}
-                      <code>{awaitingSecondaryApproval ? t("sync.state.starting") : secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
+                          verdicts would read 已连接 · 同步异常 over a live wait.
+                          A dead session reads 离线, not the stale 服务运行中 —
+                          the sticky link verdict cannot outlive its socket. */}
+                      <code>{awaitingSecondaryApproval ? t("sync.state.starting") : !linkLive ? t("sync.device.offline") : secondaryRecovering ? t("sync.state.recovering") : secondaryDegraded ? t("sync.state.degraded") : t("sync.state.running")}</code>
                       <button type="button" className="sync-disc" disabled={commandBusy} onClick={() => setPendingConfirm({
                         request: { action: "stop" },
                         message: t("sync.revoke.confirm", { name: snapshot.primary_display_name?.trim() || t("sync.role.primary") }),
