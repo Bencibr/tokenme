@@ -550,7 +550,7 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
     const deviceMeta = [
       !device.snapshot_complete ? t("sync.device.snapshot_incomplete") : "",
       device.last_generation != null ? t("sync.device.gen", { n: device.last_generation }) : "",
-      device.last_merged_at_ms != null ? t("sync.device.merged", { time: relTime(device.last_merged_at_ms) }) : "",
+      device.last_merged_at_ms != null ? t("sync.device.last_sync", { time: relTime(device.last_merged_at_ms) }) : "",
     ].filter(Boolean).join(" · ");
     // A secondary's row lives or dies by its own last contact; a primary row
     // (only on a secondary's sheet) lives or dies by this device's session —

@@ -1184,6 +1184,20 @@ impl SyncStore {
         Ok(origin)
     }
 
+    /// The served-fetch twin of the uplink stamp: a device pulling the
+    /// primary's full snapshot has run its half of the all-at-once rollup
+    /// protocol, so its row reads as synced even when its own data has not
+    /// changed — the fingerprint-deduped push skips, leaving an idle but
+    /// healthy secondary without a time until its next edit. Same columns,
+    /// same all-at-once reasoning as the apply stamp above.
+    pub fn mark_device_fetched(&mut self, device_id: &str, at_ms: i64) -> SyncResult<()> {
+        self.state.execute(
+            "UPDATE device_registry SET last_merged_at_ms = ?2, snapshot_complete = 1 WHERE device_id = ?1",
+            params![device_id, at_ms],
+        ).map_err(sql_err)?;
+        Ok(())
+    }
+
     /// The sender side of the uplink: this machine's own rollup rows,
     /// exactly what the primary will store under our registry origin.
     /// `event_rollup.origin` is the materialized `ORIGIN_SQL` of each

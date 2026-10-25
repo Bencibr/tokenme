@@ -359,6 +359,11 @@ fn process_server_frame(
                     message: "the primary is not sharing data with secondaries".into(),
                 }), None));
             }
+            // A served fetch is a sync too — owner's call 2026-10-25: an idle
+            // secondary whose unchanged data skips the deduped push must still
+            // land a recency stamp, or its row reads as never-synced while it
+            // polls every interval.
+            store.mark_device_fetched(device_id, now_ms())?;
             match primary_local_rollup_snapshot(store) {
                 Ok(snapshot) => Ok((Some(WsSyncFrame::RollupSnapshot { snapshot }), None)),
                 Err(err) => Ok((Some(WsSyncFrame::Error { message: err.to_string() }), None)),
@@ -594,6 +599,11 @@ mod tests {
             }
             other => panic!("expected the snapshot frame, got {other:?}"),
         }
+        let record = store.devices().unwrap().into_iter()
+            .find(|record| record.device_id == device.device_id)
+            .expect("the paired device row must still exist");
+        assert_eq!(record.last_merged_at_ms, Some(1_000), "a served fetch stamps the recency like an apply does");
+        assert!(record.snapshot_complete, "the pull is the device's half of the all-at-once protocol");
     }
 
     #[test]
