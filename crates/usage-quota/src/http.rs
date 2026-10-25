@@ -61,6 +61,20 @@ pub fn post_json(url: &str, headers: &[(&str, &str)], body: Value) -> Option<Val
 /// still carries a parseable `{"error":"invalid_grant",…}` the caller must read —
 /// it is the difference between "rotate and write back" and "the login is dead,
 /// touch nothing". Only a transport failure or an unparsable body is `None`.
+/// POST JSON, returning the HTTP status even on non-2xx: a 401/403 body is
+/// the difference between "the login token expired, stop probing it" and "the
+/// vendor hiccuped, retry later". A transport failure or an unparsable body
+/// is still `None`.
+pub fn post_json_any_status(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Value,
+) -> Option<(u16, Value)> {
+    let resp = send(url, headers, Some(body))?;
+    let status = resp.status();
+    resp.into_json().ok().map(|value| (status, value))
+}
+
 pub fn post_form_any_status(
     url: &str,
     headers: &[(&str, &str)],

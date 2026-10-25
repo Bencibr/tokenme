@@ -262,8 +262,12 @@ impl QuotaProbe for TraeQuota {
     fn fetch(&self) -> Vec<QuotaSample> {
         let now = chrono::Utc::now();
         for login in logins(self.cn) {
-            // A past expiry means "no live sample"; the probe never refreshes.
-            if login.expires_at.is_some_and(|t| t <= now) {
+            // A past expiry, or a token the vendor already refused, means the
+            // probe must not spend a request on it; the first pass that finds
+            // either tells the host once so the user hears "sign in again"
+            // instead of watching the row quietly vanish.
+            if login.expires_at.is_some_and(|t| t <= now) || crate::login_is_dead(&login.token) {
+                crate::note_dead_login(self.tool(), &login.host, &login.token);
                 continue;
             }
             let headers = [
@@ -279,10 +283,12 @@ impl QuotaProbe for TraeQuota {
             // usage fields for a credits-billing account, which is exactly
             // the "usage vanished" this ladder exists to survive.
             if self.cn {
-                if let Some(body) =
-                    crate::http::post_json(&format!("{}{USAGE_PATH_V2}", login.host), &headers, json!({"require_usage": true}))
-                {
-                    if body.get("usage_summary").is_some() {
+                if let Some((status, body)) = crate::http::post_json_any_status(&format!("{}{USAGE_PATH_V2}", login.host), &headers, json!({"require_usage": true})) {
+                    if auth_rejected(status) {
+                        crate::note_dead_login(self.tool(), &login.host, &login.token);
+                        continue;
+                    }
+                    if (200..300).contains(&status) && body.get("usage_summary").is_some() {
                         cn_daily_checkin(&login, false);
                         let out = samples_from_ent_usage_v2(&body);
                         if !out.is_empty() {
@@ -292,9 +298,16 @@ impl QuotaProbe for TraeQuota {
                 }
             }
             let url = format!("{}{USAGE_PATH}", login.host);
-            let Some(body) = crate::http::post_json(&url, &headers, json!({"require_usage": true})) else {
+            let Some((status, body)) = crate::http::post_json_any_status(&url, &headers, json!({"require_usage": true})) else {
                 continue;
             };
+            if auth_rejected(status) {
+                crate::note_dead_login(self.tool(), &login.host, &login.token);
+                continue;
+            }
+            if !(200..300).contains(&status) {
+                continue;
+            }
             let samples = samples_from_entitlement(&body);
             if !samples.is_empty() {
                 return samples;
@@ -312,6 +325,13 @@ impl QuotaProbe for TraeQuota {
         }
         Vec::new()
     }
+}
+
+/// 401/403 from a vendor endpoint is the token itself being refused — the one
+/// non-2xx that never heals on a retry, so it ends the login instead of riding
+/// the outage contract like a 5xx would.
+fn auth_rejected(status: u16) -> bool {
+    status == 401 || status == 403
 }
 
 /// The strip's done-badge (`QuotaStrip.groupCheckedIn`) lights on any window id

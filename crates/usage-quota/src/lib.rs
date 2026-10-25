@@ -129,6 +129,52 @@ pub fn log_meter(key: &str, msg: &str) {
     }
 }
 
+/// The sink a host hands the login-expiry path: a probe login whose token the
+/// vendor refused (401/403) or whose stored expiry has passed. Without it a
+/// dead login is silent — the row just vanishes and the user cannot tell
+/// "vendor down" from "sign in again". The CLI installs nothing and stays
+/// silent there.
+pub type LoginExpiredNote = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+static LOGIN_EXPIRED_NOTE: std::sync::OnceLock<LoginExpiredNote> = std::sync::OnceLock::new();
+
+/// Install the host's login-expiry sink. Called once at setup; later calls win.
+pub fn set_login_expired_note(f: LoginExpiredNote) {
+    let _ = LOGIN_EXPIRED_NOTE.set(f);
+}
+
+/// Tokens already reported dead, by fingerprint. The set gates both the vendor
+/// call (a refused token stays refused — retrying it every pass is the waste
+/// being removed) and the host note (one toast per dead token, not one per
+/// pass). A re-login mints a new token, so its later expiry reports again.
+static DEAD_LOGINS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> = std::sync::OnceLock::new();
+
+pub(crate) fn login_is_dead(token: &str) -> bool {
+    dead_logins().lock().map(|set| set.contains(&token_fingerprint(token))).unwrap_or(false)
+}
+
+/// Record a login the probe must stop trying and, the first time this run,
+/// tell the host so it can ask the user to sign in again.
+pub(crate) fn note_dead_login(tool: &str, host: &str, token: &str) {
+    let first = dead_logins().lock().map(|mut set| set.insert(token_fingerprint(token))).unwrap_or(false);
+    if first {
+        if let Some(f) = LOGIN_EXPIRED_NOTE.get() { f(tool, host); }
+    }
+}
+
+fn dead_logins() -> &'static std::sync::Mutex<std::collections::HashSet<u64>> {
+    DEAD_LOGINS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// A fingerprint, never the token itself: the set outlives the pass but must
+/// not outlive it holding a live credential.
+fn token_fingerprint(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut h);
+    h.finish()
+}
+
 pub trait QuotaProbe: Send + Sync {
     /// Must match an adapter `TOOL_ID` so the panel can group quota with spend.
     fn tool(&self) -> &'static str;
@@ -370,6 +416,30 @@ mod tests {
                 || PROBE_ONLY_TOOLS.contains(&probe.tool());
             assert!(known, "probe tool {:?} matches no adapter TOOL_ID or probe-only id", probe.tool());
         }
+    }
+
+    /// The dead-login registry is the expiry UX's whole spine: one host note
+    /// per dead token (not one per pass), the token skipped from then on, and
+    /// a re-login (a different token) reporting fresh when it dies in turn.
+    #[test]
+    fn the_dead_login_registry_notifies_once_and_skips_the_token() {
+        static FIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        set_login_expired_note(std::sync::Arc::new(|tool, host| {
+            assert_eq!(tool, "trae_cn");
+            assert_eq!(host, "api.trae.cn");
+            FIRED.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert!(!login_is_dead("dead-login-test-token-a"));
+        note_dead_login("trae_cn", "api.trae.cn", "dead-login-test-token-a");
+        // The same dead token on every later pass: no second toast, still dead.
+        note_dead_login("trae_cn", "api.trae.cn", "dead-login-test-token-a");
+        assert_eq!(FIRED.load(Ordering::SeqCst), 1);
+        assert!(login_is_dead("dead-login-test-token-a"));
+        // A different token (the re-login) is its own episode.
+        assert!(!login_is_dead("dead-login-test-token-b"));
+        note_dead_login("trae_cn", "api.trae.cn", "dead-login-test-token-b");
+        assert_eq!(FIRED.load(Ordering::SeqCst), 2);
+        assert!(login_is_dead("dead-login-test-token-b"));
     }
 
     /// The check-in registry drives the engine's auto-check-in exemption and

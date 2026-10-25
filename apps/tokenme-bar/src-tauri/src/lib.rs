@@ -159,6 +159,9 @@ pub fn run() {
             // themselves call through this hook, so usage-quota stays
             // host-agnostic.
             usage_quota::set_checkin_log(std::sync::Arc::new(|msg| crate::logging::checkin(msg)));
+            usage_quota::set_login_expired_note(std::sync::Arc::new(|tool, host| {
+                notify::post_login_expired(tool, host)
+            }));
 
             let handle = app.handle().clone();
             diagnostics::DiagnosticsState::restore_on_launch(&handle);

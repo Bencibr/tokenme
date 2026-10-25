@@ -504,6 +504,29 @@ pub fn post_secondary_left(device_name: &str) {
     post_sync(zh, body, "secondary-left toast failed");
 }
 
+/// A probe login the vendor refused or that expired on disk: its quota row
+/// cannot answer until the user signs in again, so say so instead of letting
+/// the row quietly vanish. The quota crate dedups per dead token — this fires
+/// once per episode, not once per pass. Title follows the threshold banners
+/// (the tool's display name); `host` stays unused — it names the endpoint,
+/// not anything the user can act on.
+pub fn post_login_expired(tool: &str, _host: &str) {
+    let zh = crate::lang::get() == crate::lang::Lang::Zh;
+    let display = match tool {
+        "trae" => "Trae".to_string(),
+        "trae_cn" => "Trae CN".to_string(),
+        other => other.to_string(),
+    };
+    let body = if zh {
+        format!("{display} 的登录已过期，请在其客户端重新登录，用量与配额会随之恢复。")
+    } else {
+        format!("The {display} login has expired — sign in again in its client to restore usage reporting.")
+    };
+    if let Err(e) = post(&display, &body) {
+        crate::logging::error(&format!("notify: login-expired toast failed — {e}"));
+    }
+}
+
 /// The one sender behind every device-sync toast: the fixed bilingual title
 /// and the failure log lived in three copies that had already drifted in
 /// their error tags.
