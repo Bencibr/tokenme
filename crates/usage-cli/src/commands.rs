@@ -1779,7 +1779,7 @@ pub fn sync_status(ctx: &Ctx) -> Result<(), String> {
             if let Some(error) = config.last_error { println!("last_error: {error}"); }
         }
         for device in status.devices {
-            println!("{}\t{}\t{}\t{}\t{}", device.device_id, device.origin, device.os, format!("{:?}", device.status).to_lowercase(), device.last_sync_at_ms.map(|ms| ms.to_string()).unwrap_or_else(|| "-".into()));
+            println!("{}\t{}\t{}\t{}\t{}", device.device_id, device.origin, device.os, format!("{:?}", device.status).to_lowercase(), device.last_generation.map(|n| n.to_string()).unwrap_or_else(|| "-".into()));
         }
         for request in status.pairing_requests {
             println!("pairing {}\t{}\t{}", request.request_id, request.origin, request.status);

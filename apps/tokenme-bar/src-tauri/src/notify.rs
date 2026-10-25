@@ -504,6 +504,20 @@ pub fn post_secondary_left(device_name: &str) {
     post_sync(zh, body, "secondary-left toast failed");
 }
 
+/// The secondary's retry loop reached a primary that had been down: the
+/// recovery happens in the background while nobody is looking at the sheet,
+/// so it earns one banner. The caller owns the transition detection — this
+/// fires only on a real down→up edge, never on a routine reconnect blip.
+pub fn post_primary_online(primary_name: &str) {
+    let zh = crate::lang::get() == crate::lang::Lang::Zh;
+    let body = if zh {
+        format!("「{primary_name}」已恢复在线，同步已恢复。")
+    } else {
+        format!("\"{primary_name}\" is back online — sync has resumed.")
+    };
+    post_sync(zh, body, "primary-online toast failed");
+}
+
 /// A probe login the vendor refused or that expired on disk: its quota row
 /// cannot answer until the user signs in again, so say so instead of letting
 /// the row quietly vanish. The quota crate dedups per dead token — this fires

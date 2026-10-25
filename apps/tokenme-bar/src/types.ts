@@ -403,8 +403,10 @@ export interface SyncDeviceView {
   role: SyncDeviceRole;
   status: SyncDeviceStatus;
   data_epoch: number;
-  /** Last authenticated rollup contact (push or fetch) the primary saw. */
-  last_sync_at_ms: number | null;
+  active_stream_id: string | null;
+  last_generation: number | null;
+  last_merged_at_ms: number | null;
+  snapshot_complete: boolean;
   /** Live authenticated upload socket right now (primary's real-time view). */
   live: boolean;
 }

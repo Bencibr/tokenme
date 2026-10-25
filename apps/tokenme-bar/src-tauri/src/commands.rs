@@ -385,8 +385,10 @@ pub struct SyncDeviceView {
     pub role: String,
     pub status: String,
     pub data_epoch: u64,
-    /// Last authenticated rollup contact (push or fetch) the primary saw.
-    pub last_sync_at_ms: Option<i64>,
+    pub active_stream_id: Option<String>,
+    pub last_generation: Option<u64>,
+    pub last_merged_at_ms: Option<i64>,
+    pub snapshot_complete: bool,
     /// Live authenticated upload socket right now (primary's view only).
     pub live: bool,
 }
@@ -451,7 +453,10 @@ fn sync_device_view(device: DeviceStatusView) -> SyncDeviceView {
             DeviceStatus::ReconcileRequired => "reconcile_required",
         }.into(),
         data_epoch: device.data_epoch,
-        last_sync_at_ms: device.last_sync_at_ms,
+        active_stream_id: device.active_stream_id,
+        last_generation: device.last_generation,
+        last_merged_at_ms: device.last_merged_at_ms,
+        snapshot_complete: device.snapshot_complete,
     }
 }
 
@@ -846,9 +851,25 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
     let transport = secondary_transport(&config)?;
     // The heartbeat watchdog proves the primary link dead within one 3 s
     // cycle; the flag feeds the status snapshots, so the panel flips to
-    // 重试连接 without waiting for a failed poll.
-    transport.set_ws_link_hook(|live| {
-        primary_link_live().store(live, std::sync::atomic::Ordering::Release);
+    // 重试连接 without waiting for a failed poll. The same edge drives the
+    // recovery banner: a down→up transition means the primary came back
+    // while nobody was watching. Two guards keep it from crying wolf: the
+    // first connect of a fresh runtime (app launch, 重试连接) is not news
+    // unless the runtime had been struggling past a minute, and a blip is
+    // only announced after this session has actually carried a live link.
+    let primary_name = config.primary_display_name.clone().filter(|name| !name.trim().is_empty()).unwrap_or_else(|| config.primary_id.clone());
+    let hook_started = std::time::Instant::now();
+    let ever_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ever_live_hook = Arc::clone(&ever_live);
+    transport.set_ws_link_hook(move |live| {
+        let previous = primary_link_live().swap(live, std::sync::atomic::Ordering::Release);
+        // Every transition is instant UI news: without this wake the sheet
+        // learns a dead link only through the next 5 s poll, and the device
+        // row's dot lingers green over an offline peer.
+        if live != previous { wake_sync_ui(); }
+        if live && !previous && (ever_live_hook.swap(true, std::sync::atomic::Ordering::Relaxed) || hook_started.elapsed() > std::time::Duration::from_secs(60)) {
+            crate::notify::post_primary_online(&primary_name);
+        }
     });
     state.interrupt.install(&transport);
     let cancellation = transport.cancellation();
@@ -1715,7 +1736,10 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
                         role: "primary".into(),
                         status: if state.runtime.is_some() { "paired".into() } else { "paused".into() },
                         data_epoch: config.data_epoch.unwrap_or(0),
-                        last_sync_at_ms: config.last_connected_at_ms,
+                        active_stream_id: config.stream_id.clone(),
+                        last_generation: None,
+                        last_merged_at_ms: config.last_connected_at_ms,
+                        snapshot_complete: panel.download_complete.unwrap_or(false),
                         live: primary_link_live().load(std::sync::atomic::Ordering::Relaxed),
                     };
                     if !devices.iter().any(|d| d.device_id == config.primary_id) {
