@@ -213,9 +213,10 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 10px;
-  padding-top: var(--s2);
-  border-top: 1px solid var(--hair);
+  margin-top: var(--s3);
+  /* The sync/scope block above carries the divider now; doubling it here
+     read as two rules 12px apart. */
+  padding-top: 0;
 }
 
 .page-tabs {
@@ -481,11 +482,11 @@
 .hero {
   /* One locked height for both hero states: the total line and the three-
      column split render inside the same box, so the click never reflows
-     the rows beneath it. 42px = the 34px hero line at 1.05 + breathing. */
-  height: 42px;
+     the rows beneath it. 56px gives the figures room to breathe. */
+  height: 56px;
   display: flex;
   align-items: center;
-  margin-top: 10px;
+  margin-top: 12px;
 }
 
 .hero-main {
@@ -634,16 +635,33 @@
 }
 
 .hdr-stats {
+  /* Equal quarters across the row, hairline-divided, centered — the same
+     treatment the hero split gets, one size down. Each stat becomes its
+     own little station instead of a running sentence. */
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--s1) var(--s2);
-  margin-top: var(--s2);
+  align-items: center;
+  margin-top: var(--s3);
+  padding: 7px 0;
+  border-top: 1px solid var(--hair);
+  border-bottom: 1px solid var(--hair);
   font-size: var(--t-meta);
   color: var(--ink-3);
   min-width: 0;
   /* Numbers and their unit are one idea; a line may only break between items. */
   white-space: nowrap;
+}
+
+.hdr-stats > span {
+  flex: 1 1 0;
+  text-align: center;
+}
+
+.hdr-stats > span + span {
+  border-left: 1px solid var(--hair);
+}
+
+.hdr-stats > .dot-sep {
+  display: none;
 }
 
 /* The Linux-sync badge on a line of its own: it names a machine, an age and a
@@ -652,22 +670,25 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  /* One row-gap for both stacked rows, and both chips sized to the same
-     24px box — the sync badge (1px/7px) and the scope button (2px/8px)
-     used to sit at different heights, so the two gaps read unequal. */
-  gap: 6px;
-  margin-top: var(--s2);
+  /* One generous row-gap for both stacked rows, and both chips sized to
+     the same 26px box — the sync badge (1px/7px) and the scope button
+     (2px/8px) used to sit at different heights, so the two gaps read
+     unequal. The hairline under the row separates it from the tabs. */
+  gap: 10px;
+  margin-top: var(--s3);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--hair);
   min-width: 0;
 }
 
 .hdr-sync > .sync {
-  min-height: 24px;
+  min-height: 26px;
   padding-top: 0;
   padding-bottom: 0;
 }
 
 .hdr-sync > .scope-row .scope-btn {
-  min-height: 24px;
+  min-height: 26px;
   padding-top: 0;
   padding-bottom: 0;
 }
