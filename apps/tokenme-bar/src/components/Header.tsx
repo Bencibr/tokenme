@@ -40,7 +40,7 @@ interface Props {
    *  that still exists (a paired device or a configured server). Null when no
    *  such machine ever delivered one (most users). */
   sync?: {
-    latest: { origin: string; rows: number };
+    latest: { origin: string; rows: number; file: string };
     age: string;
     more: number;
     /** Warn hue: the newest merge is not from today. */
@@ -217,8 +217,17 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
                 <span>{sync.latest.origin}</span>
                 <span className="dot-sep" aria-hidden="true" />
                 <span>{sync.age}</span>
-                <span className="dot-sep" aria-hidden="true" />
-                <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
+                {sync.latest.file === "device-sync" ? (
+                  // The live session channel has no row count: its exchange
+                  // is a re-verified aggregate snapshot, so a "0 rows" here
+                  // would be a number about nothing.
+                  <span className="dot-sep" aria-hidden="true" />
+                ) : (
+                  <>
+                    <span className="dot-sep" aria-hidden="true" />
+                    <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
+                  </>
+                )}
                 {sync.more > 0 ? <span className="sync-more">{t("hdr.sync.more", { n: sync.more })}</span> : null}
               </>
             ) : (

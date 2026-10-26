@@ -526,7 +526,10 @@ const [page, setPage] = useState<PageKey>(() => {
       latest: records[0],
       importedAt,
       age: relativeTime(importedAt, now),
-      more: records.length - 1,
+      // Count only machines that actually merged today. The `+N` used to
+      // include every historical import origin (an mbp idle since 10-06 made
+      // the badge read 0 行 +1 — a number about nothing).
+      more: records.slice(1).filter((r) => localDate(r.imported_at_ms) === localDate(now)).length,
       mergedToday,
       stale: !mergedToday,
       rows: records.map((r, i) => ({
@@ -700,6 +703,8 @@ const [page, setPage] = useState<PageKey>(() => {
         {serversOpen ? (
           <ServerSheet
             servers={servers}
+            importedOrigins={(report?.syncs ?? []).filter((s) => isManagedOrigin(s.origin, syncDevices?.devices, serverOrigins, syncDevices?.role === "secondary")).map((s) => s.origin)}
+            onForgottenOrigin={() => { bridge.fetchReport(true).then((r) => setReport(r)).catch(() => {}); }}
             onServers={setServers}
             onClose={() => setServersOpen(false)}
             closeRef={serverCloseRef}

@@ -4676,6 +4676,25 @@
   line-height: 1.6;
 }
 
+.srv-imported {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hair);
+}
+
+.srv-imported-title {
+  color: var(--ink-2);
+  font-size: 11.5px;
+  margin-bottom: 4px;
+}
+
+.srv-imported-hint {
+  color: var(--ink-3);
+  font-size: 11px;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
 .srv-row {
   display: flex;
   align-items: center;

@@ -58,6 +58,7 @@ pub fn run() {
         .manage(pet_notice::NoticeState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_report,
+            commands::forget_imported_origin,
             commands::get_tray_state,
             commands::set_ui_lang,
             commands::panel_page_signal,

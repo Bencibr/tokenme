@@ -230,11 +230,19 @@ function ClearableInput({
  */
 export function ServerSheet({
   servers,
+  importedOrigins,
+  onForgottenOrigin,
   onServers,
   onClose,
   closeRef,
 }: {
   servers: ServerView[];
+  /** Historical `~/tokenme-sync` import origins (an mbp that no longer
+   *  syncs) — listed here so they can be forgotten from the same place the
+   *  server list lives. */
+  importedOrigins: string[];
+  /** A forget landed: the report must refetch or the machine list lies. */
+  onForgottenOrigin: () => void;
   /** server_update answers with fresh views; the event usually beats it. */
   onServers: (servers: ServerView[]) => void;
   onClose: () => void;
@@ -501,6 +509,39 @@ export function ServerSheet({
             );
           })
         )}
+        {importedOrigins.length ? (
+          <div className="srv-imported">
+            <div className="srv-imported-title">{t("srv.imported.title")}</div>
+            {importedOrigins.map((origin) => (
+              <div className="srv-row" key={origin}>
+                <span className="srv-dot" data-s="idle" aria-hidden="true" />
+                <span className="srv-main">
+                  <span className="srv-name">{origin}</span>
+                  <span className="srv-meta">{t("srv.imported.meta")}</span>
+                </span>
+                <span className="srv-act">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title={t("srv.imported.forget")}
+                    aria-label={t("srv.imported.forget")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!window.confirm(t("srv.imported.confirm", { name: origin }))) return;
+                      void bridge.forgetImportedOrigin(origin).then((rows) => {
+                        setNotice(t("srv.imported.done", { name: origin, rows: count(rows) }));
+                        onForgottenOrigin();
+                      }).catch((err: unknown) => setNotice(String(err)));
+                    }}
+                  >
+                    <IconClose size={12} />
+                  </button>
+                </span>
+              </div>
+            ))}
+            <div className="srv-imported-hint">{t("srv.imported.hint")}</div>
+          </div>
+        ) : null}
       </div>
       <div className="sheet-foot">
         <button type="button" className="btn-accent srv-add" onClick={openWizard}>

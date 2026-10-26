@@ -652,6 +652,7 @@ export interface Bridge {
   serverSyncNow: (id: number) => Promise<void>;
   serverUpdate: (req: ServerUpdateReq) => Promise<ServerView[]>;
   serverRemove: (id: number, cleanupRemote: boolean) => Promise<ServerRemoveOutcome>;
+  forgetImportedOrigin: (origin: string) => Promise<number>;
   onServersUpdated: (handler: (servers: ServerView[]) => void) => () => void;
   onInstallProgress: (handler: (progress: ServerInstallProgress) => void) => () => void;
 }

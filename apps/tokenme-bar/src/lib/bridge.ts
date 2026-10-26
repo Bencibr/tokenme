@@ -637,6 +637,14 @@ export const bridge: Bridge = {
     return invoke<ServerRemoveOutcome>("server_remove", { id, cleanupRemote });
   },
 
+  /** Forgets one historical `~/tokenme-sync` import origin (an mbp that no
+   *  longer syncs): its rollup rows leave the report and the machine list.
+   *  Returns the rollup row count removed. */
+  async forgetImportedOrigin(origin: string): Promise<number> {
+    if (!inTauri) return 0;
+    return invoke<number>("forget_imported_origin", { origin });
+  },
+
   onSyncDevicesChanged(handler: () => void): () => void {
     if (!inTauri) return () => {};
     return once("sync-devices-changed", handler);
