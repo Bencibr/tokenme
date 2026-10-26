@@ -167,23 +167,31 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
               }
             }}
           >
-            {showSplit ? compactTokens(summary.counts.input + summary.counts.cache_creation) : hero.value}
+            {showSplit
+              ? splitTokens(summary.counts.input + summary.counts.cache_creation).value
+              : hero.value}
           </span>
           <span className="hero-unit" aria-hidden="true">
-            {showSplit ? compactTokens(summary.counts.input + summary.counts.cache_creation).split(/^[\d.]+/)[1] ?? "" : hero.unit}
+            {showSplit
+              ? splitTokens(summary.counts.input + summary.counts.cache_creation).unit
+              : hero.unit}
           </span>
           {showSplit ? (
-            <span className="hero-unit-word" data-split-label>
-              {t("hdr.io.in")}
-            </span>
+            <span className="hero-unit-word">{t("hdr.io.in")}</span>
           ) : (
             <span className="hero-unit-word">tokens</span>
           )}
           {showSplit ? (
-            <span className="hero-side">
-              <span className="hero-io-pair">
-                <span className="hero-io-item">{t("hdr.io.cached", { v: compactTokens(summary.counts.cache_read) })}</span>
-                <span className="hero-io-item">{t("hdr.io.out", { v: compactTokens(summary.counts.output) })}</span>
+            <span className="hero-io-side">
+              <span className="hero-io-item">
+                <span className="hero-io-num">{splitTokens(summary.counts.cache_read).value}</span>
+                <span className="hero-io-unit">{splitTokens(summary.counts.cache_read).unit}</span>
+                <span className="hero-io-label">{t("hdr.io.cached")}</span>
+              </span>
+              <span className="hero-io-item">
+                <span className="hero-io-num">{splitTokens(summary.counts.output).value}</span>
+                <span className="hero-io-unit">{splitTokens(summary.counts.output).unit}</span>
+                <span className="hero-io-label">{t("hdr.io.out")}</span>
               </span>
             </span>
           ) : (
