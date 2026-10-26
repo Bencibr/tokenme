@@ -472,17 +472,20 @@ export function SyncSheet({ snapshot, onSnapshot, onClose }: { snapshot: SyncDev
   // "nothing pending" branch and read 100% while the primary's data had not
   // arrived at all.
   const progressPercent = !linkLive ? 0 : upDone ? (snapshot.download_complete === true ? 100 : 66) : 33;
+  // A bare 已完成 reads as a possibly-stale leftover — the flag survives a
+  // disconnect by design — so each finish line carries its own stamped age.
+  const doneAge = (atMs: number | null) => (atMs != null ? ` · ${relTime(atMs)}` : "");
   const uploadState = !linkLive
     ? t("sync.prog.retrying")
     : upDone
-      ? t("sync.prog.done")
+      ? `${t("sync.prog.done")}${doneAge(snapshot.upload_complete_at_ms)}`
       : t("sync.prog.running");
   const downloadState = !linkLive
     ? t("sync.prog.retrying")
     : !upDone
       ? t("sync.prog.wait")
       : snapshot.download_complete === true
-        ? t("sync.prog.done")
+        ? `${t("sync.prog.done")}${doneAge(snapshot.download_complete_at_ms)}`
         : snapshot.download_complete === false
           ? t("sync.prog.running")
           : t("sync.prog.wait_share");

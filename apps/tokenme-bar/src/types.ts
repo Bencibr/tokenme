@@ -455,6 +455,10 @@ export interface SyncDevicesSnapshot {
   /** Secondary only: primary-data downlink completion. `null` until the
    *  primary shares its first page, `false` while the backfill runs. */
   download_complete: boolean | null;
+  /** When each half last really finished (stamped by the applying
+   *  transaction), so a 完成 label can show its own age. */
+  upload_complete_at_ms: number | null;
+  download_complete_at_ms: number | null;
   last_error: string | null;
   discovery_error: string | null;
   last_connected_at_ms: number | null;

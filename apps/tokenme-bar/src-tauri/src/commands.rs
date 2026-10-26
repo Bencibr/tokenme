@@ -445,6 +445,11 @@ pub struct SyncDevicesView {
     /// Secondary only: primary-data downlink completion. `None` until the
     /// primary shares its first page, `Some(false)` while the backfill runs.
     pub download_complete: Option<bool>,
+    /// When each half last really finished (the applying transaction stamps
+    /// it), so the sheet's 已完成 can show its own age instead of a bare
+    /// flag that a disconnect never resets.
+    pub upload_complete_at_ms: Option<i64>,
+    pub download_complete_at_ms: Option<i64>,
     pub last_error: Option<String>,
     pub discovery_error: Option<String>,
     pub last_connected_at_ms: Option<i64>,
@@ -1762,6 +1767,8 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let data_epoch = secondary_config.as_ref().and_then(|config| config.data_epoch);
     let upload_complete = secondary_config.as_ref().and(panel.upload_complete);
     let download_complete = secondary_config.as_ref().and(panel.download_complete);
+    let upload_complete_at_ms = secondary_config.as_ref().and(panel.upload_complete_at_ms);
+    let download_complete_at_ms = secondary_config.as_ref().and(panel.download_complete_at_ms);
     let last_error = if state.role == "secondary" {
         secondary_config.as_ref().and_then(|config| config.last_error.clone())
     } else {
@@ -1790,6 +1797,8 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         data_epoch,
         upload_complete,
         download_complete,
+        upload_complete_at_ms,
+        download_complete_at_ms,
         last_error,
         discovery_error: state.discovery_error.clone(),
         last_connected_at_ms: secondary_config.as_ref().and_then(|config| config.last_connected_at_ms),
