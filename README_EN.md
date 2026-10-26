@@ -183,9 +183,7 @@ Every tool below ships as a built-in adapter — 30 of them, indexed straight fr
 >
 > **Verified on**: updated as real-machine verification progresses. ⏳ means the paths are implemented but not yet exercised on that platform.
 
-OpenCode quota supports the official provider only. The credential comes, in order, from `OPENCODE_API_KEY`, OpenCode V2's own store (the `credential` table of `opencode.db` — where the desktop app and the CLI both keep their login), `provider.<id>.options.apiKey` in `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json` when `baseURL` is `https://opencode.ai/zen/go/v1`, and finally the legacy `~/.local/share/opencode/auth.json`. Custom proxy providers are ignored. Open Design quota reads `profiles.prod.controlKey` (`vela_ctrl_…`, `OPEN_DESIGN_HOME` moves the directory) from the desktop app's `~/.amr/config.json` and reports the Design Plan's 5-hour / 7-day windows; the `sk-amr-…` runtime key and the wallet balance are not used.
 
->
 > Quota-only sources: **Copilot** (premium-request allowance, official backend) probes quota only and indexes no usage; probing for **Gemini CLI** is deliberately off — its on-disk OAuth token was measured expired, freshening it would mean posting with the client id and secret embedded in the Gemini CLI's own bundle, and no project id for that call exists on disk (`crates/usage-quota/src/providers/gemini.rs`).
 
 > **AgnesCode token**: its login token lives only in the app's memory and can't be read silently. Sign in at agnescode.agnes-ai.cn, copy the `access_token` request header, and write it to `agnes.token` in tokenme's OS config directory (`~/Library/Application Support/tokenme/agnes.token` on macOS, `~/.config/tokenme/agnes.token` on Linux, `%APPDATA%\tokenme\agnes.token` on Windows) — or set `AGNES_TOKEN`.
