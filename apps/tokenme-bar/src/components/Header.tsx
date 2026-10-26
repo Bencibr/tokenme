@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import type { MachineScope, PageKey, PeriodKey, Report, SyncDevicesSnapshot } from "../types";
 import {
   PERIOD_LABEL,
@@ -96,6 +96,10 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
   const win = report[period];
   const { summary } = win;
   const hero = splitTokens(useTweenNumber(summary.total_tokens));
+  // Click the hero number to flip it to the input+cache-writes figure with
+  // cache-read and output beside it; click again for the total. Scope-owned:
+  // the period tabs re-render this header, so the flip lives in this state.
+  const [showSplit, setShowSplit] = useState(false);
   const prevLabel = PERIOD_PREV[period];
 
   const onKey = useCallback(
@@ -145,6 +149,9 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
           <span
             className="hero-value"
             aria-hidden="true"
+            role="button"
+            tabIndex={0}
+            data-split={showSplit || undefined}
             title={t("hdr.io.title", {
               total: count(summary.total_tokens),
               in: count(summary.counts.input + summary.counts.cache_creation),
@@ -152,25 +159,47 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
               out: count(summary.counts.output),
               reasoning: count(summary.counts.reasoning),
             })}
+            onClick={() => setShowSplit((prev: boolean) => !prev)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setShowSplit((prev: boolean) => !prev);
+              }
+            }}
           >
-            {hero.value}
+            {showSplit ? compactTokens(summary.counts.input + summary.counts.cache_creation) : hero.value}
           </span>
           <span className="hero-unit" aria-hidden="true">
-            {hero.unit}
+            {showSplit ? compactTokens(summary.counts.input + summary.counts.cache_creation).split(/^[\d.]+/)[1] ?? "" : hero.unit}
           </span>
-          <span className="hero-unit-word">tokens</span>
-          <span className="hero-side">
-            {showMoney ? (
-              <span
-                className="hero-cost"
-                title={summary.credit_cost > 0 ? t("hdr.credit.title", { c: money(summary.credit_cost) }) : undefined}
-              >
-                {summary.credit_cost > 0 ? "≈" : ""}
-                {money(summary.cost)}
+          {showSplit ? (
+            <span className="hero-unit-word" data-split-label>
+              {t("hdr.io.in")}
+            </span>
+          ) : (
+            <span className="hero-unit-word">tokens</span>
+          )}
+          {showSplit ? (
+            <span className="hero-side">
+              <span className="hero-io-pair">
+                <span className="hero-io-item">{t("hdr.io.cached", { v: compactTokens(summary.counts.cache_read) })}</span>
+                <span className="hero-io-item">{t("hdr.io.out", { v: compactTokens(summary.counts.output) })}</span>
               </span>
-            ) : null}
-            <DeltaChip pct={showMoney ? win.delta_cost_pct : win.delta_tokens_pct} caption={prevLabel} />
-          </span>
+            </span>
+          ) : (
+            <span className="hero-side">
+              {showMoney ? (
+                <span
+                  className="hero-cost"
+                  title={summary.credit_cost > 0 ? t("hdr.credit.title", { c: money(summary.credit_cost) }) : undefined}
+                >
+                  {summary.credit_cost > 0 ? "≈" : ""}
+                  {money(summary.cost)}
+                </span>
+              ) : null}
+              <DeltaChip pct={showMoney ? win.delta_cost_pct : win.delta_tokens_pct} caption={prevLabel} />
+            </span>
+          )}
         </div>
         <span className="sr">
           {showMoney
