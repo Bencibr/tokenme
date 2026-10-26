@@ -2844,11 +2844,13 @@ pub async fn forget_imported_origin(app: AppHandle, origin: String) -> Result<u6
     }).await.map_err(|_| "index worker stopped".to_string())??;
     // The sheet's imported list is built from the report, and the report is
     // the engine's cached fold — answering immediately would hand back the
-    // pre-forget fold and leave the forgotten origin on screen. Wait out the
-    // engine's re-publish (it re-folds within a cadence tick of the delete),
-    // bounded so a stuck engine cannot hang the command.
+    // pre-forget fold and leave the forgotten origin on screen. Wake the
+    // engine with Scope, the light path: it refolds the report from the
+    // index as it now stands (no disk rescan — the delete above is the only
+    // change, and a manual-refresh's full ingest walk cost seconds here).
+    // The wait is bounded so a stuck engine cannot hang the command.
     if let Some(channel) = app.try_state::<EngineChannel>() {
-        let _ = channel.0.send(Msg::Refresh);
+        let _ = channel.0.send(Msg::Scope);
     }
     let shared = app.state::<Shared>();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -2856,9 +2858,6 @@ pub async fn forget_imported_origin(app: AppHandle, origin: String) -> Result<u6
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let gone = shared.report().map(|report| report.syncs.iter().all(|s| s.origin != origin)).unwrap_or(false);
         if gone { break; }
-    }
-    if let Some(channel) = app.try_state::<EngineChannel>() {
-        let _ = channel.0.send(Msg::Refresh);
     }
     Ok(removed)
 }
