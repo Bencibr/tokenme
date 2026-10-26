@@ -484,10 +484,10 @@
      column split render inside the same box, so the click never reflows
      the rows beneath it. 60px tall with the content pinned to the bottom —
      the number sits right above the stats rule, not mid-air. */
-  height: 60px;
+  height: 68px;
   display: flex;
   align-items: flex-end;
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .hero-main {
@@ -509,7 +509,7 @@
 }
 
 .hero-value {
-  font-size: 40px;
+  font-size: 46px;
   font-weight: 650;
   letter-spacing: -0.02em;
   line-height: 1.0;
@@ -657,12 +657,10 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  /* One generous row-gap for both stacked rows, and both chips sized to
-     the same 26px box — the sync badge (1px/7px) and the scope button
-     (2px/8px) used to sit at different heights, so the two gaps read
-     unequal. The hairline under the row separates it from the tabs. */
-  gap: 10px;
-  margin-top: var(--s3);
+  /* One row-gap for both stacked rows, same 26px chip boxes; the hairline
+     under the row separates it from the tabs. */
+  gap: 8px;
+  margin-top: var(--s2);
   padding-bottom: var(--s3);
   border-bottom: 1px solid var(--hair);
   min-width: 0;
