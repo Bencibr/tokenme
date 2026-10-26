@@ -189,6 +189,10 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
         <span className="num">{count(summary.sessions)}</span>
         <span>{t("hdr.sessions")}</span>
         <span className="dot-sep" aria-hidden="true" />
+        <span title={t("hdr.io.title", { in: count(summary.counts.input), out: count(summary.counts.output) })}>
+          {t("hdr.io", { in: compactTokens(summary.counts.input), out: compactTokens(summary.counts.output) })}
+        </span>
+        <span className="dot-sep" aria-hidden="true" />
         <span>{t("hdr.cache", { p: percent(summary.cached_pct, 1) })}</span>
         {summary.credits > 0 ? (
           <>
