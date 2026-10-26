@@ -526,42 +526,53 @@
   letter-spacing: -0.01em;
 }
 
-/* The split view's right slot: cache-read and output as two stacked
-   number+label lines, baseline-aligned with the hero figure. The first
-   cut rendered both items into one wrapped string with no gaps. */
-.hero-io-side {
+.hero-io-row {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  margin-left: auto;
-  min-width: 0;
+  align-items: baseline;
+  gap: 22px;
+  padding: 2px 0;
 }
 
-.hero-io-item {
+/* A column is a click target that flips back to the total; the number
+   carries the hero's own weight so the three figures read as peers. */
+.hero-io-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.hero-io-line {
   display: inline-flex;
   align-items: baseline;
-  gap: 4px;
+  gap: 2px;
   white-space: nowrap;
 }
 
 .hero-io-num {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
 
 .hero-io-unit {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--ink-2);
 }
 
 .hero-io-label {
-  font-size: var(--t-meta);
-  color: var(--ink-2);
+  font-size: 11px;
+  color: var(--ink-3);
 }
+
 
 /* A qualifier on a number that is derived rather than metered, e.g. credits
    converted at a plan price. Quiet on purpose: the figure is the signal. */

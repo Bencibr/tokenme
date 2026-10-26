@@ -142,16 +142,47 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
       </div>
 
       <div className="hero" aria-live="polite">
-        {/* the delta lives on the big number's baseline, right-aligned — a
-            figure and its change read as one line, not two stacked rows; when
-            the line is too tight the side wraps below, still right-aligned */}
+        {/* Split view: one row, three equal columns (输入 | 缓存读取 | 输出),
+            each a big number over a small label — the total flips back on
+            click. Total view: the original hero line. */}
+        {showSplit ? (
+          <div className="hero-io-row">
+            {([
+              ["in", summary.counts.input + summary.counts.cache_creation],
+              ["cached", summary.counts.cache_read],
+              ["out", summary.counts.output],
+            ] as const).map(([key, value]) => {
+              const part = splitTokens(value);
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className="hero-io-col"
+                  title={t("hdr.io.title", {
+                    total: count(summary.total_tokens),
+                    in: count(summary.counts.input + summary.counts.cache_creation),
+                    cached: count(summary.counts.cache_read),
+                    out: count(summary.counts.output),
+                    reasoning: count(summary.counts.reasoning),
+                  })}
+                  onClick={() => setShowSplit(false)}
+                >
+                  <span className="hero-io-line">
+                    <span className="hero-io-num">{part.value}</span>
+                    {part.unit ? <span className="hero-io-unit">{part.unit}</span> : null}
+                  </span>
+                  <span className="hero-io-label">{t(`hdr.io.${key}` as const)}</span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
         <div className="hero-main">
           <span
             className="hero-value"
             aria-hidden="true"
             role="button"
             tabIndex={0}
-            data-split={showSplit || undefined}
             title={t("hdr.io.title", {
               total: count(summary.total_tokens),
               in: count(summary.counts.input + summary.counts.cache_creation),
@@ -159,56 +190,34 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
               out: count(summary.counts.output),
               reasoning: count(summary.counts.reasoning),
             })}
-            onClick={() => setShowSplit((prev: boolean) => !prev)}
+            onClick={() => setShowSplit(true)}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
-                setShowSplit((prev: boolean) => !prev);
+                setShowSplit(true);
               }
             }}
           >
-            {showSplit
-              ? splitTokens(summary.counts.input + summary.counts.cache_creation).value
-              : hero.value}
+            {hero.value}
           </span>
           <span className="hero-unit" aria-hidden="true">
-            {showSplit
-              ? splitTokens(summary.counts.input + summary.counts.cache_creation).unit
-              : hero.unit}
+            {hero.unit}
           </span>
-          {showSplit ? (
-            <span className="hero-unit-word">{t("hdr.io.in")}</span>
-          ) : (
-            <span className="hero-unit-word">tokens</span>
-          )}
-          {showSplit ? (
-            <span className="hero-io-side">
-              <span className="hero-io-item">
-                <span className="hero-io-num">{splitTokens(summary.counts.cache_read).value}</span>
-                <span className="hero-io-unit">{splitTokens(summary.counts.cache_read).unit}</span>
-                <span className="hero-io-label">{t("hdr.io.cached")}</span>
+          <span className="hero-unit-word">tokens</span>
+          <span className="hero-side">
+            {showMoney ? (
+              <span
+                className="hero-cost"
+                title={summary.credit_cost > 0 ? t("hdr.credit.title", { c: money(summary.credit_cost) }) : undefined}
+              >
+                {summary.credit_cost > 0 ? "≈" : ""}
+                {money(summary.cost)}
               </span>
-              <span className="hero-io-item">
-                <span className="hero-io-num">{splitTokens(summary.counts.output).value}</span>
-                <span className="hero-io-unit">{splitTokens(summary.counts.output).unit}</span>
-                <span className="hero-io-label">{t("hdr.io.out")}</span>
-              </span>
-            </span>
-          ) : (
-            <span className="hero-side">
-              {showMoney ? (
-                <span
-                  className="hero-cost"
-                  title={summary.credit_cost > 0 ? t("hdr.credit.title", { c: money(summary.credit_cost) }) : undefined}
-                >
-                  {summary.credit_cost > 0 ? "≈" : ""}
-                  {money(summary.cost)}
-                </span>
-              ) : null}
-              <DeltaChip pct={showMoney ? win.delta_cost_pct : win.delta_tokens_pct} caption={prevLabel} />
-            </span>
-          )}
+            ) : null}
+            <DeltaChip pct={showMoney ? win.delta_cost_pct : win.delta_tokens_pct} caption={prevLabel} />
+          </span>
         </div>
+        )}
         <span className="sr">
           {showMoney
             ? t("hdr.sr.money", {

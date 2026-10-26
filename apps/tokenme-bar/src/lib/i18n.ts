@@ -70,7 +70,7 @@ const zh = {
   "hdr.sessions": "会话",
   "hdr.io.title": "共 {total} tokens\n输入 {in} · 缓存读取 {cached}\n输出 {out}（含推理 {reasoning}）",
   "hdr.cache": "缓存 {p}",
-  "hdr.io.in": "输入含缓存写入",
+  "hdr.io.in": "输入",
   "hdr.io.cached": "缓存读取",
   "hdr.io.out": "输出",
   "hdr.sync": "多端同步",
