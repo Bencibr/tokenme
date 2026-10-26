@@ -153,6 +153,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
               ["out", summary.counts.output],
             ] as const).map(([key, value]) => {
               const part = splitTokens(value);
+              const label = key === "in" ? t("hdr.io.in") : key === "cached" ? t("hdr.io.cached") : t("hdr.io.out");
               return (
                 <button
                   key={key}
@@ -171,7 +172,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
                     <span className="hero-io-num">{part.value}</span>
                     {part.unit ? <span className="hero-io-unit">{part.unit}</span> : null}
                   </span>
-                  <span className="hero-io-label">{t(`hdr.io.${key}` as const)}</span>
+                  <span className="hero-io-label">{label}</span>
                 </button>
               );
             })}
