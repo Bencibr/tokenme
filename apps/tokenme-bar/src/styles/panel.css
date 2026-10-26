@@ -479,6 +479,12 @@
 }
 
 .hero {
+  /* One locked height for both hero states: the total line and the three-
+     column split render inside the same box, so the click never reflows
+     the rows beneath it. 42px = the 34px hero line at 1.05 + breathing. */
+  height: 42px;
+  display: flex;
+  align-items: center;
   margin-top: 10px;
 }
 
@@ -487,6 +493,7 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: 2px;
+  width: 100%;
 }
 
 /* the cost + delta pair rides the big number's baseline, right-aligned; a
@@ -529,7 +536,7 @@
 .hero-io-row {
   display: flex;
   align-items: stretch;
-  padding: 2px 0;
+  width: 100%;
 }
 
 /* Three equal columns, each centered, hairline-separated. The number
@@ -645,9 +652,24 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  /* One row-gap for both stacked rows, and both chips sized to the same
+     24px box — the sync badge (1px/7px) and the scope button (2px/8px)
+     used to sit at different heights, so the two gaps read unequal. */
+  gap: 6px;
   margin-top: var(--s2);
   min-width: 0;
+}
+
+.hdr-sync > .sync {
+  min-height: 24px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.hdr-sync > .scope-row .scope-btn {
+  min-height: 24px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 /* Two stacked rows, both left-aligned: the sync badge on top, the scope
