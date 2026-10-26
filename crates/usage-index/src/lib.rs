@@ -1458,11 +1458,15 @@ impl Index {
 
     /// Forgets one historical import origin end to end: its rollup rows, the
     /// per-source file cursors that would re-import it, and the import
-    /// registry that keeps the origin on the panel's machine list. The rollup
-    /// rows ARE the machine's money on screen (the report folds from them),
-    /// so removing them removes the machine; the raw events behind them stay,
-    /// matching the standing import semantics where the aggregate is the
-    /// display unit. Refused for the local machine's empty origin — this
+    /// registry that keeps the origin on the panel's machine list — and
+    /// retires the source bundle pair in `~/tokenme-sync` by renaming it out
+    /// of the importer's `*.jsonl.gz` view (`.forgotten-<ts>` suffix,
+    /// recoverable by renaming back). Without that retirement the very next
+    /// ingest pass re-imports the bundle: the registry rows were the only
+    /// thing saying "already imported", and this function just deleted them.
+    /// The rollup rows ARE the machine's money on screen (the report folds
+    /// from them), so removing them removes the machine; the raw events
+    /// behind them stay. Refused for the local machine's empty origin — this
     /// door is for `~/tokenme-sync` history like an mbp that no longer syncs.
     pub fn forget_imported_origin(&mut self, origin: &str) -> Result<u64> {
         if origin.is_empty() {
@@ -1478,6 +1482,23 @@ impl Index {
         )
         .map_err(sql_err)?;
         tx.commit().map_err(sql_err)?;
+        // After the commit: the bundle pair leaves the importer's view. A
+        // rename that fails (permissions, a concurrent reader) is not fatal —
+        // the registry rows are gone, so a re-import would need the manifest
+        // hash to re-register; surface it by counting the pair as not retired.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(dir) = crate::sync::default_sync_dir() {
+            for suffix in ["jsonl.gz", "manifest.json"] {
+                let source = dir.join(format!("tokenme-{origin}.{suffix}"));
+                let retired = dir.join(format!("tokenme-{origin}.{suffix}.forgotten-{stamp}"));
+                if source.exists() {
+                    let _ = std::fs::rename(&source, &retired);
+                }
+            }
+        }
         Ok(rollup_removed)
     }
 
