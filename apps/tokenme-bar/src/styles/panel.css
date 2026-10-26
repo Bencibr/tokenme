@@ -3859,6 +3859,17 @@
   font-weight: 500;
 }
 
+/* The row's secondary button matches the primary's geometry exactly —
+   only the fill differs. The base .btn-quiet metric (4px padding, meta
+   font, small radius) left it a shrunk chip beside a tall button. */
+.sync-btnrow .btn-quiet {
+  justify-content: center;
+  padding: 12px 0;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
 .sync-btnrow .btn-accent:disabled {
   background: var(--accent);
   color: #ffffff;
