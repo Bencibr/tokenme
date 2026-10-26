@@ -60,10 +60,13 @@ struct PersistedLocalMcp {
 }
 
 impl Default for PersistedLocalMcp {
-    // A missing local MCP state file means a new installation. Start the
-    // local control surface with every currently registered local scope. An
-    // explicit persisted `enabled: false` is still honored by the loader.
-    fn default() -> Self { Self { enabled: true, bearer: None, control_enabled: true } }
+    // A missing local MCP state file means a new installation, and a fresh
+    // install starts the diagnostics surface OFF — owner's call 2026-10-26:
+    // a LAN HTTP listener is an attack surface nobody asked for by default;
+    // the sheet's switch turns it on and persists the choice. An explicit
+    // persisted state (either way) is still honored by the loader, so
+    // existing installs keep what their file says.
+    fn default() -> Self { Self { enabled: false, bearer: None, control_enabled: false } }
 }
 
 fn local_mcp_state_path() -> Option<PathBuf> {
@@ -2041,8 +2044,8 @@ mod tests {
     #[test]
     fn persisted_mcp_state_keeps_the_bearer_only_while_enabled() {
         let fresh = PersistedLocalMcp::default();
-        assert!(fresh.enabled);
-        assert!(fresh.control_enabled);
+        assert!(!fresh.enabled, "a fresh install keeps the diagnostics surface off");
+        assert!(!fresh.control_enabled);
         assert!(fresh.bearer.is_none());
 
         let token = new_local_mcp_token();
