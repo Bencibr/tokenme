@@ -113,7 +113,7 @@ function formatUsedPercent(value: number): string {
 
 /** Tools whose quota probe owns a daily check-in: the group header grows the
  *  badge/button for exactly these. */
-const CHECKIN_TOOLS = ["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn", "funide"];
+const CHECKIN_TOOLS = ["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn", "funide", "zcode"];
 
 /** Segment/dot hues for the per-model cycle breakdown — panel palette vars,
  *  repeating with the same order past the fourth model (the query caps at 8). */
@@ -133,6 +133,8 @@ function checkinCopy(msg: string | undefined): string | undefined {
   if (!msg) return msg;
   let m = msg.match(/^签到成功，\+([\d.]+) 积分$/);
   if (m) return t("quota.checkin.msg.claimed", { n: m[1] });
+  m = msg.match(/^签到成功，\+([\d.]+[KMB]?) tokens$/);
+  if (m) return t("quota.checkin.msg.claimed_tokens", { n: m[1] });
   m = msg.match(/^签到成功，领取 ([\d.]+) 积分$/);
   if (m) return t("quota.checkin.msg.claimed_credit", { n: m[1] });
   m = msg.match(/^签到需在 (.+) 内领取$/);

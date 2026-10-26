@@ -165,6 +165,9 @@ pub fn run() {
             usage_quota::set_login_expired_note(std::sync::Arc::new(|tool, host| {
                 notify::post_login_expired(tool, host)
             }));
+            usage_quota::set_claim_note(std::sync::Arc::new(|tool, plan, units| {
+                notify::post_claim(tool, plan, units)
+            }));
 
             let handle = app.handle().clone();
             diagnostics::DiagnosticsState::restore_on_launch(&handle);

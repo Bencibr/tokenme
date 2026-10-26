@@ -75,6 +75,7 @@ pub use workbuddy_cn::WorkBuddyCnQuota;
 pub use workbuddy_cn::manual_checkin as workbuddy_cn_manual_checkin;
 pub use workbuddy::login as workbuddy_login;
 pub use zcode::ZcodeQuota;
+pub use zcode::zcode_manual_checkin;
 
 use crate::QuotaProbe;
 
