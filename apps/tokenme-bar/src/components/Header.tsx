@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import type { MachineScope, PageKey, PeriodKey, Report, SyncDevicesSnapshot } from "../types";
 import {
   PERIOD_LABEL,
@@ -96,6 +96,10 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
   const win = report[period];
   const { summary } = win;
   const hero = splitTokens(useTweenNumber(summary.total_tokens));
+  // Click the hero number to flip it to the input+cache-writes figure with
+  // cache-read and output beside it; click again for the total. Scope-owned:
+  // the period tabs re-render this header, so the flip lives in this state.
+  const [showSplit, setShowSplit] = useState(false);
   const prevLabel = PERIOD_PREV[period];
 
   const onKey = useCallback(
@@ -138,11 +142,64 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
       </div>
 
       <div className="hero" aria-live="polite">
-        {/* the delta lives on the big number's baseline, right-aligned — a
-            figure and its change read as one line, not two stacked rows; when
-            the line is too tight the side wraps below, still right-aligned */}
+        {/* Split view: one row, three equal columns (输入 | 缓存读取 | 输出),
+            each a big number over a small label — the total flips back on
+            click. Total view: the original hero line. */}
+        {showSplit ? (
+          <div className="hero-io-row">
+            {([
+              ["in", summary.counts.input + summary.counts.cache_creation],
+              ["cached", summary.counts.cache_read],
+              ["out", summary.counts.output],
+            ] as const).map(([key, value]) => {
+              const part = splitTokens(value);
+              const label = key === "in" ? t("hdr.io.in") : key === "cached" ? t("hdr.io.cached") : t("hdr.io.out");
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className="hero-io-col"
+                  data-io={key}
+                  title={t("hdr.io.title", {
+                    total: count(summary.total_tokens),
+                    in: count(summary.counts.input + summary.counts.cache_creation),
+                    cached: count(summary.counts.cache_read),
+                    out: count(summary.counts.output),
+                    reasoning: count(summary.counts.reasoning),
+                  })}
+                  onClick={() => setShowSplit(false)}
+                >
+                  <span className="hero-io-line">
+                    <span className="hero-io-num">{part.value}</span>
+                    {part.unit ? <span className="hero-io-unit">{part.unit}</span> : null}
+                  </span>
+                  <span className="hero-io-label">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
         <div className="hero-main">
-          <span className="hero-value" aria-hidden="true">
+          <span
+            className="hero-value"
+            aria-hidden="true"
+            role="button"
+            tabIndex={0}
+            title={t("hdr.io.title", {
+              total: count(summary.total_tokens),
+              in: count(summary.counts.input + summary.counts.cache_creation),
+              cached: count(summary.counts.cache_read),
+              out: count(summary.counts.output),
+              reasoning: count(summary.counts.reasoning),
+            })}
+            onClick={() => setShowSplit(true)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setShowSplit(true);
+              }
+            }}
+          >
             {hero.value}
           </span>
           <span className="hero-unit" aria-hidden="true">
@@ -162,6 +219,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
             <DeltaChip pct={showMoney ? win.delta_cost_pct : win.delta_tokens_pct} caption={prevLabel} />
           </span>
         </div>
+        )}
         <span className="sr">
           {showMoney
             ? t("hdr.sr.money", {

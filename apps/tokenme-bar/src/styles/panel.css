@@ -213,9 +213,10 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 10px;
-  padding-top: var(--s2);
-  border-top: 1px solid var(--hair);
+  margin-top: var(--s3);
+  /* The sync/scope block above carries the divider now; doubling it here
+     read as two rules 12px apart. */
+  padding-top: 0;
 }
 
 .page-tabs {
@@ -479,7 +480,14 @@
 }
 
 .hero {
-  margin-top: 10px;
+  /* One locked height for both hero states: the total line and the three-
+     column split render inside the same box, so the click never reflows
+     the rows beneath it. 68px tall with the content pinned to the bottom —
+     the number sits right above the stats line, not mid-air. */
+  height: 68px;
+  display: flex;
+  align-items: flex-end;
+  margin-top: 4px;
 }
 
 .hero-main {
@@ -487,6 +495,7 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: 2px;
+  width: 100%;
 }
 
 /* the cost + delta pair rides the big number's baseline, right-aligned; a
@@ -500,10 +509,10 @@
 }
 
 .hero-value {
-  font-size: var(--t-hero);
-  font-weight: 600;
+  font-size: 46px;
+  font-weight: 650;
   letter-spacing: -0.02em;
-  line-height: 1.05;
+  line-height: 1.0;
 }
 
 .hero-unit {
@@ -525,6 +534,71 @@
   font-weight: 600;
   letter-spacing: -0.01em;
 }
+
+.hero-io-row {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+}
+
+/* Three equal columns, each centered, hairline-separated. The number
+   carries a per-semantic hue so the three figures are distinguishable at
+   a glance; the label sits under it in the muted ink. */
+.hero-io-col {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.hero-io-col + .hero-io-col {
+  border-left: 1px solid var(--hair);
+}
+
+.hero-io-col[data-io="in"] .hero-io-num {
+  color: var(--accent);
+}
+
+.hero-io-col[data-io="cached"] .hero-io-num {
+  color: var(--warn);
+}
+
+.hero-io-col[data-io="out"] .hero-io-num {
+  color: var(--ink);
+}
+
+.hero-io-line {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.hero-io-num {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-io-unit {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.hero-io-label {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
 
 /* A qualifier on a number that is derived rather than metered, e.g. credits
    converted at a plan price. Quiet on purpose: the figure is the signal. */
@@ -562,11 +636,14 @@
 }
 
 .hdr-stats {
+  /* A left-aligned running line, dot-separated as before; only the rule
+     above is gone — the hero's baseline is separation enough. */
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: var(--s1) var(--s2);
-  margin-top: var(--s2);
+  margin-top: 2px;
+  padding-bottom: var(--s1);
   font-size: var(--t-meta);
   color: var(--ink-3);
   min-width: 0;
@@ -580,9 +657,25 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
-  margin-top: var(--s2);
+  /* One row-gap for both stacked rows, same 26px chip boxes; the hairline
+     under the row separates it from the tabs. */
+  gap: 8px;
+  margin-top: var(--s1);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--hair);
   min-width: 0;
+}
+
+.hdr-sync > .sync {
+  min-height: 26px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.hdr-sync > .scope-row .scope-btn {
+  min-height: 26px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 /* Two stacked rows, both left-aligned: the sync badge on top, the scope
@@ -3852,6 +3945,17 @@
 
 /* 下一步：高保真稿的填充式主按钮（禁用态仍为青绿，降透明） */
 .sync-btnrow .btn-accent {
+  justify-content: center;
+  padding: 12px 0;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* The row's secondary button matches the primary's geometry exactly —
+   only the fill differs. The base .btn-quiet metric (4px padding, meta
+   font, small radius) left it a shrunk chip beside a tall button. */
+.sync-btnrow .btn-quiet {
   justify-content: center;
   padding: 12px 0;
   border-radius: 10px;
