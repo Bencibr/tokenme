@@ -580,17 +580,17 @@
 .hdr-sync {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 4px;
   margin-top: var(--s2);
   min-width: 0;
 }
 
-/* Two stacked rows, each right-aligned: the sync badge on top, the scope
+/* Two stacked rows, both left-aligned: the sync badge on top, the scope
    dropdown alone beneath it. A shared row squeezed the dropdown out of
-   the window; side-by-side was still one row — this gives each its own. */
+   the window; stacked is the only arrangement where neither can push the
+   other around. */
 .hdr-sync > .sync {
-  align-self: flex-start;
   max-width: 100%;
 }
 
