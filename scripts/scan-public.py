@@ -52,6 +52,9 @@ from urllib.parse import urlparse
 BLOB_LIMIT = 1 << 20
 CONTENT_CAP = 16 << 20  # bigger blobs are reported by size; pattern scan skipped
 ALLOWED_EMAILS = {"agent@local"}  # the identity every published snapshot carries
+# GitHub's noreply form carries the contributor's handle without exposing a
+# personal mailbox — the attribution the public history keeps for merged PRs.
+NOREPLY_SUFFIX = "@users.noreply.github.com"
 PUBLIC_HOSTS = {"github.com"}
 DRIVE_ROOTS_OK = {"users", "windows", "program files", "programdata"}
 
@@ -277,7 +280,7 @@ def main():
             continue
         sha, ae, ce = f
         for who, email in (("author", ae), ("committer", ce)):
-            if email not in ALLOWED_EMAILS:
+            if email not in ALLOWED_EMAILS and not email.endswith(NOREPLY_SUFFIX):
                 first, count = seen_emails.get((who, email), (sha[:8], 0))
                 seen_emails[(who, email)] = (first, count + 1)
 
