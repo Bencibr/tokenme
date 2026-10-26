@@ -655,11 +655,12 @@
    row count, and inline it displaced the day's figures onto a second row. */
 .hdr-sync {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  /* One row-gap for both stacked rows, same 26px chip boxes; the hairline
-     under the row separates it from the tabs. */
-  gap: 8px;
+  flex-direction: row;
+  align-items: center;
+  /* One row: the scope dropdown, then the sync badge to its right with a
+     fixed 15px gap — the badge hugs its content, the row never stretches
+     between them. The hairline under the row separates it from the tabs. */
+  gap: 15px;
   margin-top: var(--s1);
   padding-bottom: var(--s3);
   border-bottom: 1px solid var(--hair);
@@ -678,12 +679,15 @@
   padding-bottom: 0;
 }
 
-/* Two stacked rows, both left-aligned: the sync badge on top, the scope
-   dropdown alone beneath it. A shared row squeezed the dropdown out of
-   the window; stacked is the only arrangement where neither can push the
-   other around. */
+/* One row: scope dropdown left, sync badge right (15px apart). The badge
+   hides entirely on a narrowed scope — it speaks for the whole fleet. */
 .hdr-sync > .sync {
+  /* Width hugs its content (自适应), shrinking only when the dropdown and
+     the badge together would overflow the 400px panel. */
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 100%;
+  overflow: hidden;
 }
 
 .dot-sep {

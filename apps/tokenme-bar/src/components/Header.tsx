@@ -260,11 +260,24 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
           </>
         ) : null}
       </div>
-      {/* Its own line: the badge on the left, the scope dropdown hugging the
-          far right of the same line. The dropdown used to share the tabs'
-          row, and a long badge squeezed it out of the window entirely. */}
+      {/* One row: the scope dropdown on the left, the sync badge hugging the
+          far right — and only while the scope is 全部机器. A specific device
+          or 本机 selection hides it: the badge speaks about the whole fleet,
+          which would contradict the narrowed scope. */}
       <div className="hdr-sync">
-        {sync ? (
+        <ScopeDropdown
+          scope={scope}
+          onScope={onScope}
+          machines={report.machines ?? []}
+          syncs={report.syncs}
+          devices={syncDevices?.devices}
+          isSecondary={syncDevices?.role === "secondary"}
+          now={now}
+          open={scopeMenuOpen}
+          onOpen={onScopeMenuOpen}
+          serverOrigins={serverOrigins}
+        />
+        {sync && scope.kind === "all" ? (
           <span className="sync" data-stale={sync.stale || undefined} title={syncTip(sync)}>
             <IconRefresh size={11} />
             {t("hdr.sync")}
@@ -292,18 +305,6 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
             )}
           </span>
         ) : null}
-        <ScopeDropdown
-          scope={scope}
-          onScope={onScope}
-          machines={report.machines ?? []}
-          syncs={report.syncs}
-          devices={syncDevices?.devices}
-          isSecondary={syncDevices?.role === "secondary"}
-          now={now}
-          open={scopeMenuOpen}
-          onOpen={onScopeMenuOpen}
-          serverOrigins={serverOrigins}
-        />
       </div>
       {/* The tabs keep their line to themselves. */}
       <div className="tabs-row">
