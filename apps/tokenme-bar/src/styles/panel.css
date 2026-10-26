@@ -579,8 +579,19 @@
    row count, and inline it displaced the day's figures onto a second row. */
 .hdr-sync {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin-top: var(--s2);
   min-width: 0;
+}
+
+/* The dropdown rides the badge's line, hugging the right edge; it may
+   shrink to its own label before the badge ever pushes it out. */
+.hdr-sync > .scope-row {
+  margin-left: auto;
+  flex: none;
+  max-width: 60%;
 }
 
 .dot-sep {
