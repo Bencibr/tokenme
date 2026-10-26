@@ -591,6 +591,9 @@ mod tests {
         assert!(matches!(db_key(&junk), Credential::Unreadable), "unreadable is a different reason");
     }
 
+    // NTFS reserves `?`, so the fixture directory cannot exist on Windows and
+    // the test would die at create_dir_all before asserting anything.
+    #[cfg(not(windows))]
     #[test]
     fn a_store_under_a_path_with_a_space_or_a_question_mark_still_opens() {
         let dir = tempfile::tempdir().unwrap();
