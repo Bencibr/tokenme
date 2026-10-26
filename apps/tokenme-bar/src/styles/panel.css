@@ -482,12 +482,12 @@
 .hero {
   /* One locked height for both hero states: the total line and the three-
      column split render inside the same box, so the click never reflows
-     the rows beneath it. 60px tall with the content pinned to the bottom —
-     the number sits right above the stats rule, not mid-air. */
+     the rows beneath it. 68px tall with the content pinned to the bottom —
+     the number sits right above the stats line, not mid-air. */
   height: 68px;
   display: flex;
   align-items: flex-end;
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .hero-main {
@@ -643,7 +643,7 @@
   align-items: baseline;
   gap: var(--s1) var(--s2);
   margin-top: 2px;
-  padding-bottom: var(--s2);
+  padding-bottom: var(--s1);
   font-size: var(--t-meta);
   color: var(--ink-3);
   min-width: 0;
@@ -660,7 +660,7 @@
   /* One row-gap for both stacked rows, same 26px chip boxes; the hairline
      under the row separates it from the tabs. */
   gap: 8px;
-  margin-top: var(--s2);
+  margin-top: var(--s1);
   padding-bottom: var(--s3);
   border-bottom: 1px solid var(--hair);
   min-width: 0;
