@@ -42,6 +42,7 @@ pub const CHECKIN_TOOLS: &[(&str, fn() -> Result<(bool, String), String>)] = &[
     ("minimaxcode", providers::minimaxcode_manual_checkin),
     ("workbuddy_cn", providers::workbuddy_cn_manual_checkin),
     ("funide", providers::funide_manual_checkin),
+    ("zcode", providers::zcode_manual_checkin),
 ];
 
 /// The check-in tool ids, in registry order.
@@ -148,6 +149,26 @@ static LOGIN_EXPIRED_NOTE: std::sync::OnceLock<LoginExpiredNote> = std::sync::On
 /// Install the host's login-expiry sink. Called once at setup; later calls win.
 pub fn set_login_expired_note(f: LoginExpiredNote) {
     let _ = LOGIN_EXPIRED_NOTE.set(f);
+}
+
+/// The sink a host hands the claim path: a probe auto-claimed a vendor grant
+/// (ZCode's plan claims today) and the user should hear about it without
+/// watching the strip. The CLI installs nothing and stays silent there.
+pub type ClaimNote = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+
+static CLAIM_NOTE: std::sync::OnceLock<ClaimNote> = std::sync::OnceLock::new();
+
+/// Install the host's claim sink. Called once at setup; the first install wins.
+pub fn set_claim_note(f: ClaimNote) {
+    let _ = CLAIM_NOTE.set(f);
+}
+
+/// One grant booked: tell the host (tool, plan name or empty, "+300M tokens").
+/// The claim ledger already dedups per day, so this rides a real booking only.
+pub(crate) fn note_claim(tool: &str, plan: &str, units: &str) {
+    if let Some(f) = CLAIM_NOTE.get() {
+        f(tool, plan, units);
+    }
 }
 
 /// Tokens already reported dead, by fingerprint. The set gates both the vendor
@@ -429,8 +450,7 @@ mod tests {
     /// per dead token (not one per pass), the token skipped from then on, and
     /// a re-login (a different token) reporting fresh when it dies in turn.
     #[test]
-    fn the_dead_login_registry_notifies_once_and_skips_the_token() {
-        static FIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn the_dead_login_registry_notifies_once_and_skips_the_token() {        static FIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         set_login_expired_note(std::sync::Arc::new(|tool, host| {
             assert_eq!(tool, "trae_cn");
             assert_eq!(host, "api.trae.cn");
@@ -449,6 +469,31 @@ mod tests {
         assert!(login_is_dead("dead-login-test-token-b"));
     }
 
+    /// The claim sink rides a booked grant and nothing else: the note reaches
+    /// the host with the pieces the toast composes from, once per call.
+    #[test]
+    fn the_claim_note_reaches_the_host_with_the_booking_pieces() {
+        static SEEN: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String, String)>>> =
+            std::sync::OnceLock::new();
+        let seen = SEEN.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        set_claim_note(Arc::new(|tool, plan, units| {
+            if let Ok(mut slot) = seen.lock() {
+                slot.push((tool.to_string(), plan.to_string(), units.to_string()));
+            }
+        }));
+        note_claim("zcode", "ZCODE GLOBAL BUILD", "+300M tokens");
+        // An unnamed plan stays deliverable: the host composes the shorter body.
+        note_claim("zcode", "", "+5M tokens");
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![
+                ("zcode".into(), "ZCODE GLOBAL BUILD".into(), "+300M tokens".into()),
+                ("zcode".into(), String::new(), "+5M tokens".into()),
+            ]
+        );
+    }
+
     /// The check-in registry drives the engine's auto-check-in exemption and
     /// the panel's button dispatch, so its entries are pinned: real probes
     /// behind them, and a stranger refused before any network call.
@@ -456,7 +501,7 @@ mod tests {
     fn the_checkin_registry_names_real_probes_and_refuses_strangers() {
         let probes: Vec<&str> = built_in().iter().map(|p| p.tool()).collect();
         let ids: Vec<&str> = checkin_tool_ids().collect();
-        assert_eq!(ids, vec!["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn", "funide"], "the claim-bearing probes");
+        assert_eq!(ids, vec!["trae_cn", "qoder", "qoder_cn", "minimaxcode", "workbuddy_cn", "funide", "zcode"], "the claim-bearing probes");
         assert!(!is_checkin_tool("workbuddy"), "WorkBuddy AI never claims a CN grant");
         for id in &ids {
             assert!(probes.contains(id), "check-in tool {id:?} has no probe to run under");

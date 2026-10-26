@@ -88,7 +88,7 @@ use usage_core::QuotaSample;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::http::get_json;
+use crate::http::{get_json, post_json_any_status};
 use crate::QuotaProbe;
 
 pub struct ZcodeQuota;
@@ -115,6 +115,15 @@ const MCP_USAGE_URL: &str = "https://zcode.z.ai/api/v1/mcp/usage";
 /// required by the gateway and is read from the same local state file.
 const ZCODE_ORIGIN: &str = "https://zcode.z.ai";
 const ZCODE_PLAN_BALANCE_PATH: &str = "/api/v1/zcode-plan/billing/balance";
+/// The claimable-plan API the official app's 领取 popup fires, on the same
+/// origin and with the same `zcodejwttoken` the balance meter reads. Measured
+/// live 2026-10-26: the claim booked a 300M-token grant with no captcha for
+/// plan shapes that carry no `mode` field; a plan the vendor's server config
+/// puts behind its Aliyun human verification is recognized by the refusal
+/// message and reported, never hammered. Both calls accept any negotiated
+/// `app_version` (3.14.3 and 3.16.3 verified alike).
+const CLAIM_PREVIEW_PATH: &str = "/api/v1/zcode-plan/billing/preview";
+const CLAIM_PATH: &str = "/api/v1/zcode-plan/billing/claim";
 /// Used only when neither the environment nor the client's own settings name a
 /// version. Forks usually bump `ZCODE_APP_VERSION` or write
 /// `mceOutboundAppVersion`, and both are preferred over this.
@@ -152,6 +161,12 @@ impl QuotaProbe for ZcodeQuota {
             out.extend(zcode_plan_windows(store, &keys).unwrap_or_default());
             out.extend(mcp_meter(&store.value, &keys, plan.as_deref()).unwrap_or_default());
         }
+        // The day's plan grant rides the same pass: the claim runs even when
+        // every meter went silent — the vendor-side state change is the point —
+        // but its marker row ships only over a pass with live rows, because
+        // banking a lone marker over the held windows is the partial-result
+        // defeat the outage flag grew for.
+        let claim = claim_pass(false, store.as_ref());
         // A credential store that holds accounts while not one live meter
         // returned a number is an outage, not an empty account. Returning
         // nothing lets the caller hold the last known windows until the
@@ -161,6 +176,9 @@ impl QuotaProbe for ZcodeQuota {
         OUTAGE.store(outage, Ordering::Relaxed);
         if outage {
             return Vec::new();
+        }
+        if let Some(row) = claim.as_ref().and_then(claim_marker_row) {
+            out.push(row);
         }
         // A store whose credentials are unreadable can still carry the CLI's
         // per-session budgets, and a fork may keep the db while moving (or
@@ -863,6 +881,286 @@ fn mcp_of(body: &Value) -> Option<QuotaSample> {
         label: Some("ZCode MCP".to_string()),
         id: Some("mcp".into()),
     })
+}
+
+// ---------------------------------------------------------- the claimable plans
+
+/// How a claim pass ended. `was_already` marks the answer that came from
+/// today's earlier success rather than a POST this pass made.
+#[derive(Debug, Default)]
+struct ClaimOutcome {
+    claimed_units: f64,
+    claimed_any: bool,
+    was_already: bool,
+    ends_at_ms: i64,
+    gated: bool,
+    unreachable: bool,
+}
+
+/// Why a claim POST did not book a grant.
+#[derive(Debug, PartialEq)]
+enum ClaimFail {
+    /// The vendor demands an in-app human verification for this plan.
+    Gated,
+    /// Every other refusal: expired, already held, vendor hiccup.
+    Refused,
+}
+
+/// The claim day's ledger, persisted between passes: a plan is asked at most
+/// once per day (a refusal is not re-POSTed either), and a claimed day keeps
+/// shipping its marker row so the strip's badge survives later passes.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ClaimState {
+    #[serde(default)]
+    day: String,
+    #[serde(default)]
+    asked: Vec<String>,
+    #[serde(default)]
+    claimed_any: bool,
+    #[serde(default)]
+    claimed_units: f64,
+    #[serde(default)]
+    ends_at_ms: i64,
+}
+
+fn claim_state_path() -> Option<PathBuf> {
+    // The one hook a test pins: the ledger must never be practised against the
+    // real state file, so a fixture run re-homes it whole.
+    if let Ok(file) = std::env::var("ZCODE_CLAIM_STATE") {
+        let file = file.trim();
+        if !file.is_empty() {
+            return Some(PathBuf::from(file));
+        }
+    }
+    dirs::config_dir().map(|d| d.join("tokenme").join("quota").join("zcode_claim.json"))
+}
+
+fn load_claim_state(path: &Path) -> ClaimState {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_claim_state(path: &Path, state: &ClaimState) {
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_string(state) {
+        let _ = fs::write(path, text);
+    }
+}
+
+fn claim_day() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Whether this plan was already POSTed today — yesterday's ledger suppresses
+/// nothing, and a refusal counts as asked just the same.
+fn state_asked(state: &ClaimState, today: &str, plan_id: &str) -> bool {
+    state.day == today && state.asked.iter().any(|a| a == plan_id)
+}
+
+/// Fold one plan attempt into the ledger. Pure so the day rollover and the
+/// once-per-day guard can be proved without a filesystem.
+fn record_attempt(state: &mut ClaimState, today: &str, plan_id: &str, result: &Result<(f64, i64), ClaimFail>) {
+    if state.day != today {
+        *state = ClaimState { day: today.to_string(), ..Default::default() };
+    }
+    state.asked.push(plan_id.to_string());
+    if let Ok((units, ends_at_ms)) = result {
+        state.claimed_any = true;
+        state.claimed_units += units;
+        state.ends_at_ms = state.ends_at_ms.max(*ends_at_ms);
+    }
+}
+
+/// The day's claim pass: preview, then one POST per unasked plan. Runs on every
+/// fetch — a cheap GET — and asks each plan at most once per day. A `force`
+/// pass (the panel's button) bypasses both the auto switch and the cached day,
+/// because a new plan may have appeared since.
+fn claim_pass(force: bool, store: Option<&CredentialStore>) -> Option<ClaimOutcome> {
+    let state_path = claim_state_path()?;
+    let today = claim_day();
+    let mut state = load_claim_state(&state_path);
+    // Today's earlier success closes the day without a live preview — but the
+    // master switch only governs *new* claims, never the report of one made.
+    if !force && state.day == today && state.claimed_any {
+        return Some(ClaimOutcome {
+            claimed_units: state.claimed_units,
+            claimed_any: true,
+            was_already: true,
+            ends_at_ms: state.ends_at_ms,
+            ..Default::default()
+        });
+    }
+    if !force && !crate::auto_checkin_enabled() {
+        crate::log_checkin("zcode: skipped — 自动签到 off");
+        return None;
+    }
+
+    // The claim is the official app's popup API on its own origin: a fork's
+    // store that carries no ZCode JWT simply has nothing to claim here.
+    let Some(store) = store else {
+        return Some(ClaimOutcome { unreachable: true, ..Default::default() });
+    };
+    let keys = envelope_keys(store);
+    let Some(token) = opened(&store.value, "zcodejwttoken", &keys) else {
+        return Some(ClaimOutcome { unreachable: true, ..Default::default() });
+    };
+    let device = device_mid(&store.home);
+    let version = app_versions().first().cloned().unwrap_or_else(|| DEFAULT_APP_VERSION.to_string());
+    let authorization = format!("Bearer {token}");
+    let headers = zcode_headers(&authorization, device.as_deref(), &version);
+    let preview = format!(
+        "{ZCODE_ORIGIN}{CLAIM_PREVIEW_PATH}?app_version={version}&platform={}",
+        zcode_platform_key()
+    );
+    let Some(body) = get_json_owned(&preview, &headers) else {
+        return Some(ClaimOutcome { unreachable: true, ..Default::default() });
+    };
+    // A rejected credential answers code != 0 with no plans — the vendor's "no
+    // answer", not "nothing claimable".
+    if body.get("code").and_then(Value::as_i64).is_some_and(|c| c != 0) {
+        return Some(ClaimOutcome { unreachable: true, ..Default::default() });
+    }
+    let Some(plans) = body.pointer("/data/plans").and_then(Value::as_array) else {
+        return None;
+    };
+
+    let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut outcome = ClaimOutcome::default();
+    let mut attempted = false;
+    for plan in plans {
+        let Some(plan_id) = plan.get("plan_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if state_asked(&state, &today, plan_id) {
+            continue;
+        }
+        let result = claim_plan(plan_id, &refs);
+        record_attempt(&mut state, &today, plan_id, &result);
+        save_claim_state(&state_path, &state);
+        attempted = true;
+        match result {
+            Ok((units, ends_at_ms)) => {
+                outcome.claimed_any = true;
+                outcome.claimed_units += units;
+                outcome.ends_at_ms = outcome.ends_at_ms.max(ends_at_ms);
+                let plan_name = text_field(plan, "name").unwrap_or_default();
+                let units_text = format!("+{} tokens", compact_units(units));
+                crate::log_checkin(&format!("zcode: {today} claimed {plan_name} {units_text}{}", if force { " (forced)" } else { " (auto)" }));
+                crate::note_claim("zcode", &plan_name, &units_text);
+            }
+            Err(ClaimFail::Gated) => {
+                outcome.gated = true;
+                crate::log_checkin(&format!("zcode: {today} {plan_id} refused — the vendor wants its in-app verification — claim in the client"));
+            }
+            Err(ClaimFail::Refused) => {}
+        }
+    }
+    if attempted {
+        return Some(outcome);
+    }
+    // A forced click with nothing new still answers from today's books.
+    if force && state.day == today && state.claimed_any {
+        return Some(ClaimOutcome {
+            claimed_units: state.claimed_units,
+            claimed_any: true,
+            was_already: true,
+            ends_at_ms: state.ends_at_ms,
+            ..Default::default()
+        });
+    }
+    None
+}
+
+/// One claim POST. Only a 2xx-with-code-0 carrying a booked plan is success;
+/// the verification wall and every other refusal are distinct failures.
+fn claim_plan(plan_id: &str, headers: &[(&str, &str)]) -> Result<(f64, i64), ClaimFail> {
+    let url = format!("{ZCODE_ORIGIN}{CLAIM_PATH}");
+    match post_json_any_status(&url, headers, serde_json::json!({ "plan_id": plan_id })) {
+        Some((_, body)) => claim_result(&body),
+        None => Err(ClaimFail::Refused),
+    }
+}
+
+fn claim_result(body: &Value) -> Result<(f64, i64), ClaimFail> {
+    let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code != 0 {
+        let message = body.get("message").and_then(Value::as_str).unwrap_or("");
+        return Err(if message_needs_verification(message) { ClaimFail::Gated } else { ClaimFail::Refused });
+    }
+    claim_grants(body).ok_or(ClaimFail::Refused)
+}
+
+fn message_needs_verification(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    message.contains("安全验证") || lower.contains("security verification") || lower.contains("captcha")
+}
+
+/// The grant a successful claim booked: units summed over the plan's
+/// entitlements and the plan's own expiry (`ends_at` is epoch seconds on the
+/// wire, measured).
+fn claim_grants(body: &Value) -> Option<(f64, i64)> {
+    let plan = body.pointer("/data/plan")?;
+    let units = plan
+        .get("entitlements")
+        .and_then(Value::as_array)
+        .map(|ents| ents.iter().filter_map(|e| number_field(e, "grant_units")).sum())
+        .unwrap_or(0.0);
+    Some((units, epoch_ms(number_field(plan, "ends_at"))))
+}
+
+/// The row that carries the claim into the strip: the same check-in dialect the
+/// other tools speak, with the grant's own expiry as the reset.
+fn claim_marker_row(outcome: &ClaimOutcome) -> Option<QuotaSample> {
+    if outcome.unreachable {
+        return None;
+    }
+    if !outcome.claimed_any {
+        if !outcome.gated {
+            return None;
+        }
+        return Some(QuotaSample {
+            used_percent: 0.0,
+            window_minutes: 0,
+            resets_at_ms: 0,
+            label: Some("签到需在 ZCode 内领取".to_string()),
+            id: Some("checkin-gated".into()),
+        });
+    }
+    let label = if outcome.claimed_units > 0.0 {
+        format!("已自动签到 · +{} tokens", compact_units(outcome.claimed_units))
+    } else {
+        "已自动签到".to_string()
+    };
+    Some(QuotaSample {
+        used_percent: 0.0,
+        window_minutes: 0,
+        resets_at_ms: outcome.ends_at_ms,
+        label: Some(label),
+        id: Some("checkin".into()),
+    })
+}
+
+/// The panel's check-in button for ZCode: one forced claim right now.
+pub fn zcode_manual_checkin() -> Result<(bool, String), String> {
+    let store = credential_store();
+    let has_token =
+        store.as_ref().is_some_and(|s| opened(&s.value, "zcodejwttoken", &envelope_keys(s)).is_some());
+    if !has_token {
+        return Err("未找到 ZCode 登录".into());
+    }
+    match claim_pass(true, store.as_ref()) {
+        Some(o) if o.claimed_any && !o.was_already => {
+            Ok((true, format!("签到成功，+{} tokens", compact_units(o.claimed_units))))
+        }
+        Some(o) if o.claimed_any => Ok((true, "今日已签到".to_string())),
+        Some(o) if o.gated => Ok((false, "请在 ZCode 客户端内领取".into())),
+        Some(_) => Ok((false, "今日没有可领的签到".into())),
+        None => Ok((false, "签到未成功，稍后再试".into())),
+    }
 }
 
 // ------------------------------------------------------------- the credential
@@ -2117,6 +2415,124 @@ mod tests {
                 s.resets_at_ms,
                 s.label.unwrap_or_default()
             );
+        }
+    }
+
+    // ------------------------------------------------------ the claim pass
+
+    /// The claim response measured live on this machine (2026-10-26, the
+    /// "ZCODE GLOBAL BUILD" popup): a one-time 300M-token GLM-5.3-Flash grant
+    /// booked active, no captcha involved.
+    const CLAIMED: &str = r#"{"code":0,"data":{"server_time":1793061000,"plan":{
+        "user_plan_id":"upl-nt-1026","plan_id":"zcode-v3-start-plan-nt-1026","status":"active",
+        "starts_at":1793061000,"ends_at":1793062800,
+        "entitlements":[{"entitlement_id":"ent-flash","show_name":"GLM-5.3-Flash","meter":"tokens",
+                         "unit_type":"tokens","grant_units":300000000,"period":"one_time","priority":0}]
+      }},"message":"Plan claimed successfully."}"#;
+
+    #[test]
+    fn a_claimed_plan_books_its_grant_units_and_expiry() {
+        let body: Value = serde_json::from_str(CLAIMED).unwrap();
+        let (units, ends) = claim_grants(&body).expect("the measured claim response");
+        assert_eq!(units, 300_000_000.0);
+        assert_eq!(ends, 1793062800000, "ends_at is epoch seconds on the wire");
+        // A body without a booked plan is not a grant, whatever its code.
+        let bare: Value = serde_json::from_str(r#"{"code":0,"data":{}}"#).unwrap();
+        assert!(claim_grants(&bare).is_none());
+    }
+
+    #[test]
+    fn a_failed_claim_is_a_refusal_unless_it_names_the_verification_wall() {
+        for (raw, expected) in [
+            (r#"{"code":409,"message":"请完成安全验证后再领取"}"#, ClaimFail::Gated),
+            (r#"{"code":403,"message":"Security verification required"}"#, ClaimFail::Gated),
+            (r#"{"code":400,"message":"plan is not claimable"}"#, ClaimFail::Refused),
+            (r#"{"code":0,"data":{}}"#, ClaimFail::Refused),
+        ] {
+            let body: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(claim_result(&body), Err(expected), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_plan_is_asked_once_per_day_and_the_ledger_rolls_over() {
+        let mut state = ClaimState { day: "2026-10-26".into(), ..Default::default() };
+        record_attempt(&mut state, "2026-10-26", "p1", &Ok((300_000_000.0, 1_800_000)));
+        assert!(state_asked(&state, "2026-10-26", "p1"), "the claim is remembered for the day");
+        assert!(state.claimed_any && state.claimed_units == 300_000_000.0);
+
+        // Yesterday's ledger suppresses nothing: the new day re-asks p1, and
+        // the old grant does not bleed into the new one.
+        assert!(!state_asked(&state, "2026-10-27", "p1"));
+        record_attempt(&mut state, "2026-10-27", "p1", &Ok((5_000_000.0, 2)));
+        assert_eq!(state.claimed_units, 5_000_000.0);
+        assert_eq!(state.ends_at_ms, 2, "the new day's expiry replaced the old");
+
+        // A refusal is still an attempt — it is not re-POSTed today either.
+        let asked_before = state.asked.len();
+        record_attempt(&mut state, "2026-10-27", "p2", &Err(ClaimFail::Gated));
+        assert_eq!(state.asked.len(), asked_before + 1);
+        assert!(state_asked(&state, "2026-10-27", "p2"));
+        assert_eq!(state.claimed_units, 5_000_000.0, "a refusal books nothing");
+    }
+
+    #[test]
+    fn the_claim_ledger_round_trips_through_its_state_file() {
+        let dir = std::env::temp_dir().join(format!("tokenme-zcode-claim-test-{}", std::process::id()));
+        let file = dir.join("zcode_claim.json");
+        std::env::set_var("ZCODE_CLAIM_STATE", &file);
+        let path = claim_state_path().expect("the env-pinned path");
+        let mut state = ClaimState::default();
+        record_attempt(&mut state, "2026-10-26", "p1", &Ok((300_000_000.0, 1793062800000)));
+        save_claim_state(&path, &state);
+        let reloaded = load_claim_state(&path);
+        assert_eq!(reloaded.day, "2026-10-26");
+        assert!(state_asked(&reloaded, "2026-10-26", "p1"), "a reloaded ledger still suppresses the re-POST");
+        assert_eq!(reloaded.claimed_units, 300_000_000.0);
+        assert_eq!(reloaded.ends_at_ms, 1793062800000);
+        std::env::remove_var("ZCODE_CLAIM_STATE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_marker_row_speaks_the_checkin_dialect() {
+        let claimed = ClaimOutcome {
+            claimed_units: 300_000_000.0,
+            claimed_any: true,
+            ends_at_ms: 1793062800000,
+            ..Default::default()
+        };
+        let row = claim_marker_row(&claimed).expect("a claimed day ships its marker");
+        assert_eq!(row.id.as_deref(), Some("checkin"));
+        assert_eq!(row.label.as_deref(), Some("已自动签到 · +300M tokens"));
+        assert_eq!(row.resets_at_ms, 1793062800000);
+        assert_eq!(row.used_percent, 0.0, "a marker is not a gauge");
+
+        let gated = ClaimOutcome { gated: true, ..Default::default() };
+        let row = claim_marker_row(&gated).expect("a gated claim ships its marker too");
+        assert_eq!(row.id.as_deref(), Some("checkin-gated"));
+        assert_eq!(row.label.as_deref(), Some("签到需在 ZCode 内领取"));
+
+        // No claim and no wall is no row at all — and neither is a pass that
+        // could not even ask.
+        assert!(claim_marker_row(&ClaimOutcome::default()).is_none());
+        assert!(claim_marker_row(&ClaimOutcome { unreachable: true, ..Default::default() }).is_none());
+        // A claimed day outranks a gated one in the same pass: the grant is
+        // the fact worth keeping.
+        let both = ClaimOutcome { claimed_any: true, gated: true, claimed_units: 1.0, ..Default::default() };
+        assert_eq!(claim_marker_row(&both).unwrap().id.as_deref(), Some("checkin"));
+    }
+
+    #[test]
+    #[ignore = "reads ~/.zcode and calls the vendor's claim endpoint — books real grants"]
+    fn the_live_claim_pass_reports_its_outcome() {
+        let store = credential_store();
+        match claim_pass(true, store.as_ref()) {
+            Some(o) => println!(
+                "[zcode:claim] claimed={} units={} ends={} gated={} unreachable={}",
+                o.claimed_any, o.claimed_units, o.ends_at_ms, o.gated, o.unreachable
+            ),
+            None => println!("[zcode:claim] nothing claimable"),
         }
     }
 }

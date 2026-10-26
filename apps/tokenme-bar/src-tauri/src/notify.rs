@@ -588,6 +588,27 @@ pub fn post_login_expired(tool: &str, _host: &str) {
     }
 }
 
+/// A probe auto-claimed a vendor grant (ZCode's plan claims): one toast per
+/// booked grant — the claim ledger dedups per day, so this rides a real
+/// booking, never a pass. `plan` may be empty; `units` is the language-neutral
+/// "+300M tokens".
+pub fn post_claim(tool: &str, plan: &str, units: &str) {
+    let zh = crate::lang::get() == crate::lang::Lang::Zh;
+    let display = match tool {
+        "zcode" => "ZCode".to_string(),
+        other => other.to_string(),
+    };
+    let body = match (zh, plan.is_empty()) {
+        (true, true) => format!("{display} 已自动领取 {units}"),
+        (true, false) => format!("{display} 已自动领取「{plan}」{units}"),
+        (false, true) => format!("{display} claimed {units} automatically"),
+        (false, false) => format!("{display} claimed \"{plan}\" — {units}"),
+    };
+    if let Err(e) = post(&display, &body) {
+        crate::logging::error(&format!("notify: claim toast failed — {e}"));
+    }
+}
+
 /// The one sender behind every device-sync toast: the fixed bilingual title
 /// and the failure log lived in three copies that had already drifted in
 /// their error tags.
