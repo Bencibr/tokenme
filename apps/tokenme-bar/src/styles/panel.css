@@ -528,17 +528,18 @@
 
 .hero-io-row {
   display: flex;
-  align-items: baseline;
-  gap: 22px;
+  align-items: stretch;
   padding: 2px 0;
 }
 
-/* A column is a click target that flips back to the total; the number
-   carries the hero's own weight so the three figures read as peers. */
+/* Three equal columns, each centered, hairline-separated. The number
+   carries a per-semantic hue so the three figures are distinguishable at
+   a glance; the label sits under it in the muted ink. */
 .hero-io-col {
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   gap: 1px;
   padding: 0;
   border: none;
@@ -546,6 +547,22 @@
   color: inherit;
   cursor: pointer;
   font: inherit;
+}
+
+.hero-io-col + .hero-io-col {
+  border-left: 1px solid var(--hair);
+}
+
+.hero-io-col[data-io="in"] .hero-io-num {
+  color: var(--accent);
+}
+
+.hero-io-col[data-io="cached"] .hero-io-num {
+  color: var(--warn);
+}
+
+.hero-io-col[data-io="out"] .hero-io-num {
+  color: var(--ink);
 }
 
 .hero-io-line {

@@ -159,6 +159,7 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
                   key={key}
                   type="button"
                   className="hero-io-col"
+                  data-io={key}
                   title={t("hdr.io.title", {
                     total: count(summary.total_tokens),
                     in: count(summary.counts.input + summary.counts.cache_creation),
