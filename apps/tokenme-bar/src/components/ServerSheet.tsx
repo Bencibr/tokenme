@@ -116,7 +116,7 @@ function historyRows(history: ServerSyncEvent[], now: number) {
   return out.slice(0, 6);
 }
 
-type View = { kind: "list" } | { kind: "wizard" } | { kind: "detail"; id: number } | { kind: "confirm"; id: number };
+type View = { kind: "list" } | { kind: "wizard" } | { kind: "detail"; id: number } | { kind: "confirm"; id: number } | { kind: "forget"; origin: string };
 
 interface Wiz {
   step: 1 | 2 | 3 | 4 | 5;
@@ -527,11 +527,7 @@ export function ServerSheet({
                     aria-label={t("srv.imported.forget")}
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (!window.confirm(t("srv.imported.confirm", { name: origin }))) return;
-                      void bridge.forgetImportedOrigin(origin).then((rows) => {
-                        setNotice(t("srv.imported.done", { name: origin, rows: count(rows) }));
-                        onForgottenOrigin();
-                      }).catch((err: unknown) => setNotice(String(err)));
+                      setView({ kind: "forget", origin });
                     }}
                   >
                     <IconClose size={12} />
@@ -1207,6 +1203,55 @@ export function ServerSheet({
         </>
       );
     }
+  }
+
+  /* ── confirm forgetting an imported origin ──────────────────────────── */
+
+  if (view.kind === "forget") {
+    const origin = view.origin;
+    confirmBody = (
+      <>
+        <div className="sheet-hd">
+          <h2 className="srv-hd">{t("srv.imported.title")}</h2>
+          <button
+            type="button"
+            className="sheet-close"
+            aria-label={t("srv.back")}
+            onClick={() => setView({ kind: "list" })}
+          >
+            <IconBack size={12} />
+          </button>
+        </div>
+        <div className="sheet-body">
+          <div className="confirm-box">
+            <div className="confirm-q">{t("srv.imported.q", { name: origin })}</div>
+            <div className="f-hint">{t("srv.imported.hint")}</div>
+          </div>
+          <div className="wiz-foot">
+            <div className="left">
+              <button type="button" className="btn-quiet" onClick={() => setView({ kind: "list" })}>
+                {t("srv.cancel")}
+              </button>
+            </div>
+            <div className="left">
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={() => {
+                  setView({ kind: "list" });
+                  void bridge.forgetImportedOrigin(origin).then((rows) => {
+                    setNotice(t("srv.imported.done", { name: origin, rows: count(rows) }));
+                    onForgottenOrigin();
+                  }).catch((err: unknown) => setNotice(String(err)));
+                }}
+              >
+                {t("srv.imported.forget")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </>
+    );
   }
 
   return (
