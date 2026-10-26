@@ -445,6 +445,11 @@ pub struct SyncDevicesView {
     /// Secondary only: primary-data downlink completion. `None` until the
     /// primary shares its first page, `Some(false)` while the backfill runs.
     pub download_complete: Option<bool>,
+    /// When each half last really finished (the applying transaction stamps
+    /// it), so the sheet's 已完成 can show its own age instead of a bare
+    /// flag that a disconnect never resets.
+    pub upload_complete_at_ms: Option<i64>,
+    pub download_complete_at_ms: Option<i64>,
     pub last_error: Option<String>,
     pub discovery_error: Option<String>,
     pub last_connected_at_ms: Option<i64>,
@@ -1762,6 +1767,8 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let data_epoch = secondary_config.as_ref().and_then(|config| config.data_epoch);
     let upload_complete = secondary_config.as_ref().and(panel.upload_complete);
     let download_complete = secondary_config.as_ref().and(panel.download_complete);
+    let upload_complete_at_ms = secondary_config.as_ref().and(panel.upload_complete_at_ms);
+    let download_complete_at_ms = secondary_config.as_ref().and(panel.download_complete_at_ms);
     let last_error = if state.role == "secondary" {
         secondary_config.as_ref().and_then(|config| config.last_error.clone())
     } else {
@@ -1790,6 +1797,8 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
         data_epoch,
         upload_complete,
         download_complete,
+        upload_complete_at_ms,
+        download_complete_at_ms,
         last_error,
         discovery_error: state.discovery_error.clone(),
         last_connected_at_ms: secondary_config.as_ref().and_then(|config| config.last_connected_at_ms),
@@ -2809,6 +2818,33 @@ pub async fn get_report(app: AppHandle, force: bool) -> Result<Report, String> {
         return Err(error);
     }
     shared.report().ok_or_else(|| "indexing".to_string())
+}
+
+/// Forgets one historical `~/tokenme-sync` import origin: its rollup rows
+/// leave the report (the machine disappears from the scope list) and the
+/// import registry entries go with it. The local machine's empty origin is
+/// not addressable, and a live device-sync peer's origin is refused — this
+/// is the door for an mbp that no longer syncs. Returns the rollup row
+/// count removed, for the confirm toast.
+#[tauri::command]
+pub async fn forget_imported_origin(app: AppHandle, origin: String) -> Result<u64, String> {
+    if origin.is_empty() {
+        return Err("the local machine cannot be forgotten here".into());
+    }
+    let index_path = usage_index::Index::default_path().ok_or_else(|| "no platform data directory available".to_string())?;
+    if let Ok(status) = SyncStore::read_status(&index_path) {
+        if status.devices.iter().any(|d| d.origin == origin && d.status == usage_device_sync::DeviceStatus::Paired) {
+            return Err(format!("{origin} is a live device-sync peer; disconnect it first"));
+        }
+    }
+    let removed = tauri::async_runtime::spawn_blocking(move || {
+        let mut index = usage_index::Index::open(index_path).map_err(|e| e.to_string())?;
+        index.forget_imported_origin(&origin).map_err(|e| e.to_string())
+    }).await.map_err(|_| "index worker stopped".to_string())??;
+    if let Some(channel) = app.try_state::<EngineChannel>() {
+        let _ = channel.0.send(Msg::Refresh);
+    }
+    Ok(removed)
 }
 
 /// The webview's detected UI language (system locale; the `?lang=` override

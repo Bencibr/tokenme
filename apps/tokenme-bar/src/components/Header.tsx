@@ -40,7 +40,7 @@ interface Props {
    *  that still exists (a paired device or a configured server). Null when no
    *  such machine ever delivered one (most users). */
   sync?: {
-    latest: { origin: string; rows: number };
+    latest: { origin: string; rows: number; file: string };
     age: string;
     more: number;
     /** Warn hue: the newest merge is not from today. */
@@ -202,12 +202,11 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
           </>
         ) : null}
       </div>
-      {/* Its own line, not another item in the stats: the badge names a machine,
-          how fresh its merge is and how many rows came in, so it wraps to a
-          second row of numbers all by itself — and it is silent until a machine
-          that is still configured has actually delivered a bundle. */}
-      {sync ? (
-        <div className="hdr-sync">
+      {/* Its own line: the badge on the left, the scope dropdown hugging the
+          far right of the same line. The dropdown used to share the tabs'
+          row, and a long badge squeezed it out of the window entirely. */}
+      <div className="hdr-sync">
+        {sync ? (
           <span className="sync" data-stale={sync.stale || undefined} title={syncTip(sync)}>
             <IconRefresh size={11} />
             {t("hdr.sync")}
@@ -217,18 +216,38 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
                 <span>{sync.latest.origin}</span>
                 <span className="dot-sep" aria-hidden="true" />
                 <span>{sync.age}</span>
-                <span className="dot-sep" aria-hidden="true" />
-                <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
+                {sync.latest.file === "device-sync" ? (
+                  // The live session channel has no row count: its exchange
+                  // is a re-verified aggregate snapshot, so a "0 rows" here
+                  // would be a number about nothing.
+                  null
+                ) : (
+                  <>
+                    <span className="dot-sep" aria-hidden="true" />
+                    <span className="num">{t("hdr.sync.rows", { n: count(sync.latest.rows) })}</span>
+                  </>
+                )}
                 {sync.more > 0 ? <span className="sync-more">{t("hdr.sync.more", { n: sync.more })}</span> : null}
               </>
             ) : (
               <span>{t("hdr.sync.idle")}</span>
             )}
           </span>
-        </div>
-      ) : null}
-      {/* The scope dropdown shares the tabs' line and hugs the far right; with
-          no imported origins it renders nothing and the row is unchanged. */}
+        ) : null}
+        <ScopeDropdown
+          scope={scope}
+          onScope={onScope}
+          machines={report.machines ?? []}
+          syncs={report.syncs}
+          devices={syncDevices?.devices}
+          isSecondary={syncDevices?.role === "secondary"}
+          now={now}
+          open={scopeMenuOpen}
+          onOpen={onScopeMenuOpen}
+          serverOrigins={serverOrigins}
+        />
+      </div>
+      {/* The tabs keep their line to themselves. */}
       <div className="tabs-row">
         <div className="page-tabs" role="tablist" aria-label={t("page.overview")}>
           {PAGES.map((p, i) => (
@@ -252,18 +271,6 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
             </button>
           ))}
         </div>
-        <ScopeDropdown
-          scope={scope}
-          onScope={onScope}
-          machines={report.machines ?? []}
-          syncs={report.syncs}
-          devices={syncDevices?.devices}
-          isSecondary={syncDevices?.role === "secondary"}
-          now={now}
-          open={scopeMenuOpen}
-          onOpen={onScopeMenuOpen}
-          serverOrigins={serverOrigins}
-        />
       </div>
     </header>
   );

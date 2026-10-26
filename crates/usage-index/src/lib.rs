@@ -1456,6 +1456,31 @@ impl Index {
         Ok(())
     }
 
+    /// Forgets one historical import origin end to end: its rollup rows, the
+    /// per-source file cursors that would re-import it, and the import
+    /// registry that keeps the origin on the panel's machine list. The rollup
+    /// rows ARE the machine's money on screen (the report folds from them),
+    /// so removing them removes the machine; the raw events behind them stay,
+    /// matching the standing import semantics where the aggregate is the
+    /// display unit. Refused for the local machine's empty origin — this
+    /// door is for `~/tokenme-sync` history like an mbp that no longer syncs.
+    pub fn forget_imported_origin(&mut self, origin: &str) -> Result<u64> {
+        if origin.is_empty() {
+            return Err(Error::Sync("the local machine's origin cannot be forgotten".into()));
+        }
+        let tx = self.conn.transaction().map_err(sql_err)?;
+        let rollup_removed = tx
+            .execute("DELETE FROM event_rollup WHERE origin = ?1", params![origin])
+            .map_err(sql_err)? as u64;
+        tx.execute(
+            "DELETE FROM meta WHERE key = ?1 OR (key LIKE 'sync:file:' || ?2 || '%')",
+            params![format!("sync:linux:{origin}"), format!("tokenme-{origin}.jsonl.gz")],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(rollup_removed)
+    }
+
     // ---- queries --------------------------------------------------------
 
     pub fn all_events(&self) -> Result<Vec<UsageEvent>> {

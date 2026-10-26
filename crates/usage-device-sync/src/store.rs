@@ -338,6 +338,11 @@ pub struct DeviceSyncRead {
     pub disconnect_requested: bool,
     pub upload_complete: Option<bool>,
     pub download_complete: Option<bool>,
+    /// When each half last really finished: the applying transaction stamps
+    /// these, so a 完成 label can carry its own freshness instead of reading
+    /// as a possibly-stale leftover from before a disconnect.
+    pub upload_complete_at_ms: Option<i64>,
+    pub download_complete_at_ms: Option<i64>,
 }
 
 pub struct SyncStore {
@@ -610,6 +615,8 @@ impl SyncStore {
             read.disconnect_requested = disconnect_requested_conn(&index, &config.primary_id)?;
             read.upload_complete = upload_cursor_complete_conn(&index, config);
             read.download_complete = download_cursor_complete_conn(&index, &config.primary_id);
+            read.upload_complete_at_ms = upload_cursor_complete_at_conn(&index, config);
+            read.download_complete_at_ms = download_cursor_complete_at_conn(&index);
         }
         Ok(read)
     }
@@ -2336,6 +2343,31 @@ fn download_cursor_complete_conn(conn: &Connection, _primary_id: &str) -> Option
         )
         .ok();
     fetched.map(|_| true)
+}
+
+/// The stamped instant of each half's last real completion, read beside the
+/// boolean so the panel can render 已完成 · 刚刚 instead of a bare flag a
+/// disconnect cannot touch.
+fn upload_cursor_complete_at_conn(conn: &Connection, config: &SecondarySyncConfig) -> Option<i64> {
+    let acked: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![format!("{UPLINK_ROLLUP_ACKED_PREFIX}{}", config.device_id)],
+            |row| row.get(0),
+        )
+        .ok();
+    acked.and_then(|value| value.parse::<i64>().ok())
+}
+
+fn download_cursor_complete_at_conn(conn: &Connection) -> Option<i64> {
+    let fetched: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'device_sync_rollup_fetched_at_ms'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    fetched.and_then(|value| value.parse::<i64>().ok())
 }
 
 fn disconnect_requested_conn(conn: &Connection, primary_id: &str) -> SyncResult<bool> {

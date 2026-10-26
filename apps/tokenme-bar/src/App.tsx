@@ -90,7 +90,7 @@ const [page, setPage] = useState<PageKey>(() => {
   const [serversLoaded, setServersLoaded] = useState(false);
   const [serversOpen, setServersOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
-  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, primary_display_name: null, primary_os: null, role: "unconfigured", primary_auto_approve_enabled: false, service_running: false, primary_starting: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [], primary_link_live: false, sessions_since_boot: 0, presence_window_ms: 30_000 });
+  const [syncDevices, setSyncDevices] = useState<SyncDevicesSnapshot>({ primary_id: null, primary_display_name: null, primary_os: null, role: "unconfigured", primary_auto_approve_enabled: false, service_running: false, primary_starting: false, primary_data_sharing_enabled: false, service_health: null, endpoint: null, certificate_pin: null, stream_id: null, data_epoch: null, upload_complete: null, download_complete: null, upload_complete_at_ms: null, download_complete_at_ms: null, last_error: null, discovery_error: null, last_connected_at_ms: null, operation_state: "idle", last_checked_at_ms: null, invite_url: null, invite_expires_at_ms: null, pairing_pending: false, discovered_primaries: [], devices: [], pairing_requests: [], primary_link_live: false, sessions_since_boot: 0, presence_window_ms: 30_000 });
   // The sheet's own close guard (a running install must not be dismissed) —
   // Escape asks through this ref instead of closing the sheet blind.
   const serverCloseRef = useRef<() => void>(() => {});
@@ -526,7 +526,10 @@ const [page, setPage] = useState<PageKey>(() => {
       latest: records[0],
       importedAt,
       age: relativeTime(importedAt, now),
-      more: records.length - 1,
+      // Count only machines that actually merged today. The `+N` used to
+      // include every historical import origin (an mbp idle since 10-06 made
+      // the badge read 0 行 +1 — a number about nothing).
+      more: records.slice(1).filter((r) => localDate(r.imported_at_ms) === localDate(now)).length,
       mergedToday,
       stale: !mergedToday,
       rows: records.map((r, i) => ({
@@ -700,6 +703,8 @@ const [page, setPage] = useState<PageKey>(() => {
         {serversOpen ? (
           <ServerSheet
             servers={servers}
+            importedOrigins={(report?.syncs ?? []).filter((s) => isManagedOrigin(s.origin, syncDevices?.devices, serverOrigins, syncDevices?.role === "secondary")).map((s) => s.origin)}
+            onForgottenOrigin={() => { bridge.fetchReport(true).then((r) => setReport(r)).catch(() => {}); }}
             onServers={setServers}
             onClose={() => setServersOpen(false)}
             closeRef={serverCloseRef}

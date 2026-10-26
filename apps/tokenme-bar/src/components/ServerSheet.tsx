@@ -116,7 +116,7 @@ function historyRows(history: ServerSyncEvent[], now: number) {
   return out.slice(0, 6);
 }
 
-type View = { kind: "list" } | { kind: "wizard" } | { kind: "detail"; id: number } | { kind: "confirm"; id: number };
+type View = { kind: "list" } | { kind: "wizard" } | { kind: "detail"; id: number } | { kind: "confirm"; id: number } | { kind: "forget"; origin: string };
 
 interface Wiz {
   step: 1 | 2 | 3 | 4 | 5;
@@ -230,11 +230,19 @@ function ClearableInput({
  */
 export function ServerSheet({
   servers,
+  importedOrigins,
+  onForgottenOrigin,
   onServers,
   onClose,
   closeRef,
 }: {
   servers: ServerView[];
+  /** Historical `~/tokenme-sync` import origins (an mbp that no longer
+   *  syncs) — listed here so they can be forgotten from the same place the
+   *  server list lives. */
+  importedOrigins: string[];
+  /** A forget landed: the report must refetch or the machine list lies. */
+  onForgottenOrigin: () => void;
   /** server_update answers with fresh views; the event usually beats it. */
   onServers: (servers: ServerView[]) => void;
   onClose: () => void;
@@ -501,6 +509,35 @@ export function ServerSheet({
             );
           })
         )}
+        {importedOrigins.length ? (
+          <div className="srv-imported">
+            <div className="srv-imported-title">{t("srv.imported.title")}</div>
+            {importedOrigins.map((origin) => (
+              <div className="srv-row" key={origin}>
+                <span className="srv-dot" data-s="idle" aria-hidden="true" />
+                <span className="srv-main">
+                  <span className="srv-name">{origin}</span>
+                  <span className="srv-meta">{t("srv.imported.meta")}</span>
+                </span>
+                <span className="srv-act">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title={t("srv.imported.forget")}
+                    aria-label={t("srv.imported.forget")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setView({ kind: "forget", origin });
+                    }}
+                  >
+                    <IconClose size={12} />
+                  </button>
+                </span>
+              </div>
+            ))}
+            <div className="srv-imported-hint">{t("srv.imported.hint")}</div>
+          </div>
+        ) : null}
       </div>
       <div className="sheet-foot">
         <button type="button" className="btn-accent srv-add" onClick={openWizard}>
@@ -1166,6 +1203,55 @@ export function ServerSheet({
         </>
       );
     }
+  }
+
+  /* ── confirm forgetting an imported origin ──────────────────────────── */
+
+  if (view.kind === "forget") {
+    const origin = view.origin;
+    confirmBody = (
+      <>
+        <div className="sheet-hd">
+          <h2 className="srv-hd">{t("srv.imported.title")}</h2>
+          <button
+            type="button"
+            className="sheet-close"
+            aria-label={t("srv.back")}
+            onClick={() => setView({ kind: "list" })}
+          >
+            <IconBack size={12} />
+          </button>
+        </div>
+        <div className="sheet-body">
+          <div className="confirm-box">
+            <div className="confirm-q">{t("srv.imported.q", { name: origin })}</div>
+            <div className="f-hint">{t("srv.imported.hint")}</div>
+          </div>
+          <div className="wiz-foot">
+            <div className="left">
+              <button type="button" className="btn-quiet" onClick={() => setView({ kind: "list" })}>
+                {t("srv.cancel")}
+              </button>
+            </div>
+            <div className="left">
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={() => {
+                  setView({ kind: "list" });
+                  void bridge.forgetImportedOrigin(origin).then((rows) => {
+                    setNotice(t("srv.imported.done", { name: origin, rows: count(rows) }));
+                    onForgottenOrigin();
+                  }).catch((err: unknown) => setNotice(String(err)));
+                }}
+              >
+                {t("srv.imported.forget")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </>
+    );
   }
 
   return (

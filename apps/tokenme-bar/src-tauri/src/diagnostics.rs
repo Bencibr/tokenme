@@ -2230,6 +2230,8 @@ mod tests {
             primary_link_live: false,
             sessions_since_boot: 0,
             presence_window_ms: 30_000,
+            upload_complete_at_ms: None,
+            download_complete_at_ms: None,
             primary_id: Some("primary-1".into()),
             role: "primary".into(),
             service_running: false,
