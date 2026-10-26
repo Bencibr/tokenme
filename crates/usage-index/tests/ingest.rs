@@ -1461,6 +1461,17 @@ fn a_cumulative_projection_bills_only_its_growth_on_the_day_that_growth_happened
             format!("{{\"id\":\"k1\",\"ts\":{ts},\"session\":\"s1\",\"in\":{input},\"out\":{output}}}\n"),
         )
         .unwrap();
+        // The indexer skips a file whose (size, mtime) match its cursor, and
+        // this test's re-emits keep the size — two writes inside one
+        // millisecond used to read as "unchanged" and silently void the
+        // pass. A real source's mtime moves with its writes; stamp the
+        // event's own timestamp so the file's does too, monotonically.
+        std::fs::File::options()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ts as u64))
+            .unwrap();
     };
     let adapter = CumMock::new("mocka", dir.path());
     let mut idx = Index::open_in_memory().unwrap();
