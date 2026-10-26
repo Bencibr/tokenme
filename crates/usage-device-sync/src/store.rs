@@ -1874,6 +1874,27 @@ impl SyncStore {
         })
     }
 
+    /// Reclaims the scheduler lease a killed panel process left hanging.
+    /// The panel app is single-instance, so any `panel-secondary-{device}-*`
+    /// lease that is not ours was written by a process that no longer exists
+    /// — an installer's forced stop, a crash, a reboot. Waiting out its TTL
+    /// (15 minutes) is what made an upgraded panel show its primary offline
+    /// for a quarter hour while the network was perfectly fine. Foreign
+    /// owners (a CLI runtime, another device's prefix) are never touched:
+    /// those may be genuinely alive and keep their wait-out semantics.
+    /// `device_id` is a fixed `dev-` + hex literal, so the LIKE pattern
+    /// carries no wildcards of its own.
+    pub fn steal_stale_panel_lease(&mut self, device_id: &str) -> SyncResult<bool> {
+        let pattern = format!("panel-secondary-{device_id}-%");
+        self.index.with_network_transaction(|tx| {
+            let stolen = tx.execute(
+                "DELETE FROM device_sync_scheduler_lease WHERE lease_key = 'outbox' AND owner LIKE ?1",
+                params![pattern],
+            ).map_err(sql_err)?;
+            Ok(stolen > 0)
+        })
+    }
+
     pub fn renew_scheduler_lease(&mut self, owner: &str, now_ms: i64, ttl_ms: i64) -> SyncResult<bool> {
         if owner.is_empty() || ttl_ms <= 0 { return Err(SyncError::Invalid("scheduler lease arguments are invalid".into())); }
         self.index.with_network_transaction(|tx| {
@@ -2572,6 +2593,31 @@ mod tests {
 
     fn identity(origin: &str) -> DeviceIdentity {
         DeviceIdentity::create(origin, origin).unwrap()
+    }
+
+    #[test]
+    fn steal_stale_panel_lease_reclaims_only_this_devices_killed_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SyncStore::open(&dir.path().join("index.db"), "primary-1").unwrap();
+        let device = "dev-abc-1111111111111111111111111111111111111111111111111111111111111111";
+        let killed = format!("panel-secondary-{device}-deadbeef");
+        let fresh = format!("panel-secondary-{device}-fresh");
+        // A killed panel's lease still inside its TTL blocks the fresh runtime.
+        assert!(store.acquire_scheduler_lease(&killed, 1_000, 900_000).unwrap());
+        assert!(!store.acquire_scheduler_lease(&fresh, 2_000, 900_000).unwrap());
+        assert!(store.steal_stale_panel_lease(device).unwrap(), "the killed panel's lease is reclaimable inside its TTL");
+        assert!(store.acquire_scheduler_lease(&fresh, 3_000, 900_000).unwrap(), "the fresh panel acquires immediately after the steal");
+
+        // A foreign owner is never stolen: a CLI runtime or another device's
+        // panel may be genuinely alive and keeps its wait-out semantics.
+        store.release_scheduler_lease(&fresh).unwrap();
+        assert!(store.acquire_scheduler_lease("tokenme-cli-someone-else", 4_000, 900_000).unwrap());
+        assert!(!store.acquire_scheduler_lease(&fresh, 5_000, 900_000).unwrap());
+        assert!(!store.steal_stale_panel_lease(device).unwrap(), "a foreign CLI holder is left alone");
+        store.release_scheduler_lease("tokenme-cli-someone-else").unwrap();
+        let other_panel = "panel-secondary-dev-OTHER-2222222222222222222222222222222222222222222222222222222222222222-x";
+        assert!(store.acquire_scheduler_lease(other_panel, 6_000, 900_000).unwrap());
+        assert!(!store.steal_stale_panel_lease(device).unwrap(), "another device's panel lease is left alone");
     }
 
     #[test]
