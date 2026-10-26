@@ -142,7 +142,17 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
             figure and its change read as one line, not two stacked rows; when
             the line is too tight the side wraps below, still right-aligned */}
         <div className="hero-main">
-          <span className="hero-value" aria-hidden="true">
+          <span
+            className="hero-value"
+            aria-hidden="true"
+            title={t("hdr.io.title", {
+              total: count(summary.total_tokens),
+              in: count(summary.counts.input + summary.counts.cache_creation),
+              cached: count(summary.counts.cache_read),
+              out: count(summary.counts.output),
+              reasoning: count(summary.counts.reasoning),
+            })}
+          >
             {hero.value}
           </span>
           <span className="hero-unit" aria-hidden="true">
@@ -188,10 +198,6 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
         <span className="dot-sep" aria-hidden="true" />
         <span className="num">{count(summary.sessions)}</span>
         <span>{t("hdr.sessions")}</span>
-        <span className="dot-sep" aria-hidden="true" />
-        <span title={t("hdr.io.title", { in: count(summary.counts.input), out: count(summary.counts.output) })}>
-          {t("hdr.io", { in: compactTokens(summary.counts.input), out: compactTokens(summary.counts.output) })}
-        </span>
         <span className="dot-sep" aria-hidden="true" />
         <span>{t("hdr.cache", { p: percent(summary.cached_pct, 1) })}</span>
         {summary.credits > 0 ? (
