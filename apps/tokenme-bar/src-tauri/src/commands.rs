@@ -2837,10 +2837,26 @@ pub async fn forget_imported_origin(app: AppHandle, origin: String) -> Result<u6
             return Err(format!("{origin} is a live device-sync peer; disconnect it first"));
         }
     }
+    let forget_origin = origin.clone();
     let removed = tauri::async_runtime::spawn_blocking(move || {
         let mut index = usage_index::Index::open(index_path).map_err(|e| e.to_string())?;
-        index.forget_imported_origin(&origin).map_err(|e| e.to_string())
+        index.forget_imported_origin(&forget_origin).map_err(|e| e.to_string())
     }).await.map_err(|_| "index worker stopped".to_string())??;
+    // The sheet's imported list is built from the report, and the report is
+    // the engine's cached fold — answering immediately would hand back the
+    // pre-forget fold and leave the forgotten origin on screen. Wait out the
+    // engine's re-publish (it re-folds within a cadence tick of the delete),
+    // bounded so a stuck engine cannot hang the command.
+    if let Some(channel) = app.try_state::<EngineChannel>() {
+        let _ = channel.0.send(Msg::Refresh);
+    }
+    let shared = app.state::<Shared>();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let gone = shared.report().map(|report| report.syncs.iter().all(|s| s.origin != origin)).unwrap_or(false);
+        if gone { break; }
+    }
     if let Some(channel) = app.try_state::<EngineChannel>() {
         let _ = channel.0.send(Msg::Refresh);
     }

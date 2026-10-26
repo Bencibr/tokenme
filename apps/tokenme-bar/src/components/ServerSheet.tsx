@@ -254,6 +254,13 @@ export function ServerSheet({
   const [wiz, setWiz] = useState<Wiz | null>(null);
   const [cleanup, setCleanup] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // A completion note is news for a moment, not furniture: clear it before
+  // the user meets it again on the next visit.
+  useEffect(() => {
+    if (notice === null) return;
+    const timer = window.setTimeout(() => setNotice(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const [copied, setCopied] = useState(false);
   const tick = useTicker(30_000);
   const now = useMemo(() => Date.now(), [tick]);
