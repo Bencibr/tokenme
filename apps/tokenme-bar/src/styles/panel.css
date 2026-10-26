@@ -579,19 +579,19 @@
    row count, and inline it displaced the day's figures onto a second row. */
 .hdr-sync {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
   margin-top: var(--s2);
   min-width: 0;
 }
 
-/* The dropdown rides the badge's line, hugging the right edge; it may
-   shrink to its own label before the badge ever pushes it out. */
-.hdr-sync > .scope-row {
-  margin-left: auto;
-  flex: none;
-  max-width: 60%;
+/* Two stacked rows, each right-aligned: the sync badge on top, the scope
+   dropdown alone beneath it. A shared row squeezed the dropdown out of
+   the window; side-by-side was still one row — this gives each its own. */
+.hdr-sync > .sync {
+  align-self: flex-start;
+  max-width: 100%;
 }
 
 .dot-sep {
