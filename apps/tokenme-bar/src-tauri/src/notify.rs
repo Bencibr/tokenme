@@ -492,6 +492,53 @@ pub fn post_cut_off(reason: &str) {
     post_sync(zh, body, "cut-off toast failed");
 }
 
+/// A paired secondary crossed the presence window upward. The caller owns
+/// the transition (first poll seeds silently) and the toggle.
+pub fn post_device_online(device_name: &str) {
+    let zh = crate::lang::get() == crate::lang::Lang::Zh;
+    let body = if zh {
+        format!("「{device_name}」已上线，同步连接恢复。")
+    } else {
+        format!("\"{device_name}\" is online — sync link restored.")
+    };
+    post_sync(zh, body, "device-online toast failed");
+}
+
+/// A paired secondary aged out of the presence window: no authenticated
+/// frame for 30 s. The caller owns the transition and the toggle.
+pub fn post_device_offline(device_name: &str) {
+    let zh = crate::lang::get() == crate::lang::Lang::Zh;
+    let body = if zh {
+        format!("「{device_name}」已离线，暂时无法同步。")
+    } else {
+        format!("\"{device_name}\" went offline — sync is paused for it.")
+    };
+    post_sync(zh, body, "device-offline toast failed");
+}
+
+/// The sync link reported a fresh error (either role). The body stays short —
+/// the raw error text is an English diagnostic, the sheet shows the details.
+pub fn post_sync_error() {
+    let zh = crate::lang::get() == crate::lang::Lang::Zh;
+    let body = if zh {
+        "同步出现问题，已进入重试；请打开同步面板查看详情。".to_string()
+    } else {
+        "Sync hit a problem and is retrying — open the sync panel for details.".to_string()
+    };
+    post_sync(zh, body, "sync-error toast failed");
+}
+
+/// The error that armed the last banner has cleared.
+pub fn post_sync_recovered() {
+    let zh = crate::lang::get() == crate::lang::Lang::Zh;
+    let body = if zh {
+        "同步已恢复正常。".to_string()
+    } else {
+        "Sync has recovered.".to_string()
+    };
+    post_sync(zh, body, "sync-recovered toast failed");
+}
+
 /// A paired secondary explicitly disconnected: the primary's list is about to
 /// refresh; toast the owner so the departure is not silent.
 pub fn post_secondary_left(device_name: &str) {

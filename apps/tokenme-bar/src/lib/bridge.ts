@@ -428,6 +428,22 @@ export const bridge: Bridge = {
     await invoke<void>("set_notify_tiers", { tiers });
   },
 
+  async setNotifyDevicePresence(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.notify_device_presence = on;
+      return;
+    }
+    await invoke<void>("set_notify_device_presence", { on });
+  },
+
+  async setNotifySyncStatus(on: boolean): Promise<void> {
+    if (!inTauri) {
+      browserSettings.notify_sync_status = on;
+      return;
+    }
+    await invoke<void>("set_notify_sync_status", { on });
+  },
+
   async setPlanExpiryNotifyDays(days: number | null): Promise<void> {
     if (!inTauri) {
       browserSettings.plan_expiry_notify_days = days;
@@ -688,6 +704,8 @@ const browserSettings: PanelSettings = {
   quota_polling: true,
   quota_probes_off: [],
   notify_tiers: "both",
+  notify_device_presence: true,
+  notify_sync_status: true,
   notify_muted: [],
   plan_expiry_notify_days: 3,
   auto_update_check: true,

@@ -622,6 +622,8 @@ export interface Bridge {
   setNotifyTiers: (tiers: NotifyTierKey) => Promise<void>;
   setPlanExpiryNotifyDays: (days: number | null) => Promise<void>;
   setToolMuted: (tool: string, on: boolean) => Promise<void>;
+  setNotifyDevicePresence: (on: boolean) => Promise<void>;
+  setNotifySyncStatus: (on: boolean) => Promise<void>;
   setAutoUpdateCheck: (on: boolean) => Promise<void>;
   checkUpdate: () => Promise<UpdateStatus>;
   downloadUpdate: () => Promise<UpdateStatus>;
@@ -732,6 +734,10 @@ export interface PanelSettings {
   /** Tools the user stopped by hand — the only lever for probes with no host. */
   quota_probes_off: string[];
   notify_tiers: NotifyTierKey;
+  /** Banners when a paired device crosses the presence window. */
+  notify_device_presence: boolean;
+  /** Banners when the sync link reports a fresh error or recovers. */
+  notify_sync_status: boolean;
   /** Tools whose windows never post a banner. */
   notify_muted: string[];
   /** One reminder lead time for expiring vendor packages, or null to disable. */

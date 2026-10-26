@@ -149,6 +149,10 @@ fn default_host_exit_pause() -> bool {
 }
 
 /// Polling is the feature; the switch exists to stop it, not to start it.
+fn default_true() -> bool {
+    true
+}
+
 fn default_quota_polling() -> bool {
     true
 }
@@ -254,6 +258,14 @@ pub struct Settings {
     /// Which banner lines fire.
     #[serde(default)]
     pub notify_tiers: NotifyTier,
+    /// Banners when a paired device crosses the presence window (online or
+    /// offline). Both sync notification switches default on: silence until
+    /// touched is the honest default for a health channel.
+    #[serde(default = "default_true")]
+    pub notify_device_presence: bool,
+    /// Banners when the sync link reports a fresh error or recovers from one.
+    #[serde(default = "default_true")]
+    pub notify_sync_status: bool,
     /// Tools that never post a banner, whatever their windows do.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub notify_muted: Vec<String>,
@@ -296,6 +308,8 @@ impl Default for Settings {
             quota_polling: default_quota_polling(),
             quota_probes_off: Vec::new(),
             notify_tiers: NotifyTier::default(),
+            notify_device_presence: true,
+            notify_sync_status: true,
             notify_muted: Vec::new(),
             plan_expiry_notify_days: default_plan_expiry_notify_days(),
             auto_update_check: default_auto_update_check(),

@@ -45,6 +45,70 @@ fn device_is_live(seen: Option<i64>, now_ms: i64) -> bool {
     seen.is_some_and(|at| now_ms - at < DEVICE_LIVE_TTL_MS)
 }
 
+/// The two sync notification switches, mirrored from settings: seeded once
+/// per process from disk (a restart must respect a stored "off"), then kept
+/// current by the setters. Read on the poll path and from the ws hooks.
+static NOTIFY_DEVICE_PRESENCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static NOTIFY_SYNC_STATUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static NOTIFY_TOGGLES_SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn seed_notify_toggles_once() {
+    if !NOTIFY_TOGGLES_SEEDED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let settings = crate::settings::Settings::load();
+        NOTIFY_DEVICE_PRESENCE.store(settings.notify_device_presence, std::sync::atomic::Ordering::Release);
+        NOTIFY_SYNC_STATUS.store(settings.notify_sync_status, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Per-device presence at the previous poll: the first poll seeds silently,
+/// so a panel boot never replays the world as news. None until seeded.
+fn presence_edge_cache() -> &'static std::sync::Mutex<Option<std::collections::HashMap<String, bool>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<std::collections::HashMap<String, bool>>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+static SYNC_ERROR_EDGE_SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SYNC_ERROR_EDGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Fires the presence and sync-health banners off the fresh view, on the
+/// poll cadence. Toggle-gated at the edge, never on the read: a switch
+/// turned on mid-episode stays quiet until the NEXT transition (the edge
+/// cache keeps its pre-toggle shape).
+fn notify_sync_transitions(view: &SyncDevicesView) {
+    use std::sync::atomic::Ordering;
+    seed_notify_toggles_once();
+    let paired: Vec<(String, bool)> = view.devices.iter()
+        .filter(|d| d.role == "secondary" && d.status == "paired")
+        .map(|d| (d.device_id.clone(), d.live))
+        .collect();
+    let mut cache = presence_edge_cache().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(prev) = cache.as_ref() {
+        if NOTIFY_DEVICE_PRESENCE.load(Ordering::Acquire) {
+            for (id, live) in &paired {
+                if let Some(was) = prev.get(id).copied() {
+                    let name = view.devices.iter().find(|d| d.device_id == *id)
+                        .map(|d| d.display_name.trim().to_string())
+                        .unwrap_or_else(|| id.clone());
+                    let name = if name.is_empty() { id.clone() } else { name };
+                    if *live && !was { crate::notify::post_device_online(&name); }
+                    if !*live && was { crate::notify::post_device_offline(&name); }
+                }
+            }
+        }
+    }
+    *cache = Some(paired.into_iter().collect());
+    drop(cache);
+
+    let has_error = view.last_error.is_some();
+    if SYNC_ERROR_EDGE_SEEDED.load(Ordering::Acquire) && NOTIFY_SYNC_STATUS.load(Ordering::Acquire) {
+        let was = SYNC_ERROR_EDGE.load(Ordering::Acquire);
+        if has_error && !was { crate::notify::post_sync_error(); }
+        if !has_error && was { crate::notify::post_sync_recovered(); }
+    }
+    SYNC_ERROR_EDGE.store(has_error, Ordering::Release);
+    SYNC_ERROR_EDGE_SEEDED.store(true, Ordering::Release);
+}
+
 /// Device stale→fresh transitions since panel start: one per session rebuild
 /// that crossed the presence window, the soak metric in user-visible form.
 fn sessions_since_boot() -> &'static std::sync::atomic::AtomicU64 {
@@ -928,7 +992,7 @@ fn start_secondary_runtime(state: &mut SyncControlState) -> Result<(), String> {
             false
         };
         if woke { wake_sync_ui(); }
-        if woke && (ever_live_hook.swap(true, std::sync::atomic::Ordering::Relaxed) || hook_started.elapsed() > std::time::Duration::from_secs(60)) {
+        if woke && NOTIFY_DEVICE_PRESENCE.load(std::sync::atomic::Ordering::Acquire) && (ever_live_hook.swap(true, std::sync::atomic::Ordering::Relaxed) || hook_started.elapsed() > std::time::Duration::from_secs(60)) {
             crate::notify::post_primary_online(&primary_name);
         }
     });
@@ -1778,7 +1842,7 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
     let pairing_pending = secondary_config.is_none() && read_pending_pairing()?.is_some();
     let primary_data_sharing_enabled = primary_config.as_ref().is_some_and(|config| config.share_data_with_secondaries);
     let primary_auto_approve_enabled = primary_config.as_ref().is_some_and(|config| config.auto_approve_pairing);
-    Ok(SyncDevicesView {
+    let view = SyncDevicesView {
         primary_id,
         primary_link_live: primary_link_fresh(),
         sessions_since_boot: sessions_since_boot().load(std::sync::atomic::Ordering::Relaxed),
@@ -1836,7 +1900,9 @@ fn sync_snapshot(state: &mut SyncControlState, diagnostics_app: Option<AppHandle
             devices
         },
         pairing_requests: snapshot.pairing_requests,
-    })
+    };
+    notify_sync_transitions(&view);
+    Ok(view)
 }
 
 /// Restore an explicitly enabled sync role at boot. `enabled=false` is not an
@@ -3179,6 +3245,23 @@ pub async fn set_auto_checkin(app: AppHandle, on: bool) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_quota_polling(app: AppHandle, on: bool) -> Result<(), String> {
     mutate_settings_async(&app, |s| s.quota_polling = on).await.map(|_| ())
+}
+
+/// Banner switch: paired devices crossing the presence window. The mirror
+/// flag moves first so the ws hooks and the next poll obey at once; the
+/// edge cache keeps its shape, so flipping mid-episode stays quiet until
+/// the next real transition.
+#[tauri::command]
+pub async fn set_notify_device_presence(app: AppHandle, on: bool) -> Result<(), String> {
+    NOTIFY_DEVICE_PRESENCE.store(on, std::sync::atomic::Ordering::Release);
+    mutate_settings_async(&app, |s| s.notify_device_presence = on).await.map(|_| ())
+}
+
+/// Banner switch: a fresh sync error, and the recovery from one.
+#[tauri::command]
+pub async fn set_notify_sync_status(app: AppHandle, on: bool) -> Result<(), String> {
+    NOTIFY_SYNC_STATUS.store(on, std::sync::atomic::Ordering::Release);
+    mutate_settings_async(&app, |s| s.notify_sync_status = on).await.map(|_| ())
 }
 
 /// One tool's own switch — the only lever for the probes with no host mapping.

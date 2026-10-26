@@ -389,6 +389,16 @@ export function SettingsSheet({
     void bridge.setNotifyTiers(tiers);
   };
 
+  const setNotifyDevicePresence = (on: boolean) => {
+    patch((s) => ({ ...s, notify_device_presence: on }));
+    void bridge.setNotifyDevicePresence(on);
+  };
+
+  const setNotifySyncStatus = (on: boolean) => {
+    patch((s) => ({ ...s, notify_sync_status: on }));
+    void bridge.setNotifySyncStatus(on);
+  };
+
   const setPlanExpiryNotifyDays = (value: string) => {
     const days = value ? Number(value) : null;
     patch((s) => ({ ...s, plan_expiry_notify_days: days }));
@@ -802,6 +812,8 @@ export function SettingsSheet({
                 })}
               </div>
             </div>
+            {switchRow(t("set.notify.presence"), t("set.notify.presence.hint"), settings.notify_device_presence ?? true, setNotifyDevicePresence, mutedCount > 0 ? false : false)}
+            {switchRow(t("set.notify.sync"), t("set.notify.sync.hint"), settings.notify_sync_status ?? true, setNotifySyncStatus)}
             {navRow("mute", t("set.muted"), t("set.muted.hint"), mutedCount ? t("set.muted.count", { n: mutedCount }) : t("set.none"))}
           </>
         ) : null}

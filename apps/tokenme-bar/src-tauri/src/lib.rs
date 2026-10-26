@@ -105,6 +105,8 @@ pub fn run() {
             commands::set_host_exit_pause,
             commands::set_auto_checkin,
             commands::set_quota_polling,
+            commands::set_notify_device_presence,
+            commands::set_notify_sync_status,
             commands::set_tool_polling,
             commands::probe_tools,
             commands::set_notify_tiers,
