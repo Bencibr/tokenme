@@ -525,8 +525,29 @@ export function BubbleApp() {
     };
   }, [dock, skin]);
 
+  // The window is a rectangle larger than the visible pet: presses in the
+  // transparent margins must not arm the click contract or a drag. The live
+  // art box (`.pet-art` undocked, the edge pose image docked) moves with the
+  // breathe animation and the dock pose, so measuring it per event keeps the
+  // hit region hugging the picture the user actually sees.
+  const withinArt = (x: number, y: number) => {
+    // The waterdrop skin is code-native artwork whose core is the whole
+    // visible pet; raster skins carry the art in `.pet-art` (undocked) or
+    // the edge pose image (docked).
+    const art = (document.querySelector(".bubble-core") ?? document.querySelector(".pet-art")
+      ?? document.querySelector(".pet-edge-art"))?.getBoundingClientRect();
+    return !!art && x >= art.left && x <= art.right && y >= art.top && y <= art.bottom;
+  };
+
   const onPointerDown = async (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
+    if (!withinArt(event.clientX, event.clientY)) {
+      // A press on the transparent margin: arm nothing, so the release's
+      // click contract finds no press and stays silent.
+      moved.current = false;
+      press.current = null;
+      return;
+    }
     clearLeaveTimer();
     moved.current = false;
     press.current = { x: event.clientX, y: event.clientY };
@@ -576,6 +597,9 @@ export function BubbleApp() {
   };
 
   const onPointerUp = () => {
+    // A release with no armed press belongs to a margin press the down gate
+    // already refused: stay silent instead of toggling the panel.
+    if (!press.current) return;
     if (isMac) {
       // The single click contract on mac: a press that never became a drag
       // toggles the panel — once, here, and nowhere else.
