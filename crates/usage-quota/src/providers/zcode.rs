@@ -893,6 +893,7 @@ struct ClaimOutcome {
     claimed_any: bool,
     was_already: bool,
     ends_at_ms: i64,
+    available: bool,
     gated: bool,
     unreachable: bool,
 }
@@ -994,18 +995,21 @@ fn claim_pass(force: bool, store: Option<&CredentialStore>) -> Option<ClaimOutco
             ..Default::default()
         });
     }
-    if !force && !crate::auto_checkin_enabled() {
-        crate::log_checkin("zcode: skipped — 自动签到 off");
-        return None;
-    }
+    // Even with automatic claiming disabled, preview the vendor's plans so
+    // the panel can show a manual button only while a new claim is available.
+    // This path is GET-only; the claim POST below remains behind the switch.
+    let preview_only = !force && !crate::auto_checkin_enabled();
+    if preview_only { crate::log_checkin("zcode: previewing claim availability — 自动签到 off"); }
 
     // The claim is the official app's popup API on its own origin: a fork's
     // store that carries no ZCode JWT simply has nothing to claim here.
     let Some(store) = store else {
+        crate::log_checkin(&format!("zcode: {today} no credential store — nothing to claim"));
         return Some(ClaimOutcome { unreachable: true, ..Default::default() });
     };
     let keys = envelope_keys(store);
     let Some(token) = opened(&store.value, "zcodejwttoken", &keys) else {
+        crate::log_checkin(&format!("zcode: {today} no zcodejwttoken in the credential store — nothing to claim"));
         return Some(ClaimOutcome { unreachable: true, ..Default::default() });
     };
     let device = device_mid(&store.home);
@@ -1017,17 +1021,25 @@ fn claim_pass(force: bool, store: Option<&CredentialStore>) -> Option<ClaimOutco
         zcode_platform_key()
     );
     let Some(body) = get_json_owned(&preview, &headers) else {
+        crate::log_checkin(&format!("zcode: {today} claim preview unreachable (network or TLS) — retried on the next pass"));
         return Some(ClaimOutcome { unreachable: true, ..Default::default() });
     };
     // A rejected credential answers code != 0 with no plans — the vendor's "no
     // answer", not "nothing claimable".
     if body.get("code").and_then(Value::as_i64).is_some_and(|c| c != 0) {
+        let code = body.get("code").and_then(Value::as_i64).unwrap_or_default();
+        crate::log_checkin(&format!("zcode: {today} claim preview answered code {code} — the credential is not for this plan"));
         return Some(ClaimOutcome { unreachable: true, ..Default::default() });
     }
     let Some(plans) = body.pointer("/data/plans").and_then(Value::as_array) else {
+        crate::log_checkin(&format!("zcode: {today} claim preview carried no plans array — nothing claimable today"));
         return None;
     };
 
+    if plans.is_empty() {
+        crate::log_checkin(&format!("zcode: {today} no claimable plans today — day stays open"));
+        return Some(ClaimOutcome::default());
+    }
     let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let mut outcome = ClaimOutcome::default();
     let mut attempted = false;
@@ -1036,6 +1048,10 @@ fn claim_pass(force: bool, store: Option<&CredentialStore>) -> Option<ClaimOutco
             continue;
         };
         if state_asked(&state, &today, plan_id) {
+            continue;
+        }
+        if preview_only {
+            outcome.available = true;
             continue;
         }
         let result = claim_plan(plan_id, &refs);
@@ -1060,6 +1076,9 @@ fn claim_pass(force: bool, store: Option<&CredentialStore>) -> Option<ClaimOutco
         }
     }
     if attempted {
+        return Some(outcome);
+    }
+    if outcome.available {
         return Some(outcome);
     }
     // A forced click with nothing new still answers from today's books.
@@ -1119,15 +1138,21 @@ fn claim_marker_row(outcome: &ClaimOutcome) -> Option<QuotaSample> {
         return None;
     }
     if !outcome.claimed_any {
-        if !outcome.gated {
-            return None;
+        if outcome.gated {
+            return Some(QuotaSample {
+                used_percent: 0.0,
+                window_minutes: 0,
+                resets_at_ms: 0,
+                label: Some("签到需在 ZCode 内领取".to_string()),
+                id: Some("checkin-gated".into()),
+            });
         }
-        return Some(QuotaSample {
+        return outcome.available.then(|| QuotaSample {
             used_percent: 0.0,
             window_minutes: 0,
             resets_at_ms: 0,
-            label: Some("签到需在 ZCode 内领取".to_string()),
-            id: Some("checkin-gated".into()),
+            label: Some("有可领取的签到".to_string()),
+            id: Some("checkin-available".into()),
         });
     }
     let label = if outcome.claimed_units > 0.0 {
