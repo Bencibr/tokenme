@@ -37,6 +37,26 @@ use crate::engine::EngineChannel;
 pub fn run() {
     // Start the cold-start clock before anything else can read it.
     panel::mark_launch();
+    // A non-activating panel never becomes the frontmost app, so App Nap
+    // reads the whole process as idle and throttles it to a standstill — the
+    // webview froze mid-animation on its boot spinner while the engine below
+    // kept logging. The utility must stay responsive for as long as its
+    // window is on screen: user-initiated activity blocks the nap without
+    // touching idle system sleep. The returned token is leaked on purpose —
+    // the activity lasts for the whole process.
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::cocoa::base::{id, nil};
+        use tauri_nspanel::cocoa::foundation::NSString;
+        use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
+        unsafe {
+            let pi: id = msg_send![class!(NSProcessInfo), processInfo];
+            let reason: id = NSString::alloc(nil)
+                .init_str("TokenMe menu-bar panel and desktop pet stay responsive");
+            let _activity: id = msg_send![pi,
+                beginActivityWithOptions: 0x00FFFFFF_u64 reason: reason];
+        }
+    }
     let (tx, rx) = std::sync::mpsc::channel::<engine::Msg>();
 
     let builder = tauri::Builder::default()

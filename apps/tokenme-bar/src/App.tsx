@@ -169,10 +169,30 @@ const [page, setPage] = useState<PageKey>(() => {
     // system locale the way the webview can — hand it the verdict once.
     void bridge.setUiLang(lang);
     let alive = true;
-    void bridge
-      .fetchReport(false)
-      .then((r) => alive && setReport(r))
-      .catch((e: unknown) => alive && setError(String(e)));
+    // The boot read can lose a race against the engine's own boot sequence
+    // (the fold lands before the webview has registered anything) and it can
+    // hit a transient index lock — either way a lost boot read used to need
+    // a restart, because the panel only re-receives the report on the next
+    // publish. Retry until it lands: the read is one in-memory clone, and
+    // the retry cancels itself once a report is in hand.
+    let reportRetry: number | null = null;
+    const fetchBootReport = () => {
+      void bridge
+        .fetchReport(false)
+        .then((r) => {
+          if (reportRetry !== null) {
+            window.clearTimeout(reportRetry);
+            reportRetry = null;
+          }
+          if (alive) setReport(r);
+        })
+        .catch((e: unknown) => {
+          if (!alive) return;
+          setError(String(e));
+          reportRetry = window.setTimeout(() => alive && fetchBootReport(), 3000);
+        });
+    };
+    fetchBootReport();
     // The theme pin and the money flag live in settings.json; applying them
     // before the first paint matters more than the rest of the sheet's state,
     // so they load at boot.
