@@ -571,12 +571,16 @@ export function BubbleApp() {
   // still in flight falls open (previous behavior) for that one press.
   const withinArt = (x: number, y: number) => {
     // Chrome that is part of the pet counts regardless of pixels.
+    let sawSurface = false;
     for (const sel of [".pet-token-badge", ".bubble-core"]) {
       const r = document.querySelector(sel)?.getBoundingClientRect();
-      if (r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+      if (!r) continue;
+      sawSurface = true;
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
     }
     const edge = document.querySelector<HTMLImageElement>(".pet-edge-art");
     if (edge?.src) {
+      sawSurface = true;
       const r = edge.getBoundingClientRect();
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
         const src = edge.currentSrc || edge.src;
@@ -584,31 +588,41 @@ export function BubbleApp() {
         if (!entry) { void loadAlpha(src); return true; }
         const ix = Math.floor((x - r.left) * (entry.w / r.width));
         const iy = Math.floor((y - r.top) * (entry.h / r.height));
-        if (ix < 0 || iy < 0 || ix >= entry.w || iy >= entry.h) return false;
-        return entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
+        if (ix >= 0 && iy >= 0 && ix < entry.w && iy < entry.h) {
+          return entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
+        }
+        return false;
       }
-      return false;
     }
     const sprite = document.querySelector<HTMLElement>(".pet-sprite");
     if (sprite) {
+      sawSurface = true;
       const r = sprite.getBoundingClientRect();
-      if (x < r.left || x > r.right || y < r.top || y > r.bottom) return false;
-      const cs = getComputedStyle(sprite);
-      const url = urlOf(cs.backgroundImage);
-      if (!url) return true;
-      const entry = alphaCache.get(url);
-      if (!entry) { void loadAlpha(url); return true; }
-      const sizeW = pxOf(cs.backgroundSize) ?? entry.w;
-      const sizeH = pxOf(cs.backgroundSize?.split(" ")[1]) ?? entry.h;
-      const posX = pxOf(cs.backgroundPosition) ?? 0;
-      const posY = pxOf(cs.backgroundPosition?.split(" ").slice(1).join(" ")) ?? 0;
-      const ix = Math.floor(((x - r.left) - posX) * (entry.w / sizeW));
-      const iy = Math.floor(((y - r.top) - posY) * (entry.h / sizeH));
-      if (ix < 0 || iy < 0 || ix >= entry.w || iy >= entry.h) return true;
-      return entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+        const cs = getComputedStyle(sprite);
+        const url = urlOf(cs.backgroundImage);
+        const entry = url ? alphaCache.get(url) : undefined;
+        if (url && !entry) { void loadAlpha(url); return true; }
+        if (url && entry) {
+          const sizeW = pxOf(cs.backgroundSize) ?? entry.w;
+          const sizeH = pxOf(cs.backgroundSize?.split(" ")[1]) ?? entry.h;
+          const posX = pxOf(cs.backgroundPosition) ?? 0;
+          const posY = pxOf(cs.backgroundPosition?.split(" ").slice(1).join(" ")) ?? 0;
+          const ix = Math.floor(((x - r.left) - posX) * (entry.w / sizeW));
+          const iy = Math.floor(((y - r.top) - posY) * (entry.h / sizeH));
+          if (ix >= 0 && iy >= 0 && ix < entry.w && iy < entry.h) {
+            return entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
+          }
+          return false;
+        }
+        return true;
+      }
     }
-    // Unknown skin shape: previous behavior.
-    return true;
+    // A recognized pet surface exists but the point missed every visible box:
+    // the transparent margin of the window. Gate it — this is exactly the
+    // "clicks outside the picture still reach the pet" report. (No surface at
+    // all means an unknown skin shape: previous behavior, ungated.)
+    return !sawSurface;
   };
 
   const onPointerDown = async (event: React.PointerEvent<HTMLDivElement>) => {
