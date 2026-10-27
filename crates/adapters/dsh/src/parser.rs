@@ -18,6 +18,21 @@
 //!
 //! `seq` is the dedupe half-key, `time` the wall clock — the day a call is
 //! billed to is the day it actually happened, on both formats.
+//!
+//! ## Forked sessions replay their parent
+//! The writer forks a session whenever the user resumes one: the new stream's
+//! header says `"isSeeded": true` with `"parentSession": "<parent id>"`, and
+//! the parent's events are re-emitted verbatim — same `seq`, same `time`, same
+//! tokens — before (and, when the fork was itself resumed, between) the fork's
+//! own calls. The replay closes with `session/end-seed` carrying
+//! `data.inherited: true`; a stream can carry several such markers, and only the
+//! LAST one ends the inherited range (measured 2026-10-27: fork `0f9b6ecd`'s
+//! 19 calls after its first marker were still the parent's, all 19 present in
+//! the parent's stream; `35e1d11f` had 466 of 487). Billing that range beside
+//! the parent counts those tokens twice — 144.31M reported against a true 87.0M
+//! on that day. The loader therefore skips the range when the parent stream is
+//! on disk (it is what the replay copies, and it bills itself); a fork whose
+//! parent is gone keeps the replay, since it is then the only copy.
 
 
 use std::path::Path;

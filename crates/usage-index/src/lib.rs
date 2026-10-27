@@ -858,6 +858,51 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot re-read of every dsh stream, because a resumed session's
+        // replay used to bill twice. The writer forks a session on resume and
+        // re-emits each of the parent's calls verbatim (same seq, same tokens,
+        // marked `isSeeded` + `parentSession`, the replay closed by
+        // `session/end-seed {"inherited": true}`); the adapter billed both
+        // copies, so a day read 144.31M against a true 87.0M (reported
+        // 2026-10-27, fork 0d3816f9 replaying parent a2c6077d). The adapter now
+        // skips the replay whenever the parent stream is on disk. The rows it
+        // already wrote must GO rather than update: the re-read re-emits only
+        // the fork's own calls under the SAME dedupe keys, so INSERT OR IGNORE
+        // would leave every duplicated replay row standing forever (the
+        // trae-turn-session precedent). `file_state` goes with them, so a
+        // source that happens to be unreadable right now (an unmounted volume)
+        // rebuilds in full on the next pass that can see it — only rows whose
+        // session file is actually gone are lost. Merged rows are another
+        // machine's truth and stay (`source NOT LIKE 'linux:%'`, the
+        // antigravity rule); the rollup rows rebuild lazily from `event` on the
+        // next report read.
+        const REPAIR_DSH_FORK_REPLAY: &str = "repair:dsh-fork-replay-1";
+        let dsh_fork: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_DSH_FORK_REPLAY],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if dsh_fork.is_none() {
+            const DSH_LOCAL_ROWS: &str =
+                "(SELECT id FROM event WHERE tool = 'dsh' AND source NOT LIKE 'linux:%')";
+            conn.execute(&format!("DELETE FROM call WHERE event_id IN ({DSH_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM quota WHERE event_id IN ({DSH_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute(&format!("DELETE FROM event WHERE id IN ({DSH_LOCAL_ROWS})"), [])
+                .map_err(sql_err)?;
+            conn.execute("DELETE FROM file_state WHERE tool = 'dsh'", []).map_err(sql_err)?;
+            conn.execute("DELETE FROM event_rollup WHERE tool = 'dsh' AND origin = ''", [])
+                .map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_DSH_FORK_REPLAY],
+            )
+            .map_err(sql_err)?;
+        }
         // One-shot retirement of the FunIDE lifetime projection, the same shape
         // as the dsh one above: the adapter stamped one event per session with
         // the session's `updatedAt`, so a session continued across a day

@@ -188,6 +188,20 @@ pub trait SourceAdapter: Send + Sync {
     /// must not abort the rest of the ingest pass.
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error>;
 
+    /// Whether a re-read of a changed file can yield FEWER events than the pass
+    /// before it.
+    ///
+    /// The index treats a log as append-only unless it shrank: it then retires
+    /// the file's rows wholesale, because a cursor cannot un-bill what a rewrite
+    /// removed. A whole-file source whose billed set is a function of the file's
+    /// CONTENT — dsh stops billing a resumed session's replayed parent range as
+    /// soon as the stream marks that range's end — needs the same treatment on
+    /// every change, or the range billed before the marker landed would sit in
+    /// the index forever beside the parent's own copy.
+    fn shrinks_on_reread(&self) -> bool {
+        false
+    }
+
     /// Live quota state that the logs do not carry. Codex embeds its rate window
     /// in every `token_count` record and so leaves this empty; tools that expose
     /// a quota only through a local server or a cached auth file answer here, and
