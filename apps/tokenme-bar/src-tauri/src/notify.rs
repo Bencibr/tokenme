@@ -1385,8 +1385,8 @@ mod tests {
         let (title, _) = copy_for("AgnesCode", Some("剩余 8578 点 · 限时 1240 · 每日刷新 7338"), 40.0, 1, Lang::En);
         assert_eq!(title, "AgnesCode · 8578 pts left · limited 1240 · daily refresh 7338");
         // Balance heads and the auto-claimed marker.
-        let (title, _) = copy_for("DSH", Some("余额 ¥26.70"), 0.0, 1, Lang::En);
-        assert_eq!(title, "DSH · Balance ¥26.70");
+        let (title, _) = copy_for("DeepSeek Harness", Some("余额 ¥26.70"), 0.0, 1, Lang::En);
+        assert_eq!(title, "DeepSeek Harness · Balance ¥26.70");
         let (title, _) = copy_for("MiniMax Code", Some("已自动签到 · +30"), 0.0, 1, Lang::En);
         assert_eq!(title, "MiniMax Code · Auto-claimed · +30");
         // A limit-less window.

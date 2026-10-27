@@ -76,7 +76,7 @@ Open Design 配额读 `~/.amr/config.json` 的 `profiles.prod`（`OPEN_DESIGN_HO
 
 ## dsh-doctor
 
-DSH 精度审计：把桌面应用自己的投影台账（`tokenUsage`）与索引里的数字并排打印，逐会话给出 `ok`、`MISMATCH`、`v3 stream`、`not indexed`、`indexed but no projection` 之一的 `status`。备注里是如实偏差的结构性原因——继承的 v4 之前事件、活在 `tokenUsage` 之外的子代理开销。无参数。
+DeepSeek Harness 精度审计：把桌面应用自己的投影台账（`tokenUsage`）与索引里的数字并排打印，逐会话给出 `ok`、`MISMATCH`、`v3 stream`、`not indexed`、`indexed but no projection` 之一的 `status`。备注里是如实偏差的结构性原因——继承的 v4 之前事件、活在 `tokenUsage` 之外的子代理开销。无参数。
 
 ```bash
 tokenme dsh-doctor
