@@ -1,21 +1,22 @@
 //! dsh adapter.
 //!
 //! One source: `<sessions-root>/<workspace>/<session>/session.jsonl.zstd` —
-//! zstd-compressed JSONL event streams, one file per agent session. Usage
-//! rides on per-call lines whose exact envelope the session's format version
-//! decides: v3 bills `assistant/chunk` (`{"type":"usage"}` with
-//! `inputTokens`/`outputTokens`/`cacheReadTokens`/`reasoningTokens`), v4
-//! bills `assistant/message` (`data.usage` with
-//! `inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`). Both
-//! name the uncached input `inputTokens` — the exclusive convention — and
-//! stamp every call with its own wall clock, so a session continued across
-//! days attributes each day's spend to that day.
+//! zstd-compressed JSONL event streams, one file per agent session. Usage rides
+//! on one line per call: `assistant/message` with `data.usage`
+//! (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`) for every
+//! DSH version from v3 on, and `assistant/chunk` (`{"type":"usage"}` with
+//! `reasoningTokens` among the stages) only in the oldest clients' streams. A
+//! header's `version` is the DSH client version that wrote the session — see
+//! [`paths`] — not a billing format: v3 and v4 both bill `assistant/message`.
+//! `inputTokens` names the uncached input everywhere (the exclusive convention),
+//! and every call carries its own wall clock, so a session continued across days
+//! attributes each day's spend to that day.
 //!
 //! The sessions roots follow the writer's own layout (see [`paths`]): the
 //! macOS CLI-era tree `~/.dsh/sessions` first, the desktop app's
 //! `%APPDATA%\dsh-desktop\harness\sessions` (Windows) /
 //! `~/Library/Application Support/dsh-desktop/harness/sessions` (macOS) second.
-//! Format v4 names the stream `session.v4.jsonl.zstd` and bills the same way;
+//! DSH v4 names the stream `session.v4.jsonl.zstd` and bills the same way;
 //! its projection cache (`storages/session_projcache`) is the writer's own
 //! cumulative ledger — read by the accuracy audit ([`doctor::ledger`]), never
 //! by billing: the projection holds the session's lifetime totals stamped
@@ -320,10 +321,11 @@ mod smoke {
     }
 
     #[test]
-    fn a_fork_of_a_v3_parent_still_bills_its_own_calls() {
+    fn the_oldest_chunk_envelope_still_bills() {
         let _env = crate::paths::lock_env();
         let dir = tempfile::tempdir().unwrap();
-        // No `isSeeded`/`parentSession` on a v3 header: nothing is replayed.
+        // The oldest clients billed on `assistant/chunk`; that envelope stays
+        // readable (and carries no seed of its own, so nothing is replayed).
         let bytes = zstd::stream::encode_all(
             [
                 r#"{"type":"session","version":3,"id":"session-v3","cwd":"/Users/dev/workspace/neuro"}"#,
@@ -340,6 +342,46 @@ mod smoke {
         std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
 
         assert_eq!(read_one(&path).len(), 1);
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
+    }
+
+    /// DSH v3's tree (`session.v3.jsonl.zstd`): its calls ride
+    /// `assistant/message` + `data.usage`, with `reasoningTokens` as a
+    /// sub-breakdown of `output` — the shape all 112 of this machine's v3
+    /// sessions carry. That file name used to sit outside `is_session_file`, so
+    /// 10,421 calls never reached the parser at all.
+    #[test]
+    fn a_v3_message_stream_bills_like_v4() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let lines = [
+            r#"{"type":"session","version":3,"id":"session-v3msg","createdAt":1788964757504,"cwd":"/Users/dev/workspace/neuro","isSeeded":false,"delegationDepth":0}"#,
+            r#"{"type":"request/header","seq":11,"time":1788964840000,"data":{"header":{"config":{"provider":"deepseek-official","model":"deepseek-v4-flash"}}}}"#,
+            r#"{"type":"assistant/message","seq":18,"time":1788964840362,"data":{"turn":1,"step":1,"usage":{"inputTokens":55611,"outputTokens":595,"totalTokens":56206,"cacheReadTokens":0,"reasoningTokens":494}}}"#,
+            r#"{"type":"assistant/message","seq":26,"time":1788964842669,"data":{"turn":1,"step":2,"usage":{"inputTokens":56029,"outputTokens":100,"totalTokens":56129,"cacheReadTokens":1280,"reasoningTokens":300}}}"#,
+        ];
+        let bytes = zstd::stream::encode_all(lines.join("\n").as_bytes(), 3).unwrap();
+        let path = dir
+            .path()
+            .join("sessions/--Users-dev-workspace-neuro--/session-v3msg/session.v3.jsonl.zstd");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        let sources = DshAdapter.discover(&DateFilter::default());
+        assert_eq!(sources.len(), 1, "a renamed v3 stream is a source");
+        let outcome = DshAdapter.read(&sources[0], ReadCursor(0)).unwrap();
+        assert_eq!(outcome.events.len(), 2);
+        let first = &outcome.events[0];
+        assert_eq!(first.session, "session-v3msg");
+        assert_eq!(first.dedupe_key.as_deref(), Some("session-v3msg#18"));
+        assert_eq!(first.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            first.counts,
+            TokenCounts { input: 55_611.0, cache_creation: 0.0, cache_read: 0.0, output: 595.0, reasoning: 494.0, credits: 0.0 }
+        );
+        // Reasoning is a sub-breakdown: beyond `output` it is clamped, not added.
+        assert_eq!(outcome.events[1].counts.reasoning, 100.0);
         std::env::remove_var(crate::paths::ENV_DSH_HOME);
     }
 

@@ -6,6 +6,7 @@ All notable changes to TokenMe are documented in this file. The format follows [
 
 ### Fixed
 
+- **DSH v3 会话树的用量回到统计里** — DSH 升级到 v4 时把当时的会话流改名为 `session.v3.jsonl.zstd`（v3/v4 是 DSH 客户端自己的版本号，不是计费格式），而适配器的文件名白名单只收 `session.jsonl.zstd` 与 `session.v4.jsonl.zstd`，于是 v3 写的会话**连 discover 都没进**：本机 112 个会话、10,421 次调用、约 1,985M tokens（2026-09-09 → 09-21）在报表里是空白。现在白名单收下 `.v3.`，并统一按 `assistant/message` 计费——DSH v3 与 v4 用的是同一种计费信封（v3 多一个 `reasoningTokens`，它是 `output` 的子集、没有 cache write），由信封而不是版本号决定怎么读；只有最老的客户端用 `assistant/chunk`，那条路径保留。重建后 dsh 由 24.3k → 34.7k 行，10,420 个可计调用全部入库（唯一例外是一行零用量）、逐 key 的 token 阶段与流内完全一致，09-18 由空白变为 392.8M。
 - **DSH 恢复会话（fork）不再把父会话的历史用量再算一遍** — 继续一次会话时，DSH 会 fork 一条新流：头部带 `isSeeded: true` + `parentSession`，把父会话的每一次调用原样重放（seq、时间、token 三者相同），再用 `session/end-seed {inherited: true}` 标记继承段结束；一个 fork 被再次恢复时还会有第二、第三个标记。适配器把重放段当新账目计费，同一笔消耗于是在父会话与 fork 下各记一次（2026-10-27 实测：今日读成 144.31M / 289 次调用，真值 87.0M —— fork `0d3816f9` 重放了父 `a2c6077d` 的全部 269 次；`0f9b6ecd` 与 `35e1d11f` 的重放还跨过了第一个标记）。现在父流仍在盘上时按**最后一个** inherited 标记跳过整段重放（父流自己计费），父流已删除则保留重放——它是那笔消耗的唯一副本；一次性迁移清掉存量 dsh 行与游标后按新口径重读（当天会话随后增长到 87.3M / 174 次，与 DSH 面板的 87.0M 对得上）。`dsh-doctor` 同步修好两处：会话名不再被 `strip_prefix("session-")` 弄成对不上索引的形态（此前整张台账都读成 `not indexed`），fork 行单列为 `fork` 状态而不是误报 `MISMATCH`。dsh 另外声明了 `shrinks_on_reread`：这类“重读完整文件、可计集合会变少”的源每次变更都先清后读，否则第二次 resume 追加标记后，先前已入库的重放行会永久留在索引里。
 
 ## [0.1.9] — 2026-10-26

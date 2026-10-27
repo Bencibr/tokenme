@@ -12,11 +12,17 @@
 //!
 //! ## Record shape
 //! Each file is a zstd-compressed JSONL event stream for one agent session:
-//! a `session` header line (`id`, `cwd`; format v4 adds `"version":4` and
-//! renames the file `session.v4.jsonl.zstd`), `request/header` lines carrying
-//! `data.header.config.model`, and per-step `assistant/chunk` lines whose
-//! `data.chunk` is `{"type":"usage","usage":{inputTokens, outputTokens,
-//! cacheReadTokens, reasoningTokens}}` — one billed call each.
+//! a `session` header line (`id`, `cwd`, and the DSH client `version` that wrote
+//! it), `request/header` lines carrying `data.header.config.model`, and one
+//! `assistant/message` line per step whose `data.usage` is
+//! `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}` — one billed
+//! call each. (The oldest clients wrote `assistant/chunk` with
+//! `data.chunk = {"type":"usage", usage:{…}}` instead; the parser reads both.)
+//!
+//! The header's `version` — v3 for the tree DSH v3 left behind, v4 for what it
+//! writes now — is that client's own version, echoed in the file name
+//! (`session.v3.jsonl.zstd` / `session.v4.jsonl.zstd`); it does not change how a
+//! call is billed.
 //!
 //! ## Token convention
 //! Exclusive: `inputTokens` excludes `cacheReadTokens` (step 1 of a fresh
@@ -137,18 +143,21 @@ pub fn diagnostic_candidates() -> Vec<(&'static str, PathBuf)> {
     out
 }
 
-/// The writer names its stream `session.jsonl.zstd`; format v4 (the session
-/// header carries `"version":4`, everything else the same shape) names it
-/// `session.v4.jsonl.zstd` — same directory layout either way. Both bill from
-/// their own events — v3 on `assistant/chunk`, v4 on `assistant/message` (see
-/// the parser).
+/// The writer names its stream `session.jsonl.zstd`; a client upgrade renames
+/// it to `session.v<DSH version>.jsonl.zstd` — `session.v3.jsonl.zstd` is what
+/// DSH v3 wrote, `session.v4.jsonl.zstd` what v4 writes — and starts the next
+/// one under the new spelling. The number is the client's own version, not a
+/// billing format. All three spellings are one data unit, and reading only the
+/// bare one made the 112 DSH v3 sessions (2026-09-09 → 09-21, 10,421 calls)
+/// invisible to the index entirely (measured 2026-10-27: the v3 tree was
+/// renamed when v4 took over on 09-21 11:27).
 pub fn is_session_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
     matches!(
         path.file_name().and_then(|n| n.to_str()),
-        Some("session.jsonl.zstd") | Some("session.v4.jsonl.zstd")
+            Some("session.jsonl.zstd") | Some("session.v3.jsonl.zstd") | Some("session.v4.jsonl.zstd")
     )
 }
 
@@ -216,6 +225,11 @@ mod tests {
         std::fs::write(&v4, b"x").unwrap();
         assert!(is_session_file(&v3));
         assert!(is_session_file(&v4));
+        // The format upgrade renames the live file; the renamed tree is the
+        // only copy of everything written before it.
+        let renamed = dir.path().join("session.v3.jsonl.zstd");
+        std::fs::write(&renamed, b"x").unwrap();
+        assert!(is_session_file(&renamed));
         // A workspace sibling that only looks close is not a stream.
         let stray = dir.path().join("session.v4.jsonl");
         std::fs::write(&stray, b"x").unwrap();

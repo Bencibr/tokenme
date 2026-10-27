@@ -1,8 +1,9 @@
 //! Walk + read for the DSH session tree. One data unit: every session stream
-//! (`session.jsonl.zstd`, or `session.v4.jsonl.zstd` for format v4) is a
+//! (`session.jsonl.zstd`, or `session.v<DSH version>.jsonl.zstd` once a client
+//! upgrade has renamed it — `session.v3`, `session.v4`, see [`paths`]) is a
 //! whole-file unit (`FileKind::Tree`) decompressed and re-parsed on change.
-//! Both formats bill per call from the stream itself — v4's
-//! `assistant/message` usage made its projection cache redundant, and the
+//! Every DSH version bills per call from the stream itself — the v4 streams'
+//! `assistant/message` usage made the projection cache redundant, and that
 //! projection's lifetime-cumulative event mis-attributed every day after the
 //! session's first (a session continued across days dragged its whole total
 //! into the newest day).

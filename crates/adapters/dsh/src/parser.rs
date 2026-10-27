@@ -6,18 +6,27 @@
 //! - `{"type":"session", id, cwd, …}` — session identity and project path
 //! - `{"type":"request/header", data.header.config.model}` — the step's model,
 //!   carried forward until the next header
-//! - format v3: `{"type":"assistant/chunk", seq, time, data.chunk =
+//! - `{"type":"assistant/chunk", seq, time, data.chunk =
 //!   {"type":"usage", usage:{inputTokens, outputTokens, cacheReadTokens,
-//!   reasoningTokens}}}` — one billed call
-//! - format v4: `{"type":"assistant/message", seq, time,
-//!   data.usage:{inputTokens, outputTokens, cacheReadTokens,
-//!   cacheWriteTokens}}` — same role, different envelope, and `inputTokens`
-//!   is uncached input there too (verified live: the per-call sums equal the
-//!   projection's `uncachedInputTokens + cacheReadTokens + outputTokens`
-//!   exactly, so nothing is counted twice and nothing hides)
+//!   reasoningTokens}}}` — one billed call, the envelope of the oldest clients
+//! - `{"type":"assistant/message", seq, time, data.usage:{inputTokens,
+//!   outputTokens, cacheReadTokens, cacheWriteTokens}}` — the envelope every
+//!   current DSH client writes; DSH v3 writes it too (there with
+//!   `reasoningTokens` as a sub-breakdown of `output` and no cache write), so the
+//!   client version never decides how a call is read. `inputTokens` is uncached
+//!   input in both (verified live: the per-call sums equal the projection's
+//!   `uncachedInputTokens + cacheReadTokens + outputTokens` exactly, so nothing
+//!   is counted twice and nothing hides)
 //!
 //! `seq` is the dedupe half-key, `time` the wall clock — the day a call is
-//! billed to is the day it actually happened, on both formats.
+//! billed to is the day it actually happened, on every envelope.
+//!
+//! ## `v3` / `v4` are DSH's own versions
+//! The `version` a session header carries — and the same number in the file
+//! name, `session.v3.jsonl.zstd` / `session.v4.jsonl.zstd` — is the DSH client
+//! version that wrote the stream, not a distinction between two billing
+//! formats: both versions bill through `assistant/message`. Reading it as a
+//! format switch is what made DSH v3's calls look like a foreign envelope.
 //!
 //! ## Forked sessions replay their parent
 //! The writer forks a session whenever the user resumes one: the new stream's
@@ -48,10 +57,6 @@ pub struct Stream {
     session: Option<String>,
     project: Option<String>,
     model: Option<String>,
-    /// The session line's `version` decides the usage envelope: v3 bills on
-    /// `assistant/chunk`, v4 on `assistant/message`. A stream that named no
-    /// version is parsed as v3 — the older writer.
-    v4: bool,
 }
 
 pub enum Parsed {
@@ -81,7 +86,6 @@ impl Stream {
                     .and_then(|c| Path::new(c).file_name())
                     .and_then(|n| n.to_str())
                     .map(str::to_string);
-                self.v4 = v.get("version").and_then(Value::as_i64) == Some(4);
                 Parsed::Noise
             }
             Some("request/header") => {
@@ -92,7 +96,13 @@ impl Stream {
                 Parsed::Noise
             }
             Some("assistant/chunk") => self.usage_chunk(&v, source_key),
-            Some("assistant/message") if self.v4 => self.message_usage(&v, source_key),
+            // DSH v4 bills here, and so does v3: both versions write
+            // `assistant/message` + `data.usage`, with `reasoningTokens` as a
+            // sub-breakdown of `output` on v3 (measured 2026-10-27: all 10,421
+            // DSH v3 calls carry this shape, 55,611 input / 0 cacheRead / 595
+            // output / 494 reasoning on a sample step). Only the oldest clients
+            // used the `assistant/chunk` envelope above, which stays for them.
+            Some("assistant/message") => self.message_usage(&v, source_key),
             _ => Parsed::Noise,
         }
     }
@@ -120,21 +130,24 @@ impl Stream {
         self.event(counts, v, source_key)
     }
 
-    /// The v4 billed call: usage rides `data.usage` directly, with the cache
-    /// write the v3 envelope never carried. `totalTokens` in the wire is the
-    /// sum of the others and is not read — the index sums its own stages.
+    /// The billed call: usage rides `data.usage` directly, with the cache write
+    /// the `assistant/chunk` envelope never carried. `totalTokens` in the wire is
+    /// the sum of the others and is not read — the index sums its own stages.
     fn message_usage(&self, v: &Value, source_key: &str) -> Parsed {
         let usage = match v.pointer("/data/usage") {
             Some(u) if u.is_object() => u,
             _ => return Parsed::Noise,
         };
         let num = |k: &str| usage.get(k).and_then(Value::as_f64).unwrap_or(0.0).max(0.0);
+        let output = num("outputTokens");
         let counts = TokenCounts {
             input: num("inputTokens"),
             cache_creation: num("cacheWriteTokens"),
             cache_read: num("cacheReadTokens"),
-            output: num("outputTokens"),
-            reasoning: 0.0,
+            output,
+            // A sub-breakdown of `output` on DSH v3, absent in v4; clamped
+            // so it never inflates a total.
+            reasoning: num("reasoningTokens").min(output),
             credits: 0.0,
         };
         self.event(counts, v, source_key)
