@@ -470,8 +470,13 @@ fn one_adapter(
         acc.files_changed += 1;
         // A shrink, or an mtime that moved backwards, means the bytes behind our
         // cursor are no longer the bytes we indexed: delete this file's rows and
-        // start over, or a rewritten log would be counted twice.
-        let rewritten = (file.size as i64) < prev.size || file.mtime_ms < prev.mtime_ms;
+        // start over, or a rewritten log would be counted twice. A source whose
+        // billed set can also LOSE rows on an ordinary append (dsh retiring a
+        // resumed session's replayed range) says so itself — its rows go the
+        // same way, or the retired calls would stay in the index for good.
+        let rewritten = (file.size as i64) < prev.size
+            || file.mtime_ms < prev.mtime_ms
+            || adapter.shrinks_on_reread();
         if rewritten {
             acc.purged += idx.purge_source(&key)?;
             jobs.push(Job { file, cursor: 0, prev_events: 0 });

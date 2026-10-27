@@ -27,10 +27,12 @@
 //! - `dsh_audit`: those same sessions reconciled against DSH's own projection
 //!   ledger, field by field — `match: false` is a double/under-count, named
 //!   per session, with `dsh_regressions` flagging any session whose summed
-//!   totals shrank between passes (a cumulative store only grows). v3-era
-//!   streams spell their session id `session-<uuid>` while the ledger keys
-//!   the bare uuid and excludes those events from its totals by design, so
-//!   v3 rows are labeled `v3-stream` and never counted as mismatches
+//!   totals shrank between passes (a cumulative store only grows). A fork
+//!   (the writer's `isSeeded` resume) replays its parent's calls and its
+//!   `totals` include them while the index bills them under the parent stream,
+//!   so those rows are labeled `fork` and never counted as mismatches; v3-era
+//!   streams carry no projection totals for their per-call events, so they are
+//!   labeled `v3-stream` and are neither compared nor treated as regressions.
 //!
 //! Rotation keeps one 2 MiB generation; the file is always safe to delete.
 
@@ -135,31 +137,30 @@ pub fn pass(
     }
     drop(last_totals);
     let mut dsh_sessions: Vec<_> = Vec::new();
-    let mut ledger_by_id: BTreeMap<String, (f64, f64, f64, f64)> = BTreeMap::new();
+    // (in, out, cache_read, cache_creation, format, is_seeded)
+    let mut ledger_by_id: BTreeMap<String, (f64, f64, f64, f64, u8, bool)> = BTreeMap::new();
     for row in usage_adapter_dsh::ledger() {
-        ledger_by_id.insert(row.session.clone(), (row.input, row.output, row.cache_read, row.cache_write));
+        ledger_by_id.insert(
+            row.session.clone(),
+            (row.input, row.output, row.cache_read, row.cache_write, row.format, row.is_seeded),
+        );
     }
     for row in &dsh_rows {
         let id = row.session.clone();
-        // v3-era streams spell the header id `session-<uuid>` while the ledger
-        // keys the bare uuid — and the projection deliberately excludes
-        // inherited v3 events from its totals, so there is nothing to
-        // reconcile against: labeling these `match: false` cried wolf on
-        // every pass.
-        let audit = if id.starts_with("session-") {
-            json!({ "ledger": "v3-stream", "note": "projection totals exclude inherited v3 events by design" })
-        } else {
-            match ledger_by_id.get(&id) {
-                Some(l) => {
-                    let (li, lo, lcr, lcc) = *l;
-                    let matches = (row.input - li).abs() < 0.5
-                        && (row.output - lo).abs() < 0.5
-                        && (row.cache_read - lcr).abs() < 0.5
-                        && (row.cache_creation - lcc).abs() < 0.5;
-                    json!({ "ledger_in": li, "ledger_out": lo, "ledger_cr": lcr, "ledger_cc": lcc, "match": matches })
-                }
-                None => json!({ "ledger": "absent", "match": false }),
+        let audit = match ledger_by_id.get(&id) {
+            // A fork's ledger totals carry the parent's replayed calls, which
+            // the index bills under the parent stream: the gap is the shape.
+            Some((_, _, _, _, format, true)) if *format >= 4 => json!({ "ledger": "fork", "note": "the inherited replay bills under the parent stream" }),
+            Some((li, lo, lcr, lcc, format, false)) if *format >= 4 => {
+                let matches = (row.input - li).abs() < 0.5
+                    && (row.output - lo).abs() < 0.5
+                    && (row.cache_read - lcr).abs() < 0.5
+                    && (row.cache_creation - lcc).abs() < 0.5;
+                json!({ "ledger_in": li, "ledger_out": lo, "ledger_cr": lcr, "ledger_cc": lcc, "match": matches })
             }
+            // A v3 stream carries per-call events but no projection totals.
+            Some(_) => json!({ "ledger": "v3-stream", "note": "no projection totals for a v3 stream" }),
+            None => json!({ "ledger": "absent", "match": false }),
         };
         dsh_sessions.push(json!({
             "id": id,
@@ -168,8 +169,14 @@ pub fn pass(
             "audit": audit,
         }));
     }
-    // A ledger row with no index event at all (usage the panel never picked up).
-    for (id, (li, lo, lcr, lcc)) in &ledger_by_id {
+    // A ledger row with no index event at all (usage the panel never picked
+    // up). A fork that has only replayed so far bills nothing of its own, and
+    // a v3 stream's calls are outside this audit's reach: neither is a
+    // regression.
+    for (id, (li, lo, lcr, lcc, format, seeded)) in &ledger_by_id {
+        if *seeded || *format < 4 {
+            continue;
+        }
         if !dsh_rows.iter().any(|r| r.session == *id) && (li + lo + lcr + lcc) > 0.0 {
             dsh_sessions.push(json!({
                 "id": id, "in": li, "out": lo, "cr": lcr, "cc": lcc,

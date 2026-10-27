@@ -32,6 +32,11 @@ pub struct LedgerRow {
     /// Events the session inherited from an older format; their tokens may
     /// sit outside this projection's totals.
     pub inherited_events: u64,
+    /// The writer forked this session from a parent and replayed every parent
+    /// event into it. `totals` then covers the replayed calls too, while the
+    /// index bills them under the parent stream (see the parser docs) — a
+    /// structural difference, not a divergence.
+    pub is_seeded: bool,
     /// Subagent entries on the projection; their spend is not in `totals`.
     pub subagents: usize,
     /// The projection file's own path (empty for stream-only sessions).
@@ -51,43 +56,53 @@ pub fn ledger() -> Vec<LedgerRow> {
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
             let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-            let session = stem.strip_prefix("session-").unwrap_or(stem).to_string();
-        let totals = v.pointer("/record/rows/tokenUsage/val/totals");
-        let num = |k: &str| {
-            totals
-                .and_then(|t| t.get(k))
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-                .max(0.0)
-        };
-        out.push(LedgerRow {
-            session,
-            format: v
-                .pointer("/record/identity/formatVersion")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u8,
-            cwd: v
-                .pointer("/record/identity/cwd")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            input: num("uncachedInputTokens"),
-            output: num("outputTokens"),
-            cache_read: num("cacheReadTokens"),
-            cache_write: num("cacheWriteTokens"),
-            last_prompt_at: v
-                .pointer("/record/rows/sessionListMetadata/val/lastPromptAt")
-                .and_then(Value::as_i64),
-            inherited_events: v
-                .pointer("/record/identity/inheritedEventCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            subagents: v
-                .pointer("/record/rows/subagent/val")
-                .and_then(Value::as_object)
-                .map(|o| o.len())
-                .unwrap_or(0),
-            projection: Some(path),
-        });
+            // The index keys a session by the stream header's own id, which
+            // carries the writer's `session-` prefix — the projection file name
+            // is that same id verbatim (only its continuable subagents are named
+            // by a bare uuid, and their streams say so too). Stripping the
+            // prefix here used to leave every prefixed session unmatched, and a
+            // whole ledger read as `not indexed`.
+            let session = stem.to_string();
+            let totals = v.pointer("/record/rows/tokenUsage/val/totals");
+            let num = |k: &str| {
+                totals
+                    .and_then(|t| t.get(k))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+                    .max(0.0)
+            };
+            out.push(LedgerRow {
+                session,
+                format: v
+                    .pointer("/record/identity/formatVersion")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u8,
+                cwd: v
+                    .pointer("/record/identity/cwd")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                input: num("uncachedInputTokens"),
+                output: num("outputTokens"),
+                cache_read: num("cacheReadTokens"),
+                cache_write: num("cacheWriteTokens"),
+                last_prompt_at: v
+                    .pointer("/record/rows/sessionListMetadata/val/lastPromptAt")
+                    .and_then(Value::as_i64),
+                inherited_events: v
+                    .pointer("/record/identity/inheritedEventCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                is_seeded: v
+                    .pointer("/record/identity/isSeeded")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                subagents: v
+                    .pointer("/record/rows/subagent/val")
+                    .and_then(Value::as_object)
+                    .map(|o| o.len())
+                    .unwrap_or(0),
+                projection: Some(path),
+            });
         }
     }
     out.sort_by(|a, b| a.session.cmp(&b.session));

@@ -1,21 +1,22 @@
 //! dsh adapter.
 //!
 //! One source: `<sessions-root>/<workspace>/<session>/session.jsonl.zstd` —
-//! zstd-compressed JSONL event streams, one file per agent session. Usage
-//! rides on per-call lines whose exact envelope the session's format version
-//! decides: v3 bills `assistant/chunk` (`{"type":"usage"}` with
-//! `inputTokens`/`outputTokens`/`cacheReadTokens`/`reasoningTokens`), v4
-//! bills `assistant/message` (`data.usage` with
-//! `inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`). Both
-//! name the uncached input `inputTokens` — the exclusive convention — and
-//! stamp every call with its own wall clock, so a session continued across
-//! days attributes each day's spend to that day.
+//! zstd-compressed JSONL event streams, one file per agent session. Usage rides
+//! on one line per call: `assistant/message` with `data.usage`
+//! (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`) for every
+//! DSH version from v3 on, and `assistant/chunk` (`{"type":"usage"}` with
+//! `reasoningTokens` among the stages) only in the oldest clients' streams. A
+//! header's `version` is the DSH client version that wrote the session — see
+//! [`paths`] — not a billing format: v3 and v4 both bill `assistant/message`.
+//! `inputTokens` names the uncached input everywhere (the exclusive convention),
+//! and every call carries its own wall clock, so a session continued across days
+//! attributes each day's spend to that day.
 //!
 //! The sessions roots follow the writer's own layout (see [`paths`]): the
 //! macOS CLI-era tree `~/.dsh/sessions` first, the desktop app's
 //! `%APPDATA%\dsh-desktop\harness\sessions` (Windows) /
 //! `~/Library/Application Support/dsh-desktop/harness/sessions` (macOS) second.
-//! Format v4 names the stream `session.v4.jsonl.zstd` and bills the same way;
+//! DSH v4 names the stream `session.v4.jsonl.zstd` and bills the same way;
 //! its projection cache (`storages/session_projcache`) is the writer's own
 //! cumulative ledger — read by the accuracy audit ([`doctor::ledger`]), never
 //! by billing: the projection holds the session's lifetime totals stamped
@@ -84,6 +85,14 @@ impl SourceAdapter for DshAdapter {
 
     fn read(&self, file: &SourceFile, cursor: ReadCursor) -> Result<ReadOutcome, Error> {
         loader::read(file, cursor)
+    }
+
+    /// A resumed session's stream bills fewer calls once the seed marker lands
+    /// (see [`parser`]), and a second resume adds a marker that retires calls
+    /// billed in the meantime — so every change re-reads from scratch and the
+    /// old rows go with it.
+    fn shrinks_on_reread(&self) -> bool {
+        true
     }
 }
 
@@ -172,6 +181,242 @@ mod smoke {
         ];
         let jsonl = lines.join("\n");
         zstd::stream::encode_all(jsonl.as_bytes(), 3).unwrap()
+    }
+
+    /// A resumed session: the writer forks the stream, replays the parent's
+    /// calls verbatim and marks the replay's end with `session/end-seed`
+    /// `{"inherited": true}`. Both files on disk, the same calls must not bill
+    /// twice (measured live 2026-10-27: fork 0d3816f9 replayed all 269 calls of
+    /// parent a2c6077d, and the day read 144.31M against a true 87.0M).
+    fn write_fork_pair() -> (Vec<u8>, Vec<u8>) {
+        let parent = [
+            r#"{"type":"session","version":4,"id":"session-parent","createdAt":1793070000000,"cwd":"/Users/dev/workspace/neuro","isSeeded":false,"delegationDepth":0}"#,
+            r#"{"type":"request/header","seq":11,"time":1793070010000,"data":{"header":{"config":{"provider":"deepseek-official","model":"deepseek-v4-flash"}}}}"#,
+            r#"{"type":"assistant/message","seq":22,"time":1793070020000,"data":{"turn":1,"step":1,"usage":{"inputTokens":1000,"outputTokens":10,"cacheReadTokens":9000,"totalTokens":10010}}}"#,
+            r#"{"type":"assistant/message","seq":33,"time":1793070030000,"data":{"turn":1,"step":2,"usage":{"inputTokens":200,"outputTokens":20,"cacheReadTokens":10000,"totalTokens":10220}}}"#,
+            r#"{"type":"turn/end","seq":40,"time":1793070031000,"data":{"turn":1}}"#,
+        ];
+        let fork = [
+            r#"{"type":"session","version":4,"id":"session-fork","createdAt":1793070760830,"cwd":"/Users/dev/workspace/neuro","parentSession":"session-parent","isSeeded":true,"delegationDepth":0}"#,
+            r#"{"type":"request/header","seq":11,"time":1793070010000,"data":{"header":{"config":{"provider":"deepseek-official","model":"deepseek-v4-flash"}}}}"#,
+            r#"{"type":"assistant/message","seq":22,"time":1793070020000,"data":{"turn":1,"step":1,"usage":{"inputTokens":1000,"outputTokens":10,"cacheReadTokens":9000,"totalTokens":10010}}}"#,
+            r#"{"type":"assistant/message","seq":33,"time":1793070030000,"data":{"turn":1,"step":2,"usage":{"inputTokens":200,"outputTokens":20,"cacheReadTokens":10000,"totalTokens":10220}}}"#,
+            r#"{"type":"turn/end","seq":40,"time":1793070031000,"data":{"turn":1}}"#,
+            r#"{"type":"session/end-seed","seq":41,"time":1793070431848,"data":{"inherited":true}}"#,
+            r#"{"type":"assistant/message","seq":52,"time":1793070780000,"data":{"turn":2,"step":1,"usage":{"inputTokens":300,"outputTokens":30,"cacheReadTokens":11000,"totalTokens":11330}}}"#,
+        ];
+        (
+            zstd::stream::encode_all(parent.join("\n").as_bytes(), 3).unwrap(),
+            zstd::stream::encode_all(fork.join("\n").as_bytes(), 3).unwrap(),
+        )
+    }
+
+    fn write_fork_tree(dir: &std::path::Path, parent: Option<&[u8]>, fork: &[u8]) -> std::path::PathBuf {        let workspace = dir.join("sessions/--Users-dev-workspace-neuro--");
+        let fork_path = workspace.join("session-fork/session.v4.jsonl.zstd");
+        std::fs::create_dir_all(fork_path.parent().unwrap()).unwrap();
+        std::fs::write(&fork_path, fork).unwrap();
+        if let Some(bytes) = parent {
+            let parent_path = workspace.join("session-parent/session.v4.jsonl.zstd");
+            std::fs::create_dir_all(parent_path.parent().unwrap()).unwrap();
+            std::fs::write(&parent_path, bytes).unwrap();
+        }
+        fork_path
+    }
+
+    fn read_one(path: &std::path::Path) -> Vec<usage_core::UsageEvent> {
+        let file = SourceFile {
+            path: path.to_path_buf(),
+            kind: FileKind::Tree,
+            size: std::fs::metadata(path).unwrap().len(),
+            mtime_ms: 0,
+        };
+        loader::read(&file, ReadCursor(0)).unwrap().events
+    }
+
+    #[test]
+    fn a_fork_does_not_bill_its_parents_replayed_calls() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let (parent, fork) = write_fork_pair();
+        let fork_path = write_fork_tree(dir.path(), Some(&parent), &fork);
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        let parent_events = read_one(&dir.path().join("sessions/--Users-dev-workspace-neuro--/session-parent/session.v4.jsonl.zstd"));
+        assert_eq!(parent_events.len(), 2, "the parent bills its own calls");
+
+        let fork_events = read_one(&fork_path);
+        assert_eq!(fork_events.len(), 1, "the replayed range belongs to the parent");
+        assert_eq!(fork_events[0].session, "session-fork");
+        assert_eq!(fork_events[0].dedupe_key.as_deref(), Some("session-fork#52"));
+        // The replay's own `request/header` lines still feed the parser, so the
+        // fork's first call carries the model the session was billed under.
+        assert_eq!(fork_events[0].model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(fork_events[0].counts, TokenCounts { input: 300.0, cache_creation: 0.0, cache_read: 11_000.0, output: 30.0, reasoning: 0.0, credits: 0.0 });
+
+        // Family-wide totals: 2 parent calls + 1 fork call, never 4.
+        let total = parent_events.iter().chain(fork_events.iter())
+            .map(|e| e.counts.total())
+            .sum::<f64>();
+        assert_eq!(total, 10_010.0 + 10_220.0 + 11_330.0);
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
+    }
+
+    #[test]
+    fn a_fork_whose_parent_is_gone_keeps_the_replay() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let (_parent, fork) = write_fork_pair();
+        let fork_path = write_fork_tree(dir.path(), None, &fork);
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        let fork_events = read_one(&fork_path);
+        assert_eq!(fork_events.len(), 3, "the replay is the only copy of that spend");
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
+    }
+
+    /// A resumed session can be re-homed under another workspace slug; the
+    /// parent still owns the replay, so the fallback lookup must find it there.
+    #[test]
+    fn a_parent_in_a_peer_workspace_dir_still_absorbs_the_replay() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let (parent, fork) = write_fork_pair();
+        let fork_path = dir
+            .path()
+            .join("sessions/--Users-dev-workspace-moved--/session-fork/session.v4.jsonl.zstd");
+        let parent_path = dir
+            .path()
+            .join("sessions/--Users-dev-workspace-neuro--/session-parent/session.v4.jsonl.zstd");
+        for path in [&fork_path, &parent_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&fork_path, &fork).unwrap();
+        std::fs::write(&parent_path, &parent).unwrap();
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        assert_eq!(read_one(&fork_path).len(), 1, "peer workspace, same family, one owner");
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
+    }
+
+    /// A seeded header with no `inherited` marker at all: nothing separates the
+    /// replay from the fork's own calls, so the safe answer is to bill the whole
+    /// stream — never to bill nothing (measured 2026-10-27: every fork on this
+    /// machine carried a marker, but the writer's older builds may not).
+    #[test]
+    fn a_seeded_stream_without_a_marker_bills_every_call() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let (parent, _fork) = write_fork_pair();
+        let unmarked = [
+            r#"{"type":"session","version":4,"id":"session-fork","createdAt":1793070760830,"cwd":"/Users/dev/workspace/neuro","parentSession":"session-parent","isSeeded":true,"delegationDepth":0}"#,
+            r#"{"type":"assistant/message","seq":22,"time":1793070020000,"data":{"turn":1,"step":1,"usage":{"inputTokens":1000,"outputTokens":10,"cacheReadTokens":9000}}}"#,
+            r#"{"type":"assistant/message","seq":33,"time":1793070030000,"data":{"turn":1,"step":2,"usage":{"inputTokens":200,"outputTokens":20,"cacheReadTokens":10000}}}"#,
+        ];
+        let fork = zstd::stream::encode_all(unmarked.join("\n").as_bytes(), 3).unwrap();
+        let fork_path = write_fork_tree(dir.path(), Some(&parent), &fork);
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        assert_eq!(read_one(&fork_path).len(), 2, "no boundary means no skip");
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
+    }
+
+    #[test]
+    fn the_oldest_chunk_envelope_still_bills() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        // The oldest clients billed on `assistant/chunk`; that envelope stays
+        // readable (and carries no seed of its own, so nothing is replayed).
+        let bytes = zstd::stream::encode_all(
+            [
+                r#"{"type":"session","version":3,"id":"session-v3","cwd":"/Users/dev/workspace/neuro"}"#,
+                r#"{"type":"assistant/chunk","seq":30,"time":1793070020000,"data":{"chunk":{"type":"usage","usage":{"inputTokens":1000,"outputTokens":10,"cacheReadTokens":0}}}}"#,
+            ]
+            .join("\n")
+            .as_bytes(),
+            3,
+        )
+        .unwrap();
+        let path = dir.path().join("sessions/--Users-dev-workspace-neuro--/session-v3/session.jsonl.zstd");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        assert_eq!(read_one(&path).len(), 1);
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
+    }
+
+    /// DSH v3's tree (`session.v3.jsonl.zstd`): its calls ride
+    /// `assistant/message` + `data.usage`, with `reasoningTokens` as a
+    /// sub-breakdown of `output` — the shape all 112 of this machine's v3
+    /// sessions carry. That file name used to sit outside `is_session_file`, so
+    /// 10,421 calls never reached the parser at all.
+    #[test]
+    fn a_v3_message_stream_bills_like_v4() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let lines = [
+            r#"{"type":"session","version":3,"id":"session-v3msg","createdAt":1788964757504,"cwd":"/Users/dev/workspace/neuro","isSeeded":false,"delegationDepth":0}"#,
+            r#"{"type":"request/header","seq":11,"time":1788964840000,"data":{"header":{"config":{"provider":"deepseek-official","model":"deepseek-v4-flash"}}}}"#,
+            r#"{"type":"assistant/message","seq":18,"time":1788964840362,"data":{"turn":1,"step":1,"usage":{"inputTokens":55611,"outputTokens":595,"totalTokens":56206,"cacheReadTokens":0,"reasoningTokens":494}}}"#,
+            r#"{"type":"assistant/message","seq":26,"time":1788964842669,"data":{"turn":1,"step":2,"usage":{"inputTokens":56029,"outputTokens":100,"totalTokens":56129,"cacheReadTokens":1280,"reasoningTokens":300}}}"#,
+        ];
+        let bytes = zstd::stream::encode_all(lines.join("\n").as_bytes(), 3).unwrap();
+        let path = dir
+            .path()
+            .join("sessions/--Users-dev-workspace-neuro--/session-v3msg/session.v3.jsonl.zstd");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        let sources = DshAdapter.discover(&DateFilter::default());
+        assert_eq!(sources.len(), 1, "a renamed v3 stream is a source");
+        let outcome = DshAdapter.read(&sources[0], ReadCursor(0)).unwrap();
+        assert_eq!(outcome.events.len(), 2);
+        let first = &outcome.events[0];
+        assert_eq!(first.session, "session-v3msg");
+        assert_eq!(first.dedupe_key.as_deref(), Some("session-v3msg#18"));
+        assert_eq!(first.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            first.counts,
+            TokenCounts { input: 55_611.0, cache_creation: 0.0, cache_read: 0.0, output: 595.0, reasoning: 494.0, credits: 0.0 }
+        );
+        // Reasoning is a sub-breakdown: beyond `output` it is clamped, not added.
+        assert_eq!(outcome.events[1].counts.reasoning, 100.0);
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
+    }
+
+    /// A fork resumed a second time carries a SECOND inherited marker, and the
+    /// calls between the two are the parent's as well (measured live 2026-10-27:
+    /// fork `0f9b6ecd`'s 19 calls after its first marker were all present in the
+    /// parent's stream, `35e1d11f` 466 of 487). Only the last marker ends the
+    /// replay — stopping at the first one leaves that stretch double-billed.
+    #[test]
+    fn a_second_seed_marker_extends_the_skipped_replay() {
+        let _env = crate::paths::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let parent = [
+            r#"{"type":"session","version":4,"id":"session-parent","createdAt":1793070000000,"cwd":"/Users/dev/workspace/neuro","isSeeded":false,"delegationDepth":0}"#,
+            r#"{"type":"assistant/message","seq":22,"time":1793070020000,"data":{"turn":1,"step":1,"usage":{"inputTokens":1000,"outputTokens":10,"cacheReadTokens":9000}}}"#,
+            r#"{"type":"assistant/message","seq":33,"time":1793070030000,"data":{"turn":1,"step":2,"usage":{"inputTokens":200,"outputTokens":20,"cacheReadTokens":10000}}}"#,
+            r#"{"type":"assistant/message","seq":44,"time":1793070040000,"data":{"turn":2,"step":1,"usage":{"inputTokens":300,"outputTokens":30,"cacheReadTokens":11000}}}"#,
+        ];
+        let fork = [
+            r#"{"type":"session","version":4,"id":"session-fork","createdAt":1793070760830,"cwd":"/Users/dev/workspace/neuro","parentSession":"session-parent","isSeeded":true,"delegationDepth":0}"#,
+            r#"{"type":"assistant/message","seq":22,"time":1793070020000,"data":{"turn":1,"step":1,"usage":{"inputTokens":1000,"outputTokens":10,"cacheReadTokens":9000}}}"#,
+            r#"{"type":"session/end-seed","seq":23,"time":1793070021000,"data":{"inherited":true}}"#,
+            r#"{"type":"assistant/message","seq":33,"time":1793070030000,"data":{"turn":1,"step":2,"usage":{"inputTokens":200,"outputTokens":20,"cacheReadTokens":10000}}}"#,
+            r#"{"type":"session/end-seed","seq":34,"time":1793070031000,"data":{"inherited":true}}"#,
+            r#"{"type":"assistant/message","seq":55,"time":1793070790000,"data":{"turn":3,"step":1,"usage":{"inputTokens":400,"outputTokens":40,"cacheReadTokens":12000}}}"#,
+        ];
+        let fork_bytes = zstd::stream::encode_all(fork.join("\n").as_bytes(), 3).unwrap();
+        let parent_bytes = zstd::stream::encode_all(parent.join("\n").as_bytes(), 3).unwrap();
+        let fork_path = write_fork_tree(dir.path(), Some(&parent_bytes), &fork_bytes);
+        std::env::set_var(crate::paths::ENV_DSH_HOME, dir.path());
+
+        let fork_events = read_one(&fork_path);
+        assert_eq!(fork_events.len(), 1, "both markers bound the parent's calls");
+        assert_eq!(fork_events[0].dedupe_key.as_deref(), Some("session-fork#55"));
+        std::env::remove_var(crate::paths::ENV_DSH_HOME);
     }
 
     #[test]

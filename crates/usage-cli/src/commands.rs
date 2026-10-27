@@ -2391,6 +2391,13 @@ pub fn dsh_doctor(ctx: &Ctx) -> Result<(), String> {
         let slot = indexed.get(&row.session);
         let ledger_str = format!("{:.0}/{:.0}/{:.0}/{:.0}", row.input, row.output, row.cache_read, row.cache_write);
         let (index_str, events, status) = match slot {
+            // A forked session replayed its parent's calls into its own stream;
+            // the adapter bills them under the parent (the replay is skipped),
+            // so this row's `totals` is the parent's spend PLUS the fork's own
+            // and can never equal the index side. The gap is structural.
+            Some((i, cc, cr, o, _, n)) if row.format >= 4 && row.is_seeded => {
+                (format!("{:.0}/{:.0}/{:.0}/{:.0}", i, o, cr, cc), *n, "fork".to_string())
+            }
             Some((i, cc, cr, o, _, n)) if row.format >= 4 => {
                 let agree = (*i - row.input).abs() < 0.5
                     && (*o - row.output).abs() < 0.5
@@ -2411,12 +2418,20 @@ pub fn dsh_doctor(ctx: &Ctx) -> Result<(), String> {
             None if row.input == 0.0 && row.output == 0.0 && row.cache_read == 0.0 && row.cache_write == 0.0 => {
                 ("—".to_string(), 0, "ok · empty".to_string())
             }
+            // A fork that has made no calls of its own since the resume bills
+            // nothing here: its whole stream is the parent's replay. That is
+            // the shape, not a missing read — 11 of the 22 forks measured on
+            // 2026-10-27 look exactly like this.
+            None if row.is_seeded => ("—".to_string(), 0, "fork · replay only".to_string()),
             None => {
                 mismatches += 1;
                 ("—".to_string(), 0, "not indexed".to_string())
             }
         };
         let mut notes = Vec::new();
+        if row.is_seeded {
+            notes.push("fork: the inherited replay bills under the parent stream".to_string());
+        }
         if row.inherited_events > 0 {
             notes.push(format!("inherited {} pre-v4 events", row.inherited_events));
         }
@@ -2424,7 +2439,7 @@ pub fn dsh_doctor(ctx: &Ctx) -> Result<(), String> {
             notes.push(format!("{} subagents (spend outside tokenUsage)", row.subagents));
         }
         table.push(vec![
-            row.session.chars().take(12).collect(),
+            row.session.chars().take(20).collect(),
             row.format.to_string(),
             ledger_str,
             index_str,
@@ -2436,7 +2451,7 @@ pub fn dsh_doctor(ctx: &Ctx) -> Result<(), String> {
         if !ledger.iter().any(|r| r.session == *session) {
             mismatches += 1;
             table.push(vec![
-                session.chars().take(12).collect(),
+                session.chars().take(20).collect(),
                 "?".into(),
                 "—".into(),
                 format!("{i:.0}/{o:.0}/{cr:.0}/{cc:.0}"),
@@ -2448,7 +2463,8 @@ pub fn dsh_doctor(ctx: &Ctx) -> Result<(), String> {
     println!("DSH ledger: {} sessions · index: {} sessions · {} mismatched", ledger.len(), indexed.len(), mismatches);
     print!("{}", table.render(false));
     println!("notes: tokenUsage is the main thread's ledger — subagent and pre-v4 spend sit outside it; a");
-    println!("cumulative session day-buckets onto its last prompt day, so day views move as sessions age.");
+    println!("cumulative session day-buckets onto its last prompt day, so day views move as sessions age;");
+    println!("a `fork` row is a resumed session whose replayed parent calls are billed under the parent.");
     Ok(())
 }
 
