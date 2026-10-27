@@ -15,6 +15,45 @@ import { usePetCompanion } from "../lib/usePetCompanion";
 
 type Dock = "left" | "right" | "top";
 
+// Decoded alpha maps for the pet's sprite assets, keyed by asset URL. Filled
+// lazily on the first press that needs each; small (atlas 192², edge poses
+// ~350²) and read at most once per pointer event.
+const alphaCache = new Map<string, { w: number; h: number; data: Uint8ClampedArray }>();
+const alphaPending = new Set<string>();
+
+function loadAlpha(src: string) {
+  if (alphaPending.has(src)) return;
+  alphaPending.add(src);
+  const image = new Image();
+  image.onload = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (ctx) {
+      ctx.drawImage(image, 0, 0);
+      alphaCache.set(src, {
+        w: image.naturalWidth, h: image.naturalHeight,
+        data: ctx.getImageData(0, 0, image.naturalWidth, image.naturalHeight).data,
+      });
+    }
+    alphaPending.delete(src);
+  };
+  image.onerror = () => alphaPending.delete(src);
+  image.src = src;
+}
+
+function urlOf(backgroundImage: string): string | null {
+  const m = /url\(["']?([^"')]+)["']?\)/.exec(backgroundImage);
+  return m ? m[1] : null;
+}
+
+function pxOf(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const m = /(-?\d+(?:\.\d+)?)px/.exec(value);
+  return m ? parseFloat(m[1]) : null;
+}
+
 type BubbleGeometry = {
   windowLogical: number;
   contentLogical: number;
@@ -525,18 +564,51 @@ export function BubbleApp() {
     };
   }, [dock, skin]);
 
-  // The window is a rectangle larger than the visible pet: presses in the
-  // transparent margins must not arm the click contract or a drag. The live
-  // art box (`.pet-art` undocked, the edge pose image docked) moves with the
-  // breathe animation and the dock pose, so measuring it per event keeps the
-  // hit region hugging the picture the user actually sees.
+  // Pixel-accurate hit testing: the sprite frames carry transparent margins
+  // (the standing pose is narrow inside its own frame), so "clickable exactly
+  // where the picture shows" means reading the alpha channel at the pressed
+  // pixel. Decoded alpha maps are cached per asset URL; a URL whose decode is
+  // still in flight falls open (previous behavior) for that one press.
   const withinArt = (x: number, y: number) => {
-    // The waterdrop skin is code-native artwork whose core is the whole
-    // visible pet; raster skins carry the art in `.pet-art` (undocked) or
-    // the edge pose image (docked).
-    const art = (document.querySelector(".bubble-core") ?? document.querySelector(".pet-art")
-      ?? document.querySelector(".pet-edge-art"))?.getBoundingClientRect();
-    return !!art && x >= art.left && x <= art.right && y >= art.top && y <= art.bottom;
+    // Chrome that is part of the pet counts regardless of pixels.
+    for (const sel of [".pet-token-badge", ".bubble-core"]) {
+      const r = document.querySelector(sel)?.getBoundingClientRect();
+      if (r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+    }
+    const edge = document.querySelector<HTMLImageElement>(".pet-edge-art");
+    if (edge?.src) {
+      const r = edge.getBoundingClientRect();
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+        const src = edge.currentSrc || edge.src;
+        const entry = alphaCache.get(src);
+        if (!entry) { void loadAlpha(src); return true; }
+        const ix = Math.floor((x - r.left) * (entry.w / r.width));
+        const iy = Math.floor((y - r.top) * (entry.h / r.height));
+        if (ix < 0 || iy < 0 || ix >= entry.w || iy >= entry.h) return false;
+        return entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
+      }
+      return false;
+    }
+    const sprite = document.querySelector<HTMLElement>(".pet-sprite");
+    if (sprite) {
+      const r = sprite.getBoundingClientRect();
+      if (x < r.left || x > r.right || y < r.top || y > r.bottom) return false;
+      const cs = getComputedStyle(sprite);
+      const url = urlOf(cs.backgroundImage);
+      if (!url) return true;
+      const entry = alphaCache.get(url);
+      if (!entry) { void loadAlpha(url); return true; }
+      const sizeW = pxOf(cs.backgroundSize) ?? entry.w;
+      const sizeH = pxOf(cs.backgroundSize?.split(" ")[1]) ?? entry.h;
+      const posX = pxOf(cs.backgroundPosition) ?? 0;
+      const posY = pxOf(cs.backgroundPosition?.split(" ").slice(1).join(" ")) ?? 0;
+      const ix = Math.floor(((x - r.left) - posX) * (entry.w / sizeW));
+      const iy = Math.floor(((y - r.top) - posY) * (entry.h / sizeH));
+      if (ix < 0 || iy < 0 || ix >= entry.w || iy >= entry.h) return true;
+      return entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
+    }
+    // Unknown skin shape: previous behavior.
+    return true;
   };
 
   const onPointerDown = async (event: React.PointerEvent<HTMLDivElement>) => {
