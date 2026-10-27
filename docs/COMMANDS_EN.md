@@ -76,7 +76,7 @@ Most probes only read credentials. Exactly three write a rotated one back, each 
 
 ## dsh-doctor
 
-DSH accuracy audit: the desktop app's own projection ledger (`tokenUsage`) printed next to what the index holds, per session, with a `status` of `ok`, `MISMATCH`, `v3 stream`, `not indexed` or `indexed but no projection`. Notes carry the structural reasons for honest drift — inherited pre-v4 events, subagent spend that lives outside `tokenUsage`. No flags.
+DeepSeek Harness accuracy audit: the desktop app's own projection ledger (`tokenUsage`) printed next to what the index holds, per session, with a `status` of `ok`, `MISMATCH`, `v3 stream`, `not indexed` or `indexed but no projection`. Notes carry the structural reasons for honest drift — inherited pre-v4 events, subagent spend that lives outside `tokenUsage`. No flags.
 
 ```bash
 tokenme dsh-doctor

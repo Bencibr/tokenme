@@ -169,7 +169,7 @@ Every tool below ships as a built-in adapter — 30 of them, indexed straight fr
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM-plan points | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手** (formerly CatPaw) | points balance | — | ✅ | ✅ | ✅ |
-| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek account balance | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DeepSeek Harness** | DeepSeek account balance | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | — | ✅ | ✅ | ⏳ |
 | **Mimocode** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | plan quota | — | ✅ | ✅ | ⏳ |
@@ -196,9 +196,9 @@ TokenMe can passively measure **TTFT** (time to first token) and **TPS** (genera
 | :--- | :--- | :--- |
 | **Codex** | Turn-level TTFT from local Codex rollout streams; TPS when the stream provides output-token and timing data | Yes — one short request through the Codex CLI app-server |
 | **Claude Code CLI** | Request-level TTFT and TPS from Claude Code OpenTelemetry spans; first-content timing is labeled separately and is not TTFT | Yes — one short CLI request with temporary, process-scoped telemetry |
-| **DSH (DeepSeek Harness)** | Request-level TTFT and TPS from local compressed session logs, when the stream contains first-token timestamps | No — passive collection only |
+| **DeepSeek Harness** | Request-level TTFT and TPS from local compressed session logs, when the stream contains first-token timestamps | No — passive collection only |
 
-DSH follows its session stats: TTFT averaged per request, TPS as output tokens over decode time; older logs without first-token timestamps yield neither. An active test sends one short prompt only after you click (uses plan quota), is kept separate from passive averages, and retains no prompt or response text.
+DeepSeek Harness follows its session stats: TTFT averaged per request, TPS as output tokens over decode time; older logs without first-token timestamps yield neither. An active test sends one short prompt only after you click (uses plan quota), is kept separate from passive averages, and retains no prompt or response text.
 
 
 ## What's new in 0.1.7

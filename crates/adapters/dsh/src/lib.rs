@@ -50,7 +50,10 @@ pub const TOOL_ID: &str = "dsh";
 pub use doctor::ledger;
 pub use paths::diagnostic_candidates;
 pub use speed::{read_speed_samples, DshSpeedSample};
-pub(crate) const DISPLAY_NAME: &str = "DSH";
+/// The name users see. The tool id stays `dsh` — it keys the index, the sync
+/// bundles, the theme slot and the host-process match — so only the display name
+/// follows the vendor's own spelling.
+pub(crate) const DISPLAY_NAME: &str = "DeepSeek Harness";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DshAdapter;

@@ -62,7 +62,7 @@ Built by `scripts/build-macos.sh` on macOS and by `pnpm tauri build --bundles ns
 ### 3.1 The five pages
 
 - **Overview** — today's tokens, cost and cache hit rate, with usage charted by hour; the **Activity** tab is a GitHub-style year heatmap, and swiping right walks back through last week, last month and last year. The vendors' quota bars and notifications sit below.
-- **Speed** — passive TTFT (time to first token) and TPS measurement: Codex is read from its local rollout stream, Claude Code comes through OpenTelemetry spans, DSH from local session logs; Codex and Claude Code can also fire one short live request to measure for real.
+- **Speed** — passive TTFT (time to first token) and TPS measurement: Codex is read from its local rollout stream, Claude Code comes through OpenTelemetry spans, DeepSeek Harness from local session logs; Codex and Claude Code can also fire one short live request to measure for real.
 - **Tools** — per-tool requests, sessions, tokens and cache rate, one row each, the row colour taken from the app's icon; tools that support check-in claim right from the row header.
 - **Rankings** — sessions ranked, so the expensive ones stand out at a glance.
 - **Details** — request-level records, filterable by model and project.
@@ -217,7 +217,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Qoder | Credits + Tokens | `~/.qoder/projects/**/*.jsonl` (credits) · `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` (tokens) |
 | WorkBuddy AI | Tokens + credits | `~/.workbuddy-ai/projects/**/<session>.jsonl` |
 | WorkBuddy (China) | Tokens + credits | `~/.workbuddy/projects/**/<session>.jsonl` |
-| AgnesCode / AtomCode / Crow5 / Mimocode / Cola / DSH | Tokens | auto-discovered, same shape as their parent tools |
+| AgnesCode / AtomCode / Crow5 / Mimocode / Cola / DeepSeek Harness | Tokens | auto-discovered, same shape as their parent tools |
 | Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl` (legacy `~/.kimi`; the desktop app's embedded runtime home under `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` is read too) |
 | MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl` (legacy `~/.mavis`) |
 

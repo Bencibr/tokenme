@@ -45,7 +45,7 @@ Cold start is ordered so the panel never waits on work it does not need. The eng
 
 ## TTFT and speed (off by default)
 
-Passive sampling reads local records only: Codex rollout completion records and DSH's local compressed session streams; Claude Code gets a loopback-only OTLP/HTTP JSON receiver (port 4319) — enabling merges the trace variables into the user's Claude settings, disabling removes only what TokenMe wrote, and only while it has not been touched since. Active checks are one-shot: a single fixed, short prompt fired only after an explicit click (Codex through an ephemeral read-only app-server thread, Claude Code with per-process OTLP settings, DSH timed by its own CLI), and nothing — prompt, response, credentials, active result — is persisted. Speed is this-machine only: under a remote origin's scope the speed page says so and asks to switch back to This machine or All machines.
+Passive sampling reads local records only: Codex rollout completion records and DeepSeek Harness's local compressed session streams; Claude Code gets a loopback-only OTLP/HTTP JSON receiver (port 4319) — enabling merges the trace variables into the user's Claude settings, disabling removes only what TokenMe wrote, and only while it has not been touched since. Active checks are one-shot: a single fixed, short prompt fired only after an explicit click (Codex through an ephemeral read-only app-server thread, Claude Code with per-process OTLP settings, DeepSeek Harness timed by its own CLI), and nothing — prompt, response, credentials, active result — is persisted. Speed is this-machine only: under a remote origin's scope the speed page says so and asks to switch back to This machine or All machines.
 
 ## Key invariants
 

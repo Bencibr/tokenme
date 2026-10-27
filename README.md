@@ -169,7 +169,7 @@ $ tokenme daily --days 3
 | <img src="crates/usage-core/assets/hermes.png" width="20" alt=""> **Hermes** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/funide.png" width="20" alt=""> **FunIDE** | GLM 套餐点数 | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/catpaw.png" width="20" alt=""> **妙手**（原 CatPaw） | 积分余额 | — | ✅ | ✅ | ✅ |
-| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DSH** | DeepSeek 账户余额 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/dsh.png" width="20" alt=""> **DeepSeek Harness** | DeepSeek 账户余额 | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/crow5.png" width="20" alt=""> **Crow5** | — | — | ✅ | ✅ | ⏳ |
 | **Mimocode** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cola.png" width="20" alt=""> **Cola** | 套餐配额 | — | ✅ | ✅ | ⏳ |
@@ -195,9 +195,9 @@ TokenMe 可以从本地客户端活动中被动测量 **TTFT**（首 token 延�
 | :--- | :--- | :--- |
 | **Codex** | 从本地 Codex rollout 流中读取轮次级 TTFT；流中提供输出 token 数和计时信息时计算 TPS | 支持：通过 Codex CLI app-server 发起一次短请求 |
 | **Claude Code CLI** | 从 Claude Code OpenTelemetry span 读取请求级 TTFT 和 TPS；首段内容耗时单独标记，不等同于 TTFT | 支持：通过临时、仅对该进程生效的遥测配置发起一次短请求 |
-| **DSH（DeepSeek Harness）** | 从本地压缩会话日志读取请求级 TTFT 和 TPS；日志包含首 token 时间时才可测量 | 暂不支持，仅被动采集 |
+| **DeepSeek Harness** | 从本地压缩会话日志读取请求级 TTFT 和 TPS；日志包含首 token 时间时才可测量 | 暂不支持，仅被动采集 |
 
-DSH 按会话汇总：TTFT 取请求均值，TPS 按输出 token 除以解码耗时；旧日志缺首 token 时间则无此指标。主动测试点击后才发一条短提示（消耗套餐额度），结果与被动均值分开显示，提示词与回复一概不留。
+DeepSeek Harness 按会话汇总：TTFT 取请求均值，TPS 按输出 token 除以解码耗时；旧日志缺首 token 时间则无此指标。主动测试点击后才发一条短提示（消耗套餐额度），结果与被动均值分开显示，提示词与回复一概不留。
 
 
 ## 设备同步（主从互备）
