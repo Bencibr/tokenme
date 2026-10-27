@@ -242,6 +242,20 @@ function validate(manifest, labels, loadPng = readPng, loadModel = readModel) {
     if (object(layout, `${path}.layout`)) {
       for (const field of ["content", "art", "atlas"]) number(layout[field], `${path}.layout.${field}`, true);
       number(layout.artOffset, `${path}.layout.artOffset`);
+      if (object(layout.crop, `${path}.layout.crop`)) {
+        number(layout.crop.left, `${path}.layout.crop.left`);
+        number(layout.crop.top, `${path}.layout.crop.top`);
+        number(layout.crop.width, `${path}.layout.crop.width`, true);
+        number(layout.crop.height, `${path}.layout.crop.height`, true);
+      }
+      if (object(layout.windowPadding, `${path}.layout.windowPadding`)) {
+        for (const side of ["left", "top", "right", "bottom"]) {
+          if (number(layout.windowPadding[side], `${path}.layout.windowPadding.${side}`)
+              && layout.windowPadding[side] < 0) {
+            fail(`${path}.layout.windowPadding.${side}`, "must be non-negative");
+          }
+        }
+      }
       if (object(layout.dockShift, `${path}.layout.dockShift`)) {
         for (const dock of ["right", "left", "top"]) number(layout.dockShift[dock], `${path}.layout.dockShift.${dock}`);
       }
@@ -316,6 +330,8 @@ function selfTest(manifest, labels, source) {
     ["skins", (m) => { m.skins = []; }],
     [`${path}.layout.art`, (m) => { m.skins[id].layout.art = 0; }],
     [`${path}.layout.atlas`, (m) => { m.skins[id].layout.atlas += 1; }],
+    [`${path}.layout.crop.width`, (m) => { m.skins[id].layout.crop.width = 0; }],
+    [`${path}.layout.windowPadding.left`, (m) => { m.skins[id].layout.windowPadding.left = -1; }],
     [`${path}.layout.dockShift.top`, (m) => { m.skins[id].layout.dockShift.top = Infinity; }],
     [`${path}.frames.open`, (m) => { m.skins[id].frames.open = [0]; }],
     [`${path}.frames.happy[0]`, (m) => { m.skins[id].frames.happy[0] = -1e6; }],

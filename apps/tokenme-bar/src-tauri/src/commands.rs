@@ -3412,6 +3412,9 @@ pub async fn set_bubble_skin(app: AppHandle, skin: BubbleSkin) -> Result<(), Str
         let skin_clone = skin.clone();
         mutate_settings_async(&app, |s| s.bubble_skin = skin_clone).await?;
     }
+    if let Err(error) = crate::bubble::resize_for_skin(&app, skin.as_str()) {
+        crate::logging::error(&format!("bubble skin window resize failed for {}: {error}", skin.as_str()));
+    }
     app.emit("bubble-skin-changed", skin).map_err(|e| e.to_string())
 }
 

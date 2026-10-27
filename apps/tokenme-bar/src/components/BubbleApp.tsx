@@ -15,32 +15,52 @@ import { usePetCompanion } from "../lib/usePetCompanion";
 
 type Dock = "left" | "right" | "top";
 
-// Decoded alpha maps for the pet's sprite assets, keyed by asset URL. Filled
-// lazily on the first press that needs each; small (atlas 192², edge poses
-// ~350²) and read at most once per pointer event.
-const alphaCache = new Map<string, { w: number; h: number; data: Uint8ClampedArray }>();
-const alphaPending = new Set<string>();
+type AlphaMap = { w: number; h: number; data: Uint8ClampedArray };
 
-function loadAlpha(src: string) {
-  if (alphaPending.has(src)) return;
-  alphaPending.add(src);
-  const image = new Image();
-  image.onload = () => {
-    const canvas = document.createElement("canvas");
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (ctx) {
-      ctx.drawImage(image, 0, 0);
-      alphaCache.set(src, {
-        w: image.naturalWidth, h: image.naturalHeight,
-        data: ctx.getImageData(0, 0, image.naturalWidth, image.naturalHeight).data,
-      });
-    }
-    alphaPending.delete(src);
-  };
-  image.onerror = () => alphaPending.delete(src);
-  image.src = src;
+// Decoded alpha maps for the pet's sprite assets, keyed by asset URL. The
+// selected skin warms its current pose before the native window hit-test uses
+// it, so transparent pixels can pass clicks through from the first hover.
+const alphaCache = new Map<string, AlphaMap>();
+const alphaPending = new Map<string, Promise<AlphaMap | null>>();
+
+function loadAlpha(src: string): Promise<AlphaMap | null> {
+  const cached = alphaCache.get(src);
+  if (cached) return Promise.resolve(cached);
+  const pending = alphaPending.get(src);
+  if (pending) return pending;
+  const loaded = new Promise<AlphaMap | null>((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      let entry: AlphaMap | null = null;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (ctx) {
+          ctx.drawImage(image, 0, 0);
+          entry = {
+            w: image.naturalWidth, h: image.naturalHeight,
+            data: ctx.getImageData(0, 0, image.naturalWidth, image.naturalHeight).data,
+          };
+          alphaCache.set(src, entry);
+        }
+      } catch {
+        // A failed alpha read must leave the surface click-through, never make
+        // the whole transparent window the pet's hit target.
+      } finally {
+        alphaPending.delete(src);
+        resolve(entry);
+      }
+    };
+    image.onerror = () => {
+      alphaPending.delete(src);
+      resolve(null);
+    };
+    image.src = src;
+  });
+  alphaPending.set(src, loaded);
+  return loaded;
 }
 
 function urlOf(backgroundImage: string): string | null {
@@ -54,9 +74,38 @@ function pxOf(value: string | null | undefined): number | null {
   return m ? parseFloat(m[1]) : null;
 }
 
+function artAlphaSampler(element: HTMLElement, entry: AlphaMap) {
+  const r = element.getBoundingClientRect();
+  let sample: (x: number, y: number) => [number, number];
+  if (element instanceof HTMLImageElement) {
+    const scaleX = entry.w / r.width;
+    const scaleY = entry.h / r.height;
+    sample = (x, y) => [Math.floor((x - r.left) * scaleX), Math.floor((y - r.top) * scaleY)];
+  } else {
+    const cs = getComputedStyle(element);
+    const sizeW = pxOf(cs.backgroundSize) ?? entry.w;
+    const sizeH = pxOf(cs.backgroundSize?.split(" ")[1]) ?? entry.h;
+    const posX = pxOf(cs.backgroundPosition) ?? 0;
+    const posY = pxOf(cs.backgroundPosition?.split(" ").slice(1).join(" ")) ?? 0;
+    const scaleX = entry.w / sizeW;
+    const scaleY = entry.h / sizeH;
+    sample = (x, y) => [Math.floor(((x - r.left) - posX) * scaleX), Math.floor(((y - r.top) - posY) * scaleY)];
+  }
+  return (x: number, y: number) => {
+    if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) return false;
+    const [ix, iy] = sample(x, y);
+    return ix >= 0 && iy >= 0 && ix < entry.w && iy < entry.h
+      && entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
+  };
+}
+
+function artAlphaAt(element: HTMLElement, x: number, y: number, entry: AlphaMap) {
+  return artAlphaSampler(element, entry)(x, y);
+}
+
 type BubbleGeometry = {
-  windowLogical: number;
-  contentLogical: number;
+  windowWidthLogical: number;
+  windowHeightLogical: number;
   marginLogical: number;
   peekLogical: number;
 };
@@ -71,18 +120,21 @@ type DockAnchor = {
 // is only that bootstrap size; the running window is negotiated from the
 // rendered `.pet-skin` box below. The 34px ring is the shadow/transparent
 // headroom that the waterdrop used to reserve around its 76px core.
-const BOOTSTRAP_WINDOW = 144;
+const BOOTSTRAP_WINDOW = 110;
 const DEFAULT_CONTENT = 76;
+const WATERDROP_CONTENT = 70;
 const WINDOW_MARGIN = 34;
+const WATERDROP_WINDOW_MARGIN = 20;
 const DEFAULT_PEEK = 44;
 const EDGE_THRESHOLD = 48;
 
 const DEFAULT_GEOMETRY: BubbleGeometry = {
-  windowLogical: BOOTSTRAP_WINDOW,
-  contentLogical: DEFAULT_CONTENT,
-  marginLogical: WINDOW_MARGIN,
+  windowWidthLogical: BOOTSTRAP_WINDOW,
+  windowHeightLogical: BOOTSTRAP_WINDOW,
+  marginLogical: WATERDROP_WINDOW_MARGIN,
   peekLogical: DEFAULT_PEEK,
 };
+
 
 function dockPosition(edge: Dock, anchor: DockAnchor, layout: BubbleGeometry, size: PhysicalSize) {
   const { position: p, size: s, scaleFactor: scale } = anchor.monitor;
@@ -144,6 +196,28 @@ export function BubbleApp() {
   const geometryDirty = useRef(false);
   const dockAnchor = useRef<DockAnchor | null>(null);
   const geometryErrorReported = useRef(false);
+  const cursorIgnored = useRef<boolean | null>(null);
+  const cursorIgnoreSupported = useRef<boolean | null>(null);
+
+  const setCursorIgnored = useCallback(async (ignore: boolean) => {
+    if (cursorIgnoreSupported.current === false) return;
+    if (cursorIgnored.current === ignore) return;
+    cursorIgnored.current = ignore;
+    try {
+      await window.setIgnoreCursorEvents(ignore);
+      cursorIgnoreSupported.current = true;
+    } catch {
+      cursorIgnoreSupported.current = false;
+      cursorIgnored.current = null;
+    }
+  }, [window]);
+
+  // Do not leave a hidden/unmounted bubble intercepting input when the native
+  // window is recreated or the user switches to a different skin.
+  useEffect(() => () => {
+    cursorIgnored.current = false;
+    void window.setIgnoreCursorEvents(false).catch(() => {});
+  }, [window]);
 
   const reportGeometryError = (error: unknown) => {
     if (geometryErrorReported.current) return;
@@ -210,7 +284,7 @@ export function BubbleApp() {
     // Geometry is deliberately refreshed only when the rendered skin/fallback
     // changes; the 150ms dock poll handles external DPI/window drift.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [skin, petAssetFailed]);
+  }, [skin, dock, petAssetFailed]);
 
   const clearLeaveTimer = () => {
     if (leaveTimer.current) {
@@ -266,17 +340,55 @@ export function BubbleApp() {
     // what the first hover showed.
     const badge = document.querySelector<HTMLElement>(".pet-token-badge");
     const badgeDrop = badge ? badge.offsetTop + badge.offsetHeight - (pet?.offsetHeight ?? 0) : 0;
+    const waterdrop = !isPetSkinName(skin) || petAssetFailed;
+    const baseContent = waterdrop ? WATERDROP_CONTENT : DEFAULT_CONTENT;
+    const baseMargin = waterdrop ? WATERDROP_WINDOW_MARGIN : WINDOW_MARGIN;
     const content = pet
       ? Math.max(pet.offsetWidth, pet.offsetHeight + Math.max(0, badgeDrop))
-      : DEFAULT_CONTENT;
-    const contentLogical = Math.max(1, Math.ceil(content));
+      : baseContent;
+    const skinConfig = skin === "waterdrop" ? undefined : getPetSkinConfig(skin);
+    const artworkCrop = pet && !dockRef.current ? skinConfig?.layout.crop : undefined;
+    const cropToArtwork = Boolean(artworkCrop);
+    let windowWidthLogical = Math.ceil(content + baseMargin * 2);
+    let windowHeightLogical = windowWidthLogical;
+    let marginLogical = baseMargin;
+    if (cropToArtwork && pet && artworkCrop && skinConfig) {
+      const centerX = artworkCrop.left + artworkCrop.width / 2;
+      const centerY = artworkCrop.top + artworkCrop.height / 2;
+      let left = artworkCrop.left;
+      let top = artworkCrop.top;
+      let right = artworkCrop.left + artworkCrop.width;
+      let bottom = artworkCrop.top + artworkCrop.height;
+      if (badge) {
+        const style = getComputedStyle(badge);
+        if (style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0.02) {
+          // Once the sprite viewport is cropped, the badge's offsets are
+          // relative to that smaller box. Convert them back into the original
+          // sprite layout before combining its bounds with the artwork.
+          const badgeLeft = badge.offsetLeft + (pet.dataset.cropped === "true" ? artworkCrop.left : 0);
+          const badgeTop = badge.offsetTop + (pet.dataset.cropped === "true" ? artworkCrop.top : 0);
+          left = Math.min(left, badgeLeft);
+          top = Math.min(top, badgeTop);
+          right = Math.max(right, badgeLeft + badge.offsetWidth);
+          bottom = Math.max(bottom, badgeTop + badge.offsetHeight);
+        }
+      }
+      const padding = skinConfig.layout.windowPadding;
+      windowWidthLogical = Math.ceil(2 * Math.max(
+        centerX - (left - padding.left), right + padding.right - centerX,
+      ));
+      windowHeightLogical = Math.ceil(2 * Math.max(
+        centerY - (top - padding.top), bottom + padding.bottom - centerY,
+      ));
+      marginLogical = Math.min(padding.left, padding.top, padding.right, padding.bottom);
+    }
     const next: BubbleGeometry = {
-      contentLogical,
-      marginLogical: WINDOW_MARGIN,
-      windowLogical: contentLogical + WINDOW_MARGIN * 2,
+      windowWidthLogical,
+      windowHeightLogical,
+      marginLogical,
       // Keep the visible dock sliver proportional when a larger character is
       // selected, instead of exposing only a thin strip of its face.
-      peekLogical: Math.round(DEFAULT_PEEK * contentLogical / DEFAULT_CONTENT),
+      peekLogical: Math.round(DEFAULT_PEEK * Math.max(windowWidthLogical, windowHeightLogical) / baseContent),
     };
     geometry.current = next;
     return next;
@@ -306,9 +418,10 @@ export function BubbleApp() {
           geometryDirty.current = true;
           continue;
         }
-        const want = Math.round(layout.windowLogical * scale);
-        const resized = size.width !== want || size.height !== want;
-        const nextSize = resized ? new PhysicalSize(want, want) : size;
+        const wantWidth = Math.round(layout.windowWidthLogical * scale);
+        const wantHeight = Math.round(layout.windowHeightLogical * scale);
+        const resized = size.width !== wantWidth || size.height !== wantHeight;
+        const nextSize = resized ? new PhysicalSize(wantWidth, wantHeight) : size;
         if (resized) await window.setSize(nextSize);
         if (dragging.current) return;
         if (edge !== dockRef.current || anchor !== dockAnchor.current) {
@@ -321,8 +434,8 @@ export function BubbleApp() {
           target = dockPosition(edge, anchor, layout, nextSize);
         } else if (resized) {
           target = new PhysicalPosition(
-            Math.round(pos.x + (size.width - want) / 2),
-            Math.round(pos.y + (size.height - want) / 2),
+            Math.round(pos.x + (size.width - wantWidth) / 2),
+            Math.round(pos.y + (size.height - wantHeight) / 2),
           );
         }
         if (target && (target.x !== pos.x || target.y !== pos.y)) await window.setPosition(target);
@@ -369,10 +482,10 @@ export function BubbleApp() {
         if (cursor && cursor.x > edge - 4 * scale) {
             edge = Math.min(monitorEdge, cursor.x + 4 * scale);
         }
-        x = edge - layout.windowLogical * scale;
+        x = edge - layout.windowWidthLogical * scale;
     } else if (currentDock === "left") {
         const monitorEdge = anchor ? anchor.monitor.position.x
-          : pos.x + (layout.windowLogical - layout.marginLogical - layout.peekLogical) * scale;
+          : pos.x + (layout.windowWidthLogical - layout.marginLogical - layout.peekLogical) * scale;
         let edge = monitorEdge + gap;
         if (cursor && cursor.x < edge + 4 * scale) {
             edge = Math.max(monitorEdge, cursor.x - 4 * scale);
@@ -380,7 +493,7 @@ export function BubbleApp() {
         x = edge;
     } else {
         const monitorEdge = anchor ? anchor.monitor.position.y
-          : pos.y + (layout.windowLogical - layout.marginLogical - layout.peekLogical) * scale;
+          : pos.y + (layout.windowHeightLogical - layout.marginLogical - layout.peekLogical) * scale;
         let edge = monitorEdge + gap;
         if (cursor && cursor.y < edge + 4 * scale) {
             edge = Math.max(monitorEdge, cursor.y - 4 * scale);
@@ -501,13 +614,26 @@ export function BubbleApp() {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     void listen<boolean>("bubble-hover", (event) => {
-      setHovered(event.payload);
-      if (event.payload) {
-        if (!suppressExpand.current) void expand().catch(reportGeometryError);
-      } else {
-        suppressExpand.current = false;
-        scheduleDock();
-      }
+      void (async () => {
+        let isHovering = event.payload;
+        if (isHovering && skin !== "waterdrop" && !petAssetFailed) {
+          const [cursor, pos, scale] = await Promise.all([
+            cursorPosition().catch(() => null),
+            window.outerPosition().catch(() => null),
+            window.scaleFactor().catch(() => 1),
+          ]);
+          isHovering = Boolean(cursor && pos && withinArt((cursor.x - pos.x) / scale, (cursor.y - pos.y) / scale));
+        }
+        hovering.current = isHovering;
+        setHovered(isHovering);
+        void setCursorIgnored(!isHovering);
+        if (isHovering) {
+          if (!suppressExpand.current) void expand().catch(reportGeometryError);
+        } else {
+          suppressExpand.current = false;
+          scheduleDock();
+        }
+      })();
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -521,15 +647,24 @@ export function BubbleApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dock]);
 
-  // The docked pet watches the cursor: poll it and point the pupils that way.
-  // The window doesn't move while docked, so only the cursor needs polling.
+  // Route native input against the visible pet pixels, not the square webview
+  // that holds transparent headroom around a tall skin. Tauri's ignore setting
+  // passes clicks through to the application underneath that headroom.
   useEffect(() => {
-    if ((!dock && skin === "waterdrop") || !inTauri) {
+    if (!inTauri) {
       setGaze(null);
+      return;
+    }
+    const petAware = skin !== "waterdrop" && !petAssetFailed;
+    if ((!dock && !petAware)) {
+      setGaze(null);
+      void setCursorIgnored(false);
       return;
     }
     let alive = true;
     void (async () => {
+      if (petAware) await setCursorIgnored(true);
+      let lastGeometryCheck = 0;
       while (alive) {
         const pos = await window.outerPosition().catch(() => null);
         const size = await window.outerSize().catch(() => null);
@@ -543,10 +678,20 @@ export function BubbleApp() {
         if (!cursor) break;
         // The mac pet has no DOM mouseenter to lean on (a non-activating
         // window sees no mouse-moved events): this poll IS the hover — the
-        // cursor inside the window means greet mode, outside means idle.
-        const inside = cursor.x >= pos.x && cursor.x < pos.x + size.width
+        // cursor over its visible pixels means greet mode, outside means idle.
+        const inWindow = cursor.x >= pos.x && cursor.x < pos.x + size.width
           && cursor.y >= pos.y && cursor.y < pos.y + size.height;
-        setHovered(inside);
+        const overPet = petAware
+          ? withinArt((cursor.x - pos.x) / scale, (cursor.y - pos.y) / scale)
+          : inWindow;
+        const interactive = dragging.current || overPet;
+        const wasInteractive = hovering.current;
+        hovering.current = interactive;
+        setHovered(interactive);
+        await setCursorIgnored(!interactive);
+        if (interactive && !wasInteractive && !suppressExpand.current) {
+          void expand().catch(reportGeometryError);
+        }
         const dx = cursor.x - centerX;
         const dy = cursor.y - centerY;
         const dist = Math.hypot(dx, dy);
@@ -555,75 +700,83 @@ export function BubbleApp() {
         // A docked pet lives at the screen edge for hours: this poll is also
         // where a drifted window gets snapped back without waiting for a
         // dock/expand round trip.
-        await ensureWindowGeometry().catch(() => {});
-        await new Promise((resolve) => setTimeout(resolve, 150));
+        if (Date.now() - lastGeometryCheck >= 150) {
+          lastGeometryCheck = Date.now();
+          await ensureWindowGeometry().catch(() => {});
+        }
+        await new Promise((resolve) => setTimeout(resolve, petAware ? 50 : 150));
       }
     })().catch(reportGeometryError);
     return () => {
       alive = false;
     };
-  }, [dock, skin]);
+  }, [dock, skin, petAssetFailed]);
 
   // Pixel-accurate hit testing: the sprite frames carry transparent margins
   // (the standing pose is narrow inside its own frame), so "clickable exactly
-  // where the picture shows" means reading the alpha channel at the pressed
-  // pixel. Decoded alpha maps are cached per asset URL; a URL whose decode is
-  // still in flight falls open (previous behavior) for that one press.
+  // where the picture shows" means reading the alpha channel at the cursor.
   const withinArt = (x: number, y: number) => {
-    // Chrome that is part of the pet counts regardless of pixels.
+    const visible = (element: Element) => {
+      const style = getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0.02;
+    };
+    // Visible chrome that is part of the pet counts regardless of pixels.
     let sawSurface = false;
     for (const sel of [".pet-token-badge", ".bubble-core"]) {
-      const r = document.querySelector(sel)?.getBoundingClientRect();
-      if (!r) continue;
+      const element = document.querySelector(sel);
+      if (!element) continue;
       sawSurface = true;
+      if (!visible(element)) continue;
+      const r = element.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
     }
     const edge = document.querySelector<HTMLImageElement>(".pet-edge-art");
     if (edge?.src) {
       sawSurface = true;
       const r = edge.getBoundingClientRect();
-      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+      if (visible(edge) && r.width > 0 && r.height > 0
+        && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
         const src = edge.currentSrc || edge.src;
         const entry = alphaCache.get(src);
-        if (!entry) { void loadAlpha(src); return true; }
-        const ix = Math.floor((x - r.left) * (entry.w / r.width));
-        const iy = Math.floor((y - r.top) * (entry.h / r.height));
-        if (ix >= 0 && iy >= 0 && ix < entry.w && iy < entry.h) {
-          return entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
-        }
-        return false;
+        if (!entry) { void loadAlpha(src); return !inTauri; }
+        return artAlphaAt(edge, x, y, entry);
       }
     }
     const sprite = document.querySelector<HTMLElement>(".pet-sprite");
     if (sprite) {
       sawSurface = true;
       const r = sprite.getBoundingClientRect();
-      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+      if (visible(sprite) && r.width > 0 && r.height > 0
+        && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
         const cs = getComputedStyle(sprite);
         const url = urlOf(cs.backgroundImage);
         const entry = url ? alphaCache.get(url) : undefined;
-        if (url && !entry) { void loadAlpha(url); return true; }
-        if (url && entry) {
-          const sizeW = pxOf(cs.backgroundSize) ?? entry.w;
-          const sizeH = pxOf(cs.backgroundSize?.split(" ")[1]) ?? entry.h;
-          const posX = pxOf(cs.backgroundPosition) ?? 0;
-          const posY = pxOf(cs.backgroundPosition?.split(" ").slice(1).join(" ")) ?? 0;
-          const ix = Math.floor(((x - r.left) - posX) * (entry.w / sizeW));
-          const iy = Math.floor(((y - r.top) - posY) * (entry.h / sizeH));
-          if (ix >= 0 && iy >= 0 && ix < entry.w && iy < entry.h) {
-            return entry.data[(iy * entry.w + ix) * 4 + 3] > 16;
-          }
-          return false;
-        }
-        return true;
+        if (url && !entry) { void loadAlpha(url); return !inTauri; }
+        if (url && entry) return artAlphaAt(sprite, x, y, entry);
+        return !url;
       }
     }
     // A recognized pet surface exists but the point missed every visible box:
-    // the transparent margin of the window. Gate it — this is exactly the
-    // "clicks outside the picture still reach the pet" report. (No surface at
-    // all means an unknown skin shape: previous behavior, ungated.)
+    // this is transparent window headroom, so the native window must let the
+    // click reach the application underneath. Unknown skin shapes retain the
+    // previous fallback behavior.
     return !sawSurface;
   };
+
+  // Per-skin crop geometry is declared in the manifest. Warm the current
+  // artwork alpha only for pixel-level hit testing, independent of its decode
+  // timing so it cannot hold the native resize at the bootstrap size.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const edge = document.querySelector<HTMLImageElement>(".pet-edge-art");
+      const sprite = document.querySelector<HTMLElement>(".pet-sprite");
+      const url = sprite ? urlOf(getComputedStyle(sprite).backgroundImage) : null;
+      const sources = [edge?.src ? edge.currentSrc || edge.src : null, url].filter((value): value is string => Boolean(value));
+      void Promise.all(sources.map(loadAlpha));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [skin, dock, petAssetFailed, companion.motion, companion.emotion, hovered]);
 
   const onPointerDown = async (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -720,6 +873,7 @@ export function BubbleApp() {
   const tokens = report?.day.summary.total_tokens ?? 0;
   const petSkinName = isPetSkinName(skin) ? skin : null;
   const petSkin = petSkinName ? getPetSkinConfig(petSkinName) : undefined;
+  const activeArtworkCrop = petSkin && dock === null && !petAssetFailed ? petSkin.layout.crop : null;
   return (
     <div
       className="bubble-app"
@@ -730,8 +884,13 @@ export function BubbleApp() {
       data-action={companion.motion}
       data-emotion={companion.emotion === "idle" ? companion.motion : companion.emotion}
       data-animations={companion.motions}
-      onMouseEnter={() => { setHovered(true); if (!suppressExpand.current) void expand().catch(reportGeometryError); }}
-      onMouseLeave={() => { setHovered(false); scheduleDock(); }}
+      onMouseEnter={(event) => {
+        const hit = skin === "waterdrop" || petAssetFailed || withinArt(event.clientX, event.clientY);
+        hovering.current = hit;
+        setHovered(hit);
+        if (hit && !suppressExpand.current) void expand().catch(reportGeometryError);
+      }}
+      onMouseLeave={() => { hovering.current = false; setHovered(false); scheduleDock(); }}
       onPointerDown={(event) => void onPointerDown(event)}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -742,7 +901,8 @@ export function BubbleApp() {
     >
       {petSkin && petSkinName && !petAssetFailed ? (
         <PetSkin key={petSkinName} skin={petSkinName} dock={dock} hovered={hovered} dragging={petDragging}
-          tokens={tokens} gaze={gaze} onAssetError={onPetAssetError} action={companion.motion} emotion={companion.emotion} motions={companion.motions} />
+          tokens={tokens} gaze={gaze} onAssetError={onPetAssetError} action={companion.motion} emotion={companion.emotion} motions={companion.motions}
+          crop={activeArtworkCrop ?? undefined} centerInWindow />
       ) : <WaterdropPet tokens={tokens} gaze={gaze} />}
     </div>
   );

@@ -1,35 +1,71 @@
-//! Windows-only token waterdrop window.
+//! Desktop token waterdrop window.
 //!
 //! This is created at runtime instead of being declared in tauri.conf.json so
 //! macOS and Linux never receive a second window or a second tray surface.
 
 pub const LABEL: &str = "bubble";
 
-/// The native surface needs an initial size before the webview has rendered a
-/// skin. BubbleApp immediately replaces this bootstrap size with the measured
-/// `.pet-skin` box plus its transparent/shadow headroom. Do not add min/max
-/// constraints here: different skins intentionally negotiate different HWND
-/// sizes at runtime.
-#[cfg(target_os = "windows")]
-pub const BOOTSTRAP_WINDOW_LOGICAL: f64 = 144.0;
-
-/// macOS: the pet hangs top-right under the menu bar, next to the TokenMe
-/// tray icon — the same corner the panel anchors to.
-#[cfg(target_os = "macos")]
-pub const BOOTSTRAP_WINDOW_LOGICAL: f64 = 144.0;
+/// Fallback size for the classic waterdrop and an unknown skin ID.
+pub const BOOTSTRAP_WINDOW_LOGICAL: f64 = 110.0;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[cfg(target_os = "windows")]
 use tauri::Emitter;
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+
+const PET_SKINS_MANIFEST: &str = include_str!("../../src/assets/pets/pet-skins.json");
+
+fn logical_size_for_skin(skin: &str) -> (f64, f64) {
+    logical_size_from_manifest(skin).unwrap_or((BOOTSTRAP_WINDOW_LOGICAL, BOOTSTRAP_WINDOW_LOGICAL))
+}
+
+fn logical_size_from_manifest(skin: &str) -> Option<(f64, f64)> {
+    use std::sync::OnceLock;
+    static MANIFEST: OnceLock<serde_json::Value> = OnceLock::new();
+    let manifest = MANIFEST.get_or_init(|| serde_json::from_str(PET_SKINS_MANIFEST).unwrap_or_default());
+    let layout = manifest.get("skins")?.get(skin)?.get("layout")?;
+    let crop = layout.get("crop")?;
+    let padding = layout.get("windowPadding")?;
+    let number = |object: &serde_json::Value, field: &str| object.get(field)?.as_f64();
+    let width = number(crop, "width")? + number(padding, "left")? + number(padding, "right")?;
+    let height = number(crop, "height")? + number(padding, "top")? + number(padding, "bottom")?;
+    (width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0).then_some((width, height))
+}
+
+/// Resize the transparent native surface from the selected skin's own
+/// manifest entry. Preserve its center so switching a tall portrait doesn't
+/// jump away from the point the user was looking at.
+pub fn resize_for_skin(app: &AppHandle, skin: &str) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(LABEL) else { return Ok(()) };
+    let (width, height) = logical_size_for_skin(skin);
+    let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
+    let wanted = PhysicalSize::new((width * scale).round() as u32, (height * scale).round() as u32);
+    let old_size = window.outer_size().ok();
+    if old_size == Some(wanted) { return Ok(()) }
+    let old_position = window.outer_position().ok();
+    window.set_size(LogicalSize::new(width, height)).map_err(|error| error.to_string())?;
+    if let (Some(position), Some(old_size)) = (old_position, old_size) {
+        let centered = PhysicalPosition::new(
+            position.x + (old_size.width as i32 - wanted.width as i32) / 2,
+            position.y + (old_size.height as i32 - wanted.height as i32) / 2,
+        );
+        let _ = window.set_position(centered);
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "windows")]
 pub fn configure(app: &AppHandle) -> tauri::Result<()> {
+    let skin = app.state::<crate::engine::Shared>().settings().bubble_skin;
+    let (skin_width, skin_height) = logical_size_for_skin(skin.as_str());
     let window = match app.get_webview_window(LABEL) {
-        Some(window) => window,
+        Some(window) => {
+            let _ = window.set_size(LogicalSize::new(skin_width, skin_height));
+            window
+        },
         None => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
             .title("")
-            .inner_size(BOOTSTRAP_WINDOW_LOGICAL, BOOTSTRAP_WINDOW_LOGICAL)
+            .inner_size(skin_width, skin_height)
             .decorations(false)
             .transparent(true)
             .shadow(false)
@@ -57,11 +93,16 @@ pub fn configure(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn configure(app: &AppHandle) -> tauri::Result<()> {
+    let skin = app.state::<crate::engine::Shared>().settings().bubble_skin;
+    let (skin_width, skin_height) = logical_size_for_skin(skin.as_str());
     let window = match app.get_webview_window(LABEL) {
-        Some(window) => window,
+        Some(window) => {
+            let _ = window.set_size(LogicalSize::new(skin_width, skin_height));
+            window
+        },
         None => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
             .title("")
-            .inner_size(BOOTSTRAP_WINDOW_LOGICAL, BOOTSTRAP_WINDOW_LOGICAL)
+            .inner_size(skin_width, skin_height)
             .decorations(false)
             .transparent(true)
             .shadow(false)

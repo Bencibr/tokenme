@@ -61,15 +61,22 @@ type RawLayout = {
   dockShift: { right: number; left: number; top: number };
 };
 
+export type PetArtworkCrop = { left: number; top: number; width: number; height: number };
+export type PetWindowPadding = { left: number; top: number; right: number; bottom: number };
+
+type RawRasterLayout = RawLayout & {
+  art: number;
+  atlas: number;
+  artOffset: number;
+  crop: PetArtworkCrop;
+  windowPadding: PetWindowPadding;
+};
+
 type RawRasterSkin = {
   labelKey: string;
   render?: "raster";
   assets: { atlas: string; side: string; left: string; top: string };
-  layout: RawLayout & {
-    art: number;
-    atlas: number;
-    artOffset: number;
-  };
+  layout: RawRasterLayout;
   frames: { open: Point; half: Point; closed: Point; happy: Point };
   reactionAtlas: { file: string; frames: Record<"hello" | "care" | "sleep" | "stretch", Point> };
   // Atlas blink is suitable for baked eyes; overlay blink keeps the same body

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   getPetSkinConfig,
+  type PetArtworkCrop,
   type PetDock,
   type RasterPetSkinConfig,
   type PetSkinName,
@@ -72,6 +73,8 @@ type PetSkinProps = {
   action?: PetMotion;
   motions?: boolean;
   emotion?: PetMotion;
+  crop?: PetArtworkCrop;
+  centerInWindow?: boolean;
 };
 
 export function PetSkin(props: PetSkinProps) {
@@ -80,7 +83,7 @@ export function PetSkin(props: PetSkinProps) {
   return <RasterPetSkin {...props} />;
 }
 
-function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetError, action = "idle", emotion = "idle", motions = true }: PetSkinProps) {
+function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetError, action = "idle", emotion = "idle", motions = true, crop, centerInWindow = false }: PetSkinProps) {
   const raster = getPetSkinConfig(skin);
   const assets = raster?.assets;
   const [decodedAssets, setDecodedAssets] = useState<typeof assets>();
@@ -117,7 +120,32 @@ function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetErr
   const tone = emotion === "idle" ? action : emotion;
   const happy = !dragging && (hovered || tone === "hello" || tone === "cheer");
   const eyes = happy && !dock ? raster.eyes.happy ?? raster.eyes.none : raster.eyes[pose];
-  const style = skinStyle(raster, dock, happy);
+  const activeCrop = !dock ? crop : undefined;
+  const style = {
+    ...skinStyle(raster, dock, happy),
+    ...(centerInWindow && activeCrop ? {
+      // Use this skin's manifest crop, with the original sprite layout
+      // translated inside the smaller viewport below.
+      position: "absolute" as const,
+      width: px(activeCrop.width),
+      height: px(activeCrop.height),
+      left: `calc(50% - ${activeCrop.width / 2}px)`,
+      top: `calc(50% - ${activeCrop.height / 2}px)`,
+    } : centerInWindow ? {
+      position: "absolute" as const,
+      left: `calc(50% - ${raster.layout.content / 2}px)`,
+      top: `calc(50% - ${raster.layout.content / 2}px)`,
+    } : {}),
+  };
+  const poseStyle: CSSProperties | undefined = activeCrop ? {
+    inset: "auto",
+    right: "auto",
+    bottom: "auto",
+    width: px(raster.layout.content),
+    height: px(raster.layout.content),
+    left: px(-activeCrop.left),
+    top: px(-activeCrop.top),
+  } : undefined;
   const reaction = !dock && raster.reactionAtlas;
   const reactionKey = tone === "cheer" ? "hello" : tone;
   const reactionFrame = reaction && reactionKey in reaction.frames
@@ -139,11 +167,12 @@ function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetErr
       data-blink={raster.animation?.blink ?? "overlay"}
       data-ready={ready}
       data-action={dragging ? "idle" : action}
+      data-cropped={Boolean(activeCrop)}
       data-animations={motions}
       data-reaction={Boolean(reactionFrame)}
       data-emotion={tone}
       style={style} aria-hidden="true">
-      <span className="pet-pose">
+      <span className="pet-pose" style={poseStyle}>
         <span className="pet-art">
           {dock ? <img key={dock} className="pet-edge-art" src={dock === "top" ? assets.top : dock === "left" ? assets.left : assets.side} alt="" draggable={false} />
             : <span className="pet-sprite" style={reactionFrame && reaction ? {
@@ -156,7 +185,7 @@ function RasterPetSkin({ skin, dock, hovered, dragging, tokens, gaze, onAssetErr
           </span>}
         </span>
       </span>
-      <span className="pet-token-badge">
+      <span className="pet-token-badge" style={activeCrop ? { top: px(activeCrop.height + 4) } : undefined}>
         <strong>{ballTokens(tokens)}</strong>
         <small>{t("bubble.today")} tokens</small>
       </span>
