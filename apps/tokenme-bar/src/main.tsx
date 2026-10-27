@@ -22,6 +22,24 @@ if (isWindows) {
 if (inTauri && getCurrentWindow().label === "pet-notice") document.body.dataset.surface = "pet-notice";
 else void bridge.reportBoot();
 
+// A render-phase exception unmounts React and re-reveals the boot shell — from
+// the outside that is indistinguishable from "still indexing". Route uncaught
+// errors and rejections into panel.log so the crash names itself. A surface
+// crash-looping here would spam the log at its own pace; the throttle keeps
+// one line per distinct message per second.
+const reported = new Map<string, number>();
+const reportFrontendError = (kind: string, message: string) => {
+  if (!inTauri) return;
+  const key = `${kind}:${message}`;
+  const last = reported.get(key) ?? 0;
+  const now = Date.now();
+  if (now - last < 1000) return;
+  reported.set(key, now);
+  void bridge.frontendError(`${kind}: ${message}`);
+};
+window.addEventListener("error", (e) => reportFrontendError("error", e.message || String(e.error)));
+window.addEventListener("unhandledrejection", (e) => reportFrontendError("rejection", String(e.reason)));
+
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />

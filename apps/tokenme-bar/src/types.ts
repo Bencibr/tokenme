@@ -622,6 +622,7 @@ export interface Bridge {
   setNotifyTiers: (tiers: NotifyTierKey) => Promise<void>;
   setPlanExpiryNotifyDays: (days: number | null) => Promise<void>;
   setToolMuted: (tool: string, on: boolean) => Promise<void>;
+  frontendError: (message: string) => Promise<void>;
   setNotifyDevicePresence: (on: boolean) => Promise<void>;
   setNotifySyncStatus: (on: boolean) => Promise<void>;
   setAutoUpdateCheck: (on: boolean) => Promise<void>;

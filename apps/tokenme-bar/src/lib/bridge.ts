@@ -463,6 +463,11 @@ export const bridge: Bridge = {
     await invoke<void>("set_tool_muted", { tool, on });
   },
 
+  async frontendError(message: string): Promise<void> {
+    if (!inTauri) return;
+    await invoke<void>("frontend_error", { message });
+  },
+
   async setAutoUpdateCheck(on: boolean): Promise<void> {
     if (!inTauri) {
       browserSettings.auto_update_check = on;

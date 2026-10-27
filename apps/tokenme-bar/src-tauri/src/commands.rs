@@ -2928,6 +2928,17 @@ pub async fn forget_imported_origin(app: AppHandle, origin: String) -> Result<u6
     Ok(removed)
 }
 
+/// The webview's uncaught errors and rejections, written into panel.log: a
+/// render-phase crash unmounts React and re-reveals the boot shell, which
+/// from the outside is indistinguishable from "still indexing" — this is
+/// the channel that names the crash instead.
+#[tauri::command]
+pub fn frontend_error(app: AppHandle, message: String) -> Result<(), String> {
+    let _ = app;
+    crate::logging::error(&format!("webview: {}", message.replace('\n', " | ")));
+    Ok(())
+}
+
 /// The webview's detected UI language (system locale; the `?lang=` override
 /// wins for QA). The Rust chrome — tray menu, tooltip, updater copy — follows
 /// it; the menu rebuilds here because muda items carry their labels from
