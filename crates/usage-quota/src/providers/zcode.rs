@@ -481,11 +481,45 @@ fn app_versions() -> Vec<String> {
             push_version(&mut out, value);
         }
     }
+    // The installed app's own version: promos are gated by client version on
+    // the vendor side, and a stale default asks a newer promo list a question
+    // it answers with an empty plans array (measured 2026-10-27: 3.14.3 saw
+    // "no plans" while the installed 3.16.3 app showed the promo).
+    if let Some(value) = installed_app_version() {
+        push_version(&mut out, value);
+    }
     push_version(&mut out, DEFAULT_APP_VERSION.to_string());
     if out.is_empty() {
         out.push(DEFAULT_APP_VERSION.to_string());
     }
     out
+}
+
+/// The installed app's version, from the macOS bundle's Info.plist (XML on
+/// this install; read as text and matched on the key). Returns the first
+/// `x.y[.z]` that follows the key.
+fn installed_app_version() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        for path in [
+            "/Applications/ZCode.app/Contents/Info.plist",
+            "/Applications/QuartzCode.app/Contents/Info.plist",
+        ] {
+            let Ok(raw) = std::fs::read_to_string(path) else { continue };
+            if !raw.contains("CFBundleShortVersionString") { continue; }
+            let marker = "<key>CFBundleShortVersionString</key>";
+            let Some(pos) = raw.find(marker) else { continue };
+            let tail = &raw[pos + marker.len()..];
+            let Some(start) = tail.find("<string>") else { continue };
+            let rest = &tail[start + "<string>".len()..];
+            let Some(end) = rest.find("</string>") else { continue };
+            let value = rest[..end].trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 fn push_version(out: &mut Vec<String>, value: String) {
@@ -1037,7 +1071,11 @@ fn claim_pass(force: bool, store: Option<&CredentialStore>) -> Option<ClaimOutco
     };
 
     if plans.is_empty() {
-        crate::log_checkin(&format!("zcode: {today} no claimable plans today — day stays open"));
+        let top_keys: Vec<String> = body.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        let data_keys: Vec<String> = body.get("data").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        crate::log_checkin(&format!(
+            "zcode: {today} claim preview (app_version {version}) — plans empty; top keys {top_keys:?}; data keys {data_keys:?} — day stays open"
+        ));
         return Some(ClaimOutcome::default());
     }
     let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();

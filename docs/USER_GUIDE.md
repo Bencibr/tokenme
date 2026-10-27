@@ -12,7 +12,7 @@
 | 按模型、项目查单次请求 | 面板 → 明细 |
 | 测 TTFT（首 token 延迟）与 TPS | 面板 → 速度（被动测量；Codex / Claude Code 可主动发起一次短请求实测） |
 | 看各家订阅剩余额度与重置倒计时 | 面板 → 概览下方的配额条（窗口跨 80% 或耗尽时弹系统通知） |
-| 每日签到一键代领 | 面板 → 工具页行头（Trae CN、Qoder、Qoder CN、MiniMax Code、WorkBuddy 国内版、FunIDE） |
+| 每日签到一键代领 | 面板 → 工具页行头（Trae CN、Qoder、Qoder CN、MiniMax Code、WorkBuddy 国内版、FunIDE、ZCode） |
 | 把服务器、容器上的用量汇总进来 | 面板底栏「服务器」一键部署，或 Linux 采集端手动安装（见 §4）；严格 HTTPS 多设备通道可在设备同步面板或 `tokenme sync run` 中使用（见 §4.1） |
 | 给无限额的工具设成本上限 | `tokenme budget set`（见 §5） |
 | 在菜单栏常驻数字或图标 | 托盘显示模式，六种任选（见 §3） |

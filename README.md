@@ -25,7 +25,7 @@ TokenMe 是一个统计 AI 编程工具 token 用量、费用与订阅额度的�
 - 各家订阅的额度还剩多少、什么时候重置？
 - 这个月每个工具各占了多少开销，缓存到底省了多少？
 
-这些数字平时散在各家自己的控制台和本地日志里，口径互不相通。TokenMe 直接读取这些工具写在磁盘上的日志与数据库，在本机汇成一份索引；无头服务器和容器装上采集端后定时报数，多机用量汇总成同一份账。配额走各家自己的接口或本地凭据做只读探测，支持签到的六家还能在面板里一键代领。
+这些数字平时散在各家自己的控制台和本地日志里，口径互不相通。TokenMe 直接读取这些工具写在磁盘上的日志与数据库，在本机汇成一份索引；无头服务器和容器装上采集端后定时报数，多机用量汇总成同一份账。配额走各家自己的接口或本地凭据做只读探测，支持签到的七家还能在面板里一键代领。
 
 ## TokenMe能干什么？
 
@@ -156,7 +156,7 @@ $ tokenme daily --days 3
 | <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/codely.png" width="20" alt=""> **Codely**（Tuanjie / Unity，含 Cowork 桌面端） | 5 小时/每周窗口 | — | ✅ | ⏳ | ✅ |
-| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5 小时/周期窗口 + 会话预算 | ✅ | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | 订阅额度 | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | Credits + 套餐/资源包 | ✅ | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | 自算（CLI `/usage`） | — | ✅ | ✅ | ⏳ |

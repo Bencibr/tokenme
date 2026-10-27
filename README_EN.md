@@ -25,7 +25,7 @@ TokenMe is a menu bar app that tracks token usage, spend, and subscription quota
 - How much is left on each subscription, and when does it reset?
 - Which tool owns this month's spend — and how much did caching actually save me?
 
-Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index; headless servers and containers run the collector and report home on a schedule, rolling every machine into the same ledger. Quota probes read each vendor's own API or local credentials — read-only — and the five tools with daily check-in can claim right from the panel.
+Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index; headless servers and containers run the collector and report home on a schedule, rolling every machine into the same ledger. Quota probes read each vendor's own API or local credentials — read-only — and the seven tools with daily check-in can claim right from the panel.
 
 ## What can TokenMe do?
 
@@ -156,7 +156,7 @@ Every tool below ships as a built-in adapter — 30 of them, indexed straight fr
 | <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | account window limits | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/codely.png" width="20" alt=""> **Codely** (Tuanjie / Unity, including the Cowork desktop app) | 5-hour / weekly windows | — | ✅ | ⏳ | ✅ |
-| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour / cycle windows + session budgets | — | ✅ | ✅ | ✅ |
+| <img src="crates/usage-core/assets/zcode.png" width="20" alt=""> **ZCode** | 5-hour / cycle windows + session budgets | ✅ | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder** | subscription windows | ✅ | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/qoder.png" width="20" alt=""> **Qoder CN** | credits + plan / resource packs | ✅ | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/antigravity.png" width="20" alt=""> **Antigravity** | self-computed (CLI `/usage`) | — | ✅ | ✅ | ⏳ |
