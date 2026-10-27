@@ -651,7 +651,7 @@ const [page, setPage] = useState<PageKey>(() => {
               {page === "tools" ? <ToolsSection tools={tools} /> : null}
               {page === "ranks" ? (
                 <>
-                  <RankedList label={t("sec.tools")} items={win.breakdown.tools} limit={8} weight="tokens" />
+                  <RankedList label={t("sec.tools")} items={win.breakdown.tools} limit={8} weight="tokens" tool />
                   <RankedList label={t("sec.models")} items={win.breakdown.models} limit={8} unpriced={win.summary.unpriced} />
                   <RankedList label={t("sec.projects")} items={win.breakdown.projects} limit={8} />
                   <CallTabs mcps={win.breakdown.mcps} skills={win.breakdown.skills} />

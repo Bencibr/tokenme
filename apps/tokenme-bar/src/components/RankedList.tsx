@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { Item, UnpricedModel } from "../types";
-import { compactTokens, credits as creditText, money } from "../lib/format";
+import { compactTokens, credits as creditText, money, toolDisplay } from "../lib/format";
 import { useMoney } from "../lib/display";
 import { t } from "../lib/i18n";
 import { MoreRow, Section } from "./Section";
@@ -16,13 +16,22 @@ export function RankRows({
   items,
   limit = 5,
   weight = "cost",
+  tool = false,
 }: {
   items: Item[];
   limit?: number;
   weight?: "cost" | "tokens";
+  /** Render the item key through the tool display map (tools page naming). */
+  tool?: boolean;
 }) {
   const showMoney = useMoney();
   const shown = items.slice(0, limit);
+  // The engine labels the tool group with its raw id (`dsh`), because that id is
+  // the key in the index, the sync bundles and the theme slots. Only the rendered
+  // name goes through the display map, so a tool row reads DeepSeek Harness here
+  // the way it already does on the tools page; model and project rows keep the
+  // label the engine sent.
+  const nameOf = (i: Item) => (tool ? toolDisplay(i.key) : i.label);
   // One tooltip at a time, keyed on the row: click the truncated name to see
   // the full path — hover titles exist but a non-activating panel is exactly
   // where nobody waits for a hover delay.
@@ -40,6 +49,7 @@ export function RankRows({
         const measure = rankingByCost ? i.cost : i.total_tokens;
         const share = max > 0 ? Math.max((measure / max) * 100, measure > 0 ? 2 : 0) : 0;
         const [head, tail] = splitPath(i.label);
+        const name = nameOf(i);
         return (
           <li className="rank-row" key={i.key}>
             <div className="rank-line">
@@ -56,13 +66,13 @@ export function RankRows({
                     to the name cell and must not inherit its overflow clip */}
                 <span className="rank-text">
                   {head ? <span className="rank-dir">{head}</span> : null}
-                  {tail}
+                  {tool ? name : tail}
                 </span>
                 {tipKey === i.key ? (
                   /* bottom rows flip the tip above the row — a below-tip
                      there would leave the panel (same rule as the sources
                      list: last two visible rows go up) */
-                  <span className={`rank-tip${idx >= shown.length - 2 ? " up" : ""}`}>{i.label}</span>
+                  <span className={`rank-tip${idx >= shown.length - 2 ? " up" : ""}`}>{name}</span>
                 ) : null}
               </span>
               {/* The ranking is a bar in its own column — one shared origin, so
@@ -113,9 +123,11 @@ interface RankedProps {
   weight?: "cost" | "tokens";
   unpriced?: UnpricedModel[];
   emptyText?: string;
+  /** Tool names go through the display map; model/project rows keep their label. */
+  tool?: boolean;
 }
 
-export function RankedList({ label, items, limit = 5, weight = "cost", unpriced, emptyText }: RankedProps) {
+export function RankedList({ label, items, limit = 5, weight = "cost", unpriced, emptyText, tool = false }: RankedProps) {
   const [all, setAll] = useState(false);
   const [sort, setSort] = useState<SortState>("default");
   const showMoney = useMoney();
@@ -144,7 +156,7 @@ export function RankedList({ label, items, limit = 5, weight = "cost", unpriced,
       {items.length === 0 ? (
         <p className="empty-row">{emptyText ?? t("rank.empty")}</p>
       ) : (
-        <RankRows items={ordered} limit={shown} weight={weight} />
+        <RankRows items={ordered} limit={shown} weight={weight} tool={tool} />
       )}
       <MoreRow open={all} total={items.length} preview={limit} onToggle={() => setAll((v) => !v)} />
       {listed.length > 0 ? (

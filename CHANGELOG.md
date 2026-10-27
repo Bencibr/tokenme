@@ -8,6 +8,8 @@ All notable changes to TokenMe are documented in this file. The format follows [
 
 - **DSH 在界面上改叫 DeepSeek Harness，图标换成官方那只鲸鱼** — 名字只改用户看得到的地方：面板与气泡的工具名（适配器的 `DISPLAY_NAME` 与前端兑底表）、测速页与通知标题、设置里的提示文案、README 与 docs；工具 id 仍是 `dsh`（索引、同步 bundle、主题色槽位、进程名匹配、`dsh-doctor` 命令名均不变），所以不需数据迁移。图标取自本机 `/Applications/DeepSeek Harness.app/Contents/Resources/icon.icns`（1024px），裁到圆角方块边界后缩为 128×128 覆盖 `assets/dsh.png`（文件名与映射不变）。名字变长后列表行沿用既有的 ellipsis + 点击看全名行为。
 
+- **排行页的工具名也改叫 DeepSeek Harness** — 排行页的“工具”分组直接用引擎给的 label，而那是工具 id（`dsh`），于是其它页面已经显示为 DeepSeek Harness 而这里仍是小写 `dsh`。现在 `RankedList` 多了一个 `tool` 开关，只对工具分组把 key 过一遍显示名映射；模型与项目分组仍用引擎发的 label（项目要的就是原路径、模型要的就是原始模型名）。工具列表与排行页现在读同一个名字，截断时点开看的全名也跟着一致。
+
 ## [0.1.9] — 2026-10-26
 
 ### Added
