@@ -19,24 +19,14 @@
 
 ## What is TokenMe?
 
-TokenMe is a menu bar app that tracks token usage, spend, and subscription quota across the AI coding tools you already run. Native installers for macOS and Windows, a fully static Linux collector and CLI. It answers three questions that usually have no good home:
+Token usage, spend and subscription quota across the AI coding tools you already run — one menu bar panel. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index: no code content, no telemetry; multi-machine rolls in over ssh, quota probes are read-only against each vendor's own API, and seven tools get one-click daily check-in. Native installers for macOS and Windows, a fully static Linux collector, plus a CLI.
 
-- How many tokens did I burn today, and what did they cost?
-- How much is left on each subscription, and when does it reset?
-- Which tool owns this month's spend — and how much did caching actually save me?
+## v0.2.0 highlights
 
-Those numbers normally live in each vendor's own console and local logs, and none of them speak the same language. TokenMe reads the logs and databases your tools already write to disk and folds them into one local index; headless servers and containers run the collector and report home on a schedule, rolling every machine into the same ledger. Quota probes read each vendor's own API or local credentials — read-only — and the seven tools with daily check-in can claim right from the panel.
-
-## What can TokenMe do?
-
-Working across Claude Code, Codex, ZCode and the rest, this tends to happen:
-
-- You want to know what today cost, so you open three vendor consoles — and their numbers don't agree.
-- A 5-hour rolling window runs dry right when the work is hottest.
-- Points, credits, dollar windows — every subscription ships its own dashboard, and none of them talk to each other.
-- At month's end you want the per-tool breakdown, and the only way to get it is parsing logs by hand.
-
-TokenMe puts all of it in one panel, a click away — usage, spend, quota, check-in and speed on one screen, with servers and containers rolled into the same ledger.
+- **Pixel-accurate pet hit testing**: clickable exactly where the picture shows — transparent margins no longer mis-trigger
+- **The panel no longer sticks on "indexing"**: the boot report read retries on its own, and App Nap throttling is blocked
+- **ZCode daily grant** claims itself, presenting the installed client's version; every pass leaves a readable trail
+- webview exceptions land in the log — problems name themselves; see the [CHANGELOG](CHANGELOG.md)
 
 ## Screenshots
 
@@ -200,17 +190,6 @@ TokenMe can passively measure **TTFT** (time to first token) and **TPS** (genera
 
 DSH follows its session stats: TTFT averaged per request, TPS as output tokens over decode time; older logs without first-token timestamps yield neither. An active test sends one short prompt only after you click (uses plan quota), is kept separate from passive averages, and retains no prompt or response text.
 
-
-## What's new in 0.1.7
-
-- **New**: passive TTFT/TPS measurements for Codex, Claude Code and DSH; DSH results now aggregate by session using its output-weighted TPS formula. Optional one-shot speed tests are available for Codex and Claude Code.
-- **New**: Qoder CN as a separate usage and quota adapter, with credit-pack windows and daily check-in.
-
-## What's new in 0.1.6
-
-- **New**: desktop pet skins (water drop / animated kitten / cute hanfu girl / cute hanfu boy / modern cute girl / summer long-legged beauty — blinking, pointer-following pupils, edge poses, token badge on hover); the summer skin preserves tall adult proportions, with display size and eye anchors defined in its JSON skin package; the pet registry now also supports lazy-loaded GLB/VRM model skins with JSON camera/head-tracking settings and a 2D fallback; the kitten's top pose was redesigned as a compact downward-looking peek; daily check-in for Trae, Trae CN and Qoder, done only after the vendor confirms; a separate Trae CN adapter with per-credit-pack windows; settings split into General / Alerts / Advanced / About with per-tool quota switches and auto check-in.
-- **Verified**: WorkBuddy and Cline on real Windows machines.
-- **Fixed**: Windows tray clicks, panel show/hide, borderless surface and bubble lifecycle — the invisible-panel and residual-surface regressions.
 
 ## Data & privacy
 
