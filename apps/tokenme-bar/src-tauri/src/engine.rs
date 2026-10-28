@@ -1374,7 +1374,7 @@ mod tests {
         assert!(host_gate_open("qoder_cn", true, &alive));
         assert!(!host_gate_open("qoder_cn", false, &alive));
         assert!(!host_gate_open("claude", true, &alive), "not a claim bearer");
-        assert!(!host_gate_open("zcode", true, &alive));
+        assert!(host_gate_open("zcode", true, &alive), "zcode claims over HTTPS — the IDE need not run");
         assert!(host_gate_open("copilot", true, &alive), "no host mapping — never paused");
         assert!(host_gate_open("trae_cn", false, &None), "pause off means everything passes");
 
