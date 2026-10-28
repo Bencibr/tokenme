@@ -69,12 +69,13 @@ function DeltaChip({ pct, caption }: { pct: number; caption: string }) {
   const dir = deltaDirection(pct);
   const Glyph = dir === "up" ? IconArrowUp : dir === "down" ? IconArrowDown : IconFlat;
   // Naked text on the hero's baseline, glued to the figure it qualifies — a
-  // boxed chip floating beside the cost read as an unrelated second row.
+  // boxed chip floating beside the cost read as an unrelated second row. The
+  // caption (较上月同期 / 较昨日同期) lives in the hover title only: the chip
+  // itself shows the direction and the number, nothing else.
   return (
     <span className="chip" data-dir={dir} title={caption}>
       <Glyph size={11} />
       <span className="chip-v num">{signedPercent(pct)}</span>
-      <span className="chip-cap">{t("hdr.vs", { p: caption })}</span>
     </span>
   );
 }
@@ -260,11 +261,22 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
           </>
         ) : null}
       </div>
-      {/* Its own line: the badge on the left, the scope dropdown hugging the
-          far right of the same line. The dropdown used to share the tabs'
-          row, and a long badge squeezed it out of the window entirely. */}
+      {/* Keep machine scope and sync status on one line. The sync badge only
+          describes the combined view, so it disappears for a single machine. */}
       <div className="hdr-sync">
-        {sync ? (
+        <ScopeDropdown
+          scope={scope}
+          onScope={onScope}
+          machines={report.machines ?? []}
+          syncs={report.syncs}
+          devices={syncDevices?.devices}
+          isSecondary={syncDevices?.role === "secondary"}
+          now={now}
+          open={scopeMenuOpen}
+          onOpen={onScopeMenuOpen}
+          serverOrigins={serverOrigins}
+        />
+        {scope.kind === "all" && sync ? (
           <span className="sync" data-stale={sync.stale || undefined} title={syncTip(sync)}>
             <IconRefresh size={11} />
             {t("hdr.sync")}
@@ -292,18 +304,6 @@ export function Header({ report, period, onPeriod, page, onPage, onClose, sync, 
             )}
           </span>
         ) : null}
-        <ScopeDropdown
-          scope={scope}
-          onScope={onScope}
-          machines={report.machines ?? []}
-          syncs={report.syncs}
-          devices={syncDevices?.devices}
-          isSecondary={syncDevices?.role === "secondary"}
-          now={now}
-          open={scopeMenuOpen}
-          onOpen={onScopeMenuOpen}
-          serverOrigins={serverOrigins}
-        />
       </div>
       {/* The tabs keep their line to themselves. */}
       <div className="tabs-row">
