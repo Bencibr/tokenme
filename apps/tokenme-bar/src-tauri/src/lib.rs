@@ -37,26 +37,34 @@ use crate::engine::EngineChannel;
 pub fn run() {
     // Start the cold-start clock before anything else can read it.
     panel::mark_launch();
-    // A non-activating panel never becomes the frontmost app, so App Nap
-    // reads the whole process as idle and throttles it to a standstill — the
-    // webview froze mid-animation on its boot spinner while the engine below
-    // kept logging. The utility must stay responsive for as long as its
-    // window is on screen: user-initiated activity blocks the nap without
-    // touching idle system sleep. The returned token is leaked on purpose —
-    // the activity lasts for the whole process.
+    // A non-activating panel never becomes the frontmost app, so App Nap can
+    // throttle the webview while the engine keeps logging. Hold a user-initiated
+    // activity for the process lifetime so the panel stays responsive, while
+    // explicitly allowing the computer to sleep when idle. `id` is a raw
+    // pointer, so retain the returned activity token rather than relying on the
+    // local pointer to keep the Objective-C object alive.
     #[cfg(target_os = "macos")]
-    {
+    let _app_nap_activity = unsafe {
         use tauri_nspanel::cocoa::base::{id, nil};
         use tauri_nspanel::cocoa::foundation::NSString;
         use tauri_nspanel::objc::{class, msg_send, sel, sel_impl};
-        unsafe {
-            let pi: id = msg_send![class!(NSProcessInfo), processInfo];
-            let reason: id = NSString::alloc(nil)
-                .init_str("TokenMe menu-bar panel and desktop pet stay responsive");
-            let _activity: id = msg_send![pi,
-                beginActivityWithOptions: 0x00FFFFFF_u64 reason: reason];
-        }
-    }
+        const NS_ACTIVITY_IDLE_SYSTEM_SLEEP_DISABLED: u64 = 1 << 20;
+        const NS_ACTIVITY_USER_INITIATED: u64 = 0x00FF_FFFF;
+        let options = NS_ACTIVITY_USER_INITIATED & !NS_ACTIVITY_IDLE_SYSTEM_SLEEP_DISABLED;
+
+        let pi: id = msg_send![class!(NSProcessInfo), processInfo];
+        let reason: id = NSString::alloc(nil)
+            .init_str("TokenMe menu-bar panel and desktop pet stay responsive");
+        let activity: id = msg_send![pi,
+            beginActivityWithOptions: options reason: reason];
+        let retained_activity: id = if activity == nil {
+            nil
+        } else {
+            msg_send![activity, retain]
+        };
+        let _: () = msg_send![reason, release];
+        retained_activity
+    };
     let (tx, rx) = std::sync::mpsc::channel::<engine::Msg>();
 
     let builder = tauri::Builder::default()

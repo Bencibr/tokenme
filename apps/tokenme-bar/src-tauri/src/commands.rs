@@ -3439,6 +3439,16 @@ pub async fn set_pet_preferences(app:AppHandle, prefs:crate::settings::PetPrefer
 #[tauri::command]
 pub fn show_panel(app: AppHandle) {
     if crate::panel::is_panel_hidden() {
+        // A webview mounted while the machine was quiet can miss the boot
+        // publish event (no latch, no event replay). If the engine already
+        // holds a published report, re-emit it right as the window opens:
+        // the user is looking at the panel right now, so the handover from
+        // the boot shell to real figures must not wait out a cadence.
+        if let Some(shared) = app.try_state::<crate::engine::Shared>() {
+            if let Some(report) = shared.report() {
+                let _ = app.emit(crate::engine::REPORT_EVENT, &report);
+            }
+        }
         panel::show(&app, None);
     } else {
         panel::hide(&app);
