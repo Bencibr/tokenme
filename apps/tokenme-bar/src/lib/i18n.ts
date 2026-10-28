@@ -1414,7 +1414,7 @@ const en: Record<StrKey, string> = {
   "set.notify.hint": "Show a system notification for quota crossings or package expiry reminders",
   "set.plan-expiry": "Plan expiry reminder",
   "set.plan-expiry.hint": "Remind once when a package enters the selected lead-time window",
-  "set.plan-expiry.days": "{n} days before expiry",
+  "set.plan-expiry.days": "{n} days",
   "set.plan-expiry.off": "Off",
   "set.notify.granted": "Enabled",
   "set.notify.enable": "Open settings",
