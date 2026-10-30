@@ -1087,6 +1087,103 @@ fn the_funide_projection_repair_drops_session_rows_and_keeps_turn_rows_once() {
     assert_eq!(back, 1, "the funide repair never runs twice");
 }
 
+/// FunIDE 0.0.4.4 split one session file into `<sid>.main.json` (items),
+/// `<sid>.meta.json` (header) and `<sid>.ckpt-N.json` (rollback snapshots).
+/// Discovery first walked every `.json`, so each of those siblings was read
+/// once, parsed to zero events (no `id`, or no `items`, or a bare array) and
+/// recorded in `file_state` at the size and mtime it still has. Once discovery
+/// learned to return only the body, `unchanged_since` — comparing exactly those
+/// numbers — skipped the body forever: on a live install three sessions holding
+/// 165M tokens between them carried `events = 0` markers matching the disk to
+/// the millisecond, so the panel showed 7.15M for a day whose files held 161.3M.
+///
+/// The repair clears the read markers so the next pass re-reads; it must NOT
+/// touch events. The re-read is additive: keys are turn ids, so rows already on
+/// the books merge rather than duplicate.
+#[test]
+fn the_funide_split_reread_repair_clears_markers_and_keeps_events_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    const BODY: &str = "/Users/demo/Library/Application Support/FunIDE/User/funide/sessions/ws/s9.main.json";
+    {
+        let idx = Index::open(&db).unwrap();
+        // Undo the repair a fresh open already ran, to stage the pre-shape.
+        idx.conn()
+            .execute("DELETE FROM meta WHERE key = 'repair:funide-split-reread-1'", [])
+            .unwrap();
+        // The marker the old discovery left: the body's real size and mtime,
+        // with nothing parsed out of it.
+        idx.conn()
+            .execute(
+                "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                 VALUES(?1, 'funide', 2829288, 1793333933015, 2829288, 0, 1)",
+                rusqlite::params![BODY],
+            )
+            .unwrap();
+        // A marker from the layout before the split, and one for another tool
+        // that must be left alone.
+        idx.conn()
+            .execute(
+                "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                 VALUES('/w/old.json', 'funide', 10, 1, 10, 7, 1)",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+                 VALUES('/w/dsh.jsonl', 'dsh', 10, 1, 10, 3, 1)",
+                [],
+            )
+            .unwrap();
+        // Money already on the books: the repair must not delete it.
+        idx.conn()
+            .execute(
+                "INSERT INTO event(id, tool, ts_ms, session, meter, in_tok, dedupe_key, source) \
+                 VALUES(1, 'funide', 10, 's9', 'tokens', 100.0, 'funide#s9#turn_1793337889311_1', ?1)",
+                rusqlite::params![BODY],
+            )
+            .unwrap();
+    }
+    let idx = Index::open(&db).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM file_state WHERE tool='funide'"),
+        0,
+        "every funide read marker goes, or the body keeps being skipped as unchanged"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM file_state WHERE tool='dsh'"),
+        1,
+        "another tool's markers are not this repair's business"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM event WHERE tool='funide'"),
+        1,
+        "the repair invalidates read markers only — the rows on the books stay"
+    );
+    assert_eq!(
+        idx.meta_value("repair:funide-split-reread-1").unwrap().as_deref(),
+        Some("1")
+    );
+
+    // One-shot: a marker written after the repair survives every reopen.
+    idx.conn()
+        .execute(
+            "INSERT INTO file_state(source_key, tool, size, mtime_ms, cursor, events, updated_ms) \
+             VALUES(?1, 'funide', 2829288, 1793333933015, 2829288, 18, 2)",
+            rusqlite::params![BODY],
+        )
+        .unwrap();
+    drop(idx);
+    let idx = Index::open(&db).unwrap();
+    let back: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM file_state WHERE tool='funide'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(back, 1, "the split re-read repair never runs twice");
+}
+
 /// The hermes key widened from four vendor fields to six. An old row stands
 /// under a key no future pass writes, and the new key's first projection would
 /// seed its ledger at zero and bill the slice's whole lifetime beside the
