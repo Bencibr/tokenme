@@ -1,11 +1,11 @@
 //! FunIDE adapter (唐山趣绮梦's VS Code fork with a built-in agent).
 //!
-//! One source: `<data>/FunIDE/User/funide/sessions/<workspace>/<session>.json`
-//! — each file is a whole session (Tree kind): the UI's own `cacheUsage`
-//! cumulative ledger, the per-turn `items[].usage*` numbers, the session model,
-//! and the workspace key. One event per billed turn, keyed on the turn's own id
-//! and stamped with the turn's own start; the file's mtime is the cursor and
-//! re-reads are absorbed.
+//! One source, which is `<data>/FunIDE/User/funide/sessions/<workspace>/` — the
+//! writer's layout there changed in 0.0.4.4, and [`paths`] documents both
+//! shapes. What is constant is the unit of billing: a whole session file read as
+//! a Tree, one event per billed turn, keyed on the turn's own id and stamped with
+//! the turn's own start; the file's mtime is the cursor and re-reads are
+//! absorbed.
 //!
 //! `index.json` per workspace is UI bookkeeping (titles, counts) and is not a
 //! session. No quota here: the GLM-plan points balance lives in the FunIDE
@@ -71,7 +71,13 @@ impl SourceAdapter for FunIdeAdapter {
                 let Ok(text) = std::fs::read_to_string(&file.path) else {
                     return Ok(ReadOutcome { events: Vec::new(), cursor });
                 };
-                Ok(ReadOutcome { events: proj::parse(&text, file.mtime_ms, &file.key()), cursor })
+                // 0.0.4.4+ keeps the session header beside the body; before that
+                // the body was the header. A header that cannot be read is not
+                // fatal — the body still yields the turns, and it answers `id`
+                // itself in the older layout.
+                let header = paths::header_for(&file.path).and_then(|p| std::fs::read_to_string(p).ok());
+                let events = proj::parse(&text, header.as_deref(), file.mtime_ms, &file.key());
+                Ok(ReadOutcome { events, cursor })
             }
             _ => Ok(ReadOutcome { events: Vec::new(), cursor }),
         }
@@ -102,6 +108,38 @@ mod tests {
         let index = ws.join("index.json");
         std::fs::write(index, b"{}").unwrap();
         path
+    }
+
+    /// The 0.0.4.4+ layout: the header in `.meta.json`, the turns in
+    /// `.main.json`, a rollback snapshot beside them carrying the same turns.
+    const SPLIT_HEADER: &str = r#"{"id":"s9","workspaceKey":"10blr3b1m7plhc",
+        "activeModelId":"cloud:deepseek-flash-free","updatedAt":1793330609706,
+        "cacheUsage":{"promptTokens":220,"cachedTokens":60,"completionTokens":30}}"#;
+
+    const SPLIT_BODY: &str = r#"{"items":[
+        {"role":"user","turnId":"turn_1790510647992_1","text":"hi"},
+        {"role":"assistant","turnId":"turn_1790510647992_1",
+         "usagePrompt":200,"usageCached":50,"usageCompletion":20},
+        {"role":"user","turnId":"turn_1790520647992_2","text":"go on"},
+        {"role":"assistant","turnId":"turn_1790520647992_2",
+         "usagePrompt":20,"usageCached":10,"usageCompletion":10}],
+        "contextMessages":[],"fileObservations":{}}"#;
+
+    fn split_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+        let ws = dir.join("sessions").join("ws2");
+        std::fs::create_dir_all(&ws).unwrap();
+        let body = ws.join("s9.main.json");
+        std::fs::write(&body, SPLIT_BODY).unwrap();
+        std::fs::write(ws.join("s9.meta.json"), SPLIT_HEADER).unwrap();
+        // A rollback snapshot replays the same turns; billing it would double them.
+        std::fs::write(
+            ws.join("s9.ckpt-0.json"),
+            r#"[{"turnId":"turn_1790510647992_1","entries":[]}]"#,
+        )
+        .unwrap();
+        std::fs::write(ws.join("s9.draft.txt"), b"unsent").unwrap();
+        std::fs::write(ws.join("index.json"), br#"{"version":1,"sessions":[]}"#).unwrap();
+        body
     }
 
     #[test]
@@ -135,6 +173,36 @@ mod tests {
         assert_eq!(outcome.events[1].ts_ms, 1790520647992);
         assert_eq!(outcome.events[0].dedupe_key.as_deref(), Some("funide#s1#turn_1790510647992_1"));
         assert_eq!(outcome.events[1].dedupe_key.as_deref(), Some("funide#s1#turn_1790520647992_2"));
+        std::env::remove_var(paths::HOME_ENV);
+    }
+
+    #[test]
+    fn a_split_session_reads_its_body_and_bills_the_same_turns_as_before_the_split() {
+        let _guard = paths::test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let body = split_fixture(dir.path());
+        std::env::set_var(paths::HOME_ENV, dir.path());
+
+        let files = FunIdeAdapter.discover(&DateFilter::default());
+        assert_eq!(files.len(), 1, "one body per session: the meta, the checkpoint and the index are not sessions");
+        assert_eq!(files[0].path, body, "the body is what carries the turns");
+
+        let outcome = FunIdeAdapter.read(&files[0], ReadCursor::default()).unwrap();
+        assert_eq!(outcome.events.len(), 2, "the checkpoint's replay of turn 1 is not billed twice");
+        assert_eq!(outcome.events[0].session, "s9", "the id is read out of the sibling .meta.json");
+        assert_eq!(outcome.events[0].model.as_deref(), Some("deepseek-flash-free"));
+        assert_eq!(outcome.events[0].ts_ms, 1790510647992);
+        assert_eq!(outcome.events[0].dedupe_key.as_deref(), Some("funide#s9#turn_1790510647992_1"));
+        let (input, cache, output): (f64, f64, f64) = outcome.events.iter().fold(
+            (0.0, 0.0, 0.0),
+            |mut acc, e| {
+                acc.0 += e.counts.input;
+                acc.1 += e.counts.cache_read;
+                acc.2 += e.counts.output;
+                acc
+            },
+        );
+        assert_eq!((input, cache, output), (160.0, 60.0, 30.0), "same ledger the single-file layout produced");
         std::env::remove_var(paths::HOME_ENV);
     }
 }

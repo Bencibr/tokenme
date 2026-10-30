@@ -903,6 +903,53 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        // One-shot re-read of the FunIDE sessions the 0.0.4.4 split introduced,
+        // which the projection repair above cannot reach. That repair was
+        // written for the *old* layout and invalidated nothing on disk; it only
+        // cleared the cursors of a discovery that then walked every `.json` in
+        // a workspace. So `.main.json` (items but no `id`), `.meta.json` (id but
+        // no items) and `.ckpt-N.json` (a bare array) were each read once,
+        // parsed to zero events, and recorded in `file_state` at the size and
+        // mtime they still have. Discovery then learned to return only the
+        // body, and `unchanged_since` — comparing exactly those numbers — now
+        // skips it forever: the sessions are on disk, their size/mtime match
+        // the stored marker, and nothing ever reads them again.
+        //
+        // Measured on a live 0.0.4.5 install (2026-10-30): three sessions
+        // (`smvtoqr65haav` 135.5M, `smvuech4v72dl` 19.1M, `smvrsl9mha1tg` 10.4M)
+        // held `events = 0` markers whose (size, mtime) matched the disk to the
+        // millisecond, so the tool reported 7.15M tokens for a day whose files
+        // hold 161.3M. Dropping `file_state` for the tool and re-ingesting took
+        // the index from 243 events / 978.1M to 270 / 1,146.4M with 321 rows
+        // deduped — the re-read fills the gaps and re-emits nothing twice,
+        // because the dedupe keys are the turn ids and those never moved.
+        //
+        // Only the read markers go. Every event stays: the ones already
+        // indexed are correct, and the re-read merges into them by key. Missing
+        // rows can only be *added* here, so no `purge_source` and no rollup
+        // rebuild is needed — the insert path folds each new row into the
+        // rollup in the same transaction.
+        const REPAIR_FUNIDE_SPLIT_REREAD: &str = "repair:funide-split-reread-1";
+        let funide_split: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![REPAIR_FUNIDE_SPLIT_REREAD],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if funide_split.is_none() {
+            // The whole tool, not just `.main.json` rows: a workspace can hold
+            // both layouts side by side (a session that predates the split and
+            // one that follows it), and re-reading a legacy body is free — its
+            // turns dedupe on the same ids.
+            conn.execute("DELETE FROM file_state WHERE tool = 'funide'", []).map_err(sql_err)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, '1')",
+                params![REPAIR_FUNIDE_SPLIT_REREAD],
+            )
+            .map_err(sql_err)?;
+        }
         // One-shot re-billing of the Hermes rows: the dedupe key was
         // `hermes#<session>#<model>#<provider>#<task>` — four of the vendor's
         // six primary-key fields — so two slices differing only in billing
