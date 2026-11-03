@@ -94,6 +94,8 @@ TokenMe reads only the official OpenCode Go provider's quota. The credential com
 
 **Open Design** quota comes from the desktop app's own sign-in: the `vela_ctrl_…` control key in `profiles.prod` of `~/.amr/config.json` (`OPEN_DESIGN_HOME` moves the directory), read-only, for the Design Plan's 5-hour and 7-day windows. The runtime key `sk-amr-…` only authorises model requests and is refused by the control plane; the wallet balance is not a window and is not drawn. An expired sign-in makes the row disappear; signing in to Open Design again restores it.
 
+**Grok Build** quota comes from the CLI login: the OIDC `key` in `~/.grok/auth.json` (`GROK_HOME` moves the directory), sent to `cli-chat-proxy.grok.com/v1/billing?format=credits` — read-only, never refreshed here. The answer is the SuperGrok **weekly** pool's used percent; when the account has unified billing (`isUnifiedBillingUser`), Cursor / Grok Bot / GrokChat draw from the same pool — the panel draws that one weekly window. An expired token makes the row disappear; `grok login` again restores it.
+
 ### 3.6 Automatic token renewal
 
 Three tools keep a short-lived login on disk — MiniMax Code (about an hour), Kimi Code (the vendor's 15-minute schedule) and Cline (the gateway token, one hour) — and tokenme renews each in place as it expires: the refresh token in the tool's own credential file is exchanged for a fresh pair, written back atomically in that tool's own format. The write-back is what makes the renewal safe — a rotation that never lands on disk is a rotation already spent, and the tool's own next refresh would find its login dead. Each probe renews only the login it is actually reading; a static API key is read, never written. A failed exchange changes nothing, and the row keeps its last real number for up to six hours (the probe cache's grace). Every other probe reads credentials and never writes them — the WorkBuddy credential tokenme does store comes from `tokenme workbuddy-login`, a command you ran, not from a probe.
@@ -208,6 +210,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Codex | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | Tokens | `~/.local/share/opencode/opencode.db` |
 | Open Design | Tokens | `~/.amr/opencode-sessions/<id>/data/opencode/opencode-.db` (one store per sandbox, all read; `OPEN_DESIGN_DATA_DIR` moves the root) |
+| Grok Build | Tokens | `~/.grok/sessions/<cwd-encoded>/<session-id>/usage.json` (`GROK_HOME` moves the root) |
 | Pi | Tokens | `~/.pi/agent/sessions/**` |
 | Oh My Pi | Tokens | `~/.omp/agent/sessions/**` (`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` to move it) |
 | Cline | Tokens | `~/.cline/data/sessions/**` (the desktop app writes a sub-agent's transcript inside its parent session dir and its meta into a sibling `<session>__agent_<uuid>/`; each is attributed to the session's own workspace) |

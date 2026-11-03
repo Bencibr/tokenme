@@ -16,6 +16,7 @@ pub(crate) use crypto::hmac_sha256;
 mod dsh;
 mod funide;
 mod gemini;
+mod grokbuild;
 mod joycode;
 mod kimicode;
 mod minimaxcode;
@@ -51,6 +52,7 @@ pub use dsh::DshQuota;
 pub use funide::FunIdeQuota;
 pub use funide::manual_checkin as funide_manual_checkin;
 pub use gemini::GeminiQuota;
+pub use grokbuild::GrokBuildQuota;
 pub use joycode::JoycodeQuota;
 pub use kimicode::KimiCodeQuota;
 pub use minimaxcode::MiniMaxCodeQuota;
@@ -97,6 +99,7 @@ pub fn optional() -> Vec<Box<dyn QuotaProbe>> {
         Box::new(OpenDesignQuota),
         Box::new(CodexQuota),
         Box::new(CopilotQuota),
+        Box::new(GrokBuildQuota),
         Box::new(GeminiQuota),
         Box::new(JoycodeQuota),
         Box::new(QoderQuota),

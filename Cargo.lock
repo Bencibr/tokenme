@@ -1820,6 +1820,7 @@ dependencies = [
  "usage-adapter-codex",
  "usage-adapter-dsh",
  "usage-adapter-funide",
+ "usage-adapter-grokbuild",
  "usage-adapter-hermes",
  "usage-adapter-joycode",
  "usage-adapter-kimicode",
@@ -1954,6 +1955,17 @@ dependencies = [
 
 [[package]]
 name = "usage-adapter-funide"
+version = "0.2.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "usage-core",
+]
+
+[[package]]
+name = "usage-adapter-grokbuild"
 version = "0.2.0"
 dependencies = [
  "dirs",

@@ -93,6 +93,8 @@ TokenMe 只读取官方 OpenCode Go provider 的配额，凭据按顺序取：`O
 
 **Open Design** 的配额读自桌面应用自己的登录：`~/.amr/config.json` 的 `profiles.prod` 里那枚 `vela_ctrl_…` 控制密钥（`OPEN_DESIGN_HOME` 可改目录），只读 Design Plan 的 5 小时与 7 天两个窗口。运行时密钥 `sk-amr-…` 只用于模型请求，控制面不接受它；钱包余额不是窗口，面板不画。登录过期时行会消失，重新登录 Open Design 即恢复。
 
+**Grok Build** 的配额读自 CLI 登录：`~/.grok/auth.json`（`GROK_HOME` 可改目录）里 OIDC 条目的 `key`，请求 `cli-chat-proxy.grok.com/v1/billing?format=credits`，只读、不续期。答回的是 SuperGrok **每周**池的已用百分比；账号若开启统一计费（`isUnifiedBillingUser`），Cursor / Grok Bot / GrokChat 也从同一池扣费——面板只画这一条周窗口。令牌过期时行会消失，重新 `grok login` 即恢复。
+
 ### 3.6 令牌自动续期
 
 MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline（gateway 令牌一小时）三家把短时效令牌存在磁盘上，tokenme 在其过期时就地续期：拿同一份凭据文件里的 refresh token 去换新对，再按该工具自己的格式原子性写回原处。写回是安全性的前提——没有落盘的轮换等于已被消耗的轮换，工具自己下次刷新就会发现登录死了。每个探测只续自己正在读的那份登录；静态 API key 只读不写。换取失败则什么都不改，该行最多保留六小时（探测缓存的宽限）的最后真实数字。其余所有探测只读凭据、绝不写回——tokenme 存的那份 WorkBuddy 凭据来自你亲自跑过的 `tokenme workbuddy-login`，不是探测写的。
@@ -207,6 +209,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Codex | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | Tokens | `~/.local/share/opencode/opencode.db` |
 | Open Design | Tokens | `~/.amr/opencode-sessions/<id>/data/opencode/opencode-.db`（每个沙箱一份，全部读取；`OPEN_DESIGN_DATA_DIR` 可改根目录） |
+| Grok Build | Tokens | `~/.grok/sessions/<cwd-encoded>/<session-id>/usage.json`（`GROK_HOME` 可改根目录） |
 | Pi | Tokens | `~/.pi/agent/sessions/**` |
 | Oh My Pi | Tokens | `~/.omp/agent/sessions/**`（`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` 可改） |
 | Cline | Tokens | `~/.cline/data/sessions/**`（桌面版把子代理的转录写在父会话目录内、元数据写在旁边的 `<session>__agent_<uuid>/`，各自归到自己的工作区） |

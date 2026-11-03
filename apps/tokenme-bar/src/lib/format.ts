@@ -37,7 +37,7 @@ const TOOL_ORDER = [
   // Codely CLI and the Tuanjie Cowork desktop share one store — one tool row.
   "codely",
   "opendesign",
-
+  "grokbuild",
 ];
 
 const DISPLAY: Record<string, string> = {
@@ -73,6 +73,7 @@ const DISPLAY: Record<string, string> = {
   omp: "Oh My Pi",
   codely: "Codely",
   opendesign: "Open Design",
+  grokbuild: "Grok Build",
   gemini: "Gemini CLI",
   cursor: "Cursor",
 };
