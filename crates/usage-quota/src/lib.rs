@@ -527,7 +527,7 @@ mod tests {
         let ungated: Vec<&str> = listed.iter().filter(|i| !i.host_gated).map(|i| i.tool).collect();
         assert_eq!(
             ungated,
-            vec!["kimicode", "minimaxcode", "copilot", "gemini"],
+            vec!["kimicode", "minimaxcode", "copilot", "grokbuild", "gemini"],
             "these probes are only stoppable by the user's own switch"
         );
         // claude leads the list because built_in() pushes it first; the page's
