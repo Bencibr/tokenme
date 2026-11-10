@@ -94,7 +94,7 @@ TokenMe reads only the official OpenCode Go provider's quota. The credential com
 
 **Open Design** quota comes from the desktop app's own sign-in: the `vela_ctrl_…` control key in `profiles.prod` of `~/.amr/config.json` (`OPEN_DESIGN_HOME` moves the directory), read-only, for the Design Plan's 5-hour and 7-day windows. The runtime key `sk-amr-…` only authorises model requests and is refused by the control plane; the wallet balance is not a window and is not drawn. An expired sign-in makes the row disappear; signing in to Open Design again restores it.
 
-**Grok Build** quota comes from the CLI login: the OIDC `key` in `~/.grok/auth.json` (`GROK_HOME` moves the directory), sent to `cli-chat-proxy.grok.com/v1/billing?format=credits` — read-only, never refreshed here. The answer is the SuperGrok **weekly** pool's used percent; when the account has unified billing (`isUnifiedBillingUser`), Cursor / Grok Bot / GrokChat draw from the same pool — the panel draws that one weekly window and does not add a Cursor bar. When Cursor spends on this machine (`~/.cursor/ai-tracking` is written, or the Cursor app is open), the next publish asks that endpoint again, so the same bar moves; the five-minute cache still covers a quiet machine. An expired token makes the row disappear; `grok login` again restores it.
+**Grok Build** quota is the one shared weekly window. The panel draws that bar and does not add a Cursor bar. With `grok login`, the OIDC `key` in `~/.grok/auth.json` (`GROK_HOME` moves the directory) is sent to `cli-chat-proxy.grok.com/v1/billing?format=credits` — read-only, never refreshed here. `creditUsagePercent` is the used percent; under unified billing (`isUnifiedBillingUser`), Cursor / Grok Bot / GrokChat draw from it. A machine with only Cursor and no Grok Build reads Cursor's own sign-in instead (`cursorAuth/accessToken` in `state.vscdb`, read-only) and asks the editor's current-period endpoint, mapping included usage onto the same bar. When both logins exist, Grok's endpoint wins, because it also sees Grok chat and Grok Bot. When Cursor spends on this machine (`~/.cursor/ai-tracking` is written, or the Cursor app is open), the next publish asks again; the five-minute cache still covers a quiet machine. If the Grok token is expired and Cursor is still signed in, the bar stays on Cursor's session. The row disappears only when neither login is present.
 
 ### 3.6 Automatic token renewal
 
@@ -224,7 +224,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl` (legacy `~/.kimi`; the desktop app's embedded runtime home under `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` is read too) |
 | MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl` (legacy `~/.mavis`) |
 
-Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are not indexed as usage. On a unified bill, Cursor's spend stays on the Grok Build weekly bar above, and that bar refreshes after Cursor spends.
+Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are not indexed as usage. On a unified bill, Cursor's spend stays on the Grok Build weekly bar above. Without Grok Build installed, that bar is still filled from Cursor's sign-in, and it refreshes after Cursor spends.
 
 ## 7. Privacy
 
