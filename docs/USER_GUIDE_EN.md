@@ -223,8 +223,9 @@ tokenme budget set zcode --daily 5 --monthly 50
 | AgnesCode / AtomCode / Crow5 / Mimocode / Cola / DSH | Tokens | auto-discovered, same shape as their parent tools |
 | Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl` (legacy `~/.kimi`; the desktop app's embedded runtime home under `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` is read too) |
 | MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl` (legacy `~/.mavis`) |
+| Cursor | Tokens | No local per-request log. The sign-in in `state.vscdb` (read-only) pulls the account's per-request usage into tokenme's own `cursor-usage.jsonl`, which is what gets indexed. Quota stays on the Grok Build weekly bar above; there is no second bar |
 
-Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are not indexed as usage. On a unified bill, Cursor's spend stays on the Grok Build weekly bar above. Without Grok Build installed, that bar is still filled from Cursor's sign-in, and it refreshes after Cursor spends.
+Cloud-only tools without local per-request logs (VS Code Copilot) are not indexed as usage. Cursor's per-request tokens come from the account usage endpoint and show up in today, tools, and detail. Dollar figures are still the models.dev estimate, which can disagree with the cents on a Cursor invoice. The unified weekly quota stays on the Grok Build bar.
 
 ## 7. Privacy
 

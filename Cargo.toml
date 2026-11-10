@@ -9,6 +9,7 @@ members = [
     "crates/adapters/cline",
     "crates/adapters/codely",
     "crates/adapters/grokbuild",
+    "crates/adapters/cursor",
     "crates/adapters/zcode",
     "crates/adapters/qoder",
     "crates/adapters/antigravity",
@@ -50,6 +51,7 @@ usage-adapter-pi = { path = "crates/adapters/pi" }
 usage-adapter-cline = { path = "crates/adapters/cline" }
 usage-adapter-codely = { path = "crates/adapters/codely" }
 usage-adapter-grokbuild = { path = "crates/adapters/grokbuild" }
+usage-adapter-cursor = { path = "crates/adapters/cursor" }
 usage-adapter-zcode = { path = "crates/adapters/zcode" }
 usage-adapter-qoder = { path = "crates/adapters/qoder" }
 usage-adapter-antigravity = { path = "crates/adapters/antigravity" }

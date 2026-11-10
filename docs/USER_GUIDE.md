@@ -222,14 +222,15 @@ tokenme budget set zcode --daily 5 --monthly 50
 | AgnesCode / AtomCode / Crow5 / Mimocode / Cola / DSH | Tokens | 自动发现，与其同形 |
 | Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl`（旧 `~/.kimi`；桌面端内嵌 runtime 的 `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` 也在读取范围） |
 | MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl`（旧 `~/.mavis`） |
+| Cursor | Tokens | 无本地逐次日志。用 `state.vscdb` 里的登录（只读）拉取账号的逐次用量，写入 tokenme 自己的 `cursor-usage.jsonl` 再索引。配额仍是上面那条 Grok Build 周窗口，不另画一条 |
 
-只有云端记录、本地没有逐请求日志的工具（Cursor、VS Code Copilot）不进入用量索引。Cursor 在统一计费下的花费记在上面那条 Grok Build 周配额里；没装 Grok Build 时，这条仍由 Cursor 的登录撑住，消耗后会刷新。
+只有云端记录、本地没有逐请求日志的工具（VS Code Copilot）不进入用量索引。Cursor 的逐次 token 来自账号用量接口，进今日、工具、明细；金额仍按 models.dev 折算，和 Cursor 账单上的美分可能不一致。统一计费的周配额继续走 Grok Build 那一条。
 
 ## 7. 隐私
 
 - 入库的只有每次请求的 token 计数、模型名与项目路径——绝不碰你的代码和 Prompt。
 - 扫描全程只读：探测读凭据，会把续期后的凭据写回的只有 §3 点名的那三家，且各自只写自己的存储。无遥测、无第三方代理。
-- 网络调用包括对你自己厂商账号的实时配额探测、models.dev 价格表、你亲自点击的面板内邮件/发布链接，以及你明确配置的设备间同步端点。
+- 网络调用包括对你自己厂商账号的实时配额探测、Cursor 账号的逐次用量（只留下 token 计数、模型与时间）、models.dev 价格表、你亲自点击的面板内邮件/发布链接，以及你明确配置的设备间同步端点。
 - 多机同步（§4）在你的机器之间搬运的也只有这些元数据——bundle 里没有代码、Prompt 或凭据。传统文件 bundle 的通道由你选择（ssh/scp、Syncthing、挂载盘）；严格设备同步则只向你明确配置并批准的主设备开放 pinned HTTPS/TCP/TLS 1.3。tokenme 不使用云端中继、不存第三方同步凭据，每个 bundle 或严格包在合并前都过校验。
 
 ## 8. 故障排查

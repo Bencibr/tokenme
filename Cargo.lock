@@ -1818,6 +1818,7 @@ dependencies = [
  "usage-adapter-codebuddy",
  "usage-adapter-codely",
  "usage-adapter-codex",
+ "usage-adapter-cursor",
  "usage-adapter-dsh",
  "usage-adapter-funide",
  "usage-adapter-grokbuild",
@@ -1937,6 +1938,21 @@ dependencies = [
  "tempfile",
  "usage-core",
  "walkdir",
+]
+
+[[package]]
+name = "usage-adapter-cursor"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "dirs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+ "usage-core",
 ]
 
 [[package]]

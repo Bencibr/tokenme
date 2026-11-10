@@ -14,6 +14,7 @@ usage-adapter-pi.workspace = true
 usage-adapter-cline.workspace = true
 usage-adapter-codely.workspace = true
 usage-adapter-grokbuild.workspace = true
+usage-adapter-cursor.workspace = true
 usage-adapter-zcode.workspace = true
 usage-adapter-qoder.workspace = true
 usage-adapter-antigravity.workspace = true

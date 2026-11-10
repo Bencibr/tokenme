@@ -4,7 +4,7 @@
 
 ## 一段话总览
 
-每款受支持的 AI 工具都把日志写在自己本机；TokenMe 在「统计用量」这件事上从不与厂商通信。每工具一个适配器把各自的日志归一成同一种 `UsageEvent`，增量 SQLite 索引负责摄取（字节游标、去重键、保留期），`usage-core` 把事件折算成金额与时间窗——既可以在内存里全量算，也可以读索引自己维护的 `event_rollup` 缓存。两个前端——CLI（macOS、Linux、Windows）与菜单栏面板（macOS、Windows）——从同一个索引渲染同一批数字。服务器与容器上的用量经同步 bundle 并入同一索引（每个来源一个机器视图）；TTFT/速度是第二条独立信号通道，默认关闭，开了也只采本机。
+每款受支持的 AI 工具都把日志写在自己本机；TokenMe 在「统计用量」这件事上从不与厂商通信。Cursor 是例外：它没有逐次本地账本，适配器用本机已有的登录只读拉取账号逐次用量，只把 token 计数、模型和时间写入自己的 JSONL 再索引。每工具一个适配器把各自的日志归一成同一种 `UsageEvent`，增量 SQLite 索引负责摄取（字节游标、去重键、保留期），`usage-core` 把事件折算成金额与时间窗——既可以在内存里全量算，也可以读索引自己维护的 `event_rollup` 缓存。两个前端——CLI（macOS、Linux、Windows）与菜单栏面板（macOS、Windows）——从同一个索引渲染同一批数字。服务器与容器上的用量经同步 bundle 并入同一索引（每个来源一个机器视图）；TTFT/速度是第二条独立信号通道，默认关闭，开了也只采本机。
 
 ## Crate 地图
 
@@ -14,7 +14,7 @@
 | `crates/usage-index` | SQLite 增量索引：文件游标、去重、摄取租约、保留期、watcher；维护 `event_rollup` 缓存表并承载报表读路径（`report_facts`）；同步协议 `export_sync`/`import_sync` |
 | `crates/usage-device-sync` | 独立严格入口：Ed25519 identity、配对/stream/epoch、签名包、receipt/highwater、确定性 merge，以及受限 HTTPS over TCP/TLS 1.3 transport；不改变旧 JSONL/SSH importer |
 | `crates/usage-quota` | 实时厂商配额探针（一个 provider 一个文件），共享一个 5 分钟 TTL、每工具一份缓存文件；每日签到与令牌续期也在这里；`copilot` 与 `gemini` 是纯探针，没有用量适配器 |
-| `crates/adapters/<tool>` | 23 个工具族 crate，注册表共 31 个工具；8 个兄弟产品复用既有 crate 的解析器（crow5、mimocode、opendesign 寄在 `opencode`，cola、omp 寄在 `pi`，qoder_cn 寄在 `qoder`，workbuddy_cn 寄在 `workbuddy`，trae_cn 寄在 `trae`）；`grokbuild` 为独立 crate || `crates/adapters/all` | 注册表：`TOOL_IDS`、`detect_all`、`builtin_adapters`，外加编译期交叉核对——四个源码家的版本号与编译版本一致、`latest.json` 自洽（可以滞后，不许串版）、面板 `TOOL_ORDER` 不漏工具、CHANGELOG 每个已发布版本有分节 |
+| `crates/adapters/<tool>` | 24 个工具族 crate，注册表共 32 个工具；8 个兄弟产品复用既有 crate 的解析器（crow5、mimocode、opendesign 寄在 `opencode`，cola、omp 寄在 `pi`，qoder_cn 寄在 `qoder`，workbuddy_cn 寄在 `workbuddy`，trae_cn 寄在 `trae`）；`grokbuild` 与 `cursor` 为独立 crate || `crates/adapters/all` | 注册表：`TOOL_IDS`、`detect_all`、`builtin_adapters`，外加编译期交叉核对——四个源码家的版本号与编译版本一致、`latest.json` 自洽（可以滞后，不许串版）、面板 `TOOL_ORDER` 不漏工具、CHANGELOG 每个已发布版本有分节 |
 | `crates/usage-cli` | `tokenme` CLI：`detect` / `daily` / `weekly` / `monthly` / `report` / `sessions` / `quota` / `index --rebuild|--prune|--force` / `export` / `import` / `budget` / `pricing` / `icons`，外加 `dsh-doctor`、`codex-doctor`、`workbuddy-login` |
 | `apps/tokenme-bar` | Tauri 2 菜单栏面板（前端 `src/`，Rust 在 `src-tauri/`）：概览/工具/排行/明细/速度五页，服务器与设置浮层，托盘，桌宠 |
 

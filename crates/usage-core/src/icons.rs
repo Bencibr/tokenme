@@ -62,6 +62,7 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     // Grok Build is a CLI; the mark is the vendor favicon. Grok Bot's desktop
     // bundle is a separate product that shares the SuperGrok weekly pool.
     ("grokbuild", &["Grok Bot"]),
+    ("cursor", &["Cursor"]),
 ];
 
 /// PNGs shipped with the panel, consulted only when the bundle lookup above
