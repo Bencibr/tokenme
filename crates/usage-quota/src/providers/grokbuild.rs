@@ -29,9 +29,12 @@
 //! both logins exist, Grok's billing proxy wins: it is the pool that also
 //! sees Grok chat and Grok Bot.
 //!
-//! Nothing here logs in or refreshes either token: an expired Grok
-//! `expires_at` or a 401 yields no row from that path. Grok owns its own
-//! refresh (`auth.json` stays read-only), and Cursor owns its session.
+//! Nothing here logs in or refreshes either token. Grok owns its own refresh
+//! (`auth.json` stays read-only), and Cursor owns its session. A Grok login
+//! that is present but expired, or whose request fails, does **not** fall
+//! through to Cursor: that would rename the window (different account id,
+//! different cycle length) and re-fire the used-up banner. Cursor is the
+//! source only when there is no Grok login at all.
 
 use serde_json::Value;
 use usage_core::QuotaSample;
@@ -53,6 +56,11 @@ impl QuotaProbe for GrokBuildQuota {
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
+        // Count the attempt before the request returns. A failure keeps the
+        // previous sample's timestamp (the grace window), and the refresh
+        // decision keys off that timestamp — without this stamp a tracking-db
+        // write would retry on every ingest pass for as long as the outage lasts.
+        note_pool_attempt();
         live().unwrap_or_default()
     }
 
@@ -61,15 +69,36 @@ impl QuotaProbe for GrokBuildQuota {
     }
 }
 
-fn live() -> Option<Vec<QuotaSample>> {
-    // Grok's proxy is the shared pool, including chat and bot. A Cursor-only
-    // machine has no such login; its editor session is the fallback, and it
-    // still answers as this one bar.
-    grok_live().or_else(cursor_live)
+enum GrokRead {
+    Samples(Vec<QuotaSample>),
+    /// No `auth.json`, or nothing in it that was ever a key.
+    Absent,
+    /// A Grok login exists and did not answer. Do not replace it with Cursor.
+    Failed(&'static str),
 }
 
-fn grok_live() -> Option<Vec<QuotaSample>> {
-    let (token, identity) = credential()?;
+fn live() -> Option<Vec<QuotaSample>> {
+    // Grok's proxy is the shared pool, including chat and bot. Cursor's
+    // editor session fills the same bar only when that login is absent.
+    match grok_read() {
+        GrokRead::Samples(samples) => Some(samples),
+        GrokRead::Absent => cursor_live(),
+        GrokRead::Failed(why) => {
+            crate::notes::note("grokbuild", why);
+            None
+        }
+    }
+}
+
+fn grok_read() -> GrokRead {
+    let Some(text) = auth_text() else {
+        return GrokRead::Absent;
+    };
+    let (token, identity) = match auth_state(&text) {
+        AuthState::Live(token, identity) => (token, identity),
+        AuthState::Expired => return GrokRead::Failed("grok login expired"),
+        AuthState::Absent => return GrokRead::Absent,
+    };
     let headers = [
         ("authorization", format!("Bearer {token}")),
         ("x-xai-token-auth", TOKEN_AUTH.to_string()),
@@ -77,8 +106,13 @@ fn grok_live() -> Option<Vec<QuotaSample>> {
         ("user-agent", USER_AGENT.into()),
     ];
     let borrowed: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let body = get_json(ENDPOINT, &borrowed)?;
-    stamp(samples_from(&body), &identity)
+    let Some(body) = get_json(ENDPOINT, &borrowed) else {
+        return GrokRead::Failed("grok billing request failed");
+    };
+    match stamp(samples_from(&body), &identity) {
+        Some(samples) => GrokRead::Samples(samples),
+        None => GrokRead::Failed("grok billing had no percent"),
+    }
 }
 
 fn cursor_live() -> Option<Vec<QuotaSample>> {
@@ -304,7 +338,7 @@ fn state_value(conn: &rusqlite::Connection, key: &str) -> Option<String> {
 
 /// `$GROK_HOME/auth.json` else `~/.grok/auth.json`. The file maps
 /// `https://auth.x.ai::<client_id>` → `{ key, expires_at, … }`.
-fn credential() -> Option<(String, String)> {
+fn auth_text() -> Option<String> {
     // Match the usage adapter: trim `GROK_HOME`, treat blank as unset.
     let root = match std::env::var("GROK_HOME") {
         Ok(value) => {
@@ -317,7 +351,53 @@ fn credential() -> Option<(String, String)> {
         }
         Err(_) => dirs::home_dir().map(|h| h.join(".grok"))?,
     };
-    token_in(&std::fs::read_to_string(root.join("auth.json")).ok()?)
+    std::fs::read_to_string(root.join("auth.json")).ok()
+}
+
+enum AuthState {
+    Live(String, String),
+    /// A key was present and its `expires_at` is already past.
+    Expired,
+    Absent,
+}
+
+fn auth_state(text: &str) -> AuthState {
+    let Ok(body) = serde_json::from_str::<Value>(text) else {
+        return AuthState::Absent;
+    };
+    let Some(obj) = body.as_object() else {
+        return AuthState::Absent;
+    };
+    let mut expired = false;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    for (account_key, entry) in obj {
+        let Some(entry) = entry.as_object() else { continue };
+        let Some(token) = entry.get("key").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        if let Some(expires) = entry.get("expires_at").and_then(Value::as_str) {
+            if let Some(ms) = usage_core::parse_ts_ms(expires) {
+                if ms <= now {
+                    expired = true;
+                    continue;
+                }
+            }
+        }
+        let identity = entry
+            .get("user_id")
+            .or_else(|| entry.get("email"))
+            .or_else(|| entry.get("principal_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(account_key)
+            .to_string();
+        return AuthState::Live(token.to_string(), identity);
+    }
+    if expired { AuthState::Expired } else { AuthState::Absent }
 }
 
 /// A streaming Cursor turn rewrites the tracking db continuously. Under this
@@ -336,8 +416,13 @@ pub(crate) fn pool_refresh_due(
     now_ms: i64,
     activity_ms: Option<i64>,
     cursor_open: bool,
+    last_attempt_ms: i64,
 ) -> bool {
     if cached_at_ms <= 0 {
+        return false;
+    }
+    // A failed fetch does not move the sample timestamp. The attempt does.
+    if last_attempt_ms > 0 && now_ms.saturating_sub(last_attempt_ms) < POOL_REFRESH_FLOOR_MS {
         return false;
     }
     let age = now_ms.saturating_sub(cached_at_ms);
@@ -356,7 +441,18 @@ pub(crate) fn pool_refresh_due_now(cached_at_ms: i64) -> bool {
         crate::cache::now_ms(),
         cursor_activity_ms(),
         crate::host::cursor_app_running(),
+        last_pool_attempt_ms(),
     )
+}
+
+static LAST_POOL_ATTEMPT_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn note_pool_attempt() {
+    LAST_POOL_ATTEMPT_MS.store(crate::cache::now_ms(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn last_pool_attempt_ms() -> i64 {
+    LAST_POOL_ATTEMPT_MS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// `~/.cursor/ai-tracking` when that directory exists. The engine watches it
@@ -403,39 +499,10 @@ fn mtime_ms(path: &std::path::Path) -> Option<i64> {
 }
 
 pub(crate) fn token_in(text: &str) -> Option<(String, String)> {
-    let body: Value = serde_json::from_str(text).ok()?;
-    let obj = body.as_object()?;
-    // Prefer a non-expired OIDC entry; skip empty keys. Expired keys are
-    // refused entirely — Grok owns refresh, and sending a dead bearer only
-    // produces a 401 we would treat the same as "no row".
-    for (account_key, entry) in obj {
-        let Some(entry) = entry.as_object() else { continue };
-        let Some(token) = entry.get("key").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()) else {
-            continue;
-        };
-        if let Some(expires) = entry.get("expires_at").and_then(Value::as_str) {
-            if let Some(ms) = usage_core::parse_ts_ms(expires) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                if ms <= now {
-                    continue;
-                }
-            }
-        }
-        let identity = entry
-            .get("user_id")
-            .or_else(|| entry.get("email"))
-            .or_else(|| entry.get("principal_id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(account_key)
-            .to_string();
-        return Some((token.to_string(), identity));
+    match auth_state(text) {
+        AuthState::Live(token, identity) => Some((token, identity)),
+        AuthState::Expired | AuthState::Absent => None,
     }
-    None
 }
 
 #[cfg(test)]
@@ -510,34 +577,46 @@ mod tests {
         );
         assert!(token_in(r#"{"https://auth.x.ai::client":{"key":""}}"#).is_none());
         assert!(token_in("not json").is_none());
+        assert!(matches!(auth_state(&format!(
+            r#"{{"https://auth.x.ai::client":{{"key":"dead","expires_at":"{past}"}}}}"#
+        )), AuthState::Expired), "an expired key is a failed login, not an absent one");
+        assert!(matches!(auth_state("{}"), AuthState::Absent));
     }
 
     #[test]
     fn cursor_spend_refreshes_the_same_pool_and_a_burst_does_not() {
         let cached = 1_000_000;
         assert!(
-            !pool_refresh_due(0, cached + 50_000, Some(cached + 40_000), true),
+            !pool_refresh_due(0, cached + 50_000, Some(cached + 40_000), true, 0),
             "no cached sample yet — the ordinary fetch owns the first read"
         );
         assert!(
-            !pool_refresh_due(cached, cached + 5_000, Some(cached + 4_000), true),
+            !pool_refresh_due(cached, cached + 5_000, Some(cached + 4_000), true, 0),
             "a streaming turn must not refetch inside the floor"
         );
         assert!(
-            pool_refresh_due(cached, cached + 21_000, Some(cached + 20_000), false),
+            pool_refresh_due(cached, cached + 21_000, Some(cached + 20_000), false, 0),
             "a tracking-db write after the floor is a Cursor spend"
         );
         assert!(
-            !pool_refresh_due(cached, cached + 21_000, Some(cached - 1), false),
+            !pool_refresh_due(cached, cached + 21_000, Some(cached - 1), false, 0),
             "activity older than the sample is not a new spend"
         );
-        assert!(!pool_refresh_due(cached, cached + 30_000, None, true));
+        assert!(!pool_refresh_due(cached, cached + 30_000, None, true, 0));
         assert!(
-            pool_refresh_due(cached, cached + POOL_REFRESH_OPEN_MS, None, true),
+            !pool_refresh_due(cached, cached + 21_000, Some(cached + 20_000), false, cached + 16_000),
+            "a failed attempt inside the floor does not retry, even though the sample timestamp did not move"
+        );
+        assert!(
+            pool_refresh_due(cached, cached + 21_000, Some(cached + 20_000), false, cached),
+            "an attempt older than the floor may try again"
+        );
+        assert!(
+            pool_refresh_due(cached, cached + POOL_REFRESH_OPEN_MS, None, true, 0),
             "an open IDE with no new file still moves the shared pool"
         );
         assert!(
-            !pool_refresh_due(cached, cached + 120_000, None, false),
+            !pool_refresh_due(cached, cached + 120_000, None, false, 0),
             "a closed IDE and a quiet tracking db keep the five-minute cache"
         );
     }

@@ -100,6 +100,10 @@ pub const HOST_PATTERNS: &[(&str, &[&str])] = &[("zcode", &["zcode", "zcodium"])
 /// refresh the one bar.
 pub const CURSOR_PROCESSES: &[&str] = &[
     "Cursor",
+    // Linux names the binary `cursor`. `pgrep -x` is case-sensitive, so the
+    // Title Case macOS name never hits it. Windows matching is case-insensitive
+    // and does not need this spelling.
+    "cursor",
     "Cursor Helper",
     "Cursor Helper (GPU)",
     "Cursor Helper (Renderer)",
@@ -325,6 +329,8 @@ mod tests {
         assert!(!cursor_process_hit(&HashSet::new()));
         assert!(cursor_process_hit(&HashSet::from(["Cursor Helper (Renderer)".into()])));
         assert!(cursor_process_hit(&HashSet::from(["cursor.exe".into()])));
+        assert!(cursor_process_hit(&HashSet::from(["cursor".into()])));
+        assert!(CURSOR_PROCESSES.contains(&"cursor"), "pgrep -x on Linux needs the lowercase binary name");
         assert!(!cursor_process_hit(&HashSet::from(["cursor-agent".into()])));
     }
 

@@ -93,7 +93,7 @@ TokenMe 只读取官方 OpenCode Go provider 的配额，凭据按顺序取：`O
 
 **Open Design** 的配额读自桌面应用自己的登录：`~/.amr/config.json` 的 `profiles.prod` 里那枚 `vela_ctrl_…` 控制密钥（`OPEN_DESIGN_HOME` 可改目录），只读 Design Plan 的 5 小时与 7 天两个窗口。运行时密钥 `sk-amr-…` 只用于模型请求，控制面不接受它；钱包余额不是窗口，面板不画。登录过期时行会消失，重新登录 Open Design 即恢复。
 
-**Grok Build** 的配额是那条共用的周窗口，面板只画这一条，不另画 Cursor。有 `grok login` 时读 `~/.grok/auth.json`（`GROK_HOME` 可改目录）里 OIDC 条目的 `key`，请求 `cli-chat-proxy.grok.com/v1/billing?format=credits`，只读、不续期；`creditUsagePercent` 就是已用百分比，统一计费（`isUnifiedBillingUser`）下 Cursor / Grok Bot / GrokChat 都从这里扣。只装了 Cursor、没有 Grok Build 时，改读 Cursor 自己的登录（`state.vscdb` 的 `cursorAuth/accessToken`，只读不写回），请求编辑器同一条当前周期接口，把「已用包含额度」画成同一条。两边都有登录时以 Grok 的接口为准，因为它还看得到 Grok 对话和 Grok Bot。Cursor 在本机消耗时（`~/.cursor/ai-tracking` 有写入，或 Cursor 正在运行），下一次发布会重新取数；五分钟缓存仍然盖住没有 Cursor 活动的时候。Grok 令牌过期时，若 Cursor 仍登录，这条改由 Cursor 的会话撑住；两边都没有登录，行才消失。
+**Grok Build** 的配额是那条共用的周窗口，面板只画这一条，不另画 Cursor。有 `grok login` 时读 `~/.grok/auth.json`（`GROK_HOME` 可改目录）里 OIDC 条目的 `key`，请求 `cli-chat-proxy.grok.com/v1/billing?format=credits`，只读、不续期；`creditUsagePercent` 就是已用百分比，统一计费（`isUnifiedBillingUser`）下 Cursor / Grok Bot / GrokChat 都从这里扣。只装了 Cursor、没有 Grok Build 时，改读 Cursor 自己的登录（`state.vscdb` 的 `cursorAuth/accessToken`，只读不写回），请求编辑器同一条当前周期接口，把「已用包含额度」画成同一条。两边都有登录时以 Grok 的接口为准，因为它还看得到 Grok 对话和 Grok Bot。Cursor 在本机消耗时（`~/.cursor/ai-tracking` 有写入，或 Cursor 正在运行），下一次发布会重新取数；五分钟缓存仍然盖住没有 Cursor 活动的时候。已有 Grok 登录但过期或请求失败时，不改用 Cursor 的周期，避免同一条窗口换身份。没有 Grok 登录时才读 Cursor。两边都没有登录，行才消失。失败的刷新也计入 20 秒间隔，不会因为跟踪库还在写就每轮都重试。
 
 ### 3.6 令牌自动续期
 
