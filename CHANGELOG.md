@@ -6,8 +6,7 @@ All notable changes to TokenMe are documented in this file. The format follows [
 
 ### Added
 
-- **Cursor 消耗刷新 Grok 的同一条周配额** — 统一计费下 Cursor 与 Grok 共用一个池，不另画一条。有 `~/.grok/auth.json` 时读 `creditUsagePercent`；只装了 Cursor、没有 Grok Build 时，只读 `state.vscdb` 的 `cursorAuth/accessToken`，用编辑器的当前周期接口把「已用包含额度」画成同一条 `grokbuild` 窗口。两边都登录时以 Grok 的接口为准。`~/.cursor/ai-tracking` 有写入，或 Cursor 正在运行且缓存已超过 45 秒时，下一次发布绕过五分钟缓存重新取数；20 秒内的连续写入不重复请求。
-- **Cursor 逐次用量进入统计** — 本地没有逐次 token 账本。用同一份只读登录请求 `get-filtered-usage-events`，把每次的 token 计数、模型和时间写成 tokenme 自己的 `cursor-usage.jsonl` 再索引，因此出现在今日、工具和明细里。金额仍按 models.dev 折算。配额条不因此多一条。
+- **Cursor 消耗刷新 Grok 的同一条周配额** — 统一计费下 Cursor 与 Grok 共用一个池，不另画一条。有 `~/.grok/auth.json` 时读 `creditUsagePercent`；只装了 Cursor、没有 Grok Build 时，只读 `state.vscdb` 的 `cursorAuth/accessToken`，用编辑器的当前周期接口把「已用包含额度」画成同一条 `grokbuild` 窗口。两边都登录时以 Grok 的接口为准。`~/.cursor/ai-tracking` 有写入，或 Cursor 正在运行且缓存已超过 45 秒时，下一次发布绕过五分钟缓存重新取数；20 秒内的连续写入不重复请求。仍不把 Cursor 的本地对话记进用量索引。
 
 - **宠物命中像素级精确** — 点击判定读取精灵帧的 alpha 通道：图片画到哪里才能点哪里，站立姿态两侧的透明边距、图集帧边距不再误触面板/拖拽；命中区域随呼吸动画与停靠姿态动态跟随。
 - **面板不再卡在「正在索引」** — 挂载时的报告读取会与引擎自身的启动序列竞争，输了就永远停在引导壳。boot 读取现在每 3 秒重试直到拿到报告（一次内存克隆，成功即取消）。

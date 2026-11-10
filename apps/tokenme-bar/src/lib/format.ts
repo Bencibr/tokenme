@@ -38,7 +38,6 @@ const TOOL_ORDER = [
   "codely",
   "opendesign",
   "grokbuild",
-  "cursor",
 ];
 
 const DISPLAY: Record<string, string> = {

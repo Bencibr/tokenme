@@ -134,7 +134,7 @@ $ tokenme daily --days 3
 
 ## Supported tools & live quota
 
-Every tool below ships as a built-in adapter — 32 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
+Every tool below ships as a built-in adapter — 31 of them, indexed straight from the logs and databases each one writes to disk. Quota probes read credentials and never log you in; check-in, token renewal and the pause-on-exit behavior are detailed in the [user guide](docs/USER_GUIDE.md):
 
 | Tool | Live quota | Check-in | Fixtures | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -143,7 +143,6 @@ Every tool below ships as a built-in adapter — 32 of them, indexed straight fr
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | OpenCode Go, three dollar windows (official provider only) | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/opendesign.png" width="20" alt=""> **Open Design** | Design Plan 5-hour / 7-day allowance | — | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/grokbuild.png" width="20" alt=""> **Grok Build** | SuperGrok weekly pool (shared with Cursor / Grok Bot / Chat when unified billing) | — | ✅ | ⏳ | ✅ |
-| **Cursor** | shared weekly bar stays on Grok Build; usage is the account's per-request record | — | ✅ | ⏳ | ⏳ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | account window limits | — | ✅ | ✅ | ✅ |
