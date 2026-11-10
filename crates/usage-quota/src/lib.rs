@@ -236,6 +236,13 @@ pub trait QuotaProbe: Send + Sync {
     fn outage(&self) -> bool {
         false
     }
+
+    /// `false` drops a still-fresh disk cache and asks the vendor again.
+    /// Grok Build uses this when Cursor has spent from the same weekly pool
+    /// since `captured_at_ms`. Every other probe keeps the TTL.
+    fn reuse_cache(&self, _captured_at_ms: i64) -> bool {
+        true
+    }
 }
 
 /// The probes worth running on this machine, in display order.
@@ -313,6 +320,35 @@ pub fn collect_gated(
         cache::Cache::open("tokenme/quota", TTL),
         &gate,
     )
+}
+
+/// Whether the Grok Build weekly sample on disk is stale because Cursor has
+/// spent from that same pool. Empty when this machine has no cached sample.
+/// The panel drops its in-memory quota pass on `true` so the next publish
+/// actually reaches [`collect`]; the probe then bypasses its own TTL.
+pub fn grokbuild_pool_refresh_due() -> bool {
+    let Some(cache) = cache::Cache::open("tokenme/quota", TTL) else {
+        return false;
+    };
+    let Some(views) = cache.fresh("grokbuild").or_else(|| cache.stale("grokbuild")) else {
+        return false;
+    };
+    let Some(captured_at_ms) = views.first().map(|view| view.sampled_at_ms) else {
+        return false;
+    };
+    providers::pool_refresh_due_now(captured_at_ms)
+}
+
+/// Directories the panel watcher should add so a Cursor spend wakes a pass.
+/// Only the AI-tracking directory, and only when it already exists — watching
+/// a missing path would climb to `~/.cursor` and fire on unrelated files.
+pub fn cursor_activity_roots() -> Vec<std::path::PathBuf> {
+    providers::cursor_activity_roots()
+}
+
+/// Whether a watcher wake names one of [`cursor_activity_roots`].
+pub fn is_cursor_activity_root(path: &std::path::Path) -> bool {
+    providers::is_cursor_activity_root(path)
 }
 
 /// Invalidate every cached quota answer, so the next [`collect`] re-probes

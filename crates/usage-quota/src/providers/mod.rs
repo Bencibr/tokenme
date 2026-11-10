@@ -53,6 +53,7 @@ pub use funide::FunIdeQuota;
 pub use funide::manual_checkin as funide_manual_checkin;
 pub use gemini::GeminiQuota;
 pub use grokbuild::GrokBuildQuota;
+pub(crate) use grokbuild::{cursor_activity_roots, is_cursor_activity_root, pool_refresh_due_now};
 pub use joycode::JoycodeQuota;
 pub use kimicode::KimiCodeQuota;
 pub use minimaxcode::MiniMaxCodeQuota;

@@ -93,7 +93,7 @@ TokenMe 只读取官方 OpenCode Go provider 的配额，凭据按顺序取：`O
 
 **Open Design** 的配额读自桌面应用自己的登录：`~/.amr/config.json` 的 `profiles.prod` 里那枚 `vela_ctrl_…` 控制密钥（`OPEN_DESIGN_HOME` 可改目录），只读 Design Plan 的 5 小时与 7 天两个窗口。运行时密钥 `sk-amr-…` 只用于模型请求，控制面不接受它；钱包余额不是窗口，面板不画。登录过期时行会消失，重新登录 Open Design 即恢复。
 
-**Grok Build** 的配额读自 CLI 登录：`~/.grok/auth.json`（`GROK_HOME` 可改目录）里 OIDC 条目的 `key`，请求 `cli-chat-proxy.grok.com/v1/billing?format=credits`，只读、不续期。答回的是 SuperGrok **每周**池的已用百分比；账号若开启统一计费（`isUnifiedBillingUser`），Cursor / Grok Bot / GrokChat 也从同一池扣费——面板只画这一条周窗口。令牌过期时行会消失，重新 `grok login` 即恢复。
+**Grok Build** 的配额读自 CLI 登录：`~/.grok/auth.json`（`GROK_HOME` 可改目录）里 OIDC 条目的 `key`，请求 `cli-chat-proxy.grok.com/v1/billing?format=credits`，只读、不续期。答回的是 SuperGrok **每周**池的已用百分比；账号若开启统一计费（`isUnifiedBillingUser`），Cursor / Grok Bot / GrokChat 也从同一池扣费——面板只画这一条周窗口，不另画 Cursor。Cursor 在本机消耗时（`~/.cursor/ai-tracking` 有写入，或 Cursor 正在运行），下一次发布会重新向这个接口取数，所以这条会跟着动；五分钟缓存仍然盖住没有 Cursor 活动的时候。令牌过期时行会消失，重新 `grok login` 即恢复。
 
 ### 3.6 令牌自动续期
 
@@ -223,7 +223,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl`（旧 `~/.kimi`；桌面端内嵌 runtime 的 `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` 也在读取范围） |
 | MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl`（旧 `~/.mavis`） |
 
-只有云端记录、本地没有逐请求日志的工具（Cursor、VS Code Copilot）本地不支持。
+只有云端记录、本地没有逐请求日志的工具（Cursor、VS Code Copilot）不进入用量索引。Cursor 在统一计费下的花费记在上面那条 Grok Build 周配额里，消耗后那一条会刷新。
 
 ## 7. 隐私
 

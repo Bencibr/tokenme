@@ -15,6 +15,12 @@
 //! GrokChat draw from this same weekly window — `productUsage` is a share
 //! breakdown, not a separate meter, so this probe emits one weekly sample.
 //!
+//! Cursor does not get its own bar. Its spend is already inside that percent,
+//! but it does not write `~/.grok`, so the five-minute probe cache would keep
+//! showing the pre-spend number. A newer `~/.cursor/ai-tracking` database, or
+//! the Cursor app simply being open, makes the next pass ask the proxy again.
+//! A short floor keeps a streaming turn from refetching on every write.
+//!
 //! Nothing here logs in or refreshes the token: an expired `expires_at` or a
 //! 401 yields no row. Grok owns refresh (`auth.json` stays read-only).
 
@@ -38,6 +44,10 @@ impl QuotaProbe for GrokBuildQuota {
 
     fn fetch(&self) -> Vec<QuotaSample> {
         live().unwrap_or_default()
+    }
+
+    fn reuse_cache(&self, captured_at_ms: i64) -> bool {
+        !pool_refresh_due_now(captured_at_ms)
     }
 }
 
@@ -160,6 +170,88 @@ fn credential() -> Option<(String, String)> {
     token_in(&std::fs::read_to_string(root.join("auth.json")).ok()?)
 }
 
+/// A streaming Cursor turn rewrites the tracking db continuously. Under this
+/// age the cached percent stands, even if the file just moved.
+const POOL_REFRESH_FLOOR_MS: i64 = 20_000;
+/// While the IDE is open the shared pool can move with no Grok log write.
+/// This is the longest that open app may keep a stale percent.
+const POOL_REFRESH_OPEN_MS: i64 = 45_000;
+
+/// Whether the cached shared-pool sample is stale because Cursor has spent
+/// since it was taken. `cached_at_ms <= 0` means there is no sample yet — the
+/// ordinary fetch owns that, and an empty negative cache must not be retried
+/// on every Cursor write.
+pub(crate) fn pool_refresh_due(
+    cached_at_ms: i64,
+    now_ms: i64,
+    activity_ms: Option<i64>,
+    cursor_open: bool,
+) -> bool {
+    if cached_at_ms <= 0 {
+        return false;
+    }
+    let age = now_ms.saturating_sub(cached_at_ms);
+    if age < POOL_REFRESH_FLOOR_MS {
+        return false;
+    }
+    if activity_ms.is_some_and(|at| at > cached_at_ms) {
+        return true;
+    }
+    cursor_open && age >= POOL_REFRESH_OPEN_MS
+}
+
+pub(crate) fn pool_refresh_due_now(cached_at_ms: i64) -> bool {
+    pool_refresh_due(
+        cached_at_ms,
+        crate::cache::now_ms(),
+        cursor_activity_ms(),
+        crate::host::cursor_app_running(),
+    )
+}
+
+/// `~/.cursor/ai-tracking` when that directory exists. The engine watches it
+/// so a Cursor spend wakes a pass instead of waiting out the idle cadence.
+/// The database itself is never opened: its mtime is the whole signal, and
+/// the billed percent still comes from the Grok proxy.
+pub(crate) fn cursor_activity_roots() -> Vec<std::path::PathBuf> {
+    cursor_tracking_dir().filter(|dir| dir.is_dir()).into_iter().collect()
+}
+
+pub(crate) fn is_cursor_activity_root(path: &std::path::Path) -> bool {
+    cursor_activity_roots().iter().any(|root| root == path)
+}
+
+fn cursor_tracking_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(".cursor").join("ai-tracking"))
+}
+
+/// Newest mtime of the tracking database or its `-wal`, in epoch ms.
+pub(crate) fn cursor_activity_ms() -> Option<i64> {
+    let dir = cursor_tracking_dir()?;
+    activity_ms_in(&dir)
+}
+
+pub(crate) fn activity_ms_in(dir: &std::path::Path) -> Option<i64> {
+    let db = dir.join("ai-code-tracking.db");
+    let wal = {
+        let mut name = db.file_name()?.to_os_string();
+        name.push("-wal");
+        db.with_file_name(name)
+    };
+    match (mtime_ms(&db), mtime_ms(&wal)) {
+        (Some(db_ms), Some(wal_ms)) => Some(db_ms.max(wal_ms)),
+        (db_ms, wal_ms) => db_ms.or(wal_ms),
+    }
+}
+
+fn mtime_ms(path: &std::path::Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_millis() as i64)
+}
+
 pub(crate) fn token_in(text: &str) -> Option<(String, String)> {
     let body: Value = serde_json::from_str(text).ok()?;
     let obj = body.as_object()?;
@@ -268,6 +360,54 @@ mod tests {
         );
         assert!(token_in(r#"{"https://auth.x.ai::client":{"key":""}}"#).is_none());
         assert!(token_in("not json").is_none());
+    }
+
+    #[test]
+    fn cursor_spend_refreshes_the_same_pool_and_a_burst_does_not() {
+        let cached = 1_000_000;
+        assert!(
+            !pool_refresh_due(0, cached + 50_000, Some(cached + 40_000), true),
+            "no cached sample yet — the ordinary fetch owns the first read"
+        );
+        assert!(
+            !pool_refresh_due(cached, cached + 5_000, Some(cached + 4_000), true),
+            "a streaming turn must not refetch inside the floor"
+        );
+        assert!(
+            pool_refresh_due(cached, cached + 21_000, Some(cached + 20_000), false),
+            "a tracking-db write after the floor is a Cursor spend"
+        );
+        assert!(
+            !pool_refresh_due(cached, cached + 21_000, Some(cached - 1), false),
+            "activity older than the sample is not a new spend"
+        );
+        assert!(!pool_refresh_due(cached, cached + 30_000, None, true));
+        assert!(
+            pool_refresh_due(cached, cached + POOL_REFRESH_OPEN_MS, None, true),
+            "an open IDE with no new file still moves the shared pool"
+        );
+        assert!(
+            !pool_refresh_due(cached, cached + 120_000, None, false),
+            "a closed IDE and a quiet tracking db keep the five-minute cache"
+        );
+    }
+
+    #[test]
+    fn the_tracking_wal_is_cursor_activity_even_when_the_main_db_is_older() {
+        let dir = std::env::temp_dir().join(format!("tokenme-cursor-activity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("ai-code-tracking.db");
+        std::fs::write(&db, b"db").unwrap();
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let file = std::fs::OpenOptions::new().write(true).open(&db).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(past)).unwrap();
+        let wal = dir.join("ai-code-tracking.db-wal");
+        std::fs::write(&wal, b"wal").unwrap();
+        let seen = activity_ms_in(&dir).unwrap();
+        assert!(seen > 1_700_000_000_000, "the wal mtime wins over a stale main db, got {seen}");
+        assert!(activity_ms_in(&dir.join("missing")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
