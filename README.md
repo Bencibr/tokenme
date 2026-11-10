@@ -134,7 +134,7 @@ $ tokenme daily --days 3
 
 ## 支持的工具与实时配额
 
-以下工具全部内置适配器——共 30 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
+以下工具全部内置适配器——共 31 款，直接从各工具自己落盘的日志与数据库建立索引；配额条只读凭据、绝不代你登录。签到、令牌自动续期与宿主退出暂停的细节见[用户指南](docs/USER_GUIDE.md)：
 
 | 工具 | 实时配额 | 签到 | 兼容性测试 | macOS | Windows |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -142,6 +142,7 @@ $ tokenme daily --days 3
 | <img src="crates/usage-core/assets/codex.png" width="20" alt=""> **Codex** | ChatGPT 速率窗口 | — | ✅ | ✅ | ✅ |
 | <img src="crates/usage-core/assets/opencode.png" width="20" alt=""> **OpenCode** | OpenCode Go 三美元窗口（仅官方 provider） | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/opendesign.png" width="20" alt=""> **Open Design** | Design Plan 5 小时/7 天额度 | — | ✅ | ⏳ | ✅ |
+| <img src="crates/usage-core/assets/grokbuild.png" width="20" alt=""> **Grok Build** | SuperGrok 每周额度（统一计费时与 Cursor / Grok Bot / Chat 同池） | — | ✅ | ⏳ | ✅ |
 | <img src="crates/usage-core/assets/pi.png" width="20" alt=""> **Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/omp.png" width="20" alt=""> **Oh My Pi** | — | — | ✅ | ✅ | ⏳ |
 | <img src="crates/usage-core/assets/cline.png" width="20" alt=""> **Cline** | 账号窗口限额 | — | ✅ | ✅ | ✅ |

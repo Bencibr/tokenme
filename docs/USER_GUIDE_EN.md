@@ -94,6 +94,8 @@ TokenMe reads only the official OpenCode Go provider's quota. The credential com
 
 **Open Design** quota comes from the desktop app's own sign-in: the `vela_ctrl_…` control key in `profiles.prod` of `~/.amr/config.json` (`OPEN_DESIGN_HOME` moves the directory), read-only, for the Design Plan's 5-hour and 7-day windows. The runtime key `sk-amr-…` only authorises model requests and is refused by the control plane; the wallet balance is not a window and is not drawn. An expired sign-in makes the row disappear; signing in to Open Design again restores it.
 
+**Grok Build** quota is the one shared weekly window. The panel draws that bar and does not add a Cursor bar. With `grok login`, the OIDC `key` in `~/.grok/auth.json` (`GROK_HOME` moves the directory) is sent to `cli-chat-proxy.grok.com/v1/billing?format=credits` — read-only, never refreshed here. `creditUsagePercent` is the used percent; under unified billing (`isUnifiedBillingUser`), Cursor / Grok Bot / GrokChat draw from it. A machine with only Cursor and no Grok Build reads Cursor's own sign-in instead (`cursorAuth/accessToken` in `state.vscdb`, read-only) and asks the editor's current-period endpoint, mapping included usage onto the same bar. When both logins exist, Grok's endpoint wins, because it also sees Grok chat and Grok Bot. When Cursor spends on this machine (`~/.cursor/ai-tracking` is written, or the Cursor app is open), the next publish asks again; the five-minute cache still covers a quiet machine. A Grok login that is present but expired, or whose request fails, is not replaced by Cursor's period — that would rename the window. Cursor is read only when there is no Grok login. The row disappears only when neither login is present. A failed refresh still counts toward the 20-second floor, so a tracking-db that keeps moving does not retry on every pass.
+
 ### 3.6 Automatic token renewal
 
 Three tools keep a short-lived login on disk — MiniMax Code (about an hour), Kimi Code (the vendor's 15-minute schedule) and Cline (the gateway token, one hour) — and tokenme renews each in place as it expires: the refresh token in the tool's own credential file is exchanged for a fresh pair, written back atomically in that tool's own format. The write-back is what makes the renewal safe — a rotation that never lands on disk is a rotation already spent, and the tool's own next refresh would find its login dead. Each probe renews only the login it is actually reading; a static API key is read, never written. A failed exchange changes nothing, and the row keeps its last real number for up to six hours (the probe cache's grace). Every other probe reads credentials and never writes them — the WorkBuddy credential tokenme does store comes from `tokenme workbuddy-login`, a command you ran, not from a probe.
@@ -208,6 +210,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Codex | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | Tokens | `~/.local/share/opencode/opencode.db` |
 | Open Design | Tokens | `~/.amr/opencode-sessions/<id>/data/opencode/opencode-.db` (one store per sandbox, all read; `OPEN_DESIGN_DATA_DIR` moves the root) |
+| Grok Build | Tokens | `~/.grok/sessions/<cwd-encoded>/<session-id>/usage.json` (`GROK_HOME` moves the root) |
 | Pi | Tokens | `~/.pi/agent/sessions/**` |
 | Oh My Pi | Tokens | `~/.omp/agent/sessions/**` (`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` to move it) |
 | Cline | Tokens | `~/.cline/data/sessions/**` (the desktop app writes a sub-agent's transcript inside its parent session dir and its meta into a sibling `<session>__agent_<uuid>/`; each is attributed to the session's own workspace) |
@@ -221,7 +224,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl` (legacy `~/.kimi`; the desktop app's embedded runtime home under `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` is read too) |
 | MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl` (legacy `~/.mavis`) |
 
-Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are not supported locally.
+Cloud-only tools without local per-request logs (Cursor, VS Code Copilot) are not indexed as usage. On a unified bill, Cursor's spend stays on the Grok Build weekly bar above. Without Grok Build installed, that bar is still filled from Cursor's sign-in, and it refreshes after Cursor spends.
 
 ## 7. Privacy
 

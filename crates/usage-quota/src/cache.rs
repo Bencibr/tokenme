@@ -168,8 +168,14 @@ fn views(tool: &str, captured_at_ms: i64, entries: &[Entry]) -> Vec<QuotaView> {
 pub fn probe(cache: Option<&Cache>, source: &dyn QuotaProbe) -> Vec<QuotaView> {
     if let Some(cache) = cache {
         if let Some(fresh) = cache.fresh(source.tool()) {
-            crate::diagnostics::note(source.tool(), "probe_skipped", "cache_hit");
-            return fresh;
+            let captured = fresh.first().map(|view| view.sampled_at_ms).unwrap_or(0);
+            // An empty cached answer stays empty for the TTL. Bypassing it
+            // would retry "not signed in" on every Cursor write.
+            if fresh.is_empty() || source.reuse_cache(captured) {
+                crate::diagnostics::note(source.tool(), "probe_skipped", "cache_hit");
+                return fresh;
+            }
+            crate::diagnostics::note(source.tool(), "cache_bypass", "shared_pool");
         }
     }
     // One attempt per tool at a time. A probe that blocks longer than the

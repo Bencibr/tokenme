@@ -59,6 +59,9 @@ pub const APP_BUNDLES: &[(&str, &[&str])] = &[
     ("minimaxcode", &["MiniMax Code"]),
     ("omp", &[]),
     ("opendesign", &["Open Design"]),
+    // Grok Build is a CLI; the mark is the vendor favicon. Grok Bot's desktop
+    // bundle is a separate product that shares the SuperGrok weekly pool.
+    ("grokbuild", &["Grok Bot"]),
 ];
 
 /// PNGs shipped with the panel, consulted only when the bundle lookup above
@@ -111,6 +114,8 @@ pub const BUNDLED_ICONS: &[(&str, &[u8])] = &[
     // the same layer the live bundle lookup picks.
     ("kimicode", include_bytes!("../assets/kimicode.png")),
     ("omp", include_bytes!("../assets/omp.png")),
+    // Grok Build: largest tile of docs.x.ai's favicon.ico (48 px).
+    ("grokbuild", include_bytes!("../assets/grokbuild.png")),
 ];
 
 /// Where a user-installed app lives. `~/Applications` first: a per-user install

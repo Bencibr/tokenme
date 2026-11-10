@@ -94,6 +94,40 @@ pub const HOST_PROCESSES: &[(&str, &[&str])] = &[
 /// every fork; exact names in [`HOST_PROCESSES`] still take the fast path.
 pub const HOST_PATTERNS: &[(&str, &[&str])] = &[("zcode", &["zcode", "zcodium"])];
 
+/// Cursor's process names. These are not a host gate: the shared weekly pool
+/// is still probed from Grok's login when Cursor is closed. They only tell
+/// that probe the IDE is open, so a spend that never touches `~/.grok` can
+/// refresh the one bar.
+pub const CURSOR_PROCESSES: &[&str] = &[
+    "Cursor",
+    // Linux names the binary `cursor`. `pgrep -x` is case-sensitive, so the
+    // Title Case macOS name never hits it. Windows matching is case-insensitive
+    // and does not need this spelling.
+    "cursor",
+    "Cursor Helper",
+    "Cursor Helper (GPU)",
+    "Cursor Helper (Renderer)",
+    "Cursor Helper (Plugin)",
+];
+
+/// Whether any Cursor process from [`CURSOR_PROCESSES`] is in `alive`.
+pub fn cursor_process_hit(alive: &HashSet<String>) -> bool {
+    CURSOR_PROCESSES.iter().any(|name| matches(alive, name))
+}
+
+/// Live check. Unix `pgrep -x` is exact, so each helper is listed on its own;
+/// Windows reads the process snapshot the host gate already uses.
+pub fn cursor_app_running() -> bool {
+    #[cfg(windows)]
+    {
+        cursor_process_hit(&running_process_names())
+    }
+    #[cfg(not(windows))]
+    {
+        CURSOR_PROCESSES.iter().any(|name| pgrep_exact(name))
+    }
+}
+
 /// Whether the tool's host application is running. A tool with no mapping is
 /// always "running": the probe keeps going rather than guessing a stop.
 pub fn host_running(tool: &str, alive: &dyn Fn(&str) -> bool) -> bool {
@@ -163,17 +197,21 @@ pub fn running_process_names() -> HashSet<String> {
 }
 
 #[cfg(not(windows))]
+fn pgrep_exact(name: &str) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-x", name])
+        .output()
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
 pub fn running_process_names() -> HashSet<String> {
     let mut names = HashSet::new();
     for tool_names in HOST_PROCESSES.iter().flat_map(|(_, names)| names.iter()) {
-        if let Ok(output) = std::process::Command::new("pgrep")
-            .args(["-x", tool_names])
-            .output()
-        {
-            // pgrep answers 0 with pids when the process runs.
-            if output.status.success() && !output.stdout.is_empty() {
-                names.insert(tool_names.to_lowercase());
-            }
+        // pgrep answers 0 with pids when the process runs.
+        if pgrep_exact(tool_names) {
+            names.insert(tool_names.to_lowercase());
         }
     }
     names
@@ -284,6 +322,16 @@ mod tests {
             any_host_running("zcode", &alive),
             "no ZCode-family process in: {alive:?}"
         );
+    }
+
+    #[test]
+    fn a_cursor_helper_counts_as_the_ide_being_open() {
+        assert!(!cursor_process_hit(&HashSet::new()));
+        assert!(cursor_process_hit(&HashSet::from(["Cursor Helper (Renderer)".into()])));
+        assert!(cursor_process_hit(&HashSet::from(["cursor.exe".into()])));
+        assert!(cursor_process_hit(&HashSet::from(["cursor".into()])));
+        assert!(CURSOR_PROCESSES.contains(&"cursor"), "pgrep -x on Linux needs the lowercase binary name");
+        assert!(!cursor_process_hit(&HashSet::from(["cursor-agent".into()])));
     }
 
     #[test]

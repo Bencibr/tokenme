@@ -1070,6 +1070,73 @@ def index_totals(db):
 # v1 session into a v2 directory under a new id and both roots are read.
 
 
+def grokbuild():
+    """Grok Build session ledgers: one `usage.json` per session with per-turn totals.
+
+    `inputTokens` is the whole prompt and `cachedReadTokens` / `cacheCreationTokens`
+    are its cached parts, so the uncached stage is the difference; `reasoningTokens`
+    is a breakdown of the completion, never extra. The file is rewritten whole as
+    turns land, but each turn keeps its `turnNumber`, so replaying still bills once.
+    """
+    root = (os.environ.get("GROK_HOME") or "").strip() or os.path.join(HOME, ".grok")
+    agg = defaultdict(float)
+    seen = set()
+    n = files_n = repeats = unstamped = 0
+    for path in files(os.path.join(root, "sessions", "**", "usage.json")):
+        files_n += 1
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                doc = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        session = doc.get("sessionId") or Path(path).parent.name
+        # Bill only turns[]. The sibling `session` object is a cumulative
+        # projection of those turns — counting it would disagree with the
+        # Rust adapter (and double-count in the index after turns land).
+        turns = doc.get("turns")
+        if not isinstance(turns, list) or not turns:
+            continue
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            stamp = turn.get("endedAt") or doc.get("updatedAt")
+            if not isinstance(stamp, str):
+                unstamped += 1
+                continue
+            try:
+                dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError:
+                unstamped += 1
+                continue
+            turn_number = turn.get("turnNumber", 0)
+            ident = f"grokbuild#{session}#turn{turn_number}"
+            if ident in seen:
+                repeats += 1
+                continue
+            seen.add(ident)
+            inp = num(turn.get("inputTokens"))
+            cr = num(turn.get("cachedReadTokens"))
+            cc = num(turn.get("cacheCreationTokens"))
+            out = num(turn.get("outputTokens"))
+            reason = num(turn.get("reasoningTokens"))
+            n += 1
+            agg["in"] += max(inp - cr - cc, 0.0)
+            agg["cr"] += cr
+            agg["cc"] += cc
+            agg["out"] += out
+            agg["reason"] += reason
+    return {
+        "n": n,
+        "in": agg["in"],
+        "cc": agg["cc"],
+        "cr": agg["cr"],
+        "out": agg["out"],
+        "reason": agg["reason"],
+        "credits": 0.0,
+        "notes": f"{files_n} usage.json, repeats collapsed={repeats}, unstamped={unstamped}",
+    }
+
+
 def codely():
     """Tuanjie Codely / Cowork chat snapshots: one `tokens` object per API round.
 
@@ -1346,6 +1413,7 @@ def compute_all():
         **pi_family(),
         "cline": cline(),
         "codely": codely(),
+        "grokbuild": grokbuild(),
         "zcode": zcode(),
         "agnes": agnes(),
         "atomcode": atomcode(),

@@ -304,7 +304,11 @@ fn run<R: Runtime>(app: AppHandle<R>, rx: &Receiver<Msg>, tx: &Sender<Msg>) -> E
     );
     let at_index = boot.elapsed();
 
-    let roots: Vec<PathBuf> = detected.iter().flat_map(|d| d.roots.clone()).collect();
+    let mut roots: Vec<PathBuf> = detected.iter().flat_map(|d| d.roots.clone()).collect();
+    // Cursor spend does not touch ~/.grok. Watching the tracking directory
+    // wakes a pass so the shared weekly bar can be re-read; the database is
+    // not an adapter and is never parsed.
+    roots.extend(usage_quota::cursor_activity_roots());
     let (wake_tx, wake_rx) = mpsc::channel();
     // The watcher only lives as long as this binding; dropping it stops events.
     let _watcher: Option<Watcher> = Watcher::spawn(&roots, wake_tx).ok();
@@ -624,6 +628,12 @@ fn ingest<R: Runtime>(
             (a.id().to_string(), a.discover_cached(&filter, prev))
         })
         .collect();
+    // Captured before the roots are cleared: a Cursor tracking-db write is not
+    // an indexed event, so the quiet-file return below would otherwise swallow
+    // the only signal that the shared weekly pool moved.
+    let cursor_pool = reason == "file change"
+        && wake_roots.iter().any(|root| usage_quota::is_cursor_activity_root(root))
+        && usage_quota::grokbuild_pool_refresh_due();
     *snapshot = prepared.clone();
     *snapshot_at = Instant::now();
     wake_roots.clear();
@@ -683,10 +693,10 @@ fn ingest<R: Runtime>(
     // must not wait out a drip writer's gap.
     if reason == "file change" {
         let quiet = report.as_ref().is_some_and(|r| r.new_events == 0);
-        if quiet && !sync_merged {
+        if quiet && !sync_merged && !cursor_pool {
             return;
         }
-        if !sync_merged && last_publish.elapsed() < PUBLISH_GAP {
+        if !sync_merged && !cursor_pool && last_publish.elapsed() < PUBLISH_GAP {
             return;
         }
     }
@@ -1032,6 +1042,19 @@ fn quota_pass<R: Runtime>(
         usage_quota::clear_cache();
         if let Ok(mut slot) = QUOTA_PASS.lock() {
             *slot = None;
+        }
+    }
+    // Cursor and Grok share one weekly pool. The in-memory pass would keep
+    // showing the pre-spend percent for up to a minute after the tracking db
+    // moved; dropping it lets this publish re-read that one probe. Other
+    // vendors stay on their disk cache.
+    if !cache_only && usage_quota::grokbuild_pool_refresh_due() {
+        if let Ok(mut slot) = QUOTA_PASS.lock() {
+            if slot.take().is_some() {
+                crate::logging::info(
+                    "quota poll: refreshing the shared grok/cursor weekly pool",
+                );
+            }
         }
     }
     if let Ok(slot) = QUOTA_PASS.lock() {

@@ -6,6 +6,8 @@ All notable changes to TokenMe are documented in this file. The format follows [
 
 ### Added
 
+- **Cursor 消耗刷新 Grok 的同一条周配额** — 统一计费下 Cursor 与 Grok 共用一个池，不另画一条。有 `~/.grok/auth.json` 时读 `creditUsagePercent`；只装了 Cursor、没有 Grok Build 时，只读 `state.vscdb` 的 `cursorAuth/accessToken`，用编辑器的当前周期接口把「已用包含额度」画成同一条 `grokbuild` 窗口。两边都登录时以 Grok 的接口为准。`~/.cursor/ai-tracking` 有写入，或 Cursor 正在运行且缓存已超过 45 秒时，下一次发布绕过五分钟缓存重新取数；20 秒内的连续写入不重复请求，失败的那一次也计入这 20 秒。已有 Grok 登录但过期或请求失败时不改走 Cursor 的周期，避免窗口身份被换成另一条。Linux 上进程名是小写 `cursor`，`pgrep -x` 区分大小写，因此两个拼写都查。仍不把 Cursor 的本地对话记进用量索引。
+
 - **宠物命中像素级精确** — 点击判定读取精灵帧的 alpha 通道：图片画到哪里才能点哪里，站立姿态两侧的透明边距、图集帧边距不再误触面板/拖拽；命中区域随呼吸动画与停靠姿态动态跟随。
 - **面板不再卡在「正在索引」** — 挂载时的报告读取会与引擎自身的启动序列竞争，输了就永远停在引导壳。boot 读取现在每 3 秒重试直到拿到报告（一次内存克隆，成功即取消）。
 - **阻断 App Nap** — 非激活面板永远不是前台应用，macOS 把整个进程当空闲节流到 webview 合成器冻结。进程启动即声明 user-initiated 活动（不影响系统休眠）。
@@ -64,6 +66,8 @@ All notable changes to TokenMe are documented in this file. The format follows [
 ## [Unreleased]
 
 ### Added
+
+- **Grok Build 加入适配器与配额注册表** — 用量读 `$GROK_HOME/sessions/<cwd>/<id>/usage.json`（默认 `~/.grok`，Win/macOS/Linux 同路径）的 `turns[]`：按 turn 记账，`inputTokens` 含缓存前缀故净出 `cachedReadTokens`/`cacheCreationTokens`，`reasoningTokens` 作 output 子分解；去重键 `grokbuild#<session>#turnN`。配额只读 `~/.grok/auth.json` 的 OIDC `key`，请求 `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`（`X-XAI-Token-Auth: xai-grok-cli`），把 `creditUsagePercent` 画成每周窗口；过期令牌 fail-closed、不代刷新。`isUnifiedBillingUser` 时 Cursor / Grok Bot / Chat 与 Build 同池——本机探测确认 `productUsage` 是份额分解而非独立仪表，故只发一条周窗口。不做 Cursor / Grok Bot 本地用量索引（无 per-request 账本）。注册表、图标、`TOOL_ORDER` 与色板 `--cat-30`、两份 README、USER_GUIDE、ARCHITECTURE、verify-totals 与 hero 计数随行至 31。
 
 - **Open Design 加入适配器与配额注册表（社区贡献，by momijineko，[PR #6](https://github.com/Bencibr/tokenme/pull/6)）** — Open Design 桌面端内嵌 OpenCode 作为代理运行时，每次运行在 `~/.amr/opencode-sessions/<id>/data/opencode/` 下留一份自己的 `opencode-.db`；适配器沿用 OpenCode 方言逐沙箱读取（`OPEN_DESIGN_DATA_DIR` 可改根目录），去重键仍是消息主键，事件按 `opendesign` 记账而不是混进 OpenCode。配额读 `~/.amr/config.json` 的 `profiles.prod`：`vela_ctrl_…` 控制密钥请求 `/api/v1/workspaces/current` 与 `billing/preflight`，把 Design Plan 的 5 小时/7 天窗口送进现有仪表（运行时密钥 `sk-amr-…` 不能读控制面，钱包余额不是窗口）。注册表、宿主退出门控（`Open Design` / `vela`）、官方 apple-touch 图标、`TOOL_ORDER` 与色板（补上 omp 缺失的 `--cat-26`，新增 `--cat-29`）、两份 README、USER_GUIDE、ARCHITECTURE、verify-totals 与 hero 计数随行至 30。
 

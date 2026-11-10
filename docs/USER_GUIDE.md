@@ -93,6 +93,8 @@ TokenMe 只读取官方 OpenCode Go provider 的配额，凭据按顺序取：`O
 
 **Open Design** 的配额读自桌面应用自己的登录：`~/.amr/config.json` 的 `profiles.prod` 里那枚 `vela_ctrl_…` 控制密钥（`OPEN_DESIGN_HOME` 可改目录），只读 Design Plan 的 5 小时与 7 天两个窗口。运行时密钥 `sk-amr-…` 只用于模型请求，控制面不接受它；钱包余额不是窗口，面板不画。登录过期时行会消失，重新登录 Open Design 即恢复。
 
+**Grok Build** 的配额是那条共用的周窗口，面板只画这一条，不另画 Cursor。有 `grok login` 时读 `~/.grok/auth.json`（`GROK_HOME` 可改目录）里 OIDC 条目的 `key`，请求 `cli-chat-proxy.grok.com/v1/billing?format=credits`，只读、不续期；`creditUsagePercent` 就是已用百分比，统一计费（`isUnifiedBillingUser`）下 Cursor / Grok Bot / GrokChat 都从这里扣。只装了 Cursor、没有 Grok Build 时，改读 Cursor 自己的登录（`state.vscdb` 的 `cursorAuth/accessToken`，只读不写回），请求编辑器同一条当前周期接口，把「已用包含额度」画成同一条。两边都有登录时以 Grok 的接口为准，因为它还看得到 Grok 对话和 Grok Bot。Cursor 在本机消耗时（`~/.cursor/ai-tracking` 有写入，或 Cursor 正在运行），下一次发布会重新取数；五分钟缓存仍然盖住没有 Cursor 活动的时候。已有 Grok 登录但过期或请求失败时，不改用 Cursor 的周期，避免同一条窗口换身份。没有 Grok 登录时才读 Cursor。两边都没有登录，行才消失。失败的刷新也计入 20 秒间隔，不会因为跟踪库还在写就每轮都重试。
+
 ### 3.6 令牌自动续期
 
 MiniMax Code（约 1 小时）、Kimi Code（厂商 15 分钟一轮）、Cline（gateway 令牌一小时）三家把短时效令牌存在磁盘上，tokenme 在其过期时就地续期：拿同一份凭据文件里的 refresh token 去换新对，再按该工具自己的格式原子性写回原处。写回是安全性的前提——没有落盘的轮换等于已被消耗的轮换，工具自己下次刷新就会发现登录死了。每个探测只续自己正在读的那份登录；静态 API key 只读不写。换取失败则什么都不改，该行最多保留六小时（探测缓存的宽限）的最后真实数字。其余所有探测只读凭据、绝不写回——tokenme 存的那份 WorkBuddy 凭据来自你亲自跑过的 `tokenme workbuddy-login`，不是探测写的。
@@ -207,6 +209,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Codex | Tokens | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | Tokens | `~/.local/share/opencode/opencode.db` |
 | Open Design | Tokens | `~/.amr/opencode-sessions/<id>/data/opencode/opencode-.db`（每个沙箱一份，全部读取；`OPEN_DESIGN_DATA_DIR` 可改根目录） |
+| Grok Build | Tokens | `~/.grok/sessions/<cwd-encoded>/<session-id>/usage.json`（`GROK_HOME` 可改根目录） |
 | Pi | Tokens | `~/.pi/agent/sessions/**` |
 | Oh My Pi | Tokens | `~/.omp/agent/sessions/**`（`OMP_AGENT_DIR` / `OMP_CODING_AGENT_DIR` 可改） |
 | Cline | Tokens | `~/.cline/data/sessions/**`（桌面版把子代理的转录写在父会话目录内、元数据写在旁边的 `<session>__agent_<uuid>/`，各自归到自己的工作区） |
@@ -220,7 +223,7 @@ tokenme budget set zcode --daily 5 --monthly 50
 | Kimi Code | Tokens | `~/.kimi-code/sessions/**/wire.jsonl`（旧 `~/.kimi`；桌面端内嵌 runtime 的 `~/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home` 也在读取范围） |
 | MiniMax Code | Tokens | `~/.minimax/v2/sessions/**/messages.jsonl`（旧 `~/.mavis`） |
 
-只有云端记录、本地没有逐请求日志的工具（Cursor、VS Code Copilot）本地不支持。
+只有云端记录、本地没有逐请求日志的工具（Cursor、VS Code Copilot）不进入用量索引。Cursor 在统一计费下的花费记在上面那条 Grok Build 周配额里；没装 Grok Build 时，这条仍由 Cursor 的登录撑住，消耗后会刷新。
 
 ## 7. 隐私
 
