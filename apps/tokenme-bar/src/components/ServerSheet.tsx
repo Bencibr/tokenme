@@ -525,7 +525,14 @@ export function ServerSheet({
     }));
     setReauth((cur) => {
       if (!cur) return cur;
-      // Changed host key: show the trust screen *before* any credential was sent.
+      // Auth / transport errors win over mismatch: a rejected password after
+      // the user already trusted the new key must return to the credential
+      // form, not loop on the trust screen.
+      if (!out.ok && out.error) {
+        return { ...cur, busy: false, probeError: out.error, session: null, step: 1, pendingKeyPath };
+      }
+      // Changed host key with no error: show the trust screen *before* any
+      // credential was sent (or when the key swapped again after ack).
       if (!out.ok && out.mismatch && out.fingerprint) {
         return {
           ...cur,
@@ -538,8 +545,6 @@ export function ServerSheet({
           pendingKeyPath,
         };
       }
-      // Auth / other failures after an ack: return to the credential form so
-      // the error is visible (step 2 only shows the fingerprint box).
       if (!out.ok) {
         return { ...cur, busy: false, probeError: out.error, session: null, step: 1, pendingKeyPath };
       }

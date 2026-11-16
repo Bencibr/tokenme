@@ -270,6 +270,8 @@ export const serverMock = {
       }
     }
     if (req.auth.kind === "password" && req.auth.password === "bad") {
+      // After fingerprint acceptance, a bad password must not look like a
+      // fresh mismatch (that would hide the auth error on the trust screen).
       return {
         ...fail("auth", "the server rejected the username or password"),
         fingerprint: presented,

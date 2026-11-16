@@ -349,12 +349,15 @@ pub async fn reauth_probe(state: &Arc<ServersState>, req: ReauthProbeReq) -> Pro
     }
     if let Err(e) = ssh::authenticate(&mut conn, &user, &auth).await {
         ssh::sftp_close(&mut conn).await;
+        // Fingerprint was already accepted for this attempt (matched pin or
+        // ack+expected). Do not set mismatch — that would send the UI back to
+        // the trust screen and hide the auth error (wrong password, etc.).
         return ProbeOutcome {
             ok: false,
             session: None,
             fingerprint: Some(conn.fingerprint.clone()),
             known_fingerprint: Some(prev_fp),
-            mismatch,
+            mismatch: false,
             arch: None,
             hostname: None,
             error: Some(e),
