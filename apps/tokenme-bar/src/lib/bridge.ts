@@ -5,7 +5,7 @@ import { serverMock } from "./serverFixture";
 import { t } from "./i18n";
 import { DEFAULT_PET_PREFERENCES } from "./petCompanion";
 import type { PetNotice, PetPreferences, PetResponse } from "./petCompanion";
-import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, DiagnosticsSnapshot, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot, SyncDevicesSnapshot, SyncManagementRequest, DiagnosticsManagementRequest, DiagnosticsResponse, McpClientConfig } from "../types";
+import type { ActiveSpeedTest, Bridge, BubbleSkin, CheckinResult, DiagnosticsSnapshot, PanelSettings, ProbeTool, NotifyTierKey, QuotaDisplayMode, QuotaOrder, PeriodKey, Report, ThemeKey, TrayMode, TrayState, UpdateStatus, DownloadProgress, MachineScope, ServerView, ServerProbeReq, ServerProbeOutcome, ServerInstallReq, ServerInstallOutcome, ServerInstallProgress, ServerReauthProbeReq, ServerReauthApplyReq, ServerUpdateReq, ServerRemoveOutcome, NotifyState, TtftSnapshot, SyncDevicesSnapshot, SyncManagementRequest, DiagnosticsManagementRequest, DiagnosticsResponse, McpClientConfig } from "../types";
 
 /** True inside the Tauri webview; in a plain browser the fixture drives everything. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -641,6 +641,16 @@ export const bridge: Bridge = {
   async serverAbortSession(session: number): Promise<void> {
     if (!inTauri) return serverMock.abort(session);
     await invoke<void>("server_abort_session", { session });
+  },
+
+  async serverReauthProbe(req: ServerReauthProbeReq): Promise<ServerProbeOutcome> {
+    if (!inTauri) return serverMock.reauthProbe(req);
+    return invoke<ServerProbeOutcome>("server_reauth_probe", { req });
+  },
+
+  async serverReauthApply(req: ServerReauthApplyReq): Promise<ServerInstallOutcome> {
+    if (!inTauri) return serverMock.reauthApply(req);
+    return invoke<ServerInstallOutcome>("server_reauth_apply", { req });
   },
 
   async serverSyncNow(id: number): Promise<void> {

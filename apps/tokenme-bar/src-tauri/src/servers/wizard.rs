@@ -25,6 +25,10 @@ use super::EV_INSTALL_PROGRESS;
 pub const STEPS: [&str; 9] =
     ["keygen", "pubkey", "reconnect", "clear_pw", "arch", "collector", "export", "detect", "merge"];
 
+/// Re-login path for an existing server: rewrite the dedicated key only.
+/// Same keys as the first four install steps so the UI reuses their labels.
+pub const REAUTH_STEPS: [&str; 4] = ["keygen", "pubkey", "reconnect", "clear_pw"];
+
 /// How long the last step waits for the engine to publish the merge before
 /// saying "written, merge pending" instead.
 const MERGE_WAIT: Duration = Duration::from_secs(20);
@@ -41,8 +45,11 @@ pub struct WizardSession {
     pub auth: Auth,
     /// The fingerprint the probe saw; install re-pins to it.
     pub fingerprint: String,
+    /// When set, this session is for `server_reauth_*` against an existing
+    /// record. `install` must refuse it (would create a duplicate); apply
+    /// updates that id instead.
+    pub reauth_of: Option<u64>,
 }
-
 #[derive(Debug, Deserialize)]
 pub struct ProbeReq {
     pub name: String,
@@ -217,6 +224,7 @@ pub async fn probe(state: &Arc<ServersState>, req: ProbeReq) -> ProbeOutcome {
                 user: req.user,
                 auth,
                 fingerprint: fingerprint.clone(),
+                reauth_of: None,
             },
         );
     }
@@ -224,6 +232,166 @@ pub async fn probe(state: &Arc<ServersState>, req: ProbeReq) -> ProbeOutcome {
     ProbeOutcome {
         ok: true,
         session: Some(id),
+        fingerprint: Some(fingerprint),
+        known_fingerprint: known,
+        mismatch,
+        arch: Some(arch_raw),
+        hostname,
+        error: None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReauthProbeReq {
+    pub id: u64,
+    /// Optional overrides — leave unset to keep the stored value. Used when
+    /// the box moved to a new IP (or the login user changed) but it is still
+    /// the same registered server.
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub user: Option<String>,
+    pub auth: AuthReq,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReauthApplyReq {
+    pub session: u64,
+    /// The fingerprint the user confirmed (equal to what the probe saw).
+    pub fingerprint: String,
+}
+
+/// Probe an already-registered server for re-login. Name stays fixed; host /
+/// port / user may change. Does not treat the existing name as a collision.
+pub async fn reauth_probe(state: &Arc<ServersState>, req: ReauthProbeReq) -> ProbeOutcome {
+    let (name, host, port, user, prev_fp) = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(_) => return probe_error("proto", "server store is busy"),
+        };
+        let Some(rec) = store.servers.iter().find(|r| r.id == req.id) else {
+            return probe_error("proto", "server not found");
+        };
+        let host = req.host.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&rec.host).to_string();
+        let port = req.port.unwrap_or(rec.port);
+        let user = req.user.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&rec.user).to_string();
+        (rec.name.clone(), host, port, user, rec.fingerprint.clone())
+    };
+
+    if !remote::valid_host(&host) {
+        return probe_error("host", "invalid host");
+    }
+    if !remote::valid_user(&user) {
+        return probe_error("user", "invalid user name");
+    }
+    if port == 0 {
+        return probe_error("host", "invalid port");
+    }
+
+    let auth = req.auth.into_auth();
+    // TOFU with no pin: an IP change presents a key against a new host:port,
+    // and we still need the fingerprint even when it differs from the record.
+    let mut conn = match ssh::connect(&host, port, None).await {
+        Ok(c) => c,
+        Err(e) => return probe_error(&e.kind, e.detail),
+    };
+    if let Err(e) = ssh::authenticate(&mut conn, &user, &auth).await {
+        ssh::sftp_close(&mut conn).await;
+        return ProbeOutcome {
+            ok: false,
+            session: None,
+            fingerprint: Some(conn.fingerprint.clone()),
+            known_fingerprint: Some(prev_fp),
+            mismatch: conn.fingerprint != prev_fp,
+            arch: None,
+            hostname: None,
+            error: Some(e),
+        };
+    }
+
+    let uname = ssh::exec(&conn.handle, remote::CMD_UNAME, ssh::PROBE_EXEC_TIMEOUT).await;
+    let arch_raw = match uname {
+        Ok(out) if out.ok() => out.stdout.trim().to_string(),
+        Ok(out) => {
+            ssh::sftp_close(&mut conn).await;
+            return ProbeOutcome {
+                fingerprint: Some(conn.fingerprint.clone()),
+                known_fingerprint: Some(prev_fp),
+                error: Some(SshError::new("remote_cmd", format!("uname failed: {}", out.summary()))),
+                ..empty_outcome()
+            };
+        }
+        Err(e) => {
+            ssh::sftp_close(&mut conn).await;
+            return ProbeOutcome {
+                fingerprint: Some(conn.fingerprint.clone()),
+                known_fingerprint: Some(prev_fp),
+                error: Some(e),
+                ..empty_outcome()
+            };
+        }
+    };
+    if collector::arch_target(&arch_raw).is_none() {
+        ssh::sftp_close(&mut conn).await;
+        return ProbeOutcome {
+            fingerprint: Some(conn.fingerprint.clone()),
+            known_fingerprint: Some(prev_fp),
+            arch: Some(arch_raw.clone()),
+            error: Some(SshError::new(
+                "unsupported_arch",
+                format!("architecture {arch_raw:?} has no bundled collector — use scripts/install-linux.sh --push on this machine"),
+            )),
+            ..empty_outcome()
+        };
+    }
+
+    let hostname = match ssh::exec(&conn.handle, remote::CMD_HOSTNAME, ssh::PROBE_EXEC_TIMEOUT).await {
+        Ok(out) if out.ok() => {
+            let h = out.stdout.trim().to_string();
+            if h.is_empty() { None } else { Some(h) }
+        }
+        _ => None,
+    };
+
+    let fingerprint = conn.fingerprint.clone();
+    ssh::sftp_close(&mut conn).await;
+
+    let known_for_endpoint = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|s| s.known_hosts.get(&host_port_key(&host, port)).cloned());
+    // Prefer the record's pin as "what we used to trust for this server"; fall
+    // back to the endpoint pin when comparing for the UI's mismatch banner.
+    let known = if !prev_fp.is_empty() { Some(prev_fp.clone()) } else { known_for_endpoint };
+    let mismatch = known.as_deref().is_some_and(|k| k != fingerprint);
+
+    let session_id = state.next_id();
+    if let Ok(mut wizards) = state.wizards.lock() {
+        if wizards.len() >= MAX_SESSIONS {
+            if let Some(oldest) = wizards.keys().min().copied() {
+                wizards.remove(&oldest);
+            }
+        }
+        wizards.insert(
+            session_id,
+            WizardSession {
+                name,
+                host,
+                port,
+                user,
+                auth,
+                fingerprint: fingerprint.clone(),
+                reauth_of: Some(req.id),
+            },
+        );
+    }
+
+    ProbeOutcome {
+        ok: true,
+        session: Some(session_id),
         fingerprint: Some(fingerprint),
         known_fingerprint: known,
         mismatch,
@@ -288,7 +456,15 @@ struct Progress<'a, R: Runtime> {
 
 impl<'a, R: Runtime> Progress<'a, R> {
     fn new(app: &'a AppHandle<R>, session: u64) -> Self {
-        let steps = STEPS
+        Self::with_steps(app, session, &STEPS)
+    }
+
+    fn for_reauth(app: &'a AppHandle<R>, session: u64) -> Self {
+        Self::with_steps(app, session, &REAUTH_STEPS)
+    }
+
+    fn with_steps(app: &'a AppHandle<R>, session: u64, keys: &[&str]) -> Self {
+        let steps = keys
             .iter()
             .map(|k| StepState { key: (*k).to_string(), state: "pending".into(), detail: None })
             .collect();
@@ -364,6 +540,12 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, state: &Arc<ServersState>, 
     let Some(mut session) = session else {
         return install_fail(SshError::new("proto", "the wizard session expired — start over"));
     };
+    if session.reauth_of.is_some() {
+        return install_fail(SshError::new(
+            "proto",
+            "this session belongs to re-login — use server_reauth_apply",
+        ));
+    }
     if !remote::valid_every(req.every_secs) {
         return install_fail(SshError::new("proto", "sync interval out of range"));
     }
@@ -587,6 +769,165 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, state: &Arc<ServersState>, 
     InstallOutcome { ok: true, server: view, detected, rows, merge_pending, error: None }
 }
 
+/// Re-login against an existing record: rewrite the dedicated key, update
+/// host/port/user/fingerprint on the same id, clear backoff, and pull now.
+/// Does not create a second server and does not re-upload the collector.
+pub async fn reauth_apply<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &Arc<ServersState>,
+    req: ReauthApplyReq,
+) -> InstallOutcome {
+    let session = state.wizards.lock().ok().and_then(|mut m| m.remove(&req.session));
+    let Some(mut session) = session else {
+        return install_fail(SshError::new("proto", "the wizard session expired — start over"));
+    };
+    let Some(server_id) = session.reauth_of else {
+        return install_fail(SshError::new(
+            "proto",
+            "this session belongs to add-server — use server_install",
+        ));
+    };
+    if req.fingerprint != session.fingerprint {
+        return install_fail(SshError::new(
+            "host_key_changed",
+            format!(
+                "the confirmed fingerprint {} differs from the one the probe saw ({})",
+                req.fingerprint, session.fingerprint
+            ),
+        ));
+    }
+
+    // Confirm the target still exists before burning the one-time password
+    // on a pubkey write that we cannot attach to a record.
+    let prev = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(_) => return install_fail(SshError::new("proto", "server store is busy")),
+        };
+        match store.servers.iter().find(|r| r.id == server_id) {
+            Some(r) => (r.host.clone(), r.port),
+            None => return install_fail(SshError::new("proto", "server not found")),
+        }
+    };
+
+    let mut prog = Progress::for_reauth(app, req.session);
+
+    prog.active("keygen");
+    let key = match keys::ensure_keypair() {
+        Ok(k) => k,
+        Err(e) => {
+            prog.fail("keygen", &e);
+            return install_fail(e);
+        }
+    };
+    prog.done("keygen", Some(key.path.display().to_string()));
+
+    prog.active("pubkey");
+    let mut conn = match ssh::connect(&session.host, session.port, Some(&session.fingerprint)).await {
+        Ok(c) => c,
+        Err(e) => {
+            prog.fail("pubkey", &e);
+            return install_fail(e);
+        }
+    };
+    if let Err(e) = ssh::authenticate(&mut conn, &session.user, &session.auth).await {
+        prog.fail("pubkey", &e);
+        return install_fail(e);
+    }
+    let append = match remote::cmd_pubkey_append(&key.blob, &key.comment) {
+        Ok(cmd) => ssh::exec(&conn.handle, &cmd, ssh::EXEC_TIMEOUT).await,
+        Err(e) => Err(e),
+    };
+    match append {
+        Ok(out) if out.ok() => prog.done("pubkey", None),
+        Ok(out) => {
+            let e = SshError::new("remote_cmd", format!("writing authorized_keys failed: {}", out.summary()));
+            prog.fail("pubkey", &e);
+            return install_fail(e);
+        }
+        Err(e) => {
+            prog.fail("pubkey", &e);
+            return install_fail(e);
+        }
+    }
+    ssh::sftp_close(&mut conn).await;
+
+    prog.active("reconnect");
+    let mut conn = match ssh::connect(&session.host, session.port, Some(&session.fingerprint)).await {
+        Ok(c) => c,
+        Err(e) => {
+            prog.fail("reconnect", &e);
+            return install_fail(e);
+        }
+    };
+    if let Err(e) = ssh::authenticate(&mut conn, &session.user, &Auth::Dedicated).await {
+        let e = SshError::new(
+            "auth",
+            format!(
+                "the dedicated key was written but does not authenticate yet ({}) — check sshd's AuthorizedKeysFile and ~/.ssh permissions",
+                e.detail
+            ),
+        );
+        prog.fail("reconnect", &e);
+        return install_fail(e);
+    }
+    prog.done("reconnect", None);
+    ssh::sftp_close(&mut conn).await;
+
+    prog.active("clear_pw");
+    session.auth = Auth::Dedicated;
+    prog.done("clear_pw", None);
+
+    let new_host = session.host.clone();
+    let new_port = session.port;
+    let new_user = session.user.clone();
+    let new_fp = session.fingerprint.clone();
+    let (prev_host, prev_port) = prev;
+
+    if let Err(e) = state.mutate(|store| {
+        let Some(rec) = store.servers.iter_mut().find(|r| r.id == server_id) else {
+            return;
+        };
+        rec.host = new_host.clone();
+        rec.port = new_port;
+        rec.user = new_user.clone();
+        rec.fingerprint = new_fp.clone();
+        rec.last_error = None;
+        rec.fail_count = 0;
+
+        // Move the TOFU pin with the endpoint. Drop the old host:port pin only
+        // when no other registered server still uses it.
+        store.known_hosts.insert(host_port_key(&new_host, new_port), new_fp.clone());
+        if (prev_host != new_host || prev_port != new_port)
+            && !store.servers.iter().any(|r| r.id != server_id && r.host == prev_host && r.port == prev_port)
+        {
+            store.known_hosts.remove(&host_port_key(&prev_host, prev_port));
+        }
+    }) {
+        let e = SshError::new("local_io", e);
+        prog.fail("clear_pw", &e);
+        return install_fail(e);
+    }
+
+    if let Ok(mut due) = state.next_due.lock() {
+        due.insert(server_id, Instant::now());
+    }
+    state.hub_send(super::hub::HubMsg::SyncNow(server_id));
+    prog.finish();
+    state.emit_updated(app);
+
+    let now_ms = usage_core::report::now_ms();
+    let view = state.views(now_ms).into_iter().find(|v| v.id == server_id);
+    InstallOutcome {
+        ok: true,
+        server: view,
+        detected: vec![],
+        rows: 0,
+        merge_pending: false,
+        error: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +937,7 @@ mod tests {
         assert_eq!(STEPS.len(), 9);
         assert_eq!(STEPS[0], "keygen");
         assert_eq!(STEPS[8], "merge");
+        assert_eq!(REAUTH_STEPS, ["keygen", "pubkey", "reconnect", "clear_pw"]);
     }
 
     #[test]
@@ -642,6 +984,21 @@ mod tests {
             serde_json::from_str(r#"{"session":7,"every_secs":900,"days":30,"fingerprint":"SHA256:x"}"#)
                 .unwrap();
         assert_eq!((i.session, i.every_secs, i.days), (7, 900, 30));
+
+        let r: ReauthProbeReq = serde_json::from_str(
+            r#"{"id":3,"host":"203.0.113.10","port":22,"user":"root","auth":{"kind":"password","password":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!((r.id, r.host.as_deref(), r.port, r.user.as_deref()), (3, Some("203.0.113.10"), Some(22), Some("root")));
+        assert!(matches!(r.auth, AuthReq::Password { .. }));
+
+        let r: ReauthProbeReq =
+            serde_json::from_str(r#"{"id":3,"auth":{"kind":"default"}}"#).unwrap();
+        assert!(r.host.is_none() && r.port.is_none() && r.user.is_none());
+
+        let a: ReauthApplyReq =
+            serde_json::from_str(r#"{"session":9,"fingerprint":"SHA256:x"}"#).unwrap();
+        assert_eq!((a.session, a.fingerprint.as_str()), (9, "SHA256:x"));
     }
 
     #[test]

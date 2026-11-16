@@ -123,6 +123,8 @@ pub fn run() {
             servers::commands::server_probe,
             servers::commands::server_install,
             servers::commands::server_abort_session,
+            servers::commands::server_reauth_probe,
+            servers::commands::server_reauth_apply,
             servers::commands::server_sync_now,
             servers::commands::server_update,
             servers::commands::server_remove,
