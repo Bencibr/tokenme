@@ -167,6 +167,9 @@ interface Reauth {
   passphrase: string;
   altOpen: boolean;
   pubkey: { path: string; line: string } | null;
+  /** Dedicated-key path from the alt "I installed the pubkey" flow; kept across
+   *  a mismatch confirm so the ack re-probe does not fall back to password. */
+  pendingKeyPath: string | null;
   busy: boolean;
   formError: string | null;
   probeError: SshError | null;
@@ -216,6 +219,7 @@ const emptyReauth = (s: ServerView): Reauth => ({
   passphrase: "",
   altOpen: false,
   pubkey: null,
+  pendingKeyPath: null,
   busy: false,
   formError: null,
   probeError: null,
@@ -480,7 +484,7 @@ export function ServerSheet({
   const runReauthProbe = async (
     r: Reauth,
     serverId: number,
-    opts?: { overrideKeyPath?: string; ackMismatch?: boolean },
+    opts?: { overrideKeyPath?: string; ackMismatch?: boolean; expectedFingerprint?: string },
   ): Promise<ServerProbeOutcome | null> => {
     const host = r.host.trim();
     const user = r.user.trim();
@@ -488,22 +492,27 @@ export function ServerSheet({
       setReauth({ ...r, formError: t("srv.f.req") });
       return null;
     }
+    // Prefer an explicit override (alt-panel path), else a pending path kept
+    // across a mismatch confirm; otherwise use the radio-card auth choice.
+    const keyOverride = opts?.overrideKeyPath !== undefined ? opts.overrideKeyPath : r.pendingKeyPath;
     const req = {
       id: serverId,
       host,
       port: Number(r.port) || 22,
       user,
       ack_mismatch: opts?.ackMismatch === true,
+      expected_fingerprint: opts?.expectedFingerprint ?? null,
       auth:
-        opts?.overrideKeyPath !== undefined
-          ? ({ kind: "key", path: opts.overrideKeyPath } as const)
+        keyOverride
+          ? ({ kind: "key", path: keyOverride } as const)
           : r.auth === "password"
             ? ({ kind: "password", password: r.password } as const)
             : r.auth === "key"
               ? ({ kind: "key", path: r.keyPath.trim(), passphrase: r.passphrase || null } as const)
               : ({ kind: "default" } as const),
     };
-    setReauth({ ...r, host, user, busy: true, probeError: null, formError: null });
+    const pendingKeyPath = opts?.overrideKeyPath !== undefined ? opts.overrideKeyPath : r.pendingKeyPath;
+    setReauth({ ...r, host, user, pendingKeyPath, busy: true, probeError: null, formError: null });
     const out = await bridge.serverReauthProbe(req).catch((e: unknown) => ({
       ok: false,
       session: null,
@@ -518,10 +527,32 @@ export function ServerSheet({
       if (!cur) return cur;
       // Changed host key: show the trust screen *before* any credential was sent.
       if (!out.ok && out.mismatch && out.fingerprint) {
-        return { ...cur, busy: false, probe: out, session: null, ack: false, step: 2, probeError: null };
+        return {
+          ...cur,
+          busy: false,
+          probe: out,
+          session: null,
+          ack: false,
+          step: 2,
+          probeError: null,
+          pendingKeyPath,
+        };
       }
-      if (!out.ok) return { ...cur, busy: false, probeError: out.error, session: null };
-      return { ...cur, busy: false, probe: out, session: out.session, ack: false, step: 2, probeError: null };
+      // Auth / other failures after an ack: return to the credential form so
+      // the error is visible (step 2 only shows the fingerprint box).
+      if (!out.ok) {
+        return { ...cur, busy: false, probeError: out.error, session: null, step: 1, pendingKeyPath };
+      }
+      return {
+        ...cur,
+        busy: false,
+        probe: out,
+        session: out.session,
+        ack: false,
+        step: 2,
+        probeError: null,
+        pendingKeyPath,
+      };
     });
     return out;
   };
@@ -537,7 +568,8 @@ export function ServerSheet({
       return;
     }
     if (view.kind !== "reauth") return;
-    void runReauthProbe(r, view.id);
+    // A normal connect clears any alt-panel key override.
+    void runReauthProbe({ ...r, pendingKeyPath: null }, view.id);
   };
 
   const reauthAltDone = async () => {
@@ -545,15 +577,23 @@ export function ServerSheet({
     if (view.kind !== "reauth") return;
     const pk = r.pubkey ?? (await bridge.serverPublicKey().catch(() => null));
     if (!pk) return;
-    setReauth({ ...r, pubkey: pk });
-    void runReauthProbe({ ...r, pubkey: pk }, view.id, { overrideKeyPath: pk.path });
+    setReauth({ ...r, pubkey: pk, pendingKeyPath: pk.path });
+    void runReauthProbe({ ...r, pubkey: pk, pendingKeyPath: pk.path }, view.id, { overrideKeyPath: pk.path });
   };
 
   const reauthBack = (to: 1) => {
     const r = reauth!;
     if (r.busy) return;
     if (r.session !== null) void bridge.serverAbortSession(r.session);
-    setReauth({ ...r, step: to, probeError: null, formError: null, session: null, busy: false, applyError: null });
+    setReauth({
+      ...r,
+      step: to,
+      probeError: null,
+      formError: null,
+      session: null,
+      busy: false,
+      applyError: null,
+    });
   };
 
   const startReauthApply = async (session: number, fingerprint: string, name: string, serverId: number) => {
@@ -592,8 +632,15 @@ export function ServerSheet({
     }
     // Mismatch path: credentials were never sent; ack then authenticate.
     if (!r.ack || !r.probe.mismatch) return;
-    const out = await runReauthProbe(r, serverId, { ackMismatch: true });
+    const approvedFp = r.probe.fingerprint;
+    const out = await runReauthProbe(r, serverId, {
+      ackMismatch: true,
+      expectedFingerprint: approvedFp,
+      overrideKeyPath: r.pendingKeyPath ?? undefined,
+    });
     if (!out?.ok || out.session === null || !out.fingerprint) return;
+    // Only persist the fingerprint the user approved (and the host still has).
+    if (out.fingerprint !== approvedFp) return;
     void startReauthApply(out.session, out.fingerprint, r.name, serverId);
   };
 
@@ -1548,6 +1595,7 @@ export function ServerSheet({
       const fp = r.probe.fingerprint ?? "";
       body = (
         <>
+          {r.probeError ? errBox(r.probeError, [{ label: t("srv.reauth.retry"), onClick: () => reauthBack(1) }]) : null}
           <div className="fp-box" data-bad={bad || undefined}>
             <div className="fp-title">{bad ? t("srv.fp.mismatch") : t("srv.fp.first")}</div>
             <div className="fp-val">{fp}</div>

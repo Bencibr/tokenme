@@ -287,6 +287,8 @@ export interface ServerReauthProbeReq {
   auth: ServerAuth;
   /** After the user trusts a changed host key; without it, credentials are never sent. */
   ack_mismatch?: boolean;
+  /** Fingerprint shown on the mismatch screen; required with `ack_mismatch`. */
+  expected_fingerprint?: string | null;
 }
 
 export interface ServerReauthApplyReq {

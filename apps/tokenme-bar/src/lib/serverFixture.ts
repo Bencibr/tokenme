@@ -254,6 +254,21 @@ export const serverMock = {
         error: null,
       };
     }
+    if (mismatch && req.ack_mismatch) {
+      const expected = (req.expected_fingerprint ?? "").trim();
+      if (!expected || expected !== presented) {
+        return {
+          ok: false,
+          session: null,
+          fingerprint: presented,
+          known_fingerprint: rec.fingerprint,
+          mismatch: true,
+          arch: null,
+          hostname: null,
+          error: expected ? null : { kind: "proto", detail: "ack_mismatch requires expected_fingerprint" },
+        };
+      }
+    }
     if (req.auth.kind === "password" && req.auth.password === "bad") {
       return {
         ...fail("auth", "the server rejected the username or password"),

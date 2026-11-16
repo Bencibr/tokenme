@@ -259,6 +259,11 @@ pub struct ReauthProbeReq {
     /// *before* any password / private-key material is sent.
     #[serde(default)]
     pub ack_mismatch: bool,
+    /// The fingerprint the user confirmed on the mismatch screen. Required
+    /// when `ack_mismatch` is true: if the host now presents a different key,
+    /// credentials are still withheld and the UI must ask again.
+    #[serde(default)]
+    pub expected_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +324,28 @@ pub async fn reauth_probe(state: &Arc<ServersState>, req: ReauthProbeReq) -> Pro
             hostname: None,
             error: None,
         };
+    }
+    if mismatch {
+        // Ack alone is not enough: bind approval to the exact fingerprint the
+        // user saw. A TOCTOU swap between screens must not inherit that ack.
+        let expected = req.expected_fingerprint.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let Some(expected) = expected else {
+            ssh::sftp_close(&mut conn).await;
+            return probe_error("proto", "ack_mismatch requires expected_fingerprint");
+        };
+        if presented != expected {
+            ssh::sftp_close(&mut conn).await;
+            return ProbeOutcome {
+                ok: false,
+                session: None,
+                fingerprint: Some(presented),
+                known_fingerprint: Some(prev_fp),
+                mismatch: true,
+                arch: None,
+                hostname: None,
+                error: None,
+            };
+        }
     }
     if let Err(e) = ssh::authenticate(&mut conn, &user, &auth).await {
         ssh::sftp_close(&mut conn).await;
@@ -1010,10 +1037,13 @@ mod tests {
         assert!(matches!(r.auth, AuthReq::Password { .. }));
         assert!(!r.ack_mismatch);
 
-        let r: ReauthProbeReq =
-            serde_json::from_str(r#"{"id":3,"auth":{"kind":"default"},"ack_mismatch":true}"#).unwrap();
+        let r: ReauthProbeReq = serde_json::from_str(
+            r#"{"id":3,"auth":{"kind":"default"},"ack_mismatch":true,"expected_fingerprint":"SHA256:x"}"#,
+        )
+        .unwrap();
         assert!(r.host.is_none() && r.port.is_none() && r.user.is_none());
         assert!(r.ack_mismatch);
+        assert_eq!(r.expected_fingerprint.as_deref(), Some("SHA256:x"));
 
         let a: ReauthApplyReq =
             serde_json::from_str(r#"{"session":9,"fingerprint":"SHA256:x"}"#).unwrap();
