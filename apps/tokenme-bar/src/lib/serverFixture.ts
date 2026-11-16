@@ -238,12 +238,28 @@ export const serverMock = {
     if (host.includes("fail")) {
       return fail("unreachable", `connect to ${host}:${port} failed: connection refused`);
     }
+    // Hostnames containing "newkey" present a different fingerprint — credentials
+    // must not be accepted until ack_mismatch is set (mirrors the Rust gate).
+    const presented = host.includes("newkey") ? FP_OLD : FP;
+    const mismatch = presented !== rec.fingerprint;
+    if (mismatch && !req.ack_mismatch) {
+      return {
+        ok: false,
+        session: null,
+        fingerprint: presented,
+        known_fingerprint: rec.fingerprint,
+        mismatch: true,
+        arch: null,
+        hostname: null,
+        error: null,
+      };
+    }
     if (req.auth.kind === "password" && req.auth.password === "bad") {
       return {
         ...fail("auth", "the server rejected the username or password"),
-        fingerprint: FP,
+        fingerprint: presented,
         known_fingerprint: rec.fingerprint,
-        mismatch: FP !== rec.fingerprint,
+        mismatch: false,
       };
     }
     const session = nextId++;
@@ -252,15 +268,15 @@ export const serverMock = {
       host,
       port,
       user,
-      fingerprint: FP,
+      fingerprint: presented,
       reauthOf: rec.id,
     });
     return {
       ok: true,
       session,
-      fingerprint: FP,
+      fingerprint: presented,
       known_fingerprint: rec.fingerprint,
-      mismatch: FP !== rec.fingerprint,
+      mismatch: false,
       arch: "x86_64",
       hostname: host.split(".")[0] || host,
       error: null,

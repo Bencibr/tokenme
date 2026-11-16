@@ -477,21 +477,26 @@ export function ServerSheet({
     return true;
   };
 
-  const runReauthProbe = async (r: Reauth, serverId: number, overrideKeyPath?: string) => {
+  const runReauthProbe = async (
+    r: Reauth,
+    serverId: number,
+    opts?: { overrideKeyPath?: string; ackMismatch?: boolean },
+  ): Promise<ServerProbeOutcome | null> => {
     const host = r.host.trim();
     const user = r.user.trim();
     if (!host || !user) {
       setReauth({ ...r, formError: t("srv.f.req") });
-      return;
+      return null;
     }
     const req = {
       id: serverId,
       host,
       port: Number(r.port) || 22,
       user,
+      ack_mismatch: opts?.ackMismatch === true,
       auth:
-        overrideKeyPath !== undefined
-          ? ({ kind: "key", path: overrideKeyPath } as const)
+        opts?.overrideKeyPath !== undefined
+          ? ({ kind: "key", path: opts.overrideKeyPath } as const)
           : r.auth === "password"
             ? ({ kind: "password", password: r.password } as const)
             : r.auth === "key"
@@ -511,9 +516,14 @@ export function ServerSheet({
     }));
     setReauth((cur) => {
       if (!cur) return cur;
+      // Changed host key: show the trust screen *before* any credential was sent.
+      if (!out.ok && out.mismatch && out.fingerprint) {
+        return { ...cur, busy: false, probe: out, session: null, ack: false, step: 2, probeError: null };
+      }
       if (!out.ok) return { ...cur, busy: false, probeError: out.error, session: null };
-      return { ...cur, busy: false, probe: out, session: out.session, ack: false, step: 2 };
+      return { ...cur, busy: false, probe: out, session: out.session, ack: false, step: 2, probeError: null };
     });
+    return out;
   };
 
   const reauthConnect = () => {
@@ -536,7 +546,7 @@ export function ServerSheet({
     const pk = r.pubkey ?? (await bridge.serverPublicKey().catch(() => null));
     if (!pk) return;
     setReauth({ ...r, pubkey: pk });
-    void runReauthProbe({ ...r, pubkey: pk }, view.id, pk.path);
+    void runReauthProbe({ ...r, pubkey: pk }, view.id, { overrideKeyPath: pk.path });
   };
 
   const reauthBack = (to: 1) => {
@@ -546,12 +556,9 @@ export function ServerSheet({
     setReauth({ ...r, step: to, probeError: null, formError: null, session: null, busy: false, applyError: null });
   };
 
-  const startReauthApply = async () => {
-    const r = reauth!;
-    if (r.session === null || !r.probe?.fingerprint || view.kind !== "reauth") return;
-    const serverId = view.id;
-    const req = { session: r.session, fingerprint: r.probe.fingerprint };
-    setReauth({ ...r, step: 3, busy: true, applyError: null, steps: [] });
+  const startReauthApply = async (session: number, fingerprint: string, name: string, serverId: number) => {
+    const req = { session, fingerprint };
+    setReauth((cur) => (cur ? { ...cur, step: 3, busy: true, applyError: null, steps: [], session } : cur));
     const out = await bridge.serverReauthApply(req).catch((e: unknown) => ({
       ok: false,
       server: null,
@@ -562,7 +569,7 @@ export function ServerSheet({
     }));
     if (out.ok) {
       setReauth(null);
-      setNotice(t("srv.reauth.done", { name: r.name }));
+      setNotice(t("srv.reauth.done", { name }));
       setView({ kind: "detail", id: serverId });
       if (out.server) {
         const views = await bridge.servers().catch(() => null);
@@ -571,6 +578,23 @@ export function ServerSheet({
       return;
     }
     setReauth((cur) => (cur ? { ...cur, busy: false, applyError: out.error } : cur));
+  };
+
+  /** Trust the fingerprint (and, on mismatch, re-probe with ack so credentials
+   *  are only sent after the user confirms), then restore the dedicated key. */
+  const confirmReauthFp = async () => {
+    const r = reauth!;
+    if (view.kind !== "reauth" || !r.probe?.fingerprint) return;
+    const serverId = view.id;
+    if (r.session !== null) {
+      void startReauthApply(r.session, r.probe.fingerprint, r.name, serverId);
+      return;
+    }
+    // Mismatch path: credentials were never sent; ack then authenticate.
+    if (!r.ack || !r.probe.mismatch) return;
+    const out = await runReauthProbe(r, serverId, { ackMismatch: true });
+    if (!out?.ok || out.session === null || !out.fingerprint) return;
+    void startReauthApply(out.session, out.fingerprint, r.name, serverId);
   };
 
   const removeServer = async (id: number) => {
@@ -1577,10 +1601,10 @@ export function ServerSheet({
               <button
                 type="button"
                 className="btn-accent"
-                disabled={bad && !r.ack}
-                onClick={() => void startReauthApply()}
+                disabled={(bad && !r.ack) || r.busy}
+                onClick={() => void confirmReauthFp()}
               >
-                {bad ? t("srv.trust.mismatch") : t("srv.trust")}
+                {r.busy ? t("srv.connecting") : bad ? t("srv.trust.mismatch") : t("srv.trust")}
               </button>
             </div>
           </div>

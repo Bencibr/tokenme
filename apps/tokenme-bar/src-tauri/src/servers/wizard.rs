@@ -254,6 +254,11 @@ pub struct ReauthProbeReq {
     #[serde(default)]
     pub user: Option<String>,
     pub auth: AuthReq,
+    /// Set after the UI shows a fingerprint mismatch and the user explicitly
+    /// trusts the new key. Without this, a changed host key stops the probe
+    /// *before* any password / private-key material is sent.
+    #[serde(default)]
+    pub ack_mismatch: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +302,24 @@ pub async fn reauth_probe(state: &Arc<ServersState>, req: ReauthProbeReq) -> Pro
         Ok(c) => c,
         Err(e) => return probe_error(&e.kind, e.detail),
     };
+    let presented = conn.fingerprint.clone();
+    let mismatch = !prev_fp.is_empty() && presented != prev_fp;
+    // Never send the one-time password / user key to a host whose key differs
+    // from the pin we already trust for this server id — that would hand the
+    // credential to an impersonator before the mismatch UI can stop us.
+    if mismatch && !req.ack_mismatch {
+        ssh::sftp_close(&mut conn).await;
+        return ProbeOutcome {
+            ok: false,
+            session: None,
+            fingerprint: Some(presented),
+            known_fingerprint: Some(prev_fp),
+            mismatch: true,
+            arch: None,
+            hostname: None,
+            error: None,
+        };
+    }
     if let Err(e) = ssh::authenticate(&mut conn, &user, &auth).await {
         ssh::sftp_close(&mut conn).await;
         return ProbeOutcome {
@@ -304,7 +327,7 @@ pub async fn reauth_probe(state: &Arc<ServersState>, req: ReauthProbeReq) -> Pro
             session: None,
             fingerprint: Some(conn.fingerprint.clone()),
             known_fingerprint: Some(prev_fp),
-            mismatch: conn.fingerprint != prev_fp,
+            mismatch,
             arch: None,
             hostname: None,
             error: Some(e),
@@ -358,15 +381,7 @@ pub async fn reauth_probe(state: &Arc<ServersState>, req: ReauthProbeReq) -> Pro
     let fingerprint = conn.fingerprint.clone();
     ssh::sftp_close(&mut conn).await;
 
-    let known_for_endpoint = state
-        .store
-        .lock()
-        .ok()
-        .and_then(|s| s.known_hosts.get(&host_port_key(&host, port)).cloned());
-    // Prefer the record's pin as "what we used to trust for this server"; fall
-    // back to the endpoint pin when comparing for the UI's mismatch banner.
-    let known = if !prev_fp.is_empty() { Some(prev_fp.clone()) } else { known_for_endpoint };
-    let mismatch = known.as_deref().is_some_and(|k| k != fingerprint);
+    let known = if !prev_fp.is_empty() { Some(prev_fp) } else { None };
 
     let session_id = state.next_id();
     if let Ok(mut wizards) = state.wizards.lock() {
@@ -394,7 +409,9 @@ pub async fn reauth_probe(state: &Arc<ServersState>, req: ReauthProbeReq) -> Pro
         session: Some(session_id),
         fingerprint: Some(fingerprint),
         known_fingerprint: known,
-        mismatch,
+        // After an explicit ack the new key is accepted; the UI should not
+        // re-prompt. A matching pin never set mismatch above.
+        mismatch: false,
         arch: Some(arch_raw),
         hostname,
         error: None,
@@ -991,10 +1008,12 @@ mod tests {
         .unwrap();
         assert_eq!((r.id, r.host.as_deref(), r.port, r.user.as_deref()), (3, Some("203.0.113.10"), Some(22), Some("root")));
         assert!(matches!(r.auth, AuthReq::Password { .. }));
+        assert!(!r.ack_mismatch);
 
         let r: ReauthProbeReq =
-            serde_json::from_str(r#"{"id":3,"auth":{"kind":"default"}}"#).unwrap();
+            serde_json::from_str(r#"{"id":3,"auth":{"kind":"default"},"ack_mismatch":true}"#).unwrap();
         assert!(r.host.is_none() && r.port.is_none() && r.user.is_none());
+        assert!(r.ack_mismatch);
 
         let a: ReauthApplyReq =
             serde_json::from_str(r#"{"session":9,"fingerprint":"SHA256:x"}"#).unwrap();

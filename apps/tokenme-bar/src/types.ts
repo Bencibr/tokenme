@@ -285,6 +285,8 @@ export interface ServerReauthProbeReq {
   port?: number | null;
   user?: string | null;
   auth: ServerAuth;
+  /** After the user trusts a changed host key; without it, credentials are never sent. */
+  ack_mismatch?: boolean;
 }
 
 export interface ServerReauthApplyReq {
