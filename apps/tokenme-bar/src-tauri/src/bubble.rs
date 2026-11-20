@@ -257,6 +257,10 @@ fn position_initial(window: &WebviewWindow) {
 
 /// Used by the panel click-away monitor so the bubble is not mistaken for a
 /// desktop click while the panel is open.
+///
+/// Geometry alone is not enough: a system calendar / notification flyout can
+/// cover the bubble rect while still leaving this HWND "visible". Only report
+/// a hit when this window is the real top-level owner under the cursor.
 #[cfg(target_os = "windows")]
 pub fn contains_point(app: &AppHandle, x: i32, y: i32) -> bool {
     let Some(window) = app.get_webview_window(LABEL) else { return false };
@@ -269,6 +273,7 @@ pub fn contains_point(app: &AppHandle, x: i32, y: i32) -> bool {
             && x < rect.right
             && y >= rect.top
             && y < rect.bottom
+            && crate::panel::windows_top_level_hwnd_at(x, y) == Some(hwnd.0 as isize)
     }
 }
 

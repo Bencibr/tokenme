@@ -189,5 +189,6 @@ pub fn contains_point(app:&AppHandle, x:i32, y:i32) -> bool {
         windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd.0) != 0
             && windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd.0, &mut rect) != 0
             && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+            && crate::panel::windows_top_level_hwnd_at(x, y) == Some(hwnd.0 as isize)
     }
 }

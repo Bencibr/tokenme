@@ -545,6 +545,13 @@ fn show_window_on_ui(window: &WebviewWindow, rect: Option<Rect>) {
                         SWP_NOACTIVATE | SWP_NOCOPYBITS,
                     )
                 };
+                // HWND_TOPMOST climbs above an already-open Shell calendar /
+                // notification flyout. Put the panel back under any foreign
+                // topmost window that intersects it so those clicks stay on
+                // the system UI instead of QuotaStrip.
+                if ok != 0 {
+                    windows_yield_below_foreign_topmost(hwnd.0);
+                }
                 crate::logging::info(&format!(
                     "panel: native position — SetWindowPos({x}, {y}, {w}x{h}) ok={ok}"
                 ));
@@ -632,7 +639,7 @@ fn show_window_on_ui(window: &WebviewWindow, rect: Option<Rect>) {
     FOCUS_HANDBACK_UNTIL_MS.store(now_ms().saturating_add(FOCUS_HANDBACK_MS), Ordering::Release);
 }
 
-/// macOS only: until this instant a `Focused(false)` is read as the system's
+/// macOS / Linux: until this instant a `Focused(false)` is read as the system's
 /// own focus hand-back after a show, not as the user clicking elsewhere.
 #[cfg(not(target_os = "windows"))]
 static FOCUS_HANDBACK_UNTIL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1930,7 +1937,11 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
     // the tray popup disappear immediately after a successful show. The
     // Windows click-away monitor above uses the actual HWND and pointer state,
     // so it remains the authoritative outside-click path there.
-    #[cfg(target_os = "macos")]
+    //
+    // macOS and Linux dismiss on real focus loss so a system calendar /
+    // notification overlay that takes the click also clears the panel instead
+    // of leaving QuotaStrip armed under the flyout.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         if !matches!(event, WindowEvent::Focused(false)) {
             return;
@@ -1974,6 +1985,9 @@ fn start_click_away_monitor(app: &AppHandle) {
                 let down = unsafe { (GetAsyncKeyState(0x01) as u16 & 0x8000) != 0 };
                 let mut point = POINT { x: 0, y: 0 };
                 let has_point = unsafe { GetCursorPos(&mut point) != 0 };
+                // contains_point already requires WindowFromPoint ownership, so a
+                // system calendar / notification flyout covering the bubble does
+                // not count as a pet hover or click.
                 let hovering = has_point && bubble::contains_point(&app, point.x, point.y);
                 if hovering != was_hover {
                     was_hover = hovering;
@@ -1989,10 +2003,13 @@ fn start_click_away_monitor(app: &AppHandle) {
                             bubble_press = Some((point.x, point.y));
                         } else if native_window_visible(&panel)
                             && has_point
-                            && !window_contains_point(&panel, point.x, point.y)
                             && !tray_contains_point(&app, point.x, point.y)
-                            && !crate::pet_notice::contains_point(&app, point.x, point.y)
+                            && !windows_tokenme_owns_point(&app, &panel, point.x, point.y)
                         {
+                            // Own the hit-test, not the rectangle. A Shell
+                            // calendar covering the panel is an outside click
+                            // even when the cursor still sits inside our frame,
+                            // so dismiss instead of letting QuotaStrip react.
                             // Tauri's visibility cache can lag for a
                             // non-activating window immediately after a native
                             // show. Use the HWND state here so a desktop click
@@ -2041,18 +2058,136 @@ fn start_click_away_monitor(app: &AppHandle) {
         .ok();
 }
 
+/// Top-level HWND under the cursor after walking to the root owner.
+///
+/// Shared with bubble / pet-notice hit tests so a covering Shell flyout is never
+/// mistaken for one of TokenMe's surfaces.
 #[cfg(target_os = "windows")]
-fn window_contains_point(window: &WebviewWindow, x: i32, y: i32) -> bool {
-    use windows_sys::Win32::Foundation::RECT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
-    let Ok(hwnd) = window.hwnd() else { return false };
-    let mut rect = RECT::default();
+pub(crate) fn windows_top_level_hwnd_at(x: i32, y: i32) -> Option<isize> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+
+    let point = POINT { x, y };
+    let hwnd = unsafe { WindowFromPoint(point) };
+    if hwnd.is_null() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let top = if root.is_null() { hwnd } else { root };
+    Some(top as isize)
+}
+
+/// True when the cursor's real top-level window is the panel, bubble, or pet notice.
+#[cfg(target_os = "windows")]
+fn windows_tokenme_owns_point(app: &AppHandle, panel: &WebviewWindow, x: i32, y: i32) -> bool {
+    let Some(top) = windows_top_level_hwnd_at(x, y) else {
+        return false;
+    };
+    if panel.hwnd().ok().is_some_and(|hwnd| hwnd.0 as isize == top) {
+        return true;
+    }
+    if let Some(bubble) = app.get_webview_window(bubble::LABEL) {
+        if bubble.hwnd().ok().is_some_and(|hwnd| hwnd.0 as isize == top) {
+            return true;
+        }
+    }
+    if let Some(notice) = app.get_webview_window(crate::pet_notice::LABEL) {
+        if notice.hwnd().ok().is_some_and(|hwnd| hwnd.0 as isize == top) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Axis-aligned overlap used when deciding whether a foreign topmost flyout
+/// covers the panel. Kept pure so the yield path can be unit-tested off Windows.
+#[cfg(any(test, target_os = "windows"))]
+fn rects_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    let (a_l, a_t, a_r, a_b) = a;
+    let (b_l, b_t, b_r, b_b) = b;
+    a_l < b_r && a_r > b_l && a_t < b_b && a_b > b_t
+}
+
+/// Place `our` below the first foreign topmost window that intersects it.
+///
+/// EnumWindows walks top-to-bottom. Skipping our own process keeps the pet and
+/// pet-notice above the panel while still yielding to Shell calendar / Action
+/// Center flyouts that share the TOPMOST band.
+#[cfg(target_os = "windows")]
+fn windows_yield_below_foreign_topmost(our: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+        SetWindowPos, GWL_EXSTYLE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
+    };
+
+    struct Search {
+        our: HWND,
+        our_pid: u32,
+        our_rect: RECT,
+        above: HWND,
+    }
+
+    unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam as *mut Search);
+        if hwnd == search.our || IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_TOPMOST == 0 {
+            return 1;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 || pid == search.our_pid {
+            return 1;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect) == 0 {
+            return 1;
+        }
+        let overlaps = rects_overlap(
+            (
+                search.our_rect.left,
+                search.our_rect.top,
+                search.our_rect.right,
+                search.our_rect.bottom,
+            ),
+            (rect.left, rect.top, rect.right, rect.bottom),
+        );
+        if !overlaps {
+            return 1;
+        }
+        search.above = hwnd;
+        0
+    }
+
+    let mut our_rect = RECT::default();
     unsafe {
-        GetWindowRect(hwnd.0, &mut rect) != 0
-            && x >= rect.left
-            && x < rect.right
-            && y >= rect.top
-            && y < rect.bottom
+        if GetWindowRect(our, &mut our_rect) == 0 {
+            return;
+        }
+        let mut search = Search {
+            our,
+            our_pid: GetCurrentProcessId(),
+            our_rect,
+            above: std::ptr::null_mut(),
+        };
+        let _ = EnumWindows(Some(each), &mut search as *mut Search as LPARAM);
+        if search.above.is_null() {
+            return;
+        }
+        // hWndInsertAfter = the foreign flyout ⇒ this panel sits below it.
+        let _ = SetWindowPos(
+            our,
+            search.above,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -2146,6 +2281,24 @@ mod tests {
         let info = reader.next_frame(&mut pixels).unwrap();
         assert_eq!((info.width, info.height), (2, 1));
         assert_eq!(&pixels[..8], &[255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn foreign_flyout_overlap_matches_shell_calendar_cover() {
+        // Panel frame vs a calendar card sitting on its right edge — the
+        // reported screenshot shape. Overlap must be detected so yield runs.
+        assert!(rects_overlap(
+            (100, 100, 500, 760),
+            (360, 200, 720, 700),
+        ));
+        assert!(
+            !rects_overlap((100, 100, 500, 760), (520, 200, 720, 700)),
+            "a flyout fully to the right of the panel is not covering it"
+        );
+        assert!(
+            !rects_overlap((100, 100, 500, 760), (100, 800, 500, 900)),
+            "a flyout fully below the panel is not covering it"
+        );
     }
 
     #[test]
@@ -2314,7 +2467,11 @@ pub fn configure(app: &AppHandle) {
                 | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
                 | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle,
         );
-        panel.set_level(NSMainMenuWindowLevel + 1);
+        // Stay at the menu-bar band, not above it. MainMenu+1 matches
+        // NSStatusWindowLevel and can sit over Notification Center widgets so
+        // calendar clicks land on QuotaStrip underneath. MainMenu keeps the
+        // tray flyout above ordinary apps while yielding to NC / Control Center.
+        panel.set_level(NSMainMenuWindowLevel);
         panel.set_becomes_key_only_if_needed(false);
         panel.set_works_when_modal(true);
         panel.set_hides_on_deactivate(false);
@@ -2561,5 +2718,12 @@ pub fn configure(app: &AppHandle) {
         set_webview_visible(&window, true);
         apply_windows_round_clip(&window);
         start_click_away_monitor(app);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(window) = app.get_webview_window(LABEL) {
+        // Linux ships alwaysOnTop: false in tauri.linux.conf.json. Re-assert so
+        // a merged config cannot leave the panel above a desktop calendar /
+        // notification popover and steal its clicks.
+        let _ = window.set_always_on_top(false);
     }
 }
