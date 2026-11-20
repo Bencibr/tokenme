@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use super::hub::HubMsg;
-use super::wizard::{self, InstallOutcome, InstallReq, ProbeOutcome, ProbeReq};
+use super::wizard::{self, InstallOutcome, InstallReq, ProbeOutcome, ProbeReq, ReauthApplyReq, ReauthProbeReq};
 use super::{fetch, host_port_key, keys, remote, ssh, ServerView, ServersState, SshError};
 
 fn servers(app: &AppHandle) -> Arc<ServersState> {
@@ -48,6 +48,19 @@ pub async fn server_install(app: AppHandle, req: InstallReq) -> InstallOutcome {
 #[tauri::command]
 pub fn server_abort_session(app: AppHandle, session: u64) {
     wizard::abort(&servers(&app), session);
+}
+
+/// Re-login probe for an already-registered server. Host / port / user may
+/// change (new IP); the name stays. Password lives only in the session.
+#[tauri::command]
+pub async fn server_reauth_probe(app: AppHandle, req: ReauthProbeReq) -> ProbeOutcome {
+    wizard::reauth_probe(&servers(&app), req).await
+}
+
+/// Rewrite the dedicated key on the same server id and clear backoff.
+#[tauri::command]
+pub async fn server_reauth_apply(app: AppHandle, req: ReauthApplyReq) -> InstallOutcome {
+    wizard::reauth_apply(&app, &servers(&app), req).await
 }
 
 /// Pull this server now (the detail sheet's 立即同步).

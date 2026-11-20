@@ -16,6 +16,8 @@ import type {
   ServerInstallReq,
   ServerProbeOutcome,
   ServerProbeReq,
+  ServerReauthApplyReq,
+  ServerReauthProbeReq,
   ServerRemoveOutcome,
   ServerUpdateReq,
   ServerView,
@@ -34,9 +36,13 @@ const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 let nextId = 1;
 let servers: ServerView[] = [];
-const sessions = new Map<number, { name: string; host: string; port: number; user: string; fingerprint: string }>();
+const sessions = new Map<
+  number,
+  { name: string; host: string; port: number; user: string; fingerprint: string; reauthOf?: number }
+>();
 const onUpdated = new Set<(servers: ServerView[]) => void>();
 const onProgress = new Set<(p: ServerInstallProgress) => void>();
+const REAUTH_STEPS = ["keygen", "pubkey", "reconnect", "clear_pw"];
 
 function emitUpdated() {
   const snap = clone(servers);
@@ -208,6 +214,147 @@ export const serverMock = {
 
   abort: async (session: number): Promise<void> => {
     sessions.delete(session);
+  },
+
+  reauthProbe: async (req: ServerReauthProbeReq): Promise<ServerProbeOutcome> => {
+    const fail = (kind: string, detail: string): ServerProbeOutcome => ({
+      ok: false,
+      session: null,
+      fingerprint: null,
+      known_fingerprint: null,
+      mismatch: false,
+      arch: null,
+      hostname: null,
+      error: { kind, detail },
+    });
+    const rec = servers.find((s) => s.id === req.id);
+    if (!rec) return fail("proto", "server not found");
+    const host = (req.host ?? rec.host).trim() || rec.host;
+    const port = req.port ?? rec.port;
+    const user = (req.user ?? rec.user).trim() || rec.user;
+    if (!host || !user) return fail("host", "invalid host");
+
+    await sleep(500);
+    if (host.includes("fail")) {
+      return fail("unreachable", `connect to ${host}:${port} failed: connection refused`);
+    }
+    // Hostnames containing "newkey" present a different fingerprint — credentials
+    // must not be accepted until ack_mismatch is set (mirrors the Rust gate).
+    const presented = host.includes("newkey") ? FP_OLD : FP;
+    const mismatch = presented !== rec.fingerprint;
+    if (mismatch && !req.ack_mismatch) {
+      return {
+        ok: false,
+        session: null,
+        fingerprint: presented,
+        known_fingerprint: rec.fingerprint,
+        mismatch: true,
+        arch: null,
+        hostname: null,
+        error: null,
+      };
+    }
+    if (mismatch && req.ack_mismatch) {
+      const expected = (req.expected_fingerprint ?? "").trim();
+      if (!expected || expected !== presented) {
+        return {
+          ok: false,
+          session: null,
+          fingerprint: presented,
+          known_fingerprint: rec.fingerprint,
+          mismatch: true,
+          arch: null,
+          hostname: null,
+          error: expected ? null : { kind: "proto", detail: "ack_mismatch requires expected_fingerprint" },
+        };
+      }
+    }
+    if (req.auth.kind === "password" && req.auth.password === "bad") {
+      // After fingerprint acceptance, a bad password must not look like a
+      // fresh mismatch (that would hide the auth error on the trust screen).
+      return {
+        ...fail("auth", "the server rejected the username or password"),
+        fingerprint: presented,
+        known_fingerprint: rec.fingerprint,
+        mismatch: false,
+      };
+    }
+    const session = nextId++;
+    sessions.set(session, {
+      name: rec.name,
+      host,
+      port,
+      user,
+      fingerprint: presented,
+      reauthOf: rec.id,
+    });
+    return {
+      ok: true,
+      session,
+      fingerprint: presented,
+      known_fingerprint: rec.fingerprint,
+      mismatch: false,
+      arch: "x86_64",
+      hostname: host.split(".")[0] || host,
+      error: null,
+    };
+  },
+
+  reauthApply: async (req: ServerReauthApplyReq): Promise<ServerInstallOutcome> => {
+    const session = sessions.get(req.session);
+    if (!session || session.reauthOf === undefined) {
+      return {
+        ok: false,
+        server: null,
+        detected: [],
+        rows: 0,
+        merge_pending: false,
+        error: { kind: "proto", detail: "the wizard session expired — start over" },
+      };
+    }
+    sessions.delete(req.session);
+
+    const steps = REAUTH_STEPS.map((key) => ({ key, state: "pending" as InstallStep["state"], detail: null as string | null }));
+    const emit = (done: boolean, ok: boolean) =>
+      emitProgress({ session: req.session, steps: clone(steps), done, ok, error: null });
+    emit(false, true);
+    for (const step of steps) {
+      step.state = "active";
+      emit(false, true);
+      await sleep(280);
+      step.state = "done";
+      step.detail = step.key === "keygen" ? "~/.config/tokenme/tokenme_ed25519" : null;
+      emit(false, true);
+    }
+
+    const t = now();
+    let updated: ServerView | null = null;
+    servers = servers.map((s) => {
+      if (s.id !== session.reauthOf) return s;
+      updated = {
+        ...s,
+        host: session.host,
+        port: session.port,
+        user: session.user,
+        fingerprint: session.fingerprint,
+        status: "ok",
+        last_ok_ms: t,
+        last_error: null,
+        next_due_ms: t + s.every_secs * 1000,
+        history: [...s.history, { at_ms: t, rows: s.last_rows, took_ms: 1200, ok: true }].slice(-20),
+      };
+      return updated;
+    });
+    emitUpdated();
+    emitProgress({ session: req.session, steps: clone(steps), done: true, ok: true, error: null });
+    return {
+      ok: true,
+      server: updated ? clone(updated) : null,
+      detected: [],
+      rows: 0,
+      merge_pending: false,
+      error: null,
+    };
   },
 
   syncNow: async (id: number): Promise<void> => {

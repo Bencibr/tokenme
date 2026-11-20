@@ -118,7 +118,13 @@ function historyRows(history: ServerSyncEvent[], now: number) {
   return out.slice(0, 6);
 }
 
-type View = { kind: "list" } | { kind: "wizard" } | { kind: "detail"; id: number } | { kind: "confirm"; id: number } | { kind: "forget"; origin: string };
+type View =
+  | { kind: "list" }
+  | { kind: "wizard" }
+  | { kind: "detail"; id: number }
+  | { kind: "reauth"; id: number }
+  | { kind: "confirm"; id: number }
+  | { kind: "forget"; origin: string };
 
 interface Wiz {
   step: 1 | 2 | 3 | 4 | 5;
@@ -148,6 +154,32 @@ interface Wiz {
   version: string;
 }
 
+/** Re-login against an existing server id: may change host/port/user/password. */
+interface Reauth {
+  step: 1 | 2 | 3;
+  host: string;
+  port: string;
+  user: string;
+  name: string;
+  auth: "password" | "key" | "default";
+  password: string;
+  keyPath: string;
+  passphrase: string;
+  altOpen: boolean;
+  pubkey: { path: string; line: string } | null;
+  /** Dedicated-key path from the alt "I installed the pubkey" flow; kept across
+   *  a mismatch confirm so the ack re-probe does not fall back to password. */
+  pendingKeyPath: string | null;
+  busy: boolean;
+  formError: string | null;
+  probeError: SshError | null;
+  probe: ServerProbeOutcome | null;
+  ack: boolean;
+  session: number | null;
+  steps: InstallStep[];
+  applyError: SshError | null;
+}
+
 const emptyWiz = (): Wiz => ({
   step: 1,
   host: "",
@@ -173,6 +205,29 @@ const emptyWiz = (): Wiz => ({
   days: 30,
   patchError: null,
   version: "",
+});
+
+const emptyReauth = (s: ServerView): Reauth => ({
+  step: 1,
+  host: s.host,
+  port: String(s.port),
+  user: s.user,
+  name: s.name,
+  auth: "password",
+  password: "",
+  keyPath: "",
+  passphrase: "",
+  altOpen: false,
+  pubkey: null,
+  pendingKeyPath: null,
+  busy: false,
+  formError: null,
+  probeError: null,
+  probe: null,
+  ack: false,
+  session: null,
+  steps: [],
+  applyError: null,
 });
 
 /** First label of the typed host, sanitized to the origin charset — the
@@ -257,6 +312,7 @@ export function ServerSheet({
 }) {
   const [view, setView] = useState<View>({ kind: "list" });
   const [wiz, setWiz] = useState<Wiz | null>(null);
+  const [reauth, setReauth] = useState<Reauth | null>(null);
   const [cleanup, setCleanup] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   // A completion note is news for a moment, not furniture: clear it before
@@ -271,27 +327,38 @@ export function ServerSheet({
   const now = useMemo(() => Date.now(), [tick]);
   const copyTimer = useRef<number | null>(null);
 
-  const installing = view.kind === "wizard" && wiz?.busy === true;
+  const installing =
+    (view.kind === "wizard" && wiz?.busy === true) || (view.kind === "reauth" && reauth?.busy === true);
   const close = () => {
     if (installing) return;
     // A session that was probed but never installed still holds the password;
     // dropping it zeroizes. After a successful install it is already consumed.
     if (wiz?.session != null) void bridge.serverAbortSession(wiz.session);
+    if (reauth?.session != null) void bridge.serverAbortSession(reauth.session);
     onClose();
   };
   useEffect(() => {
     closeRef.current = close;
   });
 
-  // Install progress streams in while step 4 is up. Filtered by session so a
-  // stale event from a previous attempt can never repaint this wizard.
+  // Install / reauth progress streams in while the progress step is up.
+  // Filtered by session so a stale event from a previous attempt can never
+  // repaint this sheet.
   useEffect(
     () =>
       bridge.onInstallProgress((p) => {
         setWiz((w) => (w && w.session !== null && p.session === w.session ? { ...w, steps: p.steps } : w));
+        setReauth((r) => (r && r.session !== null && p.session === r.session ? { ...r, steps: p.steps } : r));
       }),
     [],
   );
+
+  const openReauth = (s: ServerView) => {
+    setNotice(null);
+    if (reauth?.session != null) void bridge.serverAbortSession(reauth.session);
+    setReauth(emptyReauth(s));
+    setView({ kind: "reauth", id: s.id });
+  };
 
   const openWizard = () => {
     setNotice(null);
@@ -412,6 +479,174 @@ export function ServerSheet({
     if (!views) return false;
     onServers(views);
     return true;
+  };
+
+  const runReauthProbe = async (
+    r: Reauth,
+    serverId: number,
+    opts?: { overrideKeyPath?: string; ackMismatch?: boolean; expectedFingerprint?: string },
+  ): Promise<ServerProbeOutcome | null> => {
+    const host = r.host.trim();
+    const user = r.user.trim();
+    if (!host || !user) {
+      setReauth({ ...r, formError: t("srv.f.req") });
+      return null;
+    }
+    // Prefer an explicit override (alt-panel path), else a pending path kept
+    // across a mismatch confirm; otherwise use the radio-card auth choice.
+    const keyOverride = opts?.overrideKeyPath !== undefined ? opts.overrideKeyPath : r.pendingKeyPath;
+    const req = {
+      id: serverId,
+      host,
+      port: Number(r.port) || 22,
+      user,
+      ack_mismatch: opts?.ackMismatch === true,
+      expected_fingerprint: opts?.expectedFingerprint ?? null,
+      auth:
+        keyOverride
+          ? ({ kind: "key", path: keyOverride } as const)
+          : r.auth === "password"
+            ? ({ kind: "password", password: r.password } as const)
+            : r.auth === "key"
+              ? ({ kind: "key", path: r.keyPath.trim(), passphrase: r.passphrase || null } as const)
+              : ({ kind: "default" } as const),
+    };
+    const pendingKeyPath = opts?.overrideKeyPath !== undefined ? opts.overrideKeyPath : r.pendingKeyPath;
+    setReauth({ ...r, host, user, pendingKeyPath, busy: true, probeError: null, formError: null });
+    const out = await bridge.serverReauthProbe(req).catch((e: unknown) => ({
+      ok: false,
+      session: null,
+      fingerprint: null,
+      known_fingerprint: null,
+      mismatch: false,
+      arch: null,
+      hostname: null,
+      error: { kind: "proto", detail: e instanceof Error ? e.message : String(e) },
+    }));
+    setReauth((cur) => {
+      if (!cur) return cur;
+      // Auth / transport errors win over mismatch: a rejected password after
+      // the user already trusted the new key must return to the credential
+      // form, not loop on the trust screen.
+      if (!out.ok && out.error) {
+        return { ...cur, busy: false, probeError: out.error, session: null, step: 1, pendingKeyPath };
+      }
+      // Changed host key with no error: show the trust screen *before* any
+      // credential was sent (or when the key swapped again after ack).
+      if (!out.ok && out.mismatch && out.fingerprint) {
+        return {
+          ...cur,
+          busy: false,
+          probe: out,
+          session: null,
+          ack: false,
+          step: 2,
+          probeError: null,
+          pendingKeyPath,
+        };
+      }
+      if (!out.ok) {
+        return { ...cur, busy: false, probeError: out.error, session: null, step: 1, pendingKeyPath };
+      }
+      return {
+        ...cur,
+        busy: false,
+        probe: out,
+        session: out.session,
+        ack: false,
+        step: 2,
+        probeError: null,
+        pendingKeyPath,
+      };
+    });
+    return out;
+  };
+
+  const reauthConnect = () => {
+    const r = reauth!;
+    if (r.auth === "password" && !r.password) {
+      setReauth({ ...r, formError: t("srv.auth.pwd.ph") });
+      return;
+    }
+    if (r.auth === "key" && !r.keyPath.trim()) {
+      setReauth({ ...r, formError: t("srv.auth.key.ph") });
+      return;
+    }
+    if (view.kind !== "reauth") return;
+    // A normal connect clears any alt-panel key override.
+    void runReauthProbe({ ...r, pendingKeyPath: null }, view.id);
+  };
+
+  const reauthAltDone = async () => {
+    const r = reauth!;
+    if (view.kind !== "reauth") return;
+    const pk = r.pubkey ?? (await bridge.serverPublicKey().catch(() => null));
+    if (!pk) return;
+    setReauth({ ...r, pubkey: pk, pendingKeyPath: pk.path });
+    void runReauthProbe({ ...r, pubkey: pk, pendingKeyPath: pk.path }, view.id, { overrideKeyPath: pk.path });
+  };
+
+  const reauthBack = (to: 1) => {
+    const r = reauth!;
+    if (r.busy) return;
+    if (r.session !== null) void bridge.serverAbortSession(r.session);
+    setReauth({
+      ...r,
+      step: to,
+      probeError: null,
+      formError: null,
+      session: null,
+      busy: false,
+      applyError: null,
+    });
+  };
+
+  const startReauthApply = async (session: number, fingerprint: string, name: string, serverId: number) => {
+    const req = { session, fingerprint };
+    setReauth((cur) => (cur ? { ...cur, step: 3, busy: true, applyError: null, steps: [], session } : cur));
+    const out = await bridge.serverReauthApply(req).catch((e: unknown) => ({
+      ok: false,
+      server: null,
+      detected: [],
+      rows: 0,
+      merge_pending: false,
+      error: { kind: "proto", detail: e instanceof Error ? e.message : String(e) },
+    }));
+    if (out.ok) {
+      setReauth(null);
+      setNotice(t("srv.reauth.done", { name }));
+      setView({ kind: "detail", id: serverId });
+      if (out.server) {
+        const views = await bridge.servers().catch(() => null);
+        if (views) onServers(views);
+      }
+      return;
+    }
+    setReauth((cur) => (cur ? { ...cur, busy: false, applyError: out.error } : cur));
+  };
+
+  /** Trust the fingerprint (and, on mismatch, re-probe with ack so credentials
+   *  are only sent after the user confirms), then restore the dedicated key. */
+  const confirmReauthFp = async () => {
+    const r = reauth!;
+    if (view.kind !== "reauth" || !r.probe?.fingerprint) return;
+    const serverId = view.id;
+    if (r.session !== null) {
+      void startReauthApply(r.session, r.probe.fingerprint, r.name, serverId);
+      return;
+    }
+    // Mismatch path: credentials were never sent; ack then authenticate.
+    if (!r.ack || !r.probe.mismatch) return;
+    const approvedFp = r.probe.fingerprint;
+    const out = await runReauthProbe(r, serverId, {
+      ackMismatch: true,
+      expectedFingerprint: approvedFp,
+      overrideKeyPath: r.pendingKeyPath ?? undefined,
+    });
+    if (!out?.ok || out.session === null || !out.fingerprint) return;
+    // Only persist the fingerprint the user approved (and the host still has).
+    if (out.fingerprint !== approvedFp) return;
+    void startReauthApply(out.session, out.fingerprint, r.name, serverId);
   };
 
   const removeServer = async (id: number) => {
@@ -1029,6 +1264,7 @@ export function ServerSheet({
             {s.status === "error" && s.last_error
               ? errBox(s.last_error, [
                   { label: t("srv.sync.now"), onClick: () => void bridge.serverSyncNow(s.id) },
+                  { label: t("srv.reauth"), onClick: () => openReauth(s) },
                   { label: copied ? t("srv.copy.done") : t("srv.copy"), onClick: () => void copyKey() },
                 ])
               : null}
@@ -1150,6 +1386,9 @@ export function ServerSheet({
                 <button type="button" className="btn-quiet" onClick={() => void copyKey()}>
                   {copied ? t("srv.copy.done") : t("srv.copy")}
                 </button>
+                <button type="button" className="btn-quiet" onClick={() => openReauth(s)}>
+                  {t("srv.reauth")}
+                </button>
                 <button
                   type="button"
                   className="btn-quiet"
@@ -1174,6 +1413,318 @@ export function ServerSheet({
         </>
       );
     }
+  }
+
+  /* ── reauth (same server id; host / password may change) ────────────── */
+
+  let reauthBody = listBody;
+  if (view.kind === "reauth" && reauth) {
+    const r = reauth;
+    const serverId = view.id;
+    let body: React.ReactNode = null;
+    if (r.step === 1) {
+      const alt = r.altOpen ? (
+        <div className="alt-panel">
+          <div className="auth-name">{t("srv.auth.alt.title")}</div>
+          <div className="f-hint">{t("srv.auth.alt.hint", { f: "~/.ssh/authorized_keys" })}</div>
+          <div className="mono">{r.pubkey?.line ?? "…"}</div>
+          <div className="alt-actions">
+            <button type="button" className="btn-quiet" onClick={() => void copyKey()}>
+              {copied ? t("srv.copy.done") : t("srv.auth.alt.copy")}
+            </button>
+            <button type="button" className="btn-accent" disabled={r.busy} onClick={() => void reauthAltDone()}>
+              {t("srv.auth.alt.test")}
+            </button>
+          </div>
+        </div>
+      ) : null;
+      body = (
+        <>
+          <div className="f-hint">{t("srv.reauth.hint")}</div>
+          {r.probeError ? errBox(r.probeError, [{ label: t("srv.retry"), onClick: () => void runReauthProbe(r, serverId) }]) : null}
+          <div className="f-row">
+            <div className="f-label">
+              <span>{t("srv.reauth.name")}</span>
+            </div>
+            <input className="f-input" value={r.name} readOnly disabled />
+          </div>
+          <div className="f-row">
+            <div className="f-label">
+              <span>{t("srv.f.host")}</span>
+            </div>
+            <ClearableInput
+              value={r.host}
+              onChangeText={(host) => setReauth({ ...r, host, probeError: null, formError: null })}
+              placeholder={t("srv.f.host.ph")}
+              autoComplete="off"
+              spellCheck={false}
+              autoFocus
+            />
+          </div>
+          <div className="f-grid">
+            <div className="f-row">
+              <div className="f-label">
+                <span>{t("srv.f.user")}</span>
+              </div>
+              <ClearableInput
+                value={r.user}
+                onChangeText={(user) => setReauth({ ...r, user, probeError: null, formError: null })}
+                placeholder={t("srv.f.user.ph")}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="f-row">
+              <div className="f-label">
+                <span>{t("srv.f.port")}</span>
+              </div>
+              <ClearableInput
+                className="f-input num"
+                value={r.port}
+                onChangeText={(port) => setReauth({ ...r, port })}
+                inputMode="numeric"
+              />
+            </div>
+          </div>
+          <div className="auth-cards" role="radiogroup" aria-label={t("srv.wiz.auth")}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={r.auth === "password"}
+              className="auth-card"
+              onClick={() => setReauth({ ...r, auth: "password", probeError: null, formError: null })}
+            >
+              <span className="auth-radio" aria-hidden="true" />
+              <span>
+                <span className="auth-name">{t("srv.auth.password")}</span>
+                <span className="auth-sub">{t("srv.reauth.auth.sub")}</span>
+              </span>
+            </button>
+            {r.auth === "password" ? (
+              <div className="auth-field">
+                <ClearableInput
+                  type="password"
+                  value={r.password}
+                  onChangeText={(password) => setReauth({ ...r, password })}
+                  placeholder={t("srv.auth.pwd.ph")}
+                  autoComplete="off"
+                />
+              </div>
+            ) : null}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={r.auth === "key"}
+              className="auth-card"
+              onClick={() => setReauth({ ...r, auth: "key", password: "", probeError: null, formError: null })}
+            >
+              <span className="auth-radio" aria-hidden="true" />
+              <span>
+                <span className="auth-name">{t("srv.auth.key")}</span>
+                <span className="auth-sub">{t("srv.reauth.auth.sub")}</span>
+              </span>
+            </button>
+            {r.auth === "key" ? (
+              <div className="auth-field">
+                <ClearableInput
+                  className="f-input mono"
+                  value={r.keyPath}
+                  onChangeText={(keyPath) => setReauth({ ...r, keyPath })}
+                  placeholder={t("srv.auth.key.ph")}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <ClearableInput
+                  type="password"
+                  value={r.passphrase}
+                  onChangeText={(passphrase) => setReauth({ ...r, passphrase })}
+                  placeholder={t("srv.auth.pass.ph")}
+                  autoComplete="off"
+                />
+              </div>
+            ) : null}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={r.auth === "default"}
+              className="auth-card"
+              onClick={() => setReauth({ ...r, auth: "default", password: "", probeError: null, formError: null })}
+            >
+              <span className="auth-radio" aria-hidden="true" />
+              <span>
+                <span className="auth-name">{t("srv.auth.agent")}</span>
+                <span className="auth-sub">{t("srv.auth.agent.sub")}</span>
+              </span>
+            </button>
+          </div>
+          <button
+            type="button"
+            className="alt-toggle"
+            onClick={() => {
+              const next = !r.altOpen;
+              setReauth({ ...r, altOpen: next });
+              if (next && !r.pubkey) {
+                void bridge.serverPublicKey().then((pk) => setReauth((cur) => (cur ? { ...cur, pubkey: pk } : cur)));
+              }
+            }}
+          >
+            {t("srv.auth.alt.toggle")}
+          </button>
+          {alt}
+          {r.formError ? <div className="f-hint" data-err="">{r.formError}</div> : null}
+          <div className="wiz-foot">
+            <div className="left">
+              <button
+                type="button"
+                className="btn-quiet"
+                disabled={r.busy}
+                onClick={() => {
+                  if (r.session != null) void bridge.serverAbortSession(r.session);
+                  setReauth(null);
+                  setView({ kind: "detail", id: serverId });
+                }}
+              >
+                {t("srv.back")}
+              </button>
+            </div>
+            <div className="left">
+              <button type="button" className="btn-accent" disabled={r.busy} onClick={reauthConnect}>
+                {r.busy ? t("srv.connecting") : t("srv.connect")}
+              </button>
+            </div>
+          </div>
+        </>
+      );
+    } else if (r.step === 2 && r.probe) {
+      const bad = r.probe.mismatch;
+      const fp = r.probe.fingerprint ?? "";
+      body = (
+        <>
+          {r.probeError ? errBox(r.probeError, [{ label: t("srv.reauth.retry"), onClick: () => reauthBack(1) }]) : null}
+          <div className="fp-box" data-bad={bad || undefined}>
+            <div className="fp-title">{bad ? t("srv.fp.mismatch") : t("srv.fp.first")}</div>
+            <div className="fp-val">{fp}</div>
+            {r.probe.hostname || r.probe.arch ? (
+              <>
+                {r.probe.hostname ? (
+                  <div className="fp-row">
+                    <span className="k">{t("srv.fp.hostname")}</span>
+                    <span className="v">{r.probe.hostname}</span>
+                  </div>
+                ) : null}
+                {r.probe.arch ? (
+                  <div className="fp-row">
+                    <span className="k">{t("srv.fp.arch")}</span>
+                    <span className="v">{r.probe.arch}</span>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+            {bad ? (
+              <>
+                <div className="fp-row">
+                  <span className="k">{t("srv.fp.old")}</span>
+                  <span className="v">{r.probe.known_fingerprint ?? "—"}</span>
+                </div>
+                <div className="f-hint" data-err="">
+                  {t("srv.fp.mismatch.hint")}
+                </div>
+                <button
+                  type="button"
+                  className="chk"
+                  role="checkbox"
+                  aria-checked={r.ack}
+                  onClick={() => setReauth({ ...r, ack: !r.ack })}
+                >
+                  <i aria-hidden="true">{r.ack ? "✓" : ""}</i>
+                  <span>{t("srv.trust.mismatch")}</span>
+                </button>
+              </>
+            ) : (
+              <div className="f-hint">{t("srv.fp.remember")}</div>
+            )}
+          </div>
+          <div className="wiz-foot">
+            <div className="left">
+              <button type="button" className="btn-quiet" onClick={() => reauthBack(1)}>
+                {t("srv.back")}
+              </button>
+            </div>
+            <div className="left">
+              <button
+                type="button"
+                className="btn-accent"
+                disabled={(bad && !r.ack) || r.busy}
+                onClick={() => void confirmReauthFp()}
+              >
+                {r.busy ? t("srv.connecting") : bad ? t("srv.trust.mismatch") : t("srv.trust")}
+              </button>
+            </div>
+          </div>
+        </>
+      );
+    } else if (r.step === 3) {
+      body = (
+        <>
+          <div className="prog">
+            {r.steps.map((s) => (
+              <InstallRow key={s.key} step={s} days={30} name={r.name} />
+            ))}
+            {r.steps.length === 0 ? (
+              <div className="prog-row" data-s="run">
+                <span className="spin" />
+                <span>{t("srv.reauth.restoring")}</span>
+              </div>
+            ) : null}
+          </div>
+          {r.applyError ? errBox(r.applyError, [{ label: t("srv.reauth.retry"), onClick: () => reauthBack(1) }]) : null}
+          <div className="wiz-foot">
+            <div className="left">
+              {!r.busy && r.applyError ? (
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  onClick={() => {
+                    setReauth(null);
+                    setView({ kind: "detail", id: serverId });
+                  }}
+                >
+                  {t("srv.cancel")}
+                </button>
+              ) : null}
+            </div>
+            <div className="left">
+              {r.busy ? <span className="f-hint inst-hint">{t("srv.reauth.restoring")}</span> : null}
+            </div>
+          </div>
+        </>
+      );
+    }
+    reauthBody = (
+      <>
+        <div className="sheet-hd">
+          <h2 className="srv-hd">
+            {t("srv.reauth.title")}
+            <span className="step-chip mono">{r.name}</span>
+          </h2>
+          <button
+            type="button"
+            className="sheet-close"
+            aria-label={t("srv.back")}
+            disabled={r.busy}
+            onClick={() => {
+              if (r.busy) return;
+              if (r.session != null) void bridge.serverAbortSession(r.session);
+              setReauth(null);
+              setView({ kind: "detail", id: serverId });
+            }}
+          >
+            <IconBack size={12} />
+          </button>
+        </div>
+        <div className="sheet-body">{body}</div>
+      </>
+    );
   }
 
   /* ── confirm removal ────────────────────────────────────────────────── */
@@ -1286,7 +1837,15 @@ export function ServerSheet({
         aria-label={t("srv.title")}
         onClick={(e) => e.stopPropagation()}
       >
-        {view.kind === "list" ? listBody : view.kind === "wizard" ? wizardBody : view.kind === "detail" ? detailBody : confirmBody}
+        {view.kind === "list"
+          ? listBody
+          : view.kind === "wizard"
+            ? wizardBody
+            : view.kind === "detail"
+              ? detailBody
+              : view.kind === "reauth"
+                ? reauthBody
+                : confirmBody}
       </div>
     </div>
   );

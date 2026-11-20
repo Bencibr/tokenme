@@ -278,6 +278,24 @@ export interface ServerInstallOutcome {
   error: SshError | null;
 }
 
+/** Re-login against an existing id. Host / port / user may change (new IP). */
+export interface ServerReauthProbeReq {
+  id: number;
+  host?: string | null;
+  port?: number | null;
+  user?: string | null;
+  auth: ServerAuth;
+  /** After the user trusts a changed host key; without it, credentials are never sent. */
+  ack_mismatch?: boolean;
+  /** Fingerprint shown on the mismatch screen; required with `ack_mismatch`. */
+  expected_fingerprint?: string | null;
+}
+
+export interface ServerReauthApplyReq {
+  session: number;
+  fingerprint: string;
+}
+
 export interface ServerRemoveOutcome {
   removed: boolean;
   /** `true` cleanup ran ok; `false` it was wanted but failed; `null` not requested. */
@@ -652,6 +670,10 @@ export interface Bridge {
   serverInstall: (req: ServerInstallReq) => Promise<ServerInstallOutcome>;
   /** Drop a wizard session (zeroizes its password); safe to call twice. */
   serverAbortSession: (session: number) => Promise<void>;
+  /** Re-login probe for an already-registered server (same id; host may change). */
+  serverReauthProbe: (req: ServerReauthProbeReq) => Promise<ServerProbeOutcome>;
+  /** Rewrite the dedicated key on the same server id and clear backoff. */
+  serverReauthApply: (req: ServerReauthApplyReq) => Promise<ServerInstallOutcome>;
   serverSyncNow: (id: number) => Promise<void>;
   serverUpdate: (req: ServerUpdateReq) => Promise<ServerView[]>;
   serverRemove: (id: number, cleanupRemote: boolean) => Promise<ServerRemoveOutcome>;
